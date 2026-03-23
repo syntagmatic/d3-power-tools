@@ -85,6 +85,37 @@
 - [ ] `d3.curveBundle.beta().context(ctx)` — D3 curve generators on Canvas with tunable tension
 - [ ] Statistical overlays — box-and-whisker per axis, density ribbons, confidence bands
 
+### annotations-and-labels
+- [ ] Canvas annotation recipe (skill covers it, example is SVG-only)
+- [ ] Leader line variants: straight, elbow, curved in example
+- [ ] Force-based label collision avoidance in example
+
+### statistical-charts
+- [ ] Standalone density plot / KDE panel (example shows violin but not standalone)
+- [ ] QQ plot panel
+- [ ] Strip/jitter plot panel
+
+### small-multiples
+- [ ] Canvas small multiples example (skill documents it, example is SVG-only)
+- [ ] Synchronized cross-panel hover in example
+- [ ] Lazy rendering for offscreen panels
+
+### temporal-time-series
+- [ ] Cycle plot panel in example
+- [ ] Gantt chart example (separate file or panel)
+- [ ] LTTB downsampling toggle (show raw vs downsampled)
+- [ ] Real-time streaming example (separate file, simulated WebSocket)
+
+### linked-views
+- [ ] Coordinated zoom example (two time-series sharing x-axis)
+- [ ] State serialization (URL encoding of brush/selection state)
+- [ ] Undo/redo (StateHistory pattern from skill)
+
+### responsive-charts
+- [ ] Print styles in example (@media print)
+- [ ] Iframe embedding example (postMessage height negotiation)
+- [ ] Touch adaptation demo (pointer-type-aware interactions)
+
 ### Cross-skill composition
 - [ ] Composition guide — how skills combine in practice (every interesting visualization uses 2-3 skills). Common pairings: force+animation, hierarchy+morphing, brushing+axes, canvas+zoom
 - [ ] SVG ↔ Canvas decision guide — when to use which, hybrid patterns, handoff during animation
