@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Proof: Force ↔ Hierarchy ↔ Edge Bundling</title>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif; background: #fafafa; }
+  #controls { padding: 10px 20px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  button { padding: 5px 13px; border: 1px solid #aaa; border-radius: 4px;
+           background: #fff; cursor: pointer; font-size: 12px; }
+  button:hover { background: #eee; }
+  button.active { background: #4477AA; color: #fff; border-color: #4477AA; }
+  label { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+  input[type=range] { width: 110px; }
+  .link { fill: none; stroke: #476376; stroke-opacity: 0.25; stroke-width: 1; }
+  .link--highlighted { stroke: #e03131; stroke-opacity: 0.8; stroke-width: 1.5; }
+  .link--faded { stroke-opacity: 0.04; }
+  .node circle { cursor: pointer; }
+  .node text { font-size: 9px; fill: #333; pointer-events: none; }
+  .node--highlighted text { fill: #e03131; font-weight: 600; }
+  .node--faded circle { opacity: 0.15; }
+  .node--faded text { opacity: 0.1; }
+  #status { padding: 4px 20px; font-size: 11px; color: #888; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <label>Layout:</label>
+  <button data-layout="force" class="active">Force</button>
+  <button data-layout="bundle">Bundle</button>
+  <button data-layout="tree">Tree</button>
+  <button data-layout="pack">Pack</button>
+  <span style="margin-left:12px"></span>
+  <label>Tension: <input id="tension" type="range" min="0" max="100" value="85">
+    <span id="tension-val">0.85</span></label>
+  <button data-action="color-group">Color by Group</button>
+</div>
+<svg id="chart"></svg>
+<div id="status"></div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+const width = 960, height = 800;
+const radius = Math.min(width, height) / 2;
+const margin = 80;
+
+const tolBright = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377"];
+const color = d3.scaleOrdinal(tolBright);
+
+const svgEl = d3.select("#chart").attr("width", width).attr("height", height);
+const svg = svgEl.append("g").attr("transform", `translate(${width/2},${height/2})`);
+const status = d3.select("#status");
+
+// ─── Data: software module hierarchy + cross-links ─────────────────
+const nodeData = [
+  { id: "root", parent: "" },
+  { id: "app", parent: "root" },
+  { id: "app.main", parent: "app" },
+  { id: "app.config", parent: "app" },
+  { id: "app.router", parent: "app" },
+  { id: "app.auth", parent: "app" },
+  { id: "ui", parent: "root" },
+  { id: "ui.button", parent: "ui" },
+  { id: "ui.modal", parent: "ui" },
+  { id: "ui.form", parent: "ui" },
+  { id: "ui.list", parent: "ui" },
+  { id: "ui.tooltip", parent: "ui" },
+  { id: "data", parent: "root" },
+  { id: "data.store", parent: "data" },
+  { id: "data.api", parent: "data" },
+  { id: "data.cache", parent: "data" },
+  { id: "data.sync", parent: "data" },
+  { id: "util", parent: "root" },
+  { id: "util.log", parent: "util" },
+  { id: "util.format", parent: "util" },
+  { id: "util.validate", parent: "util" },
+  { id: "util.debounce", parent: "util" },
+  { id: "auth", parent: "root" },
+  { id: "auth.login", parent: "auth" },
+  { id: "auth.session", parent: "auth" },
+  { id: "auth.perms", parent: "auth" },
+  { id: "viz", parent: "root" },
+  { id: "viz.chart", parent: "viz" },
+  { id: "viz.axis", parent: "viz" },
+  { id: "viz.legend", parent: "viz" },
+  { id: "viz.tooltip", parent: "viz" },
+];
+
+const connections = [
+  { source: "app.main", target: "app.router" },
+  { source: "app.main", target: "app.config" },
+  { source: "app.main", target: "data.store" },
+  { source: "app.main", target: "auth.login" },
+  { source: "app.router", target: "ui.modal" },
+  { source: "app.router", target: "auth.perms" },
+  { source: "app.config", target: "util.log" },
+  { source: "app.auth", target: "auth.session" },
+  { source: "app.auth", target: "auth.perms" },
+  { source: "ui.button", target: "util.debounce" },
+  { source: "ui.modal", target: "ui.button" },
+  { source: "ui.form", target: "util.validate" },
+  { source: "ui.form", target: "ui.button" },
+  { source: "ui.list", target: "data.api" },
+  { source: "ui.list", target: "util.format" },
+  { source: "ui.tooltip", target: "util.format" },
+  { source: "data.store", target: "data.api" },
+  { source: "data.store", target: "data.cache" },
+  { source: "data.api", target: "auth.session" },
+  { source: "data.api", target: "util.log" },
+  { source: "data.sync", target: "data.store" },
+  { source: "data.sync", target: "data.api" },
+  { source: "data.cache", target: "util.log" },
+  { source: "auth.login", target: "data.api" },
+  { source: "auth.login", target: "ui.form" },
+  { source: "auth.session", target: "data.cache" },
+  { source: "auth.perms", target: "auth.session" },
+  { source: "viz.chart", target: "data.store" },
+  { source: "viz.chart", target: "viz.axis" },
+  { source: "viz.chart", target: "viz.legend" },
+  { source: "viz.chart", target: "ui.tooltip" },
+  { source: "viz.axis", target: "util.format" },
+  { source: "viz.tooltip", target: "ui.tooltip" },
+  { source: "viz.legend", target: "util.format" },
+];
+
+// ─── Build hierarchy ───────────────────────────────────────────────
+const root = d3.stratify().id(d => d.id).parentId(d => d.parent || null)(nodeData);
+root.sum(d => d.children ? 0 : 1).sort((a, b) => b.value - a.value);
+
+const nodesById = new Map(root.descendants().map(d => [d.data.id, d]));
+const lcaPaths = connections.map(c => {
+  const s = nodesById.get(c.source), t = nodesById.get(c.target);
+  return s && t ? s.path(t) : null;
+}).filter(Boolean);
+
+// ─── Layout engines ────────────────────────────────────────────────
+const layoutEngines = {
+  bundle: d3.cluster()
+    .size([2 * Math.PI, radius - 140])
+    .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth),
+  tree: d3.tree().size([height - margin * 2, width - margin * 2]),
+  pack: d3.pack().size([width - margin, height - margin]).padding(8),
+};
+
+// ─── Bundle curve (uses current_x/y) ───────────────────────────────
+let tension = 0.85;
+const bundleLine = d3.line()
+  .curve(d3.curveBundle.beta(1 - tension))
+  .x(d => d.current_x).y(d => d.current_y);
+
+// ─── Force simulation (runs only in force mode) ────────────────────
+const leaves = root.leaves();
+const forceNodes = leaves.map(d => ({ id: d.data.id, node: d, x: 0, y: 0 }));
+const forceById = new Map(forceNodes.map(d => [d.id, d]));
+const forceLinks = connections
+  .filter(c => forceById.has(c.source) && forceById.has(c.target))
+  .map(c => ({ source: c.source, target: c.target }));
+
+const simulation = d3.forceSimulation(forceNodes)
+  .force("link", d3.forceLink(forceLinks).id(d => d.id).distance(60))
+  .force("charge", d3.forceManyBody().strength(-120).distanceMax(300))
+  .force("center", d3.forceCenter(0, 0))
+  .force("collide", d3.forceCollide(8))
+  .stop();
+
+// Warm up the simulation
+for (let i = 0; i < 200; i++) simulation.tick();
+
+// Store force positions on hierarchy nodes
+forceNodes.forEach(fn => {
+  fn.node.force_x = fn.x;
+  fn.node.force_y = fn.y;
+});
+// Internal nodes go to centroid of their children
+root.eachAfter(d => {
+  if (d.children) {
+    d.force_x = d3.mean(d.children, c => c.force_x);
+    d.force_y = d3.mean(d.children, c => c.force_y);
+  }
+});
+
+// ─── Color ─────────────────────────────────────────────────────────
+function groupOf(d) {
+  let n = d; while (n.depth > 1) n = n.parent; return n.data.id;
+}
+let colorByGroup = false;
+
+// ─── Position mapping ──────────────────────────────────────────────
+function computeTargets(layoutName) {
+  const hw = (width - margin) / 2, hh = (height - margin) / 2;
+
+  if (layoutName === "force") {
+    root.each(d => {
+      d.target_x = d.force_x;
+      d.target_y = d.force_y;
+      d.target_r = d.children ? 0 : 4;
+      d.target_label_visible = !d.children;
+      d.target_label_radial = false;
+    });
+    return;
+  }
+
+  const layout = layoutEngines[layoutName];
+  layout(root);
+
+  root.each(d => {
+    switch (layoutName) {
+      case "bundle":
+        d.target_x = d.y * Math.cos(d.x - Math.PI / 2);
+        d.target_y = d.y * Math.sin(d.x - Math.PI / 2);
+        d.target_r = d.children ? 0 : 3;
+        d.target_label_visible = !d.children;
+        d.target_label_radial = true;
+        break;
+      case "tree":
+        d.target_x = d.y - hw;
+        d.target_y = d.x - hh;
+        d.target_r = d.children ? 3 : 4;
+        d.target_label_visible = true;
+        d.target_label_radial = false;
+        break;
+      case "pack":
+        d.target_x = d.x - hw;
+        d.target_y = d.y - hh;
+        d.target_r = d.children ? d.r : 4;
+        d.target_label_visible = !d.children;
+        d.target_label_radial = false;
+        break;
+    }
+  });
+}
+
+// ─── SVG layers ────────────────────────────────────────────────────
+const linkLayer = svg.append("g").attr("class", "link-layer");
+const nodeLayer = svg.append("g").attr("class", "node-layer");
+
+const allNodes = root.descendants();
+const nodeSelection = nodeLayer.selectAll("g.node")
+  .data(allNodes, d => d.data.id).join("g").attr("class", "node");
+
+nodeSelection.append("circle")
+  .attr("fill", d => d.children ? "none" : "#555")
+  .attr("stroke", d => d.children ? "#ccc" : null)
+  .attr("stroke-width", d => d.children ? 1 : null);
+
+nodeSelection.append("text")
+  .attr("dy", "0.31em")
+  .text(d => d.data.id.split(".").pop());
+
+// Edges: for bundle/tree/pack we use LCA paths; for force we draw straight lines
+const linkSelection = linkLayer.selectAll("path.link")
+  .data(lcaPaths).join("path").attr("class", "link");
+
+// Also keep a set of straight-line edges for force mode
+const forceLinkSelection = linkLayer.selectAll("line.force-link")
+  .data(forceLinks).join("line")
+  .attr("class", "force-link")
+  .attr("stroke", "#476376").attr("stroke-opacity", 0.25).attr("stroke-width", 1)
+  .attr("display", "none");
+
+// ─── Render helpers ────────────────────────────────────────────────
+function redrawLinks() {
+  linkSelection.attr("d", bundleLine);
+}
+
+function redrawForceLinks() {
+  forceLinkSelection
+    .attr("x1", d => forceById.get(typeof d.source === "object" ? d.source.id : d.source)?.node.current_x ?? 0)
+    .attr("y1", d => forceById.get(typeof d.source === "object" ? d.source.id : d.source)?.node.current_y ?? 0)
+    .attr("x2", d => forceById.get(typeof d.target === "object" ? d.target.id : d.target)?.node.current_x ?? 0)
+    .attr("y2", d => forceById.get(typeof d.target === "object" ? d.target.id : d.target)?.node.current_y ?? 0);
+}
+
+function redrawNodes() {
+  nodeSelection.attr("transform", d => `translate(${d.current_x},${d.current_y})`);
+  nodeSelection.select("circle").attr("r", d => d.current_r);
+  nodeSelection.select("text")
+    .attr("display", d => d.current_label_visible ? null : "none")
+    .attr("x", d => {
+      if (d.current_label_radial) {
+        const angle = Math.atan2(d.current_y, d.current_x);
+        return (angle > -Math.PI / 2 && angle < Math.PI / 2) ? 8 : -8;
+      }
+      return 0;
+    })
+    .attr("y", d => d.current_label_radial ? 0 : -d.current_r - 6)
+    .attr("text-anchor", d => {
+      if (d.current_label_radial) {
+        const angle = Math.atan2(d.current_y, d.current_x);
+        return (angle > -Math.PI / 2 && angle < Math.PI / 2) ? "start" : "end";
+      }
+      return "middle";
+    })
+    .attr("transform", d => {
+      if (d.current_label_radial) {
+        const angle = Math.atan2(d.current_y, d.current_x) * 180 / Math.PI;
+        return `rotate(${angle > -90 && angle < 90 ? angle : angle + 180})`;
+      }
+      return null;
+    });
+}
+
+// ─── Layout transition ─────────────────────────────────────────────
+let currentLayout = null;
+let transitioning = false;
+
+function transitionTo(layoutName) {
+  if (layoutName === currentLayout) return;
+
+  root.each(d => {
+    d.source_x = d.current_x ?? 0;
+    d.source_y = d.current_y ?? 0;
+    d.source_r = d.current_r ?? 3;
+  });
+
+  const isInitial = currentLayout === null;
+  const wasForce = currentLayout === "force";
+  const isForce = layoutName === "force";
+  computeTargets(layoutName);
+  currentLayout = layoutName;
+  transitioning = true;
+
+  d3.selectAll("[data-layout]").classed("active", function() {
+    return this.dataset.layout === layoutName;
+  });
+
+  // Toggle edge rendering mode
+  linkSelection.attr("display", isForce ? "none" : null);
+  forceLinkSelection.attr("display", isForce ? null : "none");
+
+  if (isInitial) {
+    root.each(d => {
+      d.current_x = d.target_x;
+      d.current_y = d.target_y;
+      d.current_r = d.target_r;
+      d.current_label_visible = d.target_label_visible;
+      d.current_label_radial = d.target_label_radial;
+    });
+    redrawNodes();
+    if (isForce) redrawForceLinks(); else redrawLinks();
+    transitioning = false;
+    updateStatus();
+    document.body.dataset.layout = layoutName;
+    return;
+  }
+
+  svg.transition("layout").duration(1200).ease(d3.easeCubicInOut)
+    .tween("interpolate", () => t => {
+      root.each(d => {
+        d.current_x = d.source_x + (d.target_x - d.source_x) * t;
+        d.current_y = d.source_y + (d.target_y - d.source_y) * t;
+        d.current_r = d.source_r + (d.target_r - d.source_r) * t;
+        d.current_label_visible = t > 0.5 ? d.target_label_visible : (d.source_label_visible ?? d.target_label_visible);
+        d.current_label_radial = t > 0.5 ? d.target_label_radial : (d.source_label_radial ?? d.target_label_radial);
+      });
+      redrawNodes();
+      // During transition, show bundled edges morphing (or straight lines for force)
+      if (isForce) redrawForceLinks();
+      else redrawLinks();
+    })
+    .on("end", () => {
+      transitioning = false;
+      root.each(d => {
+        d.source_label_visible = d.target_label_visible;
+        d.source_label_radial = d.target_label_radial;
+      });
+      updateStatus();
+      document.body.dataset.layout = layoutName;
+    });
+}
+
+// ─── Interaction: highlight ────────────────────────────────────────
+let selectedNode = null;
+
+function getConnectedLinks(node) {
+  const leafIds = new Set(node.leaves().map(d => d.data.id));
+  return lcaPaths.filter(l =>
+    leafIds.has(l[0].data.id) || leafIds.has(l[l.length - 1].data.id));
+}
+
+function getConnectedForceLinks(node) {
+  const id = node.data.id;
+  return forceLinks.filter(l => {
+    const s = typeof l.source === "object" ? l.source.id : l.source;
+    const t = typeof l.target === "object" ? l.target.id : l.target;
+    return s === id || t === id;
+  });
+}
+
+nodeSelection.filter(d => !d.children)
+  .on("mouseover", (event, d) => {
+    if (selectedNode || transitioning) return;
+    highlightNode(d);
+  })
+  .on("mouseout", () => {
+    if (selectedNode || transitioning) return;
+    clearHighlight();
+  })
+  .on("click", (event, d) => {
+    if (transitioning) return;
+    if (selectedNode === d) { selectedNode = null; clearHighlight(); }
+    else { selectedNode = d; highlightNode(d); }
+  });
+
+function highlightNode(d) {
+  const connected = getConnectedLinks(d);
+  const connectedIds = new Set();
+  connected.forEach(l => {
+    connectedIds.add(l[0].data.id);
+    connectedIds.add(l[l.length - 1].data.id);
+  });
+
+  linkSelection.classed("link--faded", true);
+  forceLinkSelection.attr("stroke-opacity", 0.04);
+  nodeSelection.classed("node--faded", true);
+
+  linkSelection.filter(l => connected.includes(l))
+    .classed("link--faded", false).classed("link--highlighted", true).raise();
+
+  const connForce = getConnectedForceLinks(d);
+  forceLinkSelection.filter(l => connForce.includes(l))
+    .attr("stroke", "#e03131").attr("stroke-opacity", 0.8).attr("stroke-width", 1.5);
+
+  nodeSelection.filter(n => connectedIds.has(n.data.id))
+    .classed("node--faded", false).classed("node--highlighted", true);
+
+  status.text(`${d.data.id}: ${connected.length} connections`);
+}
+
+function clearHighlight() {
+  linkSelection.classed("link--faded link--highlighted", false);
+  forceLinkSelection.attr("stroke", "#476376").attr("stroke-opacity", 0.25).attr("stroke-width", 1);
+  nodeSelection.classed("node--faded node--highlighted", false);
+  updateStatus();
+}
+
+// ─── Color toggle ──────────────────────────────────────────────────
+d3.select("[data-action=color-group]").on("click", function() {
+  colorByGroup = !colorByGroup;
+  d3.select(this).classed("active", colorByGroup);
+  nodeSelection.select("circle")
+    .attr("fill", d => d.children ? "none" : (colorByGroup ? color(groupOf(d)) : "#555"));
+  linkSelection
+    .attr("stroke", d => colorByGroup ? color(groupOf(d[0])) : null);
+  forceLinkSelection
+    .attr("stroke", d => {
+      if (!colorByGroup) return "#476376";
+      const sid = typeof d.source === "object" ? d.source.id : d.source;
+      const sn = nodesById.get(sid);
+      return sn ? color(groupOf(sn)) : "#476376";
+    });
+});
+
+// ─── Tension slider ────────────────────────────────────────────────
+d3.select("#tension").on("input", function() {
+  tension = +this.value / 100;
+  d3.select("#tension-val").text(tension.toFixed(2));
+  bundleLine.curve(d3.curveBundle.beta(1 - tension));
+  if (!transitioning && currentLayout !== "force") redrawLinks();
+});
+
+// ─── Layout buttons ────────────────────────────────────────────────
+d3.selectAll("[data-layout]").on("click", function() {
+  transitionTo(this.dataset.layout);
+});
+
+function updateStatus() {
+  status.text(`${currentLayout} | ${leaves.length} leaves | ${lcaPaths.length} connections | tension: ${tension.toFixed(2)}`);
+}
+
+// ─── Init ──────────────────────────────────────────────────────────
+transitionTo("force");
+document.body.dataset.ready = "true";
+</script>
+</body>
+</html>

@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Proof: Hierarchy Morph + Colorblind-Safe Patterns</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: #fafafa; padding: 20px; color: #333; }
+  h2 { font-size: 15px; margin: 0 0 10px; font-weight: 600; }
+  .row { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+  .row label { font-size: 12px; color: #666; align-self: center; margin-right: 2px; }
+  button { padding: 5px 13px; border: 1px solid #aaa; border-radius: 4px;
+           background: #fff; cursor: pointer; font-size: 12px; }
+  button:hover { background: #eee; }
+  button.active { background: #4477AA; color: #fff; border-color: #4477AA; }
+  svg { display: block; }
+  #status { font-size: 11px; color: #888; margin-top: 6px; }
+</style>
+</head>
+<body>
+<h2>Hierarchy Morph × Colorblind-Safe Patterns</h2>
+<div class="row">
+  <label>Layout:</label>
+  <button data-layout="treemap" class="active">Treemap</button>
+  <button data-layout="pack">Pack</button>
+  <button data-layout="sunburst">Sunburst</button>
+</div>
+<div class="row">
+  <label>Fill:</label>
+  <button data-fill="color" class="active">Color</button>
+  <button data-fill="pattern">Pattern (B&W)</button>
+  <button data-fill="both">Color + Pattern</button>
+</div>
+<svg id="chart"></svg>
+<div id="status"></div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+const width = 700, height = 560, pad = 20, nPts = 64;
+const svg = d3.select("#chart").attr("width", width).attr("height", height);
+const defs = svg.append("defs");
+const g = svg.append("g");
+
+// ─── Paul Tol Bright palette (colorblind-safe) ─────────────────────
+const tolBright = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377","#BBBBBB","#332288"];
+const color = d3.scaleOrdinal(tolBright);
+
+// ─── Data ──────────────────────────────────────────────────────────
+const categories = ["Servers","Storage","Network","Security","Analytics","Mail","Auth","Cache"];
+const rawData = { name: "root", children: categories.map((c, i) => ({
+  name: c, value: 20 + Math.sin(i * 1.9) * 15 + i * 7
+}))};
+const nLeaves = rawData.children.length;
+const values = rawData.children.map(d => d.value);
+
+// ─── Pattern definitions ───────────────────────────────────────────
+
+function mkPattern(defs, id, type, stroke) {
+  const s = 8;
+  const p = defs.append("pattern").attr("id", id)
+    .attr("width", s).attr("height", s).attr("patternUnits", "userSpaceOnUse");
+  if (type === "diag") {
+    p.attr("patternTransform", "rotate(45)");
+    p.append("line").attr("x2", 0).attr("y2", s).attr("stroke", stroke).attr("stroke-width", 1.5);
+  } else if (type === "dots") {
+    p.append("circle").attr("cx", s/2).attr("cy", s/2).attr("r", 1.5).attr("fill", stroke);
+  } else if (type === "cross") {
+    p.attr("patternTransform", "rotate(45)");
+    p.append("line").attr("x2", 0).attr("y2", s).attr("stroke", stroke).attr("stroke-width", 1);
+    p.append("line").attr("x2", s).attr("y2", 0).attr("stroke", stroke).attr("stroke-width", 1);
+  } else if (type === "backslash") {
+    p.attr("patternTransform", "rotate(-45)");
+    p.append("line").attr("x2", 0).attr("y2", s).attr("stroke", stroke).attr("stroke-width", 1.5);
+  } else if (type === "horiz") {
+    p.append("line").attr("x1", 0).attr("y1", s/2).attr("x2", s).attr("y2", s/2)
+      .attr("stroke", stroke).attr("stroke-width", 1.2);
+  } else if (type === "vert") {
+    p.append("line").attr("x1", s/2).attr("y1", 0).attr("x2", s/2).attr("y2", s)
+      .attr("stroke", stroke).attr("stroke-width", 1.2);
+  } else if (type === "checker") {
+    const h = s/2;
+    p.append("rect").attr("width", h).attr("height", h).attr("fill", stroke);
+    p.append("rect").attr("x", h).attr("y", h).attr("width", h).attr("height", h).attr("fill", stroke);
+  } else if (type === "stipple") {
+    let seed = 42;
+    const rand = () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+    for (let i = 0; i < 10; i++) p.append("circle").attr("cx", rand()*s).attr("cy", rand()*s).attr("r", 0.7).attr("fill", stroke);
+  }
+  return id;
+}
+
+const patternTypes = ["diag","dots","cross","backslash","horiz","vert","checker","stipple"];
+
+// B&W patterns
+const bwIds = patternTypes.map((t, i) => mkPattern(defs, `bw-${i}`, t, "#333"));
+
+// Color+pattern combined patterns: colored background + contrasting marks
+const cpIds = categories.map((cat, i) => {
+  const s = 8, c = color(i);
+  const id = `cp-${i}`;
+  const p = defs.append("pattern").attr("id", id)
+    .attr("width", s).attr("height", s).attr("patternUnits", "userSpaceOnUse");
+  // Background color
+  p.append("rect").attr("width", s).attr("height", s).attr("fill", c);
+  // Determine mark color for contrast
+  const mark = d3.lab(c).l < 55 ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.3)";
+  // Overlay pattern
+  const t = patternTypes[i];
+  if (t === "diag" || t === "backslash") {
+    p.attr("patternTransform", `rotate(${t === "diag" ? 45 : -45})`);
+    p.append("line").attr("x2", 0).attr("y2", s).attr("stroke", mark).attr("stroke-width", 2);
+  } else if (t === "dots") {
+    p.append("circle").attr("cx", s/2).attr("cy", s/2).attr("r", 1.8).attr("fill", mark);
+  } else if (t === "cross") {
+    p.attr("patternTransform", "rotate(45)");
+    p.append("line").attr("x2", 0).attr("y2", s).attr("stroke", mark).attr("stroke-width", 1.5);
+    p.append("line").attr("x2", s).attr("y2", 0).attr("stroke", mark).attr("stroke-width", 1.5);
+  } else if (t === "horiz") {
+    p.append("line").attr("x1", 0).attr("y1", s/2).attr("x2", s).attr("y2", s/2).attr("stroke", mark).attr("stroke-width", 1.8);
+  } else if (t === "vert") {
+    p.append("line").attr("x1", s/2).attr("y1", 0).attr("x2", s/2).attr("y2", s).attr("stroke", mark).attr("stroke-width", 1.8);
+  } else if (t === "checker") {
+    const h = s/2;
+    p.append("rect").attr("width", h).attr("height", h).attr("fill", mark);
+    p.append("rect").attr("x", h).attr("y", h).attr("width", h).attr("height", h).attr("fill", mark);
+  } else if (t === "stipple") {
+    let seed = 42;
+    const rand = () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let tt = Math.imul(seed ^ seed >>> 15, 1 | seed); tt = tt + Math.imul(tt ^ tt >>> 7, 61 | tt) ^ tt; return ((tt ^ tt >>> 14) >>> 0) / 4294967296; };
+    for (let j = 0; j < 10; j++) p.append("circle").attr("cx", rand()*s).attr("cy", rand()*s).attr("r", 0.9).attr("fill", mark);
+  }
+  return id;
+});
+
+// ─── Point resampling utilities ────────────────────────────────────
+
+function samplePath(pathStr, n) {
+  const tmp = svg.append("path").attr("d", pathStr).style("opacity", 0);
+  const len = tmp.node().getTotalLength();
+  const pts = d3.range(n).map(i => {
+    const p = tmp.node().getPointAtLength(i / n * len);
+    return [p.x, p.y];
+  });
+  tmp.remove();
+  return pts;
+}
+
+function sampleTranslatedPath(pathStr, tx, ty, n) {
+  const gg = svg.append("g").attr("transform", `translate(${tx},${ty})`);
+  const el = gg.append("path").attr("d", pathStr);
+  const len = el.node().getTotalLength();
+  const pts = d3.range(n).map(i => {
+    const p = el.node().getPointAtLength(i / n * len);
+    return [p.x + tx, p.y + ty];
+  });
+  gg.remove();
+  return pts;
+}
+
+function bestRotation(source, target) {
+  const n = source.length;
+  let bestOff = 0, bestDist = Infinity;
+  for (let off = 0; off < n; off++) {
+    let dist = 0;
+    for (let i = 0; i < n; i++) {
+      const j = (i + off) % n;
+      const dx = source[j][0] - target[i][0], dy = source[j][1] - target[i][1];
+      dist += dx * dx + dy * dy;
+    }
+    if (dist < bestDist) { bestDist = dist; bestOff = off; }
+  }
+  return source.map((_, i) => source[(i + bestOff) % n]);
+}
+
+function pointsToPath(pts) {
+  return "M" + pts.map(p => p[0].toFixed(2) + "," + p[1].toFixed(2)).join("L") + "Z";
+}
+
+function roundedRectPath(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  const x1 = x + w, y1 = y + h;
+  return `M${x+r},${y}H${x1-r}Q${x1},${y} ${x1},${y+r}V${y1-r}Q${x1},${y1} ${x1-r},${y1}H${x+r}Q${x},${y1} ${x},${y1-r}V${y+r}Q${x},${y} ${x+r},${y}Z`;
+}
+
+// ─── Compute layout point arrays ──────────────────────────────────
+
+// Treemap
+const root1 = d3.hierarchy(rawData).sum(d => d.value);
+d3.treemap().size([width - pad*2, height - pad*2]).padding(4).round(true)(root1);
+const treemapPts = root1.leaves().map(d =>
+  samplePath(roundedRectPath(d.x0 + pad, d.y0 + pad, d.x1 - d.x0, d.y1 - d.y0, 3), nPts)
+);
+const treemapCentroids = root1.leaves().map(d => [(d.x0+d.x1)/2 + pad, (d.y0+d.y1)/2 + pad]);
+
+// Pack
+const root2 = d3.hierarchy(rawData).sum(d => d.value);
+d3.pack().size([width - pad*2, height - pad*2]).padding(6)(root2);
+const packPts = root2.leaves().map(d => {
+  const r = d.r, cx = d.x + pad, cy = d.y + pad;
+  return samplePath(`M${cx+r},${cy}A${r},${r} 0 1,1 ${cx-r},${cy}A${r},${r} 0 1,1 ${cx+r},${cy}Z`, nPts);
+});
+const packCentroids = root2.leaves().map(d => [d.x + pad, d.y + pad]);
+
+// Sunburst
+const root3 = d3.hierarchy(rawData).sum(d => d.value);
+d3.partition().size([2 * Math.PI, Math.min(width, height) / 2 - pad - 10])(root3);
+const sbCx = width / 2, sbCy = height / 2;
+const arcGen = d3.arc().startAngle(d => d.x0).endAngle(d => d.x1)
+  .innerRadius(d => d.y0).outerRadius(d => d.y1);
+const sunburstPts = root3.leaves().map(d =>
+  sampleTranslatedPath(arcGen(d), sbCx, sbCy, nPts)
+);
+const sunburstCentroids = root3.leaves().map(d => {
+  const midAngle = (d.x0 + d.x1) / 2, midR = (d.y0 + d.y1) / 2;
+  return [sbCx + Math.sin(midAngle) * midR, sbCy - Math.cos(midAngle) * midR];
+});
+
+// Align to pack as neutral layout
+const treemapAligned = treemapPts.map((pts, i) => bestRotation(pts, packPts[i]));
+const sunburstAligned = sunburstPts.map((pts, i) => bestRotation(pts, packPts[i]));
+
+const layoutData = { treemap: treemapAligned, pack: packPts, sunburst: sunburstAligned };
+const centroidData = { treemap: treemapCentroids, pack: packCentroids, sunburst: sunburstCentroids };
+
+// ─── Fill logic ────────────────────────────────────────────────────
+
+let currentFill = "color";
+
+function getFill(i) {
+  if (currentFill === "color") return color(i);
+  if (currentFill === "pattern") return `url(#${bwIds[i]})`;
+  return `url(#${cpIds[i]})`;
+}
+
+function getStroke(i) {
+  return currentFill === "pattern" ? "#666" : "#fff";
+}
+
+// ─── Render ────────────────────────────────────────────────────────
+
+const cells = g.selectAll("g.cell").data(d3.range(nLeaves)).join("g")
+  .attr("class", "cell");
+
+cells.append("path")
+  .attr("d", (d, i) => pointsToPath(layoutData.treemap[i]))
+  .attr("fill", (d, i) => getFill(i))
+  .attr("stroke", (d, i) => getStroke(i))
+  .attr("stroke-width", 1.5)
+  .attr("opacity", 0.88);
+
+cells.append("text")
+  .attr("x", (d, i) => treemapCentroids[i][0])
+  .attr("y", (d, i) => treemapCentroids[i][1])
+  .attr("text-anchor", "middle").attr("dy", "0.35em")
+  .attr("font-size", 11).attr("fill", "#222").attr("pointer-events", "none")
+  .text((d, i) => rawData.children[i].name);
+
+// ─── Legend ────────────────────────────────────────────────────────
+
+const legend = svg.append("g").attr("transform", `translate(${width - 110}, ${pad})`);
+categories.forEach((cat, i) => {
+  const ly = i * 22;
+  legend.append("rect").attr("x", 0).attr("y", ly).attr("width", 14).attr("height", 14)
+    .attr("rx", 2).attr("fill", getFill(i)).attr("stroke", getStroke(i)).attr("stroke-width", 0.5)
+    .attr("class", "legend-swatch");
+  legend.append("text").attr("x", 20).attr("y", ly + 11)
+    .attr("font-size", 11).attr("fill", "#444").text(cat);
+});
+
+// ─── Morph ─────────────────────────────────────────────────────────
+
+let currentLayout = "treemap";
+let morphCount = 0;
+
+function morphTo(layout, duration = 900) {
+  if (layout === currentLayout) return;
+  const from = layoutData[currentLayout], to = layoutData[layout];
+  const fromC = centroidData[currentLayout], toC = centroidData[layout];
+  currentLayout = layout;
+  morphCount++;
+
+  cells.each(function(d, i) {
+    const fromPts = from[i], toPts = to[i];
+    d3.select(this).select("path")
+      .transition().duration(duration).ease(d3.easeCubicInOut)
+      .attrTween("d", () => t => {
+        const interp = fromPts.map((fp, j) => [
+          fp[0] + (toPts[j][0] - fp[0]) * t,
+          fp[1] + (toPts[j][1] - fp[1]) * t
+        ]);
+        return pointsToPath(interp);
+      });
+
+    d3.select(this).select("text")
+      .transition().duration(duration).ease(d3.easeCubicInOut)
+      .attr("x", toC[i][0]).attr("y", toC[i][1])
+      .attr("opacity", layout === "sunburst" ? 0 : 1);
+  });
+
+  updateStatus();
+}
+
+function setFill() {
+  cells.select("path")
+    .transition().duration(300)
+    .attr("fill", (d, i) => getFill(i))
+    .attr("stroke", (d, i) => getStroke(i));
+  legend.selectAll(".legend-swatch")
+    .transition().duration(300)
+    .attr("fill", (d, i) => getFill(i))
+    .attr("stroke", (d, i) => getStroke(i));
+}
+
+function updateStatus() {
+  d3.select("#status").text(
+    `Layout: ${currentLayout} | Fill: ${currentFill} | Points/shape: ${nPts} | Morphs: ${morphCount}`
+  );
+}
+
+// ─── Button handlers ───────────────────────────────────────────────
+
+d3.selectAll("button[data-layout]").on("click", function() {
+  d3.selectAll("button[data-layout]").classed("active", false);
+  d3.select(this).classed("active", true);
+  morphTo(this.dataset.layout);
+});
+
+d3.selectAll("button[data-fill]").on("click", function() {
+  d3.selectAll("button[data-fill]").classed("active", false);
+  d3.select(this).classed("active", true);
+  currentFill = this.dataset.fill;
+  setFill();
+  updateStatus();
+});
+
+updateStatus();
+document.getElementById("chart").dataset.ready = "true";
+</script>
+</body>
+</html>

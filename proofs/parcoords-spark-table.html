@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Proof: Parallel Coordinates + Brushing + Sparkcharts Table</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: #fafafa; padding: 20px; color: #333; }
+  h2 { font-size: 15px; font-weight: 600; margin: 0 0 10px; }
+  #pc-container { position: relative; margin-bottom: 16px; }
+  #pc-container canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
+  #pc-container > svg { position: absolute; top: 0; left: 0; }
+  .axis text { font-size: 11px; }
+  .axis .domain, .axis line { stroke: #ccc; }
+  .axis-label { font-size: 12px; font-weight: 600; cursor: pointer; fill: #333; }
+  .brush .selection { fill: steelblue; fill-opacity: 0.25; stroke: steelblue; }
+  table { border-collapse: separate; border-spacing: 0; width: 100%; max-width: 960px; font-size: 12px; }
+  th, td { padding: 5px 8px; text-align: left; border-bottom: 1px solid #eee; }
+  th { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; color: #666; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: "SF Mono", Monaco, monospace; }
+  td.spark { white-space: nowrap; line-height: 0; padding: 4px 6px; }
+  .origin-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  #status { font-size: 11px; color: #888; margin: 8px 0; }
+  #summary { margin-top: 4px; }
+</style>
+</head>
+<body>
+<h2>Car Dataset Explorer — Parallel Coordinates + Linked Sparkcharts</h2>
+<div id="status"></div>
+<div id="pc-container"></div>
+<div id="summary">
+  <table id="summary-table"><thead><tr></tr></thead><tbody></tbody></table>
+</div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+
+// ─── Generate car data ────────────────────────────────────────────
+const origins = ["USA", "Europe", "Japan"];
+const tolBright = { USA: "#4477AA", Europe: "#EE6677", Japan: "#228833" };
+const names_usa = ["Chevy Malibu","Ford Mustang","Dodge Charger","Buick Century","AMC Hornet","Pontiac Grand Prix","Chevy Impala","Ford Pinto","Plymouth Fury","Chevy Vega","Ford Maverick","AMC Gremlin","Chevy Nova","Ford Torino","Plymouth Satellite","Buick Skylark","Pontiac Firebird","Chevy Chevelle","Ford Fairlane","Dodge Dart"];
+const names_eu = ["VW Rabbit","Audi Fox","BMW 320i","Peugeot 504","Volvo 245","Saab 99","Fiat 128","Renault 12","Opel Manta","VW Dasher","Audi 100","Mercedes 280","Fiat 131","Volvo 264","BMW 2002","Peugeot 304","Saab 900","Renault 5","Opel Kadett","VW Beetle"];
+const names_jp = ["Toyota Corolla","Datsun 510","Honda Civic","Mazda RX-4","Toyota Corona","Datsun 710","Honda Accord","Mazda GLC","Toyota Celica","Datsun 280Z","Honda Prelude","Mazda 626","Toyota Carina","Datsun 200SX","Subaru DL","Mitsubishi Colt","Toyota Tercel","Datsun 210","Honda CRX","Mazda 323"];
+
+const rng = d3.randomLcg(42);
+const norm = (mu, sig) => mu + sig * Math.sqrt(-2 * Math.log(rng())) * Math.cos(2 * Math.PI * rng());
+
+const data = [];
+function addCars(nameList, origin, mpgMu, mpgSig, cylMu, hpMu, hpSig, wtMu, wtSig, accelMu) {
+  nameList.forEach((name, i) => {
+    const year = 70 + Math.floor(rng() * 13);
+    const mpg = Math.max(8, Math.round(norm(mpgMu, mpgSig) + (year - 76) * 0.5));
+    const cyl = Math.round(Math.max(3, Math.min(8, norm(cylMu, 0.8))));
+    const hp = Math.max(40, Math.round(norm(hpMu, hpSig)));
+    const weight = Math.max(1600, Math.round(norm(wtMu, wtSig)));
+    const accel = Math.max(8, Math.round(norm(accelMu, 1.5) * 10) / 10);
+    data.push({ name, origin, mpg, cylinders: cyl, horsepower: hp, weight, acceleration: accel, year });
+  });
+}
+addCars(names_usa, "USA", 18, 5, 6.5, 145, 35, 3400, 400, 14);
+addCars(names_eu, "Europe", 27, 6, 4.2, 95, 20, 2400, 350, 16);
+addCars(names_jp, "Japan", 30, 5, 4, 85, 18, 2200, 300, 16.5);
+
+// ─── Parallel coordinates setup ───────────────────────────────────
+const dims = ["mpg", "cylinders", "horsepower", "weight", "acceleration", "year"];
+const dimLabels = { mpg: "MPG", cylinders: "Cyl", horsepower: "HP", weight: "Weight", acceleration: "Accel", year: "Year" };
+const margin = { top: 40, right: 20, bottom: 12, left: 20 };
+const pcW = 920, pcH = 400;
+const w = pcW - margin.left - margin.right, h = pcH - margin.top - margin.bottom;
+
+const container = d3.select("#pc-container")
+  .style("width", pcW + "px").style("height", pcH + "px");
+
+// Canvas layer
+const dpr = window.devicePixelRatio || 1;
+const canvas = container.append("canvas")
+  .attr("width", pcW * dpr).attr("height", pcH * dpr)
+  .style("width", pcW + "px").style("height", pcH + "px");
+const ctx = canvas.node().getContext("2d");
+ctx.scale(dpr, dpr);
+ctx.translate(margin.left, margin.top);
+
+// SVG layer
+const svg = container.append("svg")
+  .attr("width", pcW).attr("height", pcH)
+  .append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+// Scales
+const xScale = d3.scalePoint().domain(dims).range([0, w]);
+const yScales = {};
+dims.forEach(dim => {
+  yScales[dim] = d3.scaleLinear().domain(d3.extent(data, d => d[dim])).range([h, 0]).nice();
+});
+
+// ─── Canvas drawing ───────────────────────────────────────────────
+const filters = {};
+
+function isSelected(d) {
+  return Object.entries(filters).every(([dim, fn]) => fn(d));
+}
+
+function drawLine(d, color, alpha) {
+  ctx.strokeStyle = color;
+  ctx.globalAlpha = alpha;
+  ctx.beginPath();
+  dims.forEach((dim, i) => {
+    const x = xScale(dim), y = yScales[dim](d[dim]);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+}
+
+function renderCanvas() {
+  ctx.clearRect(-margin.left, -margin.top, pcW, pcH);
+  ctx.lineWidth = 1;
+
+  const selected = data.filter(isSelected);
+
+  // Dim unselected
+  data.forEach(d => { if (!isSelected(d)) drawLine(d, "#ccc", 0.08); });
+
+  // Bright selected by origin color
+  selected.forEach(d => drawLine(d, tolBright[d.origin], Math.max(0.15, 50 / selected.length)));
+
+  canvas.node().dataset.selectedCount = selected.length;
+  d3.select("#status").text(`${selected.length} of ${data.length} cars selected`);
+
+  updateSummaryTable(selected);
+}
+
+// ─── SVG axes + brushes ───────────────────────────────────────────
+const axisGroups = svg.selectAll(".axis")
+  .data(dims).join("g")
+  .attr("class", "axis")
+  .attr("transform", d => `translate(${xScale(d)},0)`)
+  .each(function(dim) { d3.select(this).call(d3.axisLeft(yScales[dim]).ticks(6)); });
+
+axisGroups.append("text").attr("class", "axis-label")
+  .attr("y", -14).attr("text-anchor", "middle")
+  .text(d => dimLabels[d]);
+
+axisGroups.each(function(dim) {
+  const brush = d3.brushY()
+    .extent([[-10, 0], [10, h]])
+    .on("brush end", function(event) {
+      if (!event.selection) { delete filters[dim]; }
+      else {
+        const [y0, y1] = event.selection;
+        const scale = yScales[dim];
+        const lo = scale.invert(y1), hi = scale.invert(y0);
+        filters[dim] = d => d[dim] >= lo && d[dim] <= hi;
+      }
+      renderCanvas();
+    });
+  d3.select(this).call(brush);
+});
+
+// ─── Sparkline builders ──────────────────────────────────────────
+function sparkline(container, values, { width = 80, height = 16, strokeColor = "currentColor" } = {}) {
+  const pad = 2;
+  const x = d3.scaleLinear().domain([0, values.length - 1]).range([pad, width - pad]);
+  const ext = d3.extent(values);
+  const y = d3.scaleLinear().domain(ext[0] === ext[1] ? [ext[0]-1, ext[1]+1] : ext).range([height - pad, pad]);
+  const line = d3.line().x((d, i) => x(i)).y(d => y(d)).curve(d3.curveMonotoneX);
+  const svgEl = d3.select(container).append("svg").attr("width", width).attr("height", height).style("vertical-align", "middle");
+  svgEl.append("path").datum(values).attr("d", line).attr("fill", "none").attr("stroke", strokeColor).attr("stroke-width", 1.5).attr("stroke-linecap", "round");
+  svgEl.append("circle").attr("cx", x(values.length - 1)).attr("cy", y(values[values.length - 1])).attr("r", 1.5).attr("fill", "#e41a1c");
+  return svgEl.node();
+}
+
+function sparkbar(container, values, { width = 80, height = 16 } = {}) {
+  const n = values.length, gap = 1;
+  const bw = Math.max(1, (width - gap * (n - 1)) / n);
+  const yMin = Math.min(0, d3.min(values));
+  const y = d3.scaleLinear().domain([yMin, d3.max(values)]).range([height, 0]);
+  const zero = y(0);
+  const svgEl = d3.select(container).append("svg").attr("width", width).attr("height", height).style("vertical-align", "middle");
+  svgEl.selectAll("rect").data(values).join("rect")
+    .attr("x", (d, i) => i * (bw + gap))
+    .attr("y", d => d >= 0 ? y(d) : zero)
+    .attr("width", bw)
+    .attr("height", d => Math.abs(y(d) - zero))
+    .attr("fill", d => d >= 0 ? "#4477AA" : "#EE6677");
+  return svgEl.node();
+}
+
+// ─── Summary table ────────────────────────────────────────────────
+const sumCols = [
+  { key: "origin", label: "Origin" },
+  { key: "count", label: "Count", type: "number" },
+  { key: "avgMpg", label: "Avg MPG", type: "number", fmt: d3.format(".1f") },
+  { key: "avgHp", label: "Avg HP", type: "number", fmt: d3.format(".0f") },
+  { key: "avgWeight", label: "Avg Weight", type: "number", fmt: d3.format(",.0f") },
+  { key: "mpgDist", label: "MPG Dist.", type: "sparkline" },
+  { key: "hpDist", label: "HP Dist.", type: "sparkbar" },
+];
+
+d3.select("#summary-table thead tr").selectAll("th")
+  .data(sumCols).join("th").text(d => d.label);
+
+function updateSummaryTable(selected) {
+  const byOrigin = d3.groups(selected, d => d.origin)
+    .map(([origin, cars]) => ({
+      origin,
+      count: cars.length,
+      avgMpg: d3.mean(cars, d => d.mpg),
+      avgHp: d3.mean(cars, d => d.horsepower),
+      avgWeight: d3.mean(cars, d => d.weight),
+      mpgDist: cars.map(d => d.mpg).sort(d3.ascending),
+      hpDist: cars.map(d => d.horsepower).sort(d3.ascending),
+    }))
+    .sort((a, b) => d3.descending(a.count, b.count));
+
+  const rows = d3.select("#summary-table tbody").selectAll("tr")
+    .data(byOrigin, d => d.origin)
+    .join("tr");
+
+  rows.selectAll("td").data(d => sumCols.map(col => ({ col, row: d }))).join("td")
+    .attr("class", d => d.col.type === "number" ? "num" : d.col.type ? "spark" : "")
+    .each(function({ col, row }) {
+      const el = d3.select(this);
+      el.selectAll("*").remove();
+      el.text("");
+      if (col.key === "origin") {
+        el.html(`<span class="origin-dot" style="background:${tolBright[row.origin]}"></span>${row.origin}`);
+      } else if (col.type === "sparkline") {
+        if (row.mpgDist.length > 1) sparkline(this, row.mpgDist, { strokeColor: tolBright[row.origin] });
+        else el.text("—");
+      } else if (col.type === "sparkbar") {
+        if (row.hpDist.length > 1) sparkbar(this, row.hpDist);
+        else el.text("—");
+      } else if (col.fmt) {
+        el.text(col.fmt(row[col.key]));
+      } else {
+        el.text(row[col.key]);
+      }
+    });
+}
+
+// ─── Legend ────────────────────────────────────────────────────────
+const legend = svg.append("g").attr("transform", `translate(${w - 160}, ${h + 2})`);
+origins.forEach((o, i) => {
+  const lx = i * 70;
+  legend.append("rect").attr("x", lx).attr("y", 0).attr("width", 10).attr("height", 4).attr("fill", tolBright[o]);
+  legend.append("text").attr("x", lx + 14).attr("y", 4).attr("font-size", 10).attr("fill", "#666").text(o);
+});
+
+// ─── Init ─────────────────────────────────────────────────────────
+renderCanvas();
+document.body.dataset.ready = "true";
+</script>
+</body>
+</html>

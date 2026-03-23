@@ -170,8 +170,18 @@ def run_single_test(pw_browser, test_spec):
     check("no_js_errors", len(js_errors) == 0,
           "; ".join(js_errors[:5]) if js_errors else "")
 
-    # D3 loaded
-    d3_loaded = page.evaluate("typeof d3 !== 'undefined'")
+    # D3 loaded (global script or ES module import)
+    d3_loaded = page.evaluate("""() => {
+        if (typeof d3 !== 'undefined') return true;
+        // ES module imports don't expose d3 globally — check for d3-generated DOM
+        const hasD3Class = document.querySelector('[class*="tick"], [class*="domain"], [class*="axis"]') !== null;
+        const hasD3Data = document.querySelector('[data-ready], [__data__]') !== null;
+        // Check for d3 import in module scripts
+        const scripts = document.querySelectorAll('script[type=module]');
+        const hasD3Import = Array.from(scripts).some(s => /import.*d3/.test(s.textContent));
+        return hasD3Class || hasD3Data || hasD3Import;
+    }"""
+    )
     check("d3_loaded", d3_loaded,
           "" if d3_loaded else "d3 is not defined — check script import")
 

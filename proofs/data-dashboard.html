@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Proof: Data Dashboard — CSV → Chart → Sparkcharts → Table</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: #fafafa; padding: 20px; color: #333; }
+  h2 { font-size: 15px; font-weight: 600; margin: 0 0 10px; }
+  .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  button { padding: 5px 13px; border: 1px solid #aaa; border-radius: 4px;
+           background: #fff; cursor: pointer; font-size: 12px; }
+  button:hover { background: #eee; }
+  button.active { background: #4477AA; color: #fff; border-color: #4477AA; }
+  input[type=search] { padding: 5px 10px; border: 1px solid #aaa; border-radius: 4px; font-size: 12px; width: 180px; }
+  svg { display: block; }
+  #chart-container { background: #fff; border: 1px solid #ddd; border-radius: 4px; padding: 12px; margin-bottom: 12px; }
+  table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 12px; }
+  th, td { padding: 5px 8px; text-align: left; border-bottom: 1px solid #eee; }
+  th { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px;
+       color: #666; cursor: pointer; user-select: none; position: sticky; top: 0; background: #fff; }
+  th:hover { color: #333; }
+  th .arrow { font-size: 9px; margin-left: 3px; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: "SF Mono", Monaco, monospace; }
+  td.spark { white-space: nowrap; line-height: 0; padding: 4px 6px; }
+  tr.highlighted td { background: #e8f0fe; }
+  tr:hover td { background: #f5f5f5; }
+  #table-container { max-height: 500px; overflow-y: auto; background: #fff; border: 1px solid #ddd; border-radius: 4px; }
+  .bar.highlighted { stroke: #333; stroke-width: 2; }
+  #status { font-size: 11px; color: #888; margin-top: 6px; }
+</style>
+</head>
+<body>
+<h2>Country Metrics Dashboard</h2>
+<div class="toolbar">
+  <button id="view-chart" class="active">Chart</button>
+  <button id="view-table">Table</button>
+  <input id="search" type="search" placeholder="Filter countries…">
+</div>
+<div id="chart-container"><svg id="chart"></svg></div>
+<div id="table-container" style="display:none"><table id="data-table"><thead><tr></tr></thead><tbody></tbody></table></div>
+<div id="status"></div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+
+// ─── Inline CSV ────────────────────────────────────────────────────
+const csvText = `country,region,gdp,population,life_exp,jan,feb,mar,apr,may,jun,jul,aug,sep,oct,nov,dec
+United States,Americas,63544,331002651,78.9,102,105,108,104,110,115,118,120,117,114,111,109
+China,Asia,10500,1439323776,76.9,88,91,95,98,102,100,103,107,110,108,105,101
+Japan,Asia,39286,126476461,84.6,95,97,99,101,103,105,104,102,100,98,96,94
+Germany,Europe,46259,83783942,81.3,90,93,97,100,104,108,112,110,106,102,98,95
+United Kingdom,Europe,41124,67886011,81.2,85,88,92,96,100,103,107,105,101,97,93,89
+France,Europe,40494,65273511,82.7,87,90,94,97,101,105,109,107,103,99,95,91
+India,Asia,1901,1380004385,69.7,75,78,,84,88,92,96,94,90,86,82,78
+Brazil,Americas,6797,212559417,75.9,80,83,87,90,94,92,89,86,83,80,77,74
+Canada,Americas,43242,37742154,82.4,92,95,99,103,107,111,114,112,108,104,100,96
+Australia,Oceania,51812,25499884,83.4,98,101,104,102,99,96,94,92,95,99,103,106
+South Korea,Asia,31631,51269185,83.5,93,96,100,103,107,110,113,111,108,104,100,97
+Mexico,Americas,8347,128932753,75.1,78,81,84,,90,93,96,94,91,87,83,80
+Indonesia,Asia,3870,273523615,71.7,70,73,76,79,,85,88,86,83,79,75,72
+Netherlands,Europe,52304,17134872,82.3,91,94,98,102,106,110,113,111,107,103,99,95
+Saudi Arabia,Middle East,20110,34813871,75.1,82,85,89,93,,100,103,101,97,93,89,85
+Turkey,Europe,8538,84339067,77.7,76,79,83,87,91,95,98,96,92,88,84,80
+Switzerland,Europe,87097,8654622,83.8,96,99,103,107,111,,118,116,112,108,104,100
+Nigeria,Africa,2065,206139589,54.7,65,67,70,73,76,79,,79,76,73,70,67
+South Africa,Africa,5091,59308690,64.1,72,74,77,80,83,80,77,74,71,,75,73
+Egypt,Middle East,3019,102334404,71.8,68,71,74,77,80,83,86,84,,78,74,70`;
+
+// ─── Parse & clean ─────────────────────────────────────────────────
+const months = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];
+const raw = d3.csvParse(csvText, d => {
+  const row = {
+    country: d.country, region: d.region,
+    gdp: +d.gdp, population: +d.population, life_exp: +d.life_exp,
+    monthly: months.map(m => d[m] === "" ? null : +d[m])
+  };
+  // Interpolate missing monthly values
+  row.monthly.forEach((v, i) => {
+    if (v === null) {
+      const prev = row.monthly.slice(0, i).reverse().find(x => x !== null);
+      const next = row.monthly.slice(i + 1).find(x => x !== null);
+      row.monthly[i] = prev && next ? Math.round((prev + next) / 2) : (prev || next || 0);
+    }
+  });
+  // Compute month-over-month deltas
+  row.deltas = row.monthly.slice(1).map((v, i) => v - row.monthly[i]);
+  return row;
+});
+
+const data = raw.slice(); // mutable copy for sorting/filtering
+const tolBright = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377"];
+const regions = [...new Set(data.map(d => d.region))];
+const colorScale = d3.scaleOrdinal().domain(regions).range(tolBright);
+
+// ─── Sparkline builders ───────────────────────────────────────────
+function sparkline(container, values, { width = 80, height = 16, strokeColor = "currentColor" } = {}) {
+  const pad = 2;
+  const x = d3.scaleLinear().domain([0, values.length - 1]).range([pad, width - pad]);
+  const ext = d3.extent(values);
+  const y = d3.scaleLinear().domain(ext[0] === ext[1] ? [ext[0]-1, ext[1]+1] : ext).range([height - pad, pad]);
+  const line = d3.line().x((d, i) => x(i)).y(d => y(d)).curve(d3.curveMonotoneX);
+  const svg = d3.select(container).append("svg").attr("width", width).attr("height", height).style("vertical-align", "middle");
+  svg.append("path").datum(values).attr("d", line).attr("fill", "none").attr("stroke", strokeColor).attr("stroke-width", 1.5).attr("stroke-linecap", "round");
+  svg.append("circle").attr("cx", x(values.length - 1)).attr("cy", y(values[values.length - 1])).attr("r", 1.5).attr("fill", "#e41a1c");
+  return svg.node();
+}
+
+function sparkbar(container, values, { width = 80, height = 16 } = {}) {
+  const n = values.length, gap = 1;
+  const bw = Math.max(1, (width - gap * (n - 1)) / n);
+  const yMin = Math.min(0, d3.min(values));
+  const y = d3.scaleLinear().domain([yMin, d3.max(values)]).range([height, 0]);
+  const zero = y(0);
+  const svg = d3.select(container).append("svg").attr("width", width).attr("height", height).style("vertical-align", "middle");
+  svg.selectAll("rect").data(values).join("rect")
+    .attr("x", (d, i) => i * (bw + gap))
+    .attr("y", d => d >= 0 ? y(d) : zero)
+    .attr("width", bw)
+    .attr("height", d => Math.abs(y(d) - zero))
+    .attr("fill", d => d >= 0 ? "#4477AA" : "#EE6677");
+  return svg.node();
+}
+
+// ─── Bar chart ─────────────────────────────────────────────────────
+const chartW = 900, margin = { top: 10, right: 20, bottom: 30, left: 120 };
+const innerW = chartW - margin.left - margin.right;
+let chartData = data.slice().sort((a, b) => b.gdp - a.gdp);
+let chartH = chartData.length * 24 + margin.top + margin.bottom;
+
+const chartSvg = d3.select("#chart").attr("width", chartW).attr("height", chartH);
+const chartG = chartSvg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+const innerH = chartH - margin.top - margin.bottom;
+
+const xScale = d3.scaleLinear().domain([0, d3.max(data, d => d.gdp) * 1.05]).range([0, innerW]);
+const yScale = d3.scaleBand().domain(chartData.map(d => d.country)).range([0, innerH]).padding(0.2);
+
+chartG.append("g").attr("transform", `translate(0,${innerH})`).call(d3.axisBottom(xScale).ticks(6).tickFormat(d3.format("$,.0f"))).selectAll("text").attr("font-size", 10);
+chartG.append("g").call(d3.axisLeft(yScale)).selectAll("text").attr("font-size", 10);
+
+let bars = chartG.selectAll(".bar").data(chartData, d => d.country).join("rect")
+  .attr("class", "bar")
+  .attr("y", d => yScale(d.country))
+  .attr("width", d => xScale(d.gdp))
+  .attr("height", yScale.bandwidth())
+  .attr("fill", d => colorScale(d.region))
+  .attr("rx", 2)
+  .attr("cursor", "pointer")
+  .on("click", (e, d) => toggleHighlight(d.country));
+
+// ─── State ─────────────────────────────────────────────────────────
+let highlightedCountry = null;
+let currentView = "chart";
+let sortKey = null, sortAsc = true;
+let filterQuery = "";
+
+function toggleHighlight(country) {
+  highlightedCountry = highlightedCountry === country ? null : country;
+  updateHighlights();
+}
+
+function updateHighlights() {
+  bars.classed("highlighted", d => d.country === highlightedCountry);
+  d3.select("#data-table tbody").selectAll("tr")
+    .classed("highlighted", d => d.country === highlightedCountry);
+}
+
+// ─── Table ─────────────────────────────────────────────────────────
+const columns = [
+  { key: "country", label: "Country", type: "string" },
+  { key: "region", label: "Region", type: "string" },
+  { key: "gdp", label: "GDP/cap", type: "number", fmt: d3.format("$,.0f") },
+  { key: "population", label: "Population", type: "number", fmt: d3.format(",.0f") },
+  { key: "life_exp", label: "Life Exp", type: "number", fmt: d3.format(".1f") },
+  { key: "monthly", label: "Trend", type: "sparkline" },
+  { key: "deltas", label: "Change", type: "sparkbar" },
+];
+
+// Header
+d3.select("#data-table thead tr").selectAll("th")
+  .data(columns).join("th")
+  .text(d => d.label)
+  .on("click", (e, col) => {
+    if (col.type === "sparkline" || col.type === "sparkbar") return;
+    if (sortKey === col.key) sortAsc = !sortAsc;
+    else { sortKey = col.key; sortAsc = true; }
+    buildTable();
+  });
+
+function getFilteredData() {
+  let d = data;
+  if (filterQuery) {
+    const q = filterQuery.toLowerCase();
+    d = d.filter(r => r.country.toLowerCase().includes(q) || r.region.toLowerCase().includes(q));
+  }
+  if (sortKey) {
+    const col = columns.find(c => c.key === sortKey);
+    d = d.slice().sort((a, b) => {
+      const va = a[sortKey], vb = b[sortKey];
+      return sortAsc ? d3.ascending(va, vb) : d3.descending(va, vb);
+    });
+  }
+  return d;
+}
+
+function buildTable() {
+  const filtered = getFilteredData();
+
+  // Update headers with sort arrows
+  d3.select("#data-table thead tr").selectAll("th")
+    .html((col) => {
+      let arrow = "";
+      if (col.key === sortKey) arrow = `<span class="arrow">${sortAsc ? "▲" : "▼"}</span>`;
+      return col.label + arrow;
+    });
+
+  const rows = d3.select("#data-table tbody").selectAll("tr")
+    .data(filtered, d => d.country)
+    .join("tr")
+    .attr("cursor", "pointer")
+    .on("click", (e, d) => toggleHighlight(d.country))
+    .classed("highlighted", d => d.country === highlightedCountry);
+
+  rows.selectAll("td").data(d => columns.map(col => ({ col, row: d }))).join("td")
+    .attr("class", d => d.col.type === "number" ? "num" : d.col.type.startsWith("spark") ? "spark" : "")
+    .each(function(d) {
+      const el = d3.select(this);
+      el.selectAll("*").remove();
+      el.text("");
+      if (d.col.type === "sparkline") {
+        sparkline(this, d.row.monthly);
+      } else if (d.col.type === "sparkbar") {
+        sparkbar(this, d.row.deltas);
+      } else if (d.col.fmt) {
+        el.text(d.col.fmt(d.row[d.col.key]));
+      } else {
+        el.text(d.row[d.col.key]);
+      }
+    });
+
+  // Also filter chart bars
+  bars.attr("display", d => {
+    if (!filterQuery) return null;
+    const q = filterQuery.toLowerCase();
+    return (d.country.toLowerCase().includes(q) || d.region.toLowerCase().includes(q)) ? null : "none";
+  });
+
+  updateStatus();
+}
+
+// ─── View toggle ───────────────────────────────────────────────────
+d3.select("#view-chart").on("click", () => setView("chart"));
+d3.select("#view-table").on("click", () => setView("table"));
+
+function setView(v) {
+  currentView = v;
+  d3.select("#chart-container").style("display", v === "chart" ? null : "none");
+  d3.select("#table-container").style("display", v === "table" ? null : "none");
+  d3.select("#view-chart").classed("active", v === "chart");
+  d3.select("#view-table").classed("active", v === "table");
+}
+
+// ─── Search ────────────────────────────────────────────────────────
+d3.select("#search").on("input", function() {
+  filterQuery = this.value;
+  buildTable();
+});
+
+// ─── Status ────────────────────────────────────────────────────────
+function updateStatus() {
+  const filtered = getFilteredData();
+  status.textContent = `${filtered.length} of ${data.length} countries | ${regions.length} regions | Sort: ${sortKey || "none"} ${sortKey ? (sortAsc ? "asc" : "desc") : ""}`;
+}
+
+const status = document.getElementById("status");
+buildTable();
+updateStatus();
+document.body.dataset.ready = "true";
+</script>
+</body>
+</html>
