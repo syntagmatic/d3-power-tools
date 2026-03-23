@@ -4,20 +4,18 @@
 
    Usage:
      <script src="/style/theme-switch.js"></script>
-   Injects a .theme-switch widget into the first element matching
-   [data-theme-switch] or, if absent, the <body> (top-right fixed).
+   Injects a toggle button into [data-theme-switch] or top-right fixed.
 
-   Can also be called manually:
+   API:
      d3pt.setTheme("dark")
      d3pt.setTheme("light")
-     d3pt.theme               // current theme ("light"|"dark")
+     d3pt.theme  // "light"|"dark"
 */
 
 ;(function () {
   const KEY = "d3pt-theme";
   const stored = localStorage.getItem(KEY);
 
-  // Apply immediately to prevent FOWT
   if (stored) document.documentElement.setAttribute("data-theme", stored);
 
   function resolvedTheme() {
@@ -29,57 +27,48 @@
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem(KEY, theme);
     d3pt.theme = theme;
-    updateButtons();
+    updateButton();
     document.documentElement.dispatchEvent(
       new CustomEvent("themechange", { detail: { theme } })
     );
   }
 
-  // Public API
   const d3pt = (window.d3pt = window.d3pt || {});
   d3pt.setTheme = setTheme;
   d3pt.theme = resolvedTheme();
 
-  // ── Widget ──
+  let btn;
 
-  let container;
-
-  function updateButtons() {
-    if (!container) return;
-    const current = resolvedTheme();
-    container.querySelectorAll("button").forEach((btn) => {
-      btn.classList.toggle("active", btn.dataset.theme === current);
-    });
+  function updateButton() {
+    if (!btn) return;
+    const isDark = resolvedTheme() === "dark";
+    btn.dataset.current = isDark ? "\u263E" : "\u2600"; // ☾ in dark, ☀ in light
+    btn.dataset.alt = isDark ? "\u2600" : "\u263E";     // swap on hover
+    btn.textContent = btn.dataset.current;
+    btn.title = isDark ? "Light theme" : "Dark theme";
+    btn.setAttribute("aria-label", btn.title);
   }
 
   function mount() {
     const anchor = document.querySelector("[data-theme-switch]");
-    container = document.createElement("div");
-    container.className = "theme-switch";
-    container.setAttribute("role", "group");
-    container.setAttribute("aria-label", "Color theme");
-
-    [
-      ["light", "\u2600"], // ☀
-      ["dark", "\u263E"], // ☾
-    ].forEach(([id, icon]) => {
-      const btn = document.createElement("button");
-      btn.dataset.theme = id;
-      btn.textContent = icon;
-      btn.title = id.charAt(0).toUpperCase() + id.slice(1);
-      btn.setAttribute("aria-label", btn.title + " theme");
-      btn.addEventListener("click", () => setTheme(id));
-      container.appendChild(btn);
-    });
+    btn = document.createElement("button");
+    btn.className = "theme-toggle";
+    btn.addEventListener("click", () =>
+      setTheme(resolvedTheme() === "dark" ? "light" : "dark")
+    );
+    btn.addEventListener("mouseenter", () => { btn.textContent = btn.dataset.alt; });
+    btn.addEventListener("mouseleave", () => { btn.textContent = btn.dataset.current; });
+    btn.addEventListener("focus", () => { btn.textContent = btn.dataset.alt; });
+    btn.addEventListener("blur", () => { btn.textContent = btn.dataset.current; });
+    updateButton();
 
     if (anchor) {
-      anchor.appendChild(container);
+      anchor.appendChild(btn);
     } else {
-      container.style.cssText =
+      btn.style.cssText =
         "position:fixed;top:12px;right:12px;z-index:9999";
-      document.body.appendChild(container);
+      document.body.appendChild(btn);
     }
-    updateButtons();
   }
 
   if (document.readyState === "loading") {
