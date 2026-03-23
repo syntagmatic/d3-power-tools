@@ -51,3 +51,12 @@ Gemini reviewed the skill collection with a focus on production-readiness: acces
 - **Canvas Rendering:** Fixed density map clipping, added transparent background.
 - **Edge Bundling:** Added treemap context rectangles, fixed radial labels.
 - Updated SKILL.md files for Canvas, Layouts, and Bundling with these patterns.
+
+### 2026-03-21 → 2026-03-23 — Skill Expansion & Infrastructure
+- **3 new skills:** `annotations-and-labels` (768 lines), `statistical-charts` (855 lines), `small-multiples` (642 lines). All three were high/medium priority items from IDEAS.md.
+- **Color themes skill:** `color-themes` (664 lines) with shared theme system (`style/d3-power-tools.css`), light/dark mode switcher, FOWT prevention, CSS custom properties.
+- **Block generator:** 32 animated D3 compositions in `blocks/generator.html` — demonstrates cross-skill composition at scale.
+- **Sparkcharts enhancement:** Shared scales and number columns for sparkcharts in tables.
+- **Repo reorganization:** `proofs/` → `blocks/`, `docs/` → `notes/`, test fixtures moved into `skills/*/examples/` for self-contained distribution.
+- **Zoom-and-pan compression** and simplify/check skill tooling improvements.
+- **Collection now at 24 skills** (up from initial 20).

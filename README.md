@@ -10,6 +10,8 @@ Claude Code skills for building advanced D3.js visualizations. Each skill encode
 
 **[brushing-and-selection](skills/brushing-and-selection/SKILL.md)** — Intersection brushing, lasso selection, fisheye distortion, and cross-chart linking. Covers both SVG and canvas selection state management with fade/highlight patterns.
 
+**[linked-views](skills/linked-views/SKILL.md)** — Coordinating multiple views: d3.dispatch event bus, shared state stores, crossfilter-style filtering with bitmap indexing, coordinated brushing and zoom, overview+detail, focus+context, state serialization with undo/redo.
+
 ### Hierarchy
 
 **[hierarchy-layouts](skills/hierarchy-layouts/SKILL.md)** — All six D3 hierarchy layouts: treemap, pack, tree, cluster, partition, and stratify. Tiling strategies, radial coordinates, label placement, color encoding, and the `.sum()`/`.sort()` pipeline.
@@ -27,6 +29,12 @@ Claude Code skills for building advanced D3.js visualizations. Each skill encode
 ### Styling & Patterns
 
 **[patterned-fills](skills/patterned-fills/SKILL.md)** — SVG pattern fills (diagonal hatching, cross-hatch, dots, stipple, checkerboard, wavy lines), stroke dash patterns, Canvas pattern equivalents, SVG markers for decorated strokes, and color+pattern dual encoding for accessible, print-friendly charts.
+
+### Time & Responsiveness
+
+**[temporal-time-series](skills/temporal-time-series/SKILL.md)** — Time scales (scaleTime vs scaleUtc), date parsing pitfalls, time-aware axes, gap handling, horizon charts, swimlanes, Gantt charts, cycle plots, real-time streaming with sliding window and WebSocket, brushed time selection, multi-series with Voronoi nearest, LTTB downsampling.
+
+**[responsive-charts](skills/responsive-charts/SKILL.md)** — ResizeObserver lifecycle, container-based sizing, viewBox vs redraw-on-resize, aspect ratio strategies, responsive margins, breakpoint-driven layout changes, responsive text and labels, touch adaptation, Canvas DPI handling, iframe embedding, print styles.
 
 ### Rendering & Animation
 

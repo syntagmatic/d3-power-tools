@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Linked Views Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1a1a2e;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --accent: #6366f1;
+    --card-bg: #fafafa;
+    --radius: 8px;
+    --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--fg);
+    padding: 24px;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+
+  h1 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+
+  .subtitle {
+    color: var(--muted);
+    font-size: 0.875rem;
+    margin-bottom: 20px;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+
+  .chart-card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .chart-card h2 {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .chart-card svg { display: block; }
+
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: rgba(26, 26, 46, 0.92);
+    color: #fff;
+    font-size: 0.75rem;
+    padding: 8px 10px;
+    border-radius: 6px;
+    line-height: 1.4;
+    opacity: 0;
+    transition: opacity 0.12s ease;
+    z-index: 10;
+    white-space: nowrap;
+  }
+
+  /* Data table */
+  .table-wrap {
+    max-height: 280px;
+    overflow-y: auto;
+    font-size: 0.8125rem;
+  }
+
+  .table-wrap table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  .table-wrap th {
+    position: sticky;
+    top: 0;
+    background: var(--card-bg);
+    cursor: pointer;
+    user-select: none;
+    text-align: left;
+    padding: 6px 8px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border-bottom: 2px solid var(--border);
+  }
+
+  .table-wrap th:hover { color: var(--accent); }
+
+  .table-wrap td {
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .table-wrap tr.highlighted td {
+    background: rgba(99, 102, 241, 0.08);
+  }
+
+  .table-wrap tr.hover-row td {
+    background: rgba(99, 102, 241, 0.18);
+  }
+
+  .sort-arrow { font-size: 0.65rem; margin-left: 2px; }
+
+  /* Bar chart click target */
+  .bar-click { cursor: pointer; }
+  .bar-click:hover { filter: brightness(1.1); }
+
+  /* Brush styling */
+  .selection {
+    fill: var(--accent);
+    fill-opacity: 0.12;
+    stroke: var(--accent);
+    stroke-width: 1;
+  }
+
+  .status-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+  }
+
+  .status-text {
+    font-size: 0.8125rem;
+    color: var(--muted);
+  }
+
+  .reset-btn {
+    font-family: var(--font);
+    font-size: 0.8125rem;
+    padding: 5px 14px;
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    background: var(--bg);
+    color: var(--fg);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .reset-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  @media (max-width: 700px) {
+    .grid { grid-template-columns: 1fr; }
+    body { padding: 16px; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Linked Views Dashboard</h1>
+<p class="subtitle">Brush the scatter plot, click a bar, or hover points — all views stay coordinated via d3.dispatch</p>
+
+<div class="status-bar">
+  <span class="status-text" id="status">Showing all 200 records</span>
+  <button class="reset-btn" id="resetBtn">Reset All</button>
+</div>
+
+<div class="grid">
+  <div class="chart-card" id="scatter-card"><h2>Scatter Plot</h2></div>
+  <div class="chart-card" id="histogram-card"><h2>Y Distribution</h2></div>
+  <div class="chart-card" id="table-card"><h2>Data Table</h2></div>
+  <div class="chart-card" id="bar-card"><h2>Count by Category</h2></div>
+</div>
+<div class="tooltip" id="tooltip"></div>
+
+<script type="module">
+  // --- Data Generation (deterministic) ---
+  const seed = d3.randomLcg(42);
+  const rUniform = d3.randomUniform.source(seed);
+  const rNormal = d3.randomNormal.source(seed);
+  const categories = ["Alpha", "Beta", "Gamma", "Delta"];
+  const catRng = rUniform(0, categories.length);
+  const xRng = rNormal(50, 18);
+  const yRng = rNormal(60, 22);
+  const sizeRng = rUniform(2, 20);
+  const dateRng = rUniform(new Date(2024, 0, 1).getTime(), new Date(2024, 11, 31).getTime());
+
+  const data = d3.range(200).map(i => ({
+    id: i + 1,
+    category: categories[Math.floor(catRng())],
+    x: xRng(),
+    y: yRng(),
+    size: sizeRng(),
+    date: new Date(dateRng()),
+  }));
+
+  const colorScale = d3.scaleOrdinal()
+    .domain(categories)
+    .range(["#6366f1", "#f59e0b", "#10b981", "#ef4444"]);
+
+  // --- Event Bus ---
+  const dispatch = d3.dispatch("brush", "category", "hover");
+
+  // --- Shared Tooltip ---
+  const tooltip = d3.select("#tooltip");
+  function showTooltip(event, html) {
+    tooltip.style("opacity", 1).html(html)
+      .style("left", (event.pageX + 12) + "px")
+      .style("top", (event.pageY - 12) + "px");
+  }
+  function hideTooltip() { tooltip.style("opacity", 0); }
+
+  // --- Status ---
+  const statusEl = d3.select("#status");
+  function updateStatus(n) {
+    statusEl.text(n === data.length ? `Showing all ${data.length} records` : `${n} of ${data.length} selected`);
+  }
+
+  // --- Shared State ---
+  let selectedIds = null;  // null = all, Set = filtered
+  let selectedCategory = null;
+
+  function getFilteredData() {
+    if (selectedIds) return data.filter(d => selectedIds.has(d.id));
+    if (selectedCategory) return data.filter(d => d.category === selectedCategory);
+    return data;
+  }
+
+  // --- Dimensions ---
+  const margin = { top: 10, right: 16, bottom: 32, left: 42 };
+  const W = 520, H = 260;
+  const w = W - margin.left - margin.right;
+  const h = H - margin.top - margin.bottom;
+
+  // --- Scales (fixed domains) ---
+  const xScale = d3.scaleLinear().domain(d3.extent(data, d => d.x)).nice().range([0, w]);
+  const yScale = d3.scaleLinear().domain(d3.extent(data, d => d.y)).nice().range([h, 0]);
+  const sizeScale = d3.scaleSqrt().domain(d3.extent(data, d => d.size)).range([3, 10]);
+
+  // ===================== SCATTER PLOT =====================
+  const scatterSvg = d3.select("#scatter-card").append("svg")
+    .attr("viewBox", `0 0 ${W} ${H}`)
+    .append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+  // Axes
+  scatterSvg.append("g").attr("transform", `translate(0,${h})`)
+    .call(d3.axisBottom(xScale).ticks(6)).call(g => g.select(".domain").remove());
+  scatterSvg.append("g")
+    .call(d3.axisLeft(yScale).ticks(6)).call(g => g.select(".domain").remove());
+
+  // Points
+  const points = scatterSvg.append("g").selectAll("circle").data(data).join("circle")
+    .attr("cx", d => xScale(d.x))
+    .attr("cy", d => yScale(d.y))
+    .attr("r", d => sizeScale(d.size))
+    .attr("fill", d => colorScale(d.category))
+    .attr("fill-opacity", 0.75)
+    .attr("stroke", d => d3.color(colorScale(d.category)).darker(0.4))
+    .attr("stroke-width", 0.5)
+    .on("pointerenter", (event, d) => {
+      showTooltip(event, `<strong>#${d.id}</strong> ${d.category}<br>x: ${d.x.toFixed(1)}, y: ${d.y.toFixed(1)}<br>size: ${d.size.toFixed(1)}`);
+      dispatch.call("hover", null, d.id);
+    })
+    .on("pointermove", (event) => {
+      tooltip.style("left", (event.pageX + 12) + "px").style("top", (event.pageY - 12) + "px");
+    })
+    .on("pointerleave", () => {
+      hideTooltip();
+      dispatch.call("hover", null, null);
+    });
+
+  // Brush
+  const brush = d3.brush()
+    .extent([[0, 0], [w, h]])
+    .on("brush end", (event) => {
+      if (!event.sourceEvent) return;
+      if (!event.selection) {
+        selectedIds = null;
+        selectedCategory = null;
+        dispatch.call("brush", null, null);
+        return;
+      }
+      const [[x0, y0], [x1, y1]] = event.selection;
+      selectedIds = new Set(
+        data.filter(d =>
+          xScale(d.x) >= x0 && xScale(d.x) <= x1 &&
+          yScale(d.y) >= y0 && yScale(d.y) <= y1
+        ).map(d => d.id)
+      );
+      selectedCategory = null;
+      dispatch.call("brush", null, selectedIds);
+    });
+
+  scatterSvg.append("g").attr("class", "brush-layer").call(brush);
+
+  // Scatter responds to brush
+  dispatch.on("brush.scatter", (ids) => {
+    if (ids) {
+      points.attr("fill-opacity", d => ids.has(d.id) ? 0.85 : 0.15)
+        .attr("stroke-opacity", d => ids.has(d.id) ? 1 : 0.15);
+    } else {
+      points.attr("fill-opacity", 0.75).attr("stroke-opacity", 1);
+    }
+    updateStatus(getFilteredData().length);
+  });
+
+  // Scatter responds to category selection
+  dispatch.on("category.scatter", (cat) => {
+    // Clear brush rect
+    scatterSvg.select(".brush-layer").call(brush.move, null);
+    if (cat) {
+      points.attr("fill-opacity", d => d.category === cat ? 0.85 : 0.15)
+        .attr("stroke-opacity", d => d.category === cat ? 1 : 0.15);
+    } else {
+      points.attr("fill-opacity", 0.75).attr("stroke-opacity", 1);
+    }
+    updateStatus(getFilteredData().length);
+  });
+
+  // ===================== HISTOGRAM =====================
+  const histSvg = d3.select("#histogram-card").append("svg")
+    .attr("viewBox", `0 0 ${W} ${H}`)
+    .append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+  const histX = d3.scaleLinear().domain(yScale.domain()).nice().range([0, w]);
+  const binGen = d3.bin().domain(histX.domain()).thresholds(20).value(d => d.y);
+  const allBins = binGen(data);
+  const histY = d3.scaleLinear().domain([0, d3.max(allBins, d => d.length)]).nice().range([h, 0]);
+
+  histSvg.append("g").attr("transform", `translate(0,${h})`)
+    .call(d3.axisBottom(histX).ticks(6)).call(g => g.select(".domain").remove());
+  const histYAxis = histSvg.append("g")
+    .call(d3.axisLeft(histY).ticks(5)).call(g => g.select(".domain").remove());
+
+  // Ghost bars (full data)
+  const ghostBars = histSvg.append("g").selectAll("rect").data(allBins).join("rect")
+    .attr("x", d => histX(d.x0) + 1)
+    .attr("width", d => Math.max(0, histX(d.x1) - histX(d.x0) - 2))
+    .attr("y", d => histY(d.length))
+    .attr("height", d => h - histY(d.length))
+    .attr("fill", "#e5e7eb")
+    .attr("rx", 1);
+
+  // Active bars
+  const histBars = histSvg.append("g").selectAll("rect").data(allBins).join("rect")
+    .attr("x", d => histX(d.x0) + 1)
+    .attr("width", d => Math.max(0, histX(d.x1) - histX(d.x0) - 2))
+    .attr("y", d => histY(d.length))
+    .attr("height", d => h - histY(d.length))
+    .attr("fill", "var(--accent)")
+    .attr("fill-opacity", 0.7)
+    .attr("rx", 1);
+
+  function updateHistogram(filtered) {
+    const bins = binGen(filtered);
+    histBars.data(bins)
+      .transition().duration(200)
+      .attr("y", d => histY(d.length))
+      .attr("height", d => h - histY(d.length));
+  }
+
+  dispatch.on("brush.histogram", (ids) => {
+    const filtered = ids ? data.filter(d => ids.has(d.id)) : data;
+    ghostBars.attr("visibility", ids ? "visible" : "hidden");
+    updateHistogram(filtered);
+  });
+
+  dispatch.on("category.histogram", (cat) => {
+    const filtered = cat ? data.filter(d => d.category === cat) : data;
+    ghostBars.attr("visibility", cat ? "visible" : "hidden");
+    updateHistogram(filtered);
+  });
+
+  // ===================== DATA TABLE =====================
+  const tableCard = d3.select("#table-card");
+  const tableWrap = tableCard.append("div").attr("class", "table-wrap");
+  const table = tableWrap.append("table");
+  const thead = table.append("thead").append("tr");
+  const tbody = table.append("tbody");
+
+  const columns = [
+    { key: "id", label: "ID", fmt: d => d },
+    { key: "category", label: "Category", fmt: d => d },
+    { key: "x", label: "X", fmt: d => d.toFixed(1) },
+    { key: "y", label: "Y", fmt: d => d.toFixed(1) },
+  ];
+
+  let sortCol = "id", sortAsc = true;
+
+  function renderTable(rows) {
+    const sorted = [...rows].sort((a, b) => {
+      const av = a[sortCol], bv = b[sortCol];
+      const cmp = typeof av === "string" ? av.localeCompare(bv) : av - bv;
+      return sortAsc ? cmp : -cmp;
+    });
+
+    thead.selectAll("th").data(columns).join("th")
+      .html(d => d.label + (d.key === sortCol
+        ? `<span class="sort-arrow">${sortAsc ? " \u25B2" : " \u25BC"}</span>` : ""))
+      .on("click", (event, d) => {
+        if (sortCol === d.key) sortAsc = !sortAsc;
+        else { sortCol = d.key; sortAsc = true; }
+        renderTable(rows);
+      });
+
+    const tr = tbody.selectAll("tr").data(sorted, d => d.id).join("tr")
+      .attr("data-id", d => d.id);
+
+    tr.selectAll("td").data(d => columns.map(c => c.fmt(d[c.key]))).join("td")
+      .text(d => d);
+  }
+
+  renderTable(data);
+
+  let tableData = data;
+
+  dispatch.on("brush.table", (ids) => {
+    tableData = ids ? data.filter(d => ids.has(d.id)) : data;
+    renderTable(tableData);
+  });
+
+  dispatch.on("category.table", (cat) => {
+    tableData = cat ? data.filter(d => d.category === cat) : data;
+    renderTable(tableData);
+  });
+
+  dispatch.on("hover.table", (id) => {
+    tbody.selectAll("tr")
+      .classed("hover-row", d => d.id === id);
+    if (id !== null) {
+      const row = tbody.select(`tr[data-id="${id}"]`).node();
+      if (row) row.scrollIntoView({ block: "nearest" });
+    }
+  });
+
+  // ===================== BAR CHART =====================
+  const barSvg = d3.select("#bar-card").append("svg")
+    .attr("viewBox", `0 0 ${W} ${H}`)
+    .append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+  const barX = d3.scaleBand().domain(categories).range([0, w]).padding(0.3);
+  const fullCounts = d3.rollup(data, v => v.length, d => d.category);
+  const barY = d3.scaleLinear().domain([0, d3.max(fullCounts.values())]).nice().range([h, 0]);
+
+  barSvg.append("g").attr("transform", `translate(0,${h})`)
+    .call(d3.axisBottom(barX)).call(g => g.select(".domain").remove());
+  barSvg.append("g")
+    .call(d3.axisLeft(barY).ticks(5)).call(g => g.select(".domain").remove());
+
+  // Ghost bars
+  const ghostBarData = categories.map(c => ({ category: c, count: fullCounts.get(c) || 0 }));
+  barSvg.append("g").selectAll("rect").data(ghostBarData).join("rect")
+    .attr("class", "ghost-bar")
+    .attr("x", d => barX(d.category))
+    .attr("width", barX.bandwidth())
+    .attr("y", d => barY(d.count))
+    .attr("height", d => h - barY(d.count))
+    .attr("fill", "#e5e7eb")
+    .attr("rx", 3);
+
+  // Active bars
+  const bars = barSvg.append("g").selectAll("rect").data(ghostBarData).join("rect")
+    .attr("class", "bar-click")
+    .attr("x", d => barX(d.category))
+    .attr("width", barX.bandwidth())
+    .attr("y", d => barY(d.count))
+    .attr("height", d => h - barY(d.count))
+    .attr("fill", d => colorScale(d.category))
+    .attr("fill-opacity", 0.8)
+    .attr("rx", 3)
+    .on("click", (event, d) => {
+      if (selectedCategory === d.category) {
+        selectedCategory = null;
+        selectedIds = null;
+        dispatch.call("category", null, null);
+      } else {
+        selectedCategory = d.category;
+        selectedIds = null;
+        dispatch.call("category", null, d.category);
+      }
+    })
+    .on("pointerenter", (event, d) => {
+      showTooltip(event, `<strong>${d.category}</strong><br>Count: ${d.count}`);
+    })
+    .on("pointermove", (event) => {
+      tooltip.style("left", (event.pageX + 12) + "px").style("top", (event.pageY - 12) + "px");
+    })
+    .on("pointerleave", hideTooltip);
+
+  // Bar count labels
+  const barLabels = barSvg.append("g").selectAll("text").data(ghostBarData).join("text")
+    .attr("x", d => barX(d.category) + barX.bandwidth() / 2)
+    .attr("y", d => barY(d.count) - 5)
+    .attr("text-anchor", "middle")
+    .attr("font-size", "11px")
+    .attr("fill", "var(--muted)")
+    .text(d => d.count);
+
+  function updateBars(filtered) {
+    const counts = d3.rollup(filtered, v => v.length, d => d.category);
+    const barData = categories.map(c => ({ category: c, count: counts.get(c) || 0 }));
+
+    bars.data(barData)
+      .transition().duration(200)
+      .attr("y", d => barY(d.count))
+      .attr("height", d => h - barY(d.count));
+
+    barLabels.data(barData)
+      .transition().duration(200)
+      .attr("y", d => barY(d.count) - 5)
+      .text(d => d.count);
+
+    d3.selectAll(".ghost-bar").attr("visibility", filtered.length < data.length ? "visible" : "hidden");
+  }
+
+  dispatch.on("brush.bar", (ids) => {
+    const filtered = ids ? data.filter(d => ids.has(d.id)) : data;
+    updateBars(filtered);
+    // Reset bar highlight
+    bars.attr("fill-opacity", 0.8).attr("stroke", "none");
+  });
+
+  dispatch.on("category.bar", (cat) => {
+    if (cat) {
+      bars.attr("fill-opacity", d => d.category === cat ? 0.9 : 0.3)
+        .attr("stroke", d => d.category === cat ? d3.color(colorScale(d.category)).darker(0.5) : "none")
+        .attr("stroke-width", 2);
+    } else {
+      bars.attr("fill-opacity", 0.8).attr("stroke", "none");
+      updateBars(data);
+    }
+    updateStatus(getFilteredData().length);
+  });
+
+  // ===================== RESET =====================
+  d3.select("#resetBtn").on("click", () => {
+    selectedIds = null;
+    selectedCategory = null;
+    scatterSvg.select(".brush-layer").call(brush.move, null);
+    dispatch.call("brush", null, null);
+    dispatch.call("category", null, null);
+  });
+
+  // ===================== HOVER HIGHLIGHT IN SCATTER =====================
+  dispatch.on("hover.scatter", (id) => {
+    points.attr("stroke-width", d => d.id === id ? 2.5 : 0.5)
+      .attr("stroke", d => d.id === id ? "var(--fg)" : d3.color(colorScale(d.category)).darker(0.4));
+  });
+</script>
+</body>
+</html>

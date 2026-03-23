@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Temporal Time Series — Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1a1a2e;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --accent: #6366f1;
+    --card-bg: #fafafa;
+    --radius: 8px;
+    --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--fg);
+    padding: 24px;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+
+  h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 4px; }
+
+  .subtitle {
+    color: var(--muted);
+    font-size: 0.875rem;
+    margin-bottom: 20px;
+  }
+
+  .controls {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+  }
+
+  .controls button {
+    font-family: var(--font);
+    font-size: 0.8125rem;
+    padding: 6px 16px;
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    background: var(--bg);
+    color: var(--fg);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .controls button:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .controls button.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+
+  .chart-card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin-bottom: 16px;
+    position: relative;
+  }
+
+  .chart-card h2 {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .chart-card svg { display: block; }
+
+  .horizon-row {
+    display: flex;
+    gap: 16px;
+  }
+
+  .horizon-item { flex: 1; min-width: 0; }
+
+  .horizon-item .label {
+    font-size: 0.75rem;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: rgba(26, 26, 46, 0.92);
+    color: #fff;
+    font-size: 0.75rem;
+    padding: 8px 10px;
+    border-radius: 6px;
+    line-height: 1.5;
+    opacity: 0;
+    transition: opacity 0.12s ease;
+    z-index: 10;
+    white-space: nowrap;
+  }
+
+  .tooltip .swatch {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    margin-right: 4px;
+    vertical-align: middle;
+  }
+
+  .crosshair-line {
+    stroke: var(--muted);
+    stroke-width: 1;
+    stroke-dasharray: 3,3;
+    pointer-events: none;
+  }
+
+  .brush .selection {
+    fill: var(--accent);
+    fill-opacity: 0.15;
+    stroke: var(--accent);
+    stroke-width: 1;
+  }
+
+  @media (max-width: 700px) {
+    body { padding: 16px; }
+    .horizon-row { flex-direction: column; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Time-Series Dashboard</h1>
+<p class="subtitle">2 years of synthetic daily data — Revenue, Users, and Latency with gaps, crosshair, overview+detail, and horizon charts</p>
+
+<div class="controls">
+  <button class="active" data-range="all">All</button>
+  <button data-range="6m">6M</button>
+  <button data-range="3m">3M</button>
+  <button data-range="1m">1M</button>
+</div>
+
+<div class="chart-card" id="main-card">
+  <h2>Multi-Series Line Chart</h2>
+  <svg id="main-svg"></svg>
+</div>
+
+<div class="chart-card" id="overview-card">
+  <h2>Overview</h2>
+  <svg id="overview-svg"></svg>
+</div>
+
+<div class="chart-card" id="horizon-card">
+  <h2>Horizon Charts (2-Band)</h2>
+  <div class="horizon-row" id="horizon-row"></div>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script type="module">
+  // --- Dimensions ---
+  const fullW = Math.min(1168, window.innerWidth - 48 - 32);
+  const margin = { top: 16, right: 20, bottom: 28, left: 50 };
+  const mainH = 320;
+  const overH = 80;
+  const horzH = 50;
+  const w = fullW - margin.left - margin.right;
+
+  // --- Data Generation ---
+  const seed = d3.randomLcg(42);
+  const rng = d3.randomNormal.source(seed)(0, 1);
+  const startDate = new Date("2023-01-01");
+  const endDate = new Date("2024-12-31");
+  const dayMs = 8.64e7;
+  const seriesDefs = [
+    { key: "Revenue", base: 5000, drift: 2, vol: 200, color: "#6366f1" },
+    { key: "Users",   base: 1200, drift: 0.8, vol: 80, color: "#10b981" },
+    { key: "Latency", base: 120,  drift: -0.05, vol: 15, color: "#f59e0b" },
+  ];
+
+  // Generate daily data with random walk
+  const allDates = [];
+  for (let t = +startDate; t <= +endDate; t += dayMs) {
+    allDates.push(new Date(t));
+  }
+
+  const seriesData = seriesDefs.map(def => {
+    let val = def.base;
+    const points = [];
+    for (const date of allDates) {
+      val += def.drift + def.vol * rng() * 0.1;
+      if (val < def.base * 0.3) val = def.base * 0.3;
+
+      // Gaps: Revenue skips weekends, Latency has random ~5% missing
+      const day = date.getDay();
+      let skip = false;
+      if (def.key === "Revenue" && (day === 0 || day === 6)) skip = true;
+      if (def.key === "Latency" && Math.abs(rng()) > 1.8) skip = true;
+
+      points.push({ date, value: skip ? null : val, series: def.key });
+    }
+    return { key: def.key, color: def.color, points };
+  });
+
+  const fullExtent = [startDate, endDate];
+
+  // --- Color scale ---
+  const colorScale = d3.scaleOrdinal()
+    .domain(seriesDefs.map(d => d.key))
+    .range(seriesDefs.map(d => d.color));
+
+  // --- Scales ---
+  const xFull = d3.scaleUtc().domain(fullExtent).range([0, w]);
+  const xMain = d3.scaleUtc().domain(fullExtent).range([0, w]);
+
+  // Per-series y scales (each gets its own range for readability)
+  const yScales = {};
+  for (const s of seriesData) {
+    const vals = s.points.filter(d => d.value != null).map(d => d.value);
+    yScales[s.key] = d3.scaleLinear()
+      .domain(d3.extent(vals)).nice()
+      .range([mainH, 0]);
+  }
+
+  // --- Main chart ---
+  const mainSvg = d3.select("#main-svg")
+    .attr("width", fullW)
+    .attr("height", mainH + margin.top + margin.bottom);
+
+  const mainG = mainSvg.append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+  // Clip path
+  mainSvg.append("defs").append("clipPath").attr("id", "main-clip")
+    .append("rect").attr("width", w).attr("height", mainH);
+
+  const mainContent = mainG.append("g").attr("clip-path", "url(#main-clip)");
+
+  // Axes
+  const xAxisG = mainG.append("g")
+    .attr("transform", `translate(0,${mainH})`);
+
+  // Use the first series (Revenue) y-axis as reference, but we label it generically
+  const yAxisG = mainG.append("g");
+
+  const lineGen = d3.line()
+    .defined(d => d.value != null)
+    .x(d => xMain(d.date))
+    .y(d => yScales[d.series](d.value));
+
+  const linePaths = mainContent.selectAll(".series-line")
+    .data(seriesData)
+    .join("path")
+      .attr("class", "series-line")
+      .attr("fill", "none")
+      .attr("stroke", d => d.color)
+      .attr("stroke-width", 1.5)
+      .attr("d", d => lineGen(d.points));
+
+  // Legend in top-right
+  const legend = mainG.append("g")
+    .attr("transform", `translate(${w - 10}, 4)`);
+
+  seriesDefs.forEach((s, i) => {
+    const g = legend.append("g")
+      .attr("transform", `translate(0, ${i * 18})`);
+    g.append("line")
+      .attr("x1", -30).attr("x2", -10).attr("y1", 0).attr("y2", 0)
+      .attr("stroke", s.color).attr("stroke-width", 2);
+    g.append("text")
+      .attr("x", -34).attr("y", 0).attr("dy", "0.35em")
+      .attr("text-anchor", "end")
+      .attr("font-size", "11px").attr("fill", "var(--muted)")
+      .text(s.key);
+  });
+
+  // Crosshair elements
+  const crosshairLine = mainG.append("line")
+    .attr("class", "crosshair-line")
+    .attr("y1", 0).attr("y2", mainH)
+    .style("display", "none");
+
+  const crosshairDots = mainG.append("g").style("display", "none");
+  seriesDefs.forEach(s => {
+    crosshairDots.append("circle")
+      .attr("r", 4)
+      .attr("fill", s.color)
+      .attr("stroke", "#fff")
+      .attr("stroke-width", 1.5)
+      .attr("data-series", s.key);
+  });
+
+  // Tooltip
+  const tooltip = d3.select("#tooltip");
+  const formatDate = d3.utcFormat("%b %d, %Y");
+  const formatVal = d3.format(",.0f");
+
+  // Voronoi-based nearest point (project all defined points onto x only)
+  function buildDelaunay() {
+    const flatPoints = [];
+    for (const s of seriesData) {
+      for (const p of s.points) {
+        if (p.value != null) {
+          flatPoints.push(p);
+        }
+      }
+    }
+    // For crosshair, we only care about x (date) — find nearest date, show all series
+    const uniqueDates = [...new Set(flatPoints.map(d => +d.date))].sort((a, b) => a - b);
+    return uniqueDates.map(d => new Date(d));
+  }
+
+  let sortedDates = buildDelaunay();
+
+  function findNearestDate(mouseX) {
+    const date = xMain.invert(mouseX);
+    const bisect = d3.bisector(d => d).left;
+    const idx = bisect(sortedDates, date);
+    if (idx === 0) return sortedDates[0];
+    if (idx >= sortedDates.length) return sortedDates[sortedDates.length - 1];
+    const d0 = sortedDates[idx - 1], d1 = sortedDates[idx];
+    return (date - d0 > d1 - date) ? d1 : d0;
+  }
+
+  // Interaction overlay
+  mainG.append("rect")
+    .attr("width", w).attr("height", mainH)
+    .attr("fill", "none")
+    .attr("pointer-events", "all")
+    .on("pointerenter", () => {
+      crosshairLine.style("display", null);
+      crosshairDots.style("display", null);
+      tooltip.style("opacity", 1);
+    })
+    .on("pointermove", (event) => {
+      const [mx] = d3.pointer(event);
+      const nearDate = findNearestDate(mx);
+      const px = xMain(nearDate);
+
+      crosshairLine.attr("x1", px).attr("x2", px);
+
+      let html = `<strong>${formatDate(nearDate)}</strong>`;
+      let anyVisible = false;
+
+      for (const s of seriesData) {
+        const pt = s.points.find(p => +p.date === +nearDate);
+        const val = pt ? pt.value : null;
+        const dot = crosshairDots.select(`[data-series="${s.key}"]`);
+        if (val != null) {
+          dot.attr("cx", px).attr("cy", yScales[s.key](val)).style("display", null);
+          html += `<br><span class="swatch" style="background:${s.color}"></span>${s.key}: ${formatVal(val)}`;
+          anyVisible = true;
+        } else {
+          dot.style("display", "none");
+          html += `<br><span class="swatch" style="background:${s.color}"></span>${s.key}: —`;
+        }
+      }
+
+      tooltip.html(html);
+
+      // Position tooltip
+      const rect = document.getElementById("main-card").getBoundingClientRect();
+      let tx = px + margin.left + 16;
+      if (tx + 150 > rect.width) tx = px + margin.left - 160;
+      tooltip.style("left", (rect.left + tx + window.scrollX) + "px")
+        .style("top", (rect.top + margin.top + 30 + window.scrollY) + "px");
+    })
+    .on("pointerleave", () => {
+      crosshairLine.style("display", "none");
+      crosshairDots.style("display", "none");
+      tooltip.style("opacity", 0);
+    });
+
+  // --- Update main chart ---
+  function updateMain(domain, animate = true) {
+    xMain.domain(domain);
+    const t = animate ? d3.transition().duration(400) : d3.transition().duration(0);
+
+    xAxisG.transition(t).call(
+      d3.axisBottom(xMain).ticks(w / 100).tickSizeOuter(0)
+    ).call(g => g.select(".domain").remove());
+
+    // Update y-axis for Revenue (left axis label)
+    yAxisG.transition(t).call(
+      d3.axisLeft(yScales["Revenue"]).ticks(6).tickSizeOuter(0)
+    ).call(g => g.select(".domain").remove());
+
+    linePaths.transition(t).attr("d", d => lineGen(d.points));
+  }
+
+  updateMain(fullExtent, false);
+
+  // --- Overview chart ---
+  const overSvg = d3.select("#overview-svg")
+    .attr("width", fullW)
+    .attr("height", overH + margin.top + 4);
+
+  const overG = overSvg.append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+  const xOver = d3.scaleUtc().domain(fullExtent).range([0, w]);
+  const revData = seriesData[0].points.filter(d => d.value != null);
+  const yOver = d3.scaleLinear()
+    .domain(d3.extent(revData, d => d.value))
+    .range([overH, 0]);
+
+  const overArea = d3.area()
+    .defined(d => d.value != null)
+    .x(d => xOver(d.date))
+    .y0(overH)
+    .y1(d => yOver(d.value))
+    .curve(d3.curveMonotoneX);
+
+  overG.append("path")
+    .datum(seriesData[0].points)
+    .attr("d", overArea)
+    .attr("fill", seriesDefs[0].color)
+    .attr("fill-opacity", 0.15)
+    .attr("stroke", seriesDefs[0].color)
+    .attr("stroke-width", 1);
+
+  overG.append("g")
+    .attr("transform", `translate(0,${overH})`)
+    .call(d3.axisBottom(xOver).ticks(w / 120).tickSizeOuter(0))
+    .call(g => g.select(".domain").remove());
+
+  // Brush
+  const brush = d3.brushX()
+    .extent([[0, 0], [w, overH]])
+    .on("brush end", brushed);
+
+  const brushG = overG.append("g").attr("class", "brush").call(brush);
+
+  function brushed(event) {
+    if (!event.selection) return;
+    const [x0, x1] = event.selection.map(xOver.invert);
+    updateMain([x0, x1]);
+    // Update active button
+    d3.selectAll(".controls button").classed("active", false);
+  }
+
+  // --- Quick-select buttons ---
+  function setRange(range) {
+    let domain;
+    const end = fullExtent[1];
+    if (range === "all") {
+      domain = fullExtent;
+    } else {
+      const months = parseInt(range);
+      const start = d3.utcMonth.offset(end, -months);
+      domain = [start, end];
+    }
+
+    // Animate brush
+    const s0 = xOver(domain[0]), s1 = xOver(domain[1]);
+    brushG.transition().duration(400).call(brush.move, [s0, s1]);
+    updateMain(domain, true);
+  }
+
+  d3.selectAll(".controls button").on("click", function () {
+    d3.selectAll(".controls button").classed("active", false);
+    d3.select(this).classed("active", true);
+    setRange(this.dataset.range);
+  });
+
+  // --- Horizon charts ---
+  const horizonRow = d3.select("#horizon-row");
+  const bands = 2;
+
+  for (const s of seriesData) {
+    const container = horizonRow.append("div").attr("class", "horizon-item");
+    container.append("div").attr("class", "label").text(s.key);
+
+    const svg = container.append("svg")
+      .attr("width", fullW / 3 - 16)
+      .attr("height", horzH);
+
+    const hW = fullW / 3 - 16 - 8;
+    const g = svg.append("g").attr("transform", "translate(4, 0)");
+
+    const pts = s.points.filter(d => d.value != null);
+    const valExtent = d3.extent(pts, d => d.value);
+    const valMid = d3.mean(valExtent);
+
+    // Center data around mean so we get pos/neg bands
+    const centered = s.points.map(d => ({
+      date: d.date,
+      value: d.value != null ? d.value - valMid : null,
+    }));
+
+    const maxAbs = d3.max(centered, d => d.value != null ? Math.abs(d.value) : 0);
+    const step = maxAbs / bands;
+
+    const xH = d3.scaleUtc().domain(fullExtent).range([0, hW]);
+    const yH = d3.scaleLinear().domain([0, step]).range([horzH, 0]);
+
+    const hArea = d3.area()
+      .defined(d => d.value != null)
+      .x(d => xH(d.date))
+      .y0(horzH)
+      .y1(d => yH(Math.min(step, Math.abs(d.value != null ? d.value : 0))))
+      .curve(d3.curveMonotoneX);
+
+    for (let band = 0; band < bands; band++) {
+      const bandData = centered.map(d => ({
+        date: d.date,
+        value: d.value != null ? Math.max(0, Math.abs(d.value) - band * step) : null,
+        orig: d.value,
+      }));
+
+      // Positive band
+      g.append("path")
+        .datum(bandData.map(d => ({
+          date: d.date,
+          value: (d.orig != null && d.orig >= 0) ? d.value : null,
+        })))
+        .attr("d", hArea)
+        .attr("fill", s.color)
+        .attr("fill-opacity", (band + 1) / bands * 0.7);
+
+      // Negative band
+      g.append("path")
+        .datum(bandData.map(d => ({
+          date: d.date,
+          value: (d.orig != null && d.orig < 0) ? d.value : null,
+        })))
+        .attr("d", hArea)
+        .attr("fill", "#ef4444")
+        .attr("fill-opacity", (band + 1) / bands * 0.5);
+    }
+
+    // Thin baseline
+    g.append("line")
+      .attr("x1", 0).attr("x2", hW)
+      .attr("y1", horzH).attr("y2", horzH)
+      .attr("stroke", "var(--border)").attr("stroke-width", 0.5);
+  }
+</script>
+</body>
+</html>

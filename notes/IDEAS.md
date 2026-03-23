@@ -3,20 +3,20 @@
 ## New Skill Ideas
 
 ### High value
-- **Axes & scales** — broken axes, dual-y, log/symlog gotchas, time scales with gaps, ordinal grouping, axis label collision avoidance, custom tick formats, responsive tick counts
-- **Annotations & storytelling** — leader lines, callouts, Voronoi-based labeling, scrollytelling with `IntersectionObserver`, step-based narrative transitions, annotation collision avoidance
-- **Responsive charts** — `ResizeObserver` lifecycle, container queries, aspect ratio preservation, breakpoint-driven layout changes, `<iframe>` embedding with `postMessage`
-- **Zoom & pan** — semantic zoom (more detail not just bigger), geometric zoom, minimap, zoom-to-fit, zoom constraints, Canvas vs SVG zoom, pinch-to-zoom, zoom-linked views
-- **Temporal & time-series** — horizon charts, swimlanes, Gantt/timeline, cycle plots (day-of-week seasonality), time-aware brushing, gap handling, real-time append
+- ~~**Axes & scales**~~ ✅ Built (initial commit)
+- ~~**Annotations & storytelling**~~ ✅ Built as `annotations-and-labels` (fc08228)
+- ~~**Responsive charts**~~ ✅ Built as `responsive-charts`
+- ~~**Zoom & pan**~~ ✅ Built (initial commit, expanded with SVG-overlay-on-Canvas in 5bdc13d)
+- ~~**Temporal & time-series**~~ ✅ Built as `temporal-time-series`
 
 ### Medium value
-- **Statistical charts** — violin plots, beeswarm, ridgeline/joy plots, density contours, box plots, error bars, confidence bands, kernel density estimation, Q-Q plots
+- ~~**Statistical charts**~~ ✅ Built (fc08228)
 - **Voronoi & Delaunay** — interactive nearest-neighbor lookup, Voronoi diagrams as tooltip regions, Voronoi treemaps, Delaunay triangulation, clipped Voronoi cells
 - **Text & labels** — force-based label placement, occlusion culling, text wrapping in constrained shapes, curved text on arcs, automatic abbreviation
-- **Linked views & coordination** — crossfilter-style fast group-by, shared selection state across N charts, coordinated zoom/pan, overview+detail pattern
+- ~~**Linked views & coordination**~~ ✅ Built as `linked-views`
 - **Live & streaming data** — append-only charts with sliding window, circular buffers, WebSocket integration, `requestAnimationFrame`-gated updates, graceful reconnection
 - **Export & serialization** — SVG-to-PNG via `OffscreenCanvas`, PDF generation, responsive embed snippets, copy-to-clipboard, SVG optimization
-- **Small multiples & faceting** — trellis layouts, shared vs independent scales, faceted brushing, synchronized hover across facets, responsive grid reflow
+- ~~**Small multiples & faceting**~~ ✅ Built (fc08228)
 
 ### More ideas
 - **Heatmaps & matrices** — calendar heatmaps, correlation matrices, pixel-level Canvas rendering, cell annotations, row/column clustering and reordering
