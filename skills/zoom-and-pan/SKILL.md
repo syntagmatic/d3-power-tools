@@ -135,6 +135,49 @@ function zoomed({ transform }) {
 
 For large datasets, use `quadtree.visit()` to enumerate only visible points instead of scanning all data. See `canvas-rendering` skill for the pattern.
 
+## SVG Overlay for Canvas/WebGL Zoom
+
+Attach `d3-zoom` to an SVG layer stacked on top, then pipe the transform to Canvas or WebGL layers below. The SVG captures all pointer events and gives you DOM-based interaction (tooltips, axes, annotations) for free, while the heavy data rendering stays on Canvas/WebGL.
+
+```js
+const container = d3.select("#chart").style("position", "relative");
+
+// Canvas layer (below) — data rendering
+const canvas = container.append("canvas")
+  .style("position", "absolute")
+  .attr("width", width).attr("height", height);
+const ctx = canvas.node().getContext("2d");
+
+// SVG layer (above) — zoom target + axes/annotations
+const svg = container.append("svg")
+  .style("position", "absolute")
+  .attr("width", width).attr("height", height);
+
+// Transparent rect so SVG captures pointer events in empty space
+svg.append("rect")
+  .attr("width", width).attr("height", height)
+  .attr("fill", "none").attr("pointer-events", "all");
+
+const xAxisGroup = svg.append("g")
+  .attr("transform", `translate(0,${height - marginBottom})`);
+
+const zoom = d3.zoom().scaleExtent([1, 40]).on("zoom", ({ transform }) => {
+  // Update Canvas
+  ctx.save();
+  ctx.clearRect(0, 0, width, height);
+  ctx.translate(transform.x, transform.y);
+  ctx.scale(transform.k, transform.k);
+  drawData(ctx, data);
+  ctx.restore();
+  // Update SVG axes
+  xAxisGroup.call(d3.axisBottom(transform.rescaleX(xScale)));
+});
+
+svg.call(zoom); // zoom lives on SVG, drives Canvas below
+```
+
+This separates concerns cleanly: the SVG never holds thousands of data elements, and the Canvas never needs to handle pointer events. The same pattern works for WebGL — replace the Canvas draw calls with GL uniform updates for the transform matrix.
+
 ## Zoom Constraints
 
 ```js
@@ -248,6 +291,9 @@ function zoomed({ transform, sourceEvent }) {
 Show different representations at different zoom levels:
 
 ```js
+const zx = transform.rescaleX(xScale);
+const zy = transform.rescaleY(yScale);
+
 if (transform.k < 2) drawHexbinDensity(ctx, data, zx, zy);
 else if (transform.k < 8) drawPoints(ctx, data, zx, zy, { labels: false });
 else drawPoints(ctx, data, zx, zy, { labels: true });

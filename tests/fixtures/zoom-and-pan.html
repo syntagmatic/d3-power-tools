@@ -30,7 +30,7 @@
   .grid .domain { display: none; }
   .chart-wrap { position: relative; }
   .zoom-controls {
-    position: absolute; top: 6px; right: 6px;
+    position: absolute; top: 6px; right: 6px; z-index: 10;
     display: flex; gap: 2px;
   }
   .zoom-controls button {
@@ -56,7 +56,7 @@
 <body>
 
 <h1><b>Zoom &amp; Pan</b> Gallery</h1>
-<p class="lead">Four panels: semantic zoom with axes, geometric zoom on Canvas with minimap, focus+context with brush-to-zoom, and level-of-detail rendering.</p>
+<p class="lead">Five panels: semantic zoom with axes, geometric zoom on Canvas with minimap, focus+context with brush-to-zoom, level-of-detail rendering, and SVG-overlay-on-Canvas layered zoom.</p>
 
 <div id="charts"></div>
 
@@ -562,6 +562,114 @@ const groupColors = ["#4e79a7", "#e15759", "#59a14f", "#f28e2b"];
   d3.select("#lod-in").on("click", () => svg.transition().duration(300).call(zoom.scaleBy, 1.5));
   d3.select("#lod-out").on("click", () => svg.transition().duration(300).call(zoom.scaleBy, 1 / 1.5));
   d3.select("#lod-reset").on("click", () => svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity));
+}
+
+// ── 5. SVG Overlay on Canvas (Layered Zoom) ─────────────────────
+{
+  const panel = container.append("div").attr("class", "panel");
+  panel.append("h2").text("SVG Overlay on Canvas — Zoom Attached to SVG, Data Rendered on Canvas");
+
+  const w = 500, h = 320;
+  const margin = { top: 15, right: 15, bottom: 35, left: 45 };
+  const data = genScatter(1500);
+
+  const wrap = panel.append("div").attr("class", "chart-wrap")
+    .style("width", w + "px").style("height", h + "px")
+    .style("position", "relative");
+
+  const controls = wrap.append("div").attr("class", "zoom-controls");
+  controls.append("button").attr("id", "ol-in").text("+");
+  controls.append("button").attr("id", "ol-out").text("−");
+  controls.append("button").attr("id", "ol-reset").text("↺");
+
+  // Canvas layer (below) — data rendering
+  const dpr = window.devicePixelRatio || 1;
+  const cvs = wrap.append("canvas")
+    .attr("width", w * dpr).attr("height", h * dpr)
+    .style("width", w + "px").style("height", h + "px")
+    .style("position", "absolute").style("top", "0").style("left", "0");
+  const ctx = cvs.node().getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  // SVG layer (above) — zoom target + axes
+  const svg = wrap.append("svg")
+    .attr("width", w).attr("height", h)
+    .style("position", "absolute").style("top", "0").style("left", "0");
+
+  const xScale = d3.scaleLinear().domain([0, 100]).range([margin.left, w - margin.right]);
+  const yScale = d3.scaleLinear().domain([0, 100]).range([h - margin.bottom, margin.top]);
+
+  const xAxisG = svg.append("g")
+    .attr("transform", `translate(0,${h - margin.bottom})`);
+  const yAxisG = svg.append("g")
+    .attr("transform", `translate(${margin.left},0)`);
+
+  // Background rect so SVG captures all pointer events
+  svg.append("rect")
+    .attr("width", w).attr("height", h)
+    .attr("fill", "none").attr("pointer-events", "all");
+
+  function drawCanvas(transform) {
+    const zx = transform.rescaleX(xScale);
+    const zy = transform.rescaleY(yScale);
+    const [xMin, xMax] = zx.domain();
+    const [yMin, yMax] = zy.domain();
+
+    ctx.clearRect(0, 0, w, h);
+
+    // Background
+    ctx.fillStyle = "#fafafa";
+    ctx.fillRect(margin.left, margin.top, w - margin.left - margin.right, h - margin.top - margin.bottom);
+
+    // Clip to chart area
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(margin.left, margin.top, w - margin.left - margin.right, h - margin.top - margin.bottom);
+    ctx.clip();
+
+    // Draw points grouped by color for batch path
+    for (let g = 0; g < 4; g++) {
+      ctx.fillStyle = groupColors[g];
+      ctx.globalAlpha = 0.6;
+      ctx.beginPath();
+      for (const d of data) {
+        if (d.group !== g) continue;
+        if (d.x < xMin || d.x > xMax || d.y < yMin || d.y > yMax) continue;
+        const px = zx(d.x), py = zy(d.y);
+        ctx.moveTo(px + d.r, py);
+        ctx.arc(px, py, d.r, 0, Math.PI * 2);
+      }
+      ctx.fill();
+    }
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  function drawAxes(transform) {
+    const zx = transform.rescaleX(xScale);
+    const zy = transform.rescaleY(yScale);
+    const chartW = w - margin.left - margin.right;
+    xAxisG.call(d3.axisBottom(zx).ticks(Math.max(3, Math.floor(chartW / 80))));
+    yAxisG.call(d3.axisLeft(zy).ticks(6));
+  }
+
+  drawCanvas(d3.zoomIdentity);
+  drawAxes(d3.zoomIdentity);
+
+  const zoom = d3.zoom()
+    .scaleExtent([1, 30])
+    .extent([[margin.left, margin.top], [w - margin.right, h - margin.bottom]])
+    .translateExtent([[margin.left, margin.top], [w - margin.right, h - margin.bottom]])
+    .on("zoom", ({ transform }) => {
+      drawCanvas(transform);  // update Canvas below
+      drawAxes(transform);    // update SVG axes above
+    });
+
+  svg.call(zoom); // zoom lives on SVG, drives Canvas below
+
+  d3.select("#ol-in").on("click", () => svg.transition().duration(300).call(zoom.scaleBy, 1.5));
+  d3.select("#ol-out").on("click", () => svg.transition().duration(300).call(zoom.scaleBy, 1 / 1.5));
+  d3.select("#ol-reset").on("click", () => svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity));
 }
 </script>
 </body>
