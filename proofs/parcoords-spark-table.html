@@ -155,10 +155,11 @@ axisGroups.each(function(dim) {
 });
 
 // ─── Sparkline builders ──────────────────────────────────────────
-function sparkline(container, values, { width = 80, height = 16, strokeColor = "currentColor" } = {}) {
+// Accept optional domain for shared scales across rows
+function sparkline(container, values, { width = 80, height = 16, strokeColor = "currentColor", domain } = {}) {
   const pad = 2;
   const x = d3.scaleLinear().domain([0, values.length - 1]).range([pad, width - pad]);
-  const ext = d3.extent(values);
+  const ext = domain || d3.extent(values);
   const y = d3.scaleLinear().domain(ext[0] === ext[1] ? [ext[0]-1, ext[1]+1] : ext).range([height - pad, pad]);
   const line = d3.line().x((d, i) => x(i)).y(d => y(d)).curve(d3.curveMonotoneX);
   const svgEl = d3.select(container).append("svg").attr("width", width).attr("height", height).style("vertical-align", "middle");
@@ -167,11 +168,12 @@ function sparkline(container, values, { width = 80, height = 16, strokeColor = "
   return svgEl.node();
 }
 
-function sparkbar(container, values, { width = 80, height = 16 } = {}) {
+function sparkbar(container, values, { width = 80, height = 16, domain } = {}) {
   const n = values.length, gap = 1;
   const bw = Math.max(1, (width - gap * (n - 1)) / n);
-  const yMin = Math.min(0, d3.min(values));
-  const y = d3.scaleLinear().domain([yMin, d3.max(values)]).range([height, 0]);
+  const lo = domain ? domain[0] : Math.min(0, d3.min(values));
+  const hi = domain ? domain[1] : d3.max(values);
+  const y = d3.scaleLinear().domain([lo, hi]).range([height, 0]);
   const zero = y(0);
   const svgEl = d3.select(container).append("svg").attr("width", width).attr("height", height).style("vertical-align", "middle");
   svgEl.selectAll("rect").data(values).join("rect")
@@ -189,25 +191,37 @@ const sumCols = [
   { key: "count", label: "Count", type: "number" },
   { key: "avgMpg", label: "Avg MPG", type: "number", fmt: d3.format(".1f") },
   { key: "avgHp", label: "Avg HP", type: "number", fmt: d3.format(".0f") },
-  { key: "avgWeight", label: "Avg Weight", type: "number", fmt: d3.format(",.0f") },
-  { key: "mpgDist", label: "MPG Dist.", type: "sparkline" },
-  { key: "hpDist", label: "HP Dist.", type: "sparkbar" },
+  { key: "avgWeight", label: "Avg Wt", type: "number", fmt: d3.format(",.0f") },
+  { key: "mpgRange", label: "MPG Range", type: "number" },
+  { key: "mpgDist", label: "MPG Distribution", type: "sparkline" },
+  { key: "hpRange", label: "HP Range", type: "number" },
+  { key: "hpDist", label: "HP Distribution", type: "sparkbar" },
 ];
 
 d3.select("#summary-table thead tr").selectAll("th")
   .data(sumCols).join("th").text(d => d.label);
 
 function updateSummaryTable(selected) {
+  // Compute shared domains across all origins for comparable sparkcharts
+  const mpgDomain = d3.extent(selected, d => d.mpg);
+  const hpDomain = [0, d3.max(selected, d => d.horsepower)];
+
   const byOrigin = d3.groups(selected, d => d.origin)
-    .map(([origin, cars]) => ({
-      origin,
-      count: cars.length,
-      avgMpg: d3.mean(cars, d => d.mpg),
-      avgHp: d3.mean(cars, d => d.horsepower),
-      avgWeight: d3.mean(cars, d => d.weight),
-      mpgDist: cars.map(d => d.mpg).sort(d3.ascending),
-      hpDist: cars.map(d => d.horsepower).sort(d3.ascending),
-    }))
+    .map(([origin, cars]) => {
+      const mpgs = cars.map(d => d.mpg).sort(d3.ascending);
+      const hps = cars.map(d => d.horsepower).sort(d3.ascending);
+      return {
+        origin,
+        count: cars.length,
+        avgMpg: d3.mean(cars, d => d.mpg),
+        avgHp: d3.mean(cars, d => d.horsepower),
+        avgWeight: d3.mean(cars, d => d.weight),
+        mpgRange: `${d3.min(mpgs)}–${d3.max(mpgs)}`,
+        mpgDist: mpgs,
+        hpRange: `${d3.min(hps)}–${d3.max(hps)}`,
+        hpDist: hps,
+      };
+    })
     .sort((a, b) => d3.descending(a.count, b.count));
 
   const rows = d3.select("#summary-table tbody").selectAll("tr")
@@ -223,10 +237,10 @@ function updateSummaryTable(selected) {
       if (col.key === "origin") {
         el.html(`<span class="origin-dot" style="background:${tolBright[row.origin]}"></span>${row.origin}`);
       } else if (col.type === "sparkline") {
-        if (row.mpgDist.length > 1) sparkline(this, row.mpgDist, { strokeColor: tolBright[row.origin] });
+        if (row.mpgDist.length > 1) sparkline(this, row.mpgDist, { strokeColor: tolBright[row.origin], domain: mpgDomain });
         else el.text("—");
       } else if (col.type === "sparkbar") {
-        if (row.hpDist.length > 1) sparkbar(this, row.hpDist);
+        if (row.hpDist.length > 1) sparkbar(this, row.hpDist, { domain: hpDomain });
         else el.text("—");
       } else if (col.fmt) {
         el.text(col.fmt(row[col.key]));

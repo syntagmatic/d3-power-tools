@@ -170,6 +170,38 @@ rows.selectAll("td")
 
 Cell sizing: `white-space: nowrap`, tight padding (`2px 6px`), `line-height: 1`.
 
+### Shared scales across rows
+
+When sparkcharts in different rows represent the same metric, they **must share a common y-domain** so heights are visually comparable. Without this, a flat distribution filling its own range looks identical to a steep one.
+
+```js
+// Compute shared domain ONCE from all rows before rendering
+const mpgDomain = d3.extent(allData, d => d.mpg);
+const hpDomain = [0, d3.max(allData, d => d.hp)];
+
+// Pass to each sparkline builder
+function sparkline(container, values, { domain, ...opts } = {}) {
+  const ext = domain || d3.extent(values);           // ← shared if given
+  const y = d3.scaleLinear()
+    .domain(ext[0] === ext[1] ? [ext[0]-1, ext[1]+1] : ext)
+    .range([h - pad, pad]);
+  // ... draw as usual
+}
+```
+
+For spark bars showing distributions, use `[0, globalMax]` as the domain so bar heights are proportional across rows.
+
+### Pair sparkcharts with numbers
+
+A sparkline shows shape; numbers give magnitude. Always place a range, summary stat, or latest value next to the spark cell. Common patterns:
+
+| MPG Range | MPG Distribution |
+|-----------|-----------------|
+| 10–28     | `~sparkline~`   |
+| 22–38     | `~sparkline~`   |
+
+The number column anchors the visual. Without it, readers can't tell whether a line at the top of a spark means 30 or 300.
+
 ## Embedding Inline in Text
 
 ```html
