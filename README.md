@@ -1,5 +1,7 @@
 # D3 Power Tools
 
+**[Demo Gallery](https://syntagmatic.github.io/d3-power-tools/)**
+
 Claude Code skills for building advanced D3.js visualizations. Each skill encodes deep domain knowledge — layout algorithms, interaction patterns, rendering strategies, and common pitfalls — so you get production-quality results without rediscovering every gotcha.
 
 ## Skills
