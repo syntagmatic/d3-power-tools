@@ -73,3 +73,6 @@ Each subdirectory under `skills/` contains a `SKILL.md` with domain knowledge, a
 - `skills/webgl-rendering/` — GPU-accelerated rendering for 100K–10M+ elements: shaders, instanced rendering, D3+WebGL integration, texture atlases, zoom/picking
 - `skills/color-themes/` — theming systems: light/dark/high-contrast modes, CSS custom properties, semantic color tokens, prefers-color-scheme auto dark mode, theme-aware D3 scales, Canvas theming, WCAG contrast compliance
 - `skills/zoom-and-pan/` — d3-zoom API, geometric vs semantic zoom, SVG and Canvas zoom, rescaleX/rescaleY axis integration, zoom constraints, programmatic zoom-to-fit, minimap, pinch-to-zoom, zoom-linked views, level-of-detail, brush-to-zoom
+- `skills/annotations-and-labels/` — callout annotations, leader lines (straight/elbow/curved), force-based label collision avoidance, responsive labels, rich tooltips, threshold/reference lines, Canvas annotations
+- `skills/statistical-charts/` — box plots, violin plots, ridgeline/joy plots, bee swarm plots, strip/jitter plots, density plots, QQ plots, kernel density estimation, quartile calculation
+- `skills/small-multiples/` — trellis/faceted layouts, grid layout math, shared vs independent scales, synchronized cross-panel interaction, responsive reflow, Canvas small multiples, lazy rendering

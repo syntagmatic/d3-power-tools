@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Small Multiples — City Temperature Patterns</title>
+<style>
+  :root {
+    --bg: #fafafa;
+    --panel-bg: #ffffff;
+    --text: #1a1a1a;
+    --text-muted: #666;
+    --line-color: #4a7fc7;
+    --line-hover: #e74c3c;
+    --grid-line: #e8e8e8;
+    --crosshair: #999;
+    --border: #e0e0e0;
+    --dot-fill: #4a7fc7;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+  }
+
+  h1 {
+    font-size: 20px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+
+  .subtitle {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-bottom: 20px;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+  }
+
+  .cell {
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  .cell svg {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+
+  .grid-line line { stroke: var(--grid-line); }
+  .grid-line .domain { display: none; }
+
+  .axis text {
+    font-size: 9px;
+    fill: var(--text-muted);
+  }
+  .axis .domain { stroke: var(--border); }
+  .axis line { stroke: var(--border); }
+
+  .panel-title {
+    font-size: 11px;
+    font-weight: 600;
+    fill: var(--text);
+  }
+
+  .data-line {
+    fill: none;
+    stroke: var(--line-color);
+    stroke-width: 1.5;
+  }
+
+  .crosshair {
+    stroke: var(--crosshair);
+    stroke-width: 1;
+    stroke-dasharray: 3,3;
+    pointer-events: none;
+  }
+
+  .hover-dot {
+    fill: var(--dot-fill);
+    stroke: #fff;
+    stroke-width: 1.5;
+    pointer-events: none;
+  }
+
+  .hover-label {
+    font-size: 9px;
+    font-weight: 600;
+    fill: var(--text);
+    pointer-events: none;
+  }
+
+  @media (max-width: 900px) {
+    .grid { grid-template-columns: repeat(2, 1fr); }
+  }
+
+  @media (max-width: 480px) {
+    .grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Monthly Temperature Patterns</h1>
+<p class="subtitle">Synthetic daily temperatures for 12 cities over one year. Hover any panel to compare across all cities.</p>
+<div class="grid" id="grid"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data: 12 cities, daily temps for 1 year ---
+const cities = [
+  { name: "Helsinki", base: -2, amp: 18, phase: 0 },
+  { name: "London", base: 10, amp: 7, phase: 0.1 },
+  { name: "Paris", base: 11, amp: 9, phase: 0.05 },
+  { name: "Madrid", base: 15, amp: 12, phase: -0.1 },
+  { name: "Rome", base: 16, amp: 10, phase: -0.05 },
+  { name: "Cairo", base: 22, amp: 8, phase: -0.2 },
+  { name: "Mumbai", base: 28, amp: 4, phase: 0.5 },
+  { name: "Tokyo", base: 15, amp: 12, phase: 0.15 },
+  { name: "Sydney", base: 18, amp: 6, phase: Math.PI },
+  { name: "New York", base: 12, amp: 14, phase: 0.1 },
+  { name: "Vancouver", base: 10, amp: 7, phase: 0.2 },
+  { name: "Nairobi", base: 19, amp: 2, phase: 0.3 },
+];
+
+const startDate = new Date(2025, 0, 1);
+const days = 365;
+const rng = d3.randomNormal(0, 2);
+
+const allData = [];
+const facets = cities.map(city => {
+  const values = d3.range(days).map(i => {
+    const date = d3.timeDay.offset(startDate, i);
+    // Seasonal sine + noise
+    const dayOfYear = d3.timeDay.count(d3.timeYear(date), date);
+    const seasonal = city.amp * Math.sin((2 * Math.PI * dayOfYear) / 365 - Math.PI / 2 + city.phase);
+    const value = city.base + seasonal + rng();
+    allData.push({ date, value });
+    return { date, value };
+  });
+  return { key: city.name, values };
+});
+
+// --- Shared scales ---
+const xDomain = d3.extent(allData, d => d.date);
+const yDomain = [
+  d3.min(allData, d => d.value) - 2,
+  d3.max(allData, d => d.value) + 2,
+];
+
+// --- Dimensions ---
+const margin = { top: 28, right: 12, bottom: 24, left: 36 };
+const aspectRatio = 0.55;
+
+// --- Build grid ---
+const grid = d3.select("#grid");
+
+const cells = facets.map((facet, i) => {
+  const cell = grid.append("div").attr("class", "cell").datum(facet);
+  return cell;
+});
+
+// --- Render function ---
+function renderAll() {
+  cells.forEach((cell, i) => {
+    cell.selectAll("svg").remove();
+    const facet = facets[i];
+
+    const rect = cell.node().getBoundingClientRect();
+    const cellWidth = rect.width;
+    const cellHeight = cellWidth * aspectRatio;
+    const plotWidth = cellWidth - margin.left - margin.right;
+    const plotHeight = cellHeight - margin.top - margin.bottom;
+
+    if (plotWidth <= 0 || plotHeight <= 0) return;
+
+    const xScale = d3.scaleTime().domain(xDomain).range([0, plotWidth]);
+    const yScale = d3.scaleLinear().domain(yDomain).range([plotHeight, 0]);
+
+    const svg = cell.append("svg")
+      .attr("viewBox", `0 0 ${cellWidth} ${cellHeight}`)
+      .attr("preserveAspectRatio", "xMidYMid meet");
+
+    const g = svg.append("g")
+      .attr("transform", `translate(${margin.left},${margin.top})`);
+
+    // Gridlines
+    g.append("g").attr("class", "grid-line")
+      .call(d3.axisLeft(yScale).ticks(4).tickSize(-plotWidth).tickFormat(""));
+
+    // X axis
+    g.append("g").attr("class", "axis")
+      .attr("transform", `translate(0,${plotHeight})`)
+      .call(d3.axisBottom(xScale).ticks(d3.timeMonth.every(3)).tickFormat(d3.timeFormat("%b")));
+
+    // Y axis
+    g.append("g").attr("class", "axis")
+      .call(d3.axisLeft(yScale).ticks(4).tickFormat(d => `${d}°`));
+
+    // Line
+    const line = d3.line()
+      .x(d => xScale(d.date))
+      .y(d => yScale(d.value))
+      .curve(d3.curveMonotoneX);
+
+    g.append("path")
+      .datum(facet.values)
+      .attr("class", "data-line")
+      .attr("d", line);
+
+    // Title
+    g.append("text")
+      .attr("class", "panel-title")
+      .attr("x", plotWidth / 2)
+      .attr("y", -12)
+      .attr("text-anchor", "middle")
+      .text(facet.key);
+
+    // Crosshair (hidden by default)
+    g.append("line")
+      .attr("class", "crosshair")
+      .attr("y1", 0).attr("y2", plotHeight)
+      .style("display", "none");
+
+    // Hover dot
+    g.append("circle")
+      .attr("class", "hover-dot")
+      .attr("r", 3.5)
+      .style("display", "none");
+
+    // Hover value label
+    g.append("text")
+      .attr("class", "hover-label")
+      .style("display", "none");
+
+    // Invisible overlay for pointer events
+    g.append("rect")
+      .attr("class", "overlay")
+      .attr("width", plotWidth)
+      .attr("height", plotHeight)
+      .attr("fill", "none")
+      .attr("pointer-events", "all")
+      .on("pointermove", (event) => {
+        const [mx] = d3.pointer(event);
+        const date = xScale.invert(mx);
+        showCrosshairs(date);
+      })
+      .on("pointerleave", hideCrosshairs);
+  });
+}
+
+// --- Crosshair sync ---
+const bisect = d3.bisector(d => d.date).left;
+
+function showCrosshairs(date) {
+  cells.forEach((cell, i) => {
+    const facet = facets[i];
+    const rect = cell.node().getBoundingClientRect();
+    const cellWidth = rect.width;
+    const plotWidth = cellWidth - margin.left - margin.right;
+    const plotHeight = cellWidth * aspectRatio - margin.top - margin.bottom;
+
+    const xScale = d3.scaleTime().domain(xDomain).range([0, plotWidth]);
+    const yScale = d3.scaleLinear().domain(yDomain).range([plotHeight, 0]);
+
+    const idx = bisect(facet.values, date, 1);
+    const d0 = facet.values[idx - 1];
+    const d1 = facet.values[Math.min(idx, facet.values.length - 1)];
+    const d = date - d0.date > d1.date - date ? d1 : d0;
+
+    const px = xScale(d.date);
+    const py = yScale(d.value);
+
+    const g = cell.select("svg g");
+
+    g.select(".crosshair")
+      .attr("x1", px).attr("x2", px)
+      .style("display", null);
+
+    g.select(".hover-dot")
+      .attr("cx", px).attr("cy", py)
+      .style("display", null);
+
+    g.select(".hover-label")
+      .attr("x", px)
+      .attr("y", py - 8)
+      .attr("text-anchor", "middle")
+      .text(`${d.value.toFixed(1)}°`)
+      .style("display", null);
+  });
+}
+
+function hideCrosshairs() {
+  cells.forEach(cell => {
+    const g = cell.select("svg g");
+    g.select(".crosshair").style("display", "none");
+    g.select(".hover-dot").style("display", "none");
+    g.select(".hover-label").style("display", "none");
+  });
+}
+
+// --- Responsive reflow ---
+let resizeTimer;
+const ro = new ResizeObserver(() => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(renderAll, 100);
+});
+ro.observe(document.getElementById("grid"));
+
+// Initial render
+renderAll();
+</script>
+</body>
+</html>
