@@ -1,11 +1,11 @@
 ---
-name: proofs folder
-description: proofs/ is the top-level folder for standalone HTML demos that test combinations of skills
+name: blocks folder
+description: blocks/ is the top-level folder for standalone D3 examples and cross-skill demos
 type: project
 ---
 
-`proofs/` holds standalone HTML demo files (like bl.ocks.org gists). The name carries three meanings: printmaking proof (test impression), proof of concept, and mathematical proof. Proofs focus on testing combinations of skills together.
+`blocks/` holds standalone HTML demo files — multi-skill compositions and tools like the block generator.
 
-**Why:** Needed a place for standalone explorations/demos outside of per-skill examples. The triple meaning fits the project's power-tools theme and the mathematical rigor of combining skills.
+**Why:** Needed a place for standalone explorations/demos outside of per-skill examples. Originally called `proofs/`, renamed to `blocks/` for clarity.
 
-**How to apply:** When building demos that exercise multiple skills together, put them in `proofs/`. Per-skill examples stay in `skills/*/examples/`.
+**How to apply:** When building demos that exercise multiple skills together, put them in `blocks/`. Per-skill examples stay in `skills/*/examples/`.

@@ -1,4 +1,4 @@
-import { validateHierarchy, cleanHierarchy } from "../hierarchy-layouts/scripts/validate-hierarchy.js";
+import { validateHierarchy, cleanHierarchy } from "./validate-hierarchy.js";
 import { strict as assert } from "node:assert";
 
 let passed = 0, failed = 0;

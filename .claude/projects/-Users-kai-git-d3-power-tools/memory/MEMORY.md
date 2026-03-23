@@ -1,1 +1,1 @@
-- [proofs folder](project_proofs_folder.md) — proofs/ is the top-level folder for standalone HTML demos that test combinations of skills
+- [blocks folder](project_proofs_folder.md) — blocks/ is the top-level folder for standalone D3 examples and cross-skill demos
