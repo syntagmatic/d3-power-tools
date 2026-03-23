@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Canvas Accessibility Test</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    body { margin: 20px; font-family: system-ui, sans-serif; background: #f8f9fa; }
+    #container { position: relative; display: inline-block; background: #fff; border-radius: 8px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+    canvas { display: block; }
+    canvas:focus { outline: 2px solid #1a73e8; outline-offset: 2px; }
+    .controls { margin-bottom: 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    button { padding: 6px 14px; border: 1px solid #dadce0; border-radius: 4px; background: #fff; cursor: pointer; font-size: 13px; }
+    button[aria-pressed="true"] { background: #e8f0fe; border-color: #1a73e8; color: #1a73e8; }
+    button:focus-visible { outline: 2px solid #1a73e8; outline-offset: 2px; }
+    .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+    #status { margin-top: 8px; font-size: 13px; color: #5f6368; min-height: 20px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 8px; }
+    th, td { border: 1px solid #dadce0; padding: 6px 10px; text-align: left; font-size: 13px; }
+    th { background: #f8f9fa; font-weight: 600; }
+    tr:hover { background: #f1f3f4; }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <div class="controls">
+      <button id="table-toggle" aria-pressed="false">Show as table</button>
+      <button id="blur-mode" aria-pressed="false" data-action="toggle-blur-mode">Preserve focus on blur</button>
+      <button id="destroy-nav" data-action="destroy-nav">Destroy keyboard nav</button>
+      <span id="status"></span>
+    </div>
+    <a href="#after-viz" class="sr-only">Skip visualization</a>
+    <canvas id="viz" width="800" height="500"></canvas>
+    <div id="table-container" aria-hidden="true" style="display:none"></div>
+    <div id="after-viz"></div>
+  </div>
+
+<script>
+  const width = 800, height = 500;
+  const margin = { top: 30, right: 30, bottom: 40, left: 50 };
+  const innerW = width - margin.left - margin.right;
+  const innerH = height - margin.top - margin.bottom;
+
+  // --- Generate scatter data ---
+  const rng = d3.randomNormal(0, 1);
+  const categories = ['Technology', 'Healthcare', 'Finance', 'Energy', 'Consumer'];
+  const color = d3.scaleOrdinal(d3.schemeTableau10).domain(categories);
+  const names = [
+    'Alpha','Beta','Gamma','Delta','Epsilon','Zeta','Eta','Theta','Iota','Kappa',
+    'Lambda','Mu','Nu','Xi','Omicron','Pi','Rho','Sigma','Tau','Upsilon',
+    'Phi','Chi','Psi','Omega','Apex','Bolt','Core','Dash','Edge','Flux',
+    'Grid','Halo','Ion','Jet','Key','Lux','Max','Neo','Orb','Prism',
+    'Quad','Ray','Spark','Tide','Unit','Vex','Wave','Xeno','Yield','Zenith'
+  ];
+
+  const data = d3.range(50).map(i => ({
+    id: i,
+    name: names[i],
+    category: categories[i % categories.length],
+    revenue: Math.max(5, 50 + rng() * 25),
+    growth: rng() * 15,
+    size: Math.max(3, 8 + rng() * 4)
+  }));
+
+  // --- Scales ---
+  const xScale = d3.scaleLinear()
+    .domain(d3.extent(data, d => d.revenue)).nice()
+    .range([margin.left, margin.left + innerW]);
+
+  const yScale = d3.scaleLinear()
+    .domain(d3.extent(data, d => d.growth)).nice()
+    .range([margin.top + innerH, margin.top]);
+
+  const rScale = d3.scaleSqrt()
+    .domain(d3.extent(data, d => d.size))
+    .range([4, 14]);
+
+  // Sort data by revenue for ranking
+  const sortedData = [...data].sort((a, b) => b.revenue - a.revenue);
+
+  // --- State ---
+  let preserveFocusOnBlur = false;
+  let canvasHasFocus = false;
+
+  const state = {
+    focusedId: null,
+    selectedIds: new Set(),
+    setFocus(id) { this.focusedId = id; },
+    clearFocus() { this.focusedId = null; },
+    toggleSelect(id) {
+      if (this.selectedIds.has(id)) this.selectedIds.delete(id);
+      else this.selectedIds.add(id);
+    },
+    clearSelection() { this.selectedIds.clear(); }
+  };
+
+  // --- Canvas setup ---
+  const canvas = document.getElementById('viz');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = width * dpr;
+  canvas.height = height * dpr;
+  canvas.style.width = width + 'px';
+  canvas.style.height = height + 'px';
+  ctx.scale(dpr, dpr);
+
+  // --- ARIA setup ---
+  canvas.setAttribute('tabindex', '0');
+  canvas.setAttribute('role', 'application');
+  canvas.setAttribute('aria-roledescription', 'scatter plot');
+  canvas.setAttribute('aria-label',
+    `Scatter plot: Revenue vs Growth for ${data.length} companies across ${categories.length} sectors. Use arrow keys to navigate, Enter to select.`);
+
+  // --- Live region ---
+  const liveRegion = document.createElement('div');
+  liveRegion.setAttribute('aria-live', 'polite');
+  liveRegion.setAttribute('aria-atomic', 'true');
+  liveRegion.setAttribute('role', 'status');
+  liveRegion.className = 'sr-only';
+  canvas.parentElement.appendChild(liveRegion);
+
+  // --- Spatial navigation with quadtree ---
+  const qt = d3.quadtree()
+    .x(d => xScale(d.revenue))
+    .y(d => yScale(d.growth))
+    .addAll(data);
+
+  function inDirection(ox, oy, tx, ty, dir) {
+    const dx = tx - ox, dy = ty - oy;
+    if (dx === 0 && dy === 0) return false;
+    switch (dir) {
+      case 'right': return dx > 0 && Math.abs(dy) <= dx;
+      case 'left':  return dx < 0 && Math.abs(dy) <= -dx;
+      case 'down':  return dy > 0 && Math.abs(dx) <= dy;
+      case 'up':    return dy < 0 && Math.abs(dx) <= -dy;
+    }
+  }
+
+  function findNearest(current, direction) {
+    const cx = xScale(current.revenue), cy = yScale(current.growth);
+    let best = null, bestDist = Infinity;
+
+    qt.visit((quad, x0, y0, x1, y1) => {
+      const dx = Math.max(x0 - cx, 0, cx - x1);
+      const dy = Math.max(y0 - cy, 0, cy - y1);
+      if (best && Math.hypot(dx, dy) > bestDist) return true;
+
+      if (!quad.length) {
+        let p = quad;
+        do {
+          if (p.data === current) continue;
+          const px = xScale(p.data.revenue), py = yScale(p.data.growth);
+          if (!inDirection(cx, cy, px, py, direction)) continue;
+          const dist = Math.hypot(px - cx, py - cy);
+          if (dist < bestDist) { bestDist = dist; best = p.data; }
+        } while ((p = p.next));
+      }
+      return false;
+    });
+    return best;
+  }
+
+  // --- Announcements ---
+  const fmtRevenue = d3.format('$,.1f');
+  const fmtGrowth = d3.format('+.1f');
+  let announceTimer;
+
+  function announce(datum, extra) {
+    clearTimeout(announceTimer);
+    announceTimer = setTimeout(() => {
+      const rank = sortedData.indexOf(datum) + 1;
+      const parts = [
+        datum.name,
+        `revenue ${fmtRevenue(datum.revenue)}M`,
+        `growth ${fmtGrowth(datum.growth)}%`,
+        datum.category,
+        `rank ${rank} of ${data.length}`
+      ];
+      if (state.selectedIds.has(datum.id)) parts.push('selected');
+      if (extra) parts.push(extra);
+      const msg = parts.join(', ');
+      liveRegion.textContent = msg;
+      document.getElementById('status').textContent = msg;
+      canvas.setAttribute('aria-label', `Scatter plot. Focused: ${msg}`);
+    }, 120);
+  }
+
+  // --- Render ---
+  function render() {
+    ctx.clearRect(0, 0, width, height);
+
+    // Axes
+    ctx.save();
+    ctx.strokeStyle = '#dadce0';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    // x-axis
+    const xTicks = xScale.ticks(8);
+    for (const t of xTicks) {
+      const x = Math.round(xScale(t)) + 0.5;
+      ctx.moveTo(x, margin.top);
+      ctx.lineTo(x, margin.top + innerH);
+    }
+    // y-axis
+    const yTicks = yScale.ticks(6);
+    for (const t of yTicks) {
+      const y = Math.round(yScale(t)) + 0.5;
+      ctx.moveTo(margin.left, y);
+      ctx.lineTo(margin.left + innerW, y);
+    }
+    ctx.stroke();
+
+    // Tick labels
+    ctx.fillStyle = '#5f6368';
+    ctx.font = '11px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    for (const t of xTicks) {
+      ctx.fillText(`$${t}M`, xScale(t), margin.top + innerH + 6);
+    }
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    for (const t of yTicks) {
+      ctx.fillText(`${t}%`, margin.left - 8, yScale(t));
+    }
+
+    // Axis labels
+    ctx.fillStyle = '#202124';
+    ctx.font = '13px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText('Revenue', margin.left + innerW / 2, height - 12);
+    ctx.save();
+    ctx.translate(14, margin.top + innerH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Growth %', 0, 0);
+    ctx.restore();
+    ctx.restore();
+
+    // Data points
+    const hasFocus = state.focusedId != null;
+    const hasSelection = state.selectedIds.size > 0;
+    for (const d of data) {
+      const cx = xScale(d.revenue);
+      const cy = yScale(d.growth);
+      const r = rScale(d.size);
+      const isFocused = d.id === state.focusedId;
+      const isSelected = state.selectedIds.has(d.id);
+      const dimmed = (hasFocus || hasSelection) && !isFocused && !isSelected;
+
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fillStyle = dimmed ? '#e0e0e0' : color(d.category);
+      ctx.globalAlpha = dimmed ? 0.3 : (isSelected ? 1 : 0.8);
+      ctx.fill();
+
+      if (isSelected) {
+        ctx.strokeStyle = '#202124';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      ctx.globalAlpha = 1;
+    }
+
+    // Focus ring — drawn LAST, only when canvas has DOM focus
+    if (state.focusedId != null && canvasHasFocus) {
+      const d = data.find(el => el.id === state.focusedId);
+      if (d) {
+        const cx = xScale(d.revenue);
+        const cy = yScale(d.growth);
+        const r = rScale(d.size);
+        ctx.save();
+        ctx.strokeStyle = '#1a73e8';
+        ctx.lineWidth = 2.5;
+        ctx.setLineDash([4, 3]);
+        ctx.shadowColor = 'rgba(255, 255, 255, 0.9)';
+        ctx.shadowBlur = 3;
+        ctx.beginPath();
+        ctx.arc(cx, cy, r + 5, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // Only draw focus ring when canvas has DOM focus (or in clear mode, when focusedId is set)
+    // In preserve mode, focusedId persists but ring only shows when canvas has focus
+
+    canvas.dataset.focusedId = state.focusedId ?? '';
+    canvas.dataset.selectedCount = state.selectedIds.size;
+    canvas.dataset.hasFocus = canvasHasFocus;
+    canvas.dataset.blurMode = preserveFocusOnBlur ? 'preserve' : 'clear';
+  }
+
+  // --- Keyboard handler ---
+  function handleKeydown(e) {
+    const dirMap = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
+
+    if (dirMap[e.key]) {
+      if (state.focusedId == null) {
+        // First arrow key — focus nearest to center
+        state.setFocus(data[0].id);
+      } else {
+        const current = data.find(d => d.id === state.focusedId);
+        const next = findNearest(current, dirMap[e.key]);
+        if (next) state.setFocus(next.id);
+      }
+      const focused = data.find(d => d.id === state.focusedId);
+      if (focused) announce(focused);
+      render();
+      e.preventDefault();
+      return;
+    }
+
+    switch (e.key) {
+      case 'Enter':
+      case ' ': {
+        if (state.focusedId != null) {
+          state.toggleSelect(state.focusedId);
+          const d = data.find(el => el.id === state.focusedId);
+          announce(d, state.selectedIds.has(d.id) ? 'selected' : 'deselected');
+          render();
+        }
+        e.preventDefault();
+        break;
+      }
+      case 'Home': {
+        state.setFocus(sortedData[0].id);
+        announce(sortedData[0]);
+        render();
+        e.preventDefault();
+        break;
+      }
+      case 'End': {
+        state.setFocus(sortedData.at(-1).id);
+        announce(sortedData.at(-1));
+        render();
+        e.preventDefault();
+        break;
+      }
+      case 'Escape': {
+        state.clearSelection();
+        state.clearFocus();
+        liveRegion.textContent = 'Selection cleared';
+        document.getElementById('status').textContent = '';
+        canvas.blur();
+        render();
+        e.preventDefault();
+        break;
+      }
+    }
+  }
+  canvas.addEventListener('keydown', handleKeydown);
+
+  // Focus handler — auto-focus first point on entry
+  function handleFocus() {
+    canvasHasFocus = true;
+    if (state.focusedId == null) {
+      state.setFocus(data[0].id);
+      announce(data[0]);
+    }
+    render();
+  }
+
+  // Blur handler — two strategies based on mode
+  function handleBlur() {
+    canvasHasFocus = false;
+    if (!preserveFocusOnBlur) {
+      state.clearFocus();
+    }
+    // In preserve mode, focusedId stays — ring just stops rendering
+    render();
+  }
+
+  canvas.addEventListener('focus', handleFocus);
+  canvas.addEventListener('blur', handleBlur);
+
+  // Click handler — focus clicked point
+  canvas.addEventListener('pointerdown', e => {
+    canvas.focus();
+    const rect = canvas.getBoundingClientRect();
+    const mx = (e.clientX - rect.left);
+    const my = (e.clientY - rect.top);
+    let closest = null, closestDist = 20; // 20px hit radius
+    for (const d of data) {
+      const dist = Math.hypot(xScale(d.revenue) - mx, yScale(d.growth) - my);
+      if (dist < closestDist) { closestDist = dist; closest = d; }
+    }
+    if (closest) {
+      state.setFocus(closest.id);
+      state.toggleSelect(closest.id);
+      announce(closest, state.selectedIds.has(closest.id) ? 'selected' : 'deselected');
+      render();
+    }
+  });
+
+  // --- Blur mode toggle ---
+  document.getElementById('blur-mode').addEventListener('click', function() {
+    preserveFocusOnBlur = !preserveFocusOnBlur;
+    this.setAttribute('aria-pressed', preserveFocusOnBlur);
+    canvas.dataset.blurMode = preserveFocusOnBlur ? 'preserve' : 'clear';
+  });
+
+  // --- Destroy keyboard nav ---
+  document.getElementById('destroy-nav').addEventListener('click', () => {
+    canvas.removeEventListener('keydown', handleKeydown);
+    canvas.removeEventListener('focus', handleFocus);
+    canvas.removeEventListener('blur', handleBlur);
+    liveRegion.remove();
+    canvas.removeAttribute('tabindex');
+    canvas.removeAttribute('role');
+    canvas.dataset.navDestroyed = 'true';
+  });
+
+  // --- Table toggle ---
+  const tableToggle = document.getElementById('table-toggle');
+  const tableContainer = document.getElementById('table-container');
+  const columns = [
+    { key: 'name', label: 'Name' },
+    { key: 'category', label: 'Sector' },
+    { key: 'revenue', label: 'Revenue ($M)', format: v => fmtRevenue(v) },
+    { key: 'growth', label: 'Growth (%)', format: v => fmtGrowth(v) },
+    { key: 'size', label: 'Size', format: v => d3.format('.1f')(v) }
+  ];
+
+  tableToggle.addEventListener('click', () => {
+    const showing = tableToggle.getAttribute('aria-pressed') === 'true';
+    if (showing) {
+      canvas.style.display = '';
+      canvas.setAttribute('aria-hidden', 'false');
+      tableContainer.style.display = 'none';
+      tableContainer.setAttribute('aria-hidden', 'true');
+      tableToggle.textContent = 'Show as table';
+      tableToggle.setAttribute('aria-pressed', 'false');
+    } else {
+      canvas.style.display = 'none';
+      canvas.setAttribute('aria-hidden', 'true');
+      tableContainer.style.display = '';
+      tableContainer.setAttribute('aria-hidden', 'false');
+      tableToggle.textContent = 'Show as chart';
+      tableToggle.setAttribute('aria-pressed', 'true');
+
+      if (!tableContainer.querySelector('table')) {
+        const table = d3.select(tableContainer).append('table').attr('role', 'table');
+        table.append('thead').append('tr')
+          .selectAll('th').data(columns).join('th')
+            .attr('scope', 'col').text(d => d.label);
+        table.append('tbody')
+          .selectAll('tr').data(sortedData).join('tr')
+            .selectAll('td')
+            .data(d => columns.map(col => col.format ? col.format(d[col.key]) : d[col.key]))
+            .join('td').text(d => d);
+      }
+    }
+  });
+
+  // --- Initial render ---
+  render();
+  document.getElementById('container').dataset.ready = 'true';
+</script>
+</body>
+</html>

@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Adjacency Matrix</title>
+  <style>
+    body { margin: 0; font-family: system-ui, sans-serif; background: #fafafa; }
+    #controls { padding: 8px 16px; display: flex; gap: 8px; align-items: center; }
+    button { padding: 4px 12px; cursor: pointer; border: 1px solid #ccc; border-radius: 4px; background: #fff; }
+    button.active { background: #4682b4; color: #fff; border-color: #4682b4; }
+    svg { display: block; margin: 0 auto; }
+    .cell { cursor: pointer; }
+    .cell:hover { stroke: #333; stroke-width: 1.5; }
+    .row-label, .col-label { font-size: 11px; }
+    #status { padding: 4px 16px; font-size: 13px; color: #666; }
+    #tooltip { position: absolute; padding: 6px 10px; background: rgba(0,0,0,0.85); color: #fff; border-radius: 4px; font-size: 12px; pointer-events: none; display: none; }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <span style="font-weight:600">Sort:</span>
+    <button data-action="sort-name" class="active">Name</button>
+    <button data-action="sort-group">Group</button>
+    <button data-action="sort-degree">Degree</button>
+    <span style="margin-left:16px; font-weight:600">Color:</span>
+    <button data-action="color-weight" class="active">Weight</button>
+    <button data-action="color-group">Group</button>
+  </div>
+  <svg id="chart"></svg>
+  <div id="status"></div>
+  <div id="tooltip"></div>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script>
+    const margin = { top: 120, right: 20, bottom: 20, left: 120 };
+
+    // Generate network data
+    const groups = ["Frontend", "Backend", "Data", "DevOps", "Mobile"];
+    const n = 25;
+    const nodes = d3.range(n).map(i => ({
+      id: `mod-${String.fromCharCode(65 + i)}`,
+      group: groups[i % groups.length],
+      label: `Module ${String.fromCharCode(65 + i)}`,
+    }));
+
+    const links = [];
+    // Dense intra-group connections
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const sameGroup = nodes[i].group === nodes[j].group;
+        const prob = sameGroup ? 0.6 : 0.08;
+        if (Math.random() < prob) {
+          links.push({
+            source: nodes[i].id,
+            target: nodes[j].id,
+            weight: Math.ceil(Math.random() * (sameGroup ? 10 : 4)),
+          });
+        }
+      }
+    }
+
+    // Compute degree
+    const degree = new Map();
+    links.forEach(d => {
+      degree.set(d.source, (degree.get(d.source) || 0) + 1);
+      degree.set(d.target, (degree.get(d.target) || 0) + 1);
+    });
+    nodes.forEach(d => { d.degree = degree.get(d.id) || 0; });
+
+    // Build adjacency matrix
+    const nodeIndex = new Map(nodes.map((d, i) => [d.id, i]));
+    const matrix = Array.from({ length: n }, () => new Array(n).fill(0));
+    links.forEach(d => {
+      const i = nodeIndex.get(d.source), j = nodeIndex.get(d.target);
+      matrix[i][j] = d.weight;
+      matrix[j][i] = d.weight;
+    });
+
+    // Layout
+    const cellSize = Math.min(22, (700 - margin.left) / n);
+    const svgWidth = margin.left + n * cellSize + margin.right;
+    const svgHeight = margin.top + n * cellSize + margin.bottom;
+
+    const svg = d3.select("#chart")
+      .attr("width", svgWidth).attr("height", svgHeight);
+
+    const tooltip = document.getElementById("tooltip");
+    const status = document.getElementById("status");
+    const groupColor = d3.scaleOrdinal(d3.schemeTableau10).domain(groups);
+
+    let currentOrder = d3.range(n);
+    let colorMode = "weight";
+
+    const weightColor = d3.scaleSequential(d3.interpolateBlues).domain([0, d3.max(matrix.flat())]);
+
+    function cellColor(d) {
+      if (d.value === 0) return "#f0f0f0";
+      if (colorMode === "weight") return weightColor(d.value);
+      // Color by shared group
+      return nodes[d.row].group === nodes[d.col].group
+        ? groupColor(nodes[d.row].group) : "#bbb";
+    }
+
+    // Render
+    const g = svg.append("g");
+
+    // Row groups
+    const rows = g.selectAll(".row")
+      .data(d3.range(n)).join("g")
+      .attr("class", "row");
+
+    // Cells
+    rows.each(function(rowIdx) {
+      d3.select(this).selectAll(".cell")
+        .data(d3.range(n).map(colIdx => ({
+          row: rowIdx, col: colIdx, value: matrix[rowIdx][colIdx]
+        }))).join("rect")
+        .attr("class", "cell")
+        .attr("width", cellSize - 1)
+        .attr("height", cellSize - 1)
+        .on("mouseover", (event, d) => {
+          tooltip.style.display = "block";
+          tooltip.innerHTML = `${nodes[d.row].label} ↔ ${nodes[d.col].label}<br>Weight: ${d.value}`;
+          // Highlight row + column
+          g.selectAll(".cell").attr("stroke", c =>
+            c.row === d.row || c.col === d.col ? "#ff6600" : null
+          ).attr("stroke-width", c =>
+            c.row === d.row || c.col === d.col ? 1 : 0
+          );
+          svg.node().parentElement.dataset.hoveredCell = `${d.row},${d.col}`;
+        })
+        .on("pointermove", (event) => {
+          tooltip.style.left = (event.pageX + 12) + "px";
+          tooltip.style.top = (event.pageY - 8) + "px";
+        })
+        .on("mouseout", () => {
+          tooltip.style.display = "none";
+          g.selectAll(".cell").attr("stroke", null).attr("stroke-width", 0);
+          svg.node().parentElement.dataset.hoveredCell = "";
+        });
+    });
+
+    // Row labels
+    const rowLabels = g.selectAll(".row-label")
+      .data(d3.range(n)).join("text")
+      .attr("class", "row-label")
+      .attr("text-anchor", "end")
+      .attr("alignment-baseline", "middle")
+      .text(i => nodes[i].label);
+
+    // Column labels
+    const colLabels = g.selectAll(".col-label")
+      .data(d3.range(n)).join("text")
+      .attr("class", "col-label")
+      .attr("text-anchor", "start")
+      .text(i => nodes[i].label);
+
+    // Group color bars — rows
+    const rowBars = g.selectAll(".row-bar")
+      .data(d3.range(n)).join("rect")
+      .attr("class", "row-bar")
+      .attr("width", 4)
+      .attr("height", cellSize - 1);
+
+    // Group color bars — columns
+    const colBars = g.selectAll(".col-bar")
+      .data(d3.range(n)).join("rect")
+      .attr("class", "col-bar")
+      .attr("width", cellSize - 1)
+      .attr("height", 4);
+
+    function applyOrder(order, animate = true) {
+      currentOrder = order;
+      const pos = new Array(n);
+      order.forEach((nodeIdx, rank) => { pos[nodeIdx] = rank; });
+
+      const t = animate ? d3.transition().duration(500) : d3.transition().duration(0);
+
+      rows.transition(t)
+        .attr("transform", (d) => `translate(${margin.left},${margin.top + pos[d] * cellSize})`);
+
+      rows.selectAll(".cell").transition(t)
+        .attr("x", (d) => pos[d.col] * cellSize)
+        .attr("fill", cellColor);
+
+      rowLabels.transition(t)
+        .attr("x", margin.left - 8)
+        .attr("y", (d) => margin.top + pos[d] * cellSize + cellSize / 2)
+        .attr("fill", d => groupColor(nodes[d].group));
+
+      colLabels.transition(t)
+        .attr("x", 0).attr("y", 0)
+        .attr("transform", (d) =>
+          `translate(${margin.left + pos[d] * cellSize + cellSize / 2},${margin.top - 8}) rotate(-65)`)
+        .attr("fill", d => groupColor(nodes[d].group));
+
+      rowBars.transition(t)
+        .attr("x", margin.left - 6)
+        .attr("y", (d) => margin.top + pos[d] * cellSize)
+        .attr("fill", d => groupColor(nodes[d].group));
+
+      colBars.transition(t)
+        .attr("x", (d) => margin.left + pos[d] * cellSize)
+        .attr("y", margin.top - 6)
+        .attr("fill", d => groupColor(nodes[d].group));
+
+      status.textContent = `${n} nodes, ${links.length} edges | Sort: ${currentSortName} | Color: ${colorMode}`;
+      document.body.dataset.sort = currentSortName;
+      document.body.dataset.colorMode = colorMode;
+      document.body.dataset.nodes = n;
+      document.body.dataset.edges = links.length;
+    }
+
+    let currentSortName = "name";
+
+    // Sort functions
+    const sorts = {
+      "sort-name": () => d3.range(n).sort((a, b) => d3.ascending(nodes[a].id, nodes[b].id)),
+      "sort-group": () => d3.range(n).sort((a, b) =>
+        d3.ascending(nodes[a].group, nodes[b].group) || d3.descending(nodes[a].degree, nodes[b].degree)),
+      "sort-degree": () => d3.range(n).sort((a, b) => d3.descending(nodes[a].degree, nodes[b].degree)),
+    };
+
+    applyOrder(sorts["sort-name"](), false);
+
+    // Controls
+    document.getElementById("controls").addEventListener("click", (e) => {
+      const action = e.target.dataset?.action;
+      if (!action) return;
+
+      if (action.startsWith("sort-")) {
+        currentSortName = action.replace("sort-", "");
+        document.querySelectorAll("button[data-action^=sort]").forEach(b =>
+          b.classList.toggle("active", b.dataset.action === action));
+        applyOrder(sorts[action]());
+      } else if (action.startsWith("color-")) {
+        colorMode = action.replace("color-", "");
+        document.querySelectorAll("button[data-action^=color]").forEach(b =>
+          b.classList.toggle("active", b.dataset.action === action));
+        applyOrder(currentOrder, false);
+      }
+    });
+
+    document.body.dataset.ready = "true";
+  </script>
+</body>
+</html>

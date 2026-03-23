@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Brushing & Selection Test</title>
+<style>
+  body { margin: 0; font-family: sans-serif; background: #fafafa; }
+  #layout { display: flex; flex-wrap: wrap; padding: 10px; gap: 10px; }
+  .view { border: 1px solid #ddd; border-radius: 4px; background: #fff; }
+  .view-title { font-size: 12px; font-weight: bold; color: #555;
+                padding: 6px 10px; border-bottom: 1px solid #eee; }
+  .scatter-dot { cursor: pointer; }
+  .scatter-dot.dimmed { opacity: 0.1; }
+  .scatter-dot.selected { stroke: #333; stroke-width: 2; }
+  .bar-bg { fill: #e0e0e0; }
+  .bar-stack { }
+  .brush .selection { fill: steelblue; fill-opacity: 0.15; stroke: steelblue; }
+  .lasso-path { fill: rgba(70,130,180,0.1); stroke: steelblue;
+                stroke-width: 1.5; stroke-dasharray: 4,3; }
+  #status { padding: 8px 20px; font-size: 12px; color: #666; }
+  #instructions { padding: 4px 20px; font-size: 11px; color: #999; }
+</style>
+</head>
+<body>
+<div id="instructions">
+  Brush the scatterplot to select points. Shift+drag to lasso. Selection links to the histogram.
+</div>
+<div id="layout">
+  <div class="view" id="scatter-view">
+    <div class="view-title">Scatterplot (brush & lasso)</div>
+    <svg id="scatter"></svg>
+  </div>
+  <div class="view" id="hist-view">
+    <div class="view-title">Stacked Histogram (linked)</div>
+    <svg id="histogram"></svg>
+  </div>
+</div>
+<div id="status">Selected: 0 / 0</div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+// ============================
+// Shared data & selection
+// ============================
+const N = 150;
+const data = d3.range(N).map(i => {
+  const cluster = Math.floor(Math.random() * 3);
+  const cx = [25, 60, 75][cluster];
+  const cy = [70, 30, 65][cluster];
+  return {
+    id: i,
+    x: cx + d3.randomNormal(0, 12)(),
+    y: cy + d3.randomNormal(0, 10)(),
+    group: cluster,
+    value: Math.max(0, d3.randomNormal(50, 20)()),
+  };
+});
+
+// --- Selection Manager ---
+class SelectionManager extends EventTarget {
+  #selected = new Set();
+  select(indices, source) {
+    this.#selected = new Set(indices);
+    this.dispatchEvent(new CustomEvent("selection", {
+      detail: { indices: [...this.#selected], source }
+    }));
+  }
+  clear(source) {
+    this.#selected.clear();
+    this.dispatchEvent(new CustomEvent("selection", {
+      detail: { indices: [], source }
+    }));
+  }
+  isSelected(i) { return this.#selected.size === 0 || this.#selected.has(i); }
+  get size() { return this.#selected.size; }
+  get selected() { return [...this.#selected]; }
+}
+
+const manager = new SelectionManager();
+const colorScale = d3.scaleOrdinal(d3.schemeTableau10);
+
+function updateStatus() {
+  const sel = manager.size || N;
+  document.getElementById("status").textContent = `Selected: ${manager.size} / ${N}`;
+  document.getElementById("status").dataset.selectedCount = manager.size;
+}
+
+// ============================
+// Scatterplot with brush + lasso
+// ============================
+{
+  const margin = { top: 10, right: 15, bottom: 35, left: 40 };
+  const w = 440 - margin.left - margin.right;
+  const h = 380 - margin.top - margin.bottom;
+
+  const svg = d3.select("#scatter")
+    .attr("width", w + margin.left + margin.right)
+    .attr("height", h + margin.top + margin.bottom)
+    .append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+  const xScale = d3.scaleLinear().domain(d3.extent(data, d => d.x)).nice().range([0, w]);
+  const yScale = d3.scaleLinear().domain(d3.extent(data, d => d.y)).nice().range([h, 0]);
+
+  svg.append("g").attr("class", "axis").attr("transform", `translate(0,${h})`)
+    .call(d3.axisBottom(xScale).ticks(6));
+  svg.append("g").attr("class", "axis").call(d3.axisLeft(yScale).ticks(6));
+
+  const dots = svg.selectAll(".scatter-dot")
+    .data(data)
+    .join("circle")
+    .attr("class", "scatter-dot")
+    .attr("cx", d => xScale(d.x))
+    .attr("cy", d => yScale(d.y))
+    .attr("r", 5)
+    .attr("fill", d => colorScale(d.group));
+
+  // --- Brush ---
+  const brush = d3.brush()
+    .extent([[0, 0], [w, h]])
+    .on("start brush end", function(event) {
+      if (event.sourceEvent?.shiftKey) return; // shift = lasso mode
+      if (!event.selection) {
+        manager.clear("scatter");
+        updateStatus();
+        return;
+      }
+      const [[x0, y0], [x1, y1]] = event.selection;
+      const selected = data.reduce((acc, d, i) => {
+        const cx = xScale(d.x), cy = yScale(d.y);
+        if (cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1) acc.push(i);
+        return acc;
+      }, []);
+      manager.select(selected, "scatter");
+      updateStatus();
+    });
+
+  svg.append("g").attr("class", "brush").call(brush);
+
+  // --- Lasso ---
+  let lassoPath = [];
+  let lassoLine = null;
+
+  svg.on("pointerdown", function(event) {
+    if (!event.shiftKey) return;
+    lassoPath = [d3.pointer(event)];
+    lassoLine = svg.append("path").attr("class", "lasso-path");
+    event.target.setPointerCapture(event.pointerId);
+  });
+
+  svg.on("pointermove", function(event) {
+    if (!lassoPath.length || !event.shiftKey) return;
+    const coalesced = event.getCoalescedEvents?.() || [event];
+    coalesced.forEach(e => lassoPath.push(d3.pointer(e)));
+    lassoLine.attr("d", d3.line()(lassoPath));
+  });
+
+  svg.on("pointerup", function(event) {
+    if (!lassoPath.length) return;
+    lassoPath.push(lassoPath[0]); // close
+
+    const selected = data.reduce((acc, d, i) => {
+      if (pointInPolygon([xScale(d.x), yScale(d.y)], lassoPath)) acc.push(i);
+      return acc;
+    }, []);
+
+    manager.select(selected, "scatter");
+    updateStatus();
+    lassoPath = [];
+    if (lassoLine) { lassoLine.remove(); lassoLine = null; }
+  });
+
+  // Update dots on selection change
+  manager.addEventListener("selection", () => {
+    dots
+      .classed("dimmed", (d, i) => !manager.isSelected(i))
+      .classed("selected", (d, i) => manager.size > 0 && manager.isSelected(i));
+  });
+}
+
+// ============================
+// Linked stacked bar chart
+// ============================
+{
+  const margin = { top: 10, right: 15, bottom: 35, left: 40 };
+  const w = 440 - margin.left - margin.right;
+  const h = 380 - margin.top - margin.bottom;
+  const groups = [...new Set(data.map(d => d.group))].sort();
+
+  const svg = d3.select("#histogram")
+    .attr("width", w + margin.left + margin.right)
+    .attr("height", h + margin.top + margin.bottom)
+    .append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+  const xScale = d3.scaleLinear()
+    .domain(d3.extent(data, d => d.value)).nice()
+    .range([0, w]);
+
+  // Bin the data, keeping the original data objects (not just values)
+  const thresholds = xScale.ticks(15);
+  const binner = d3.bin().domain(xScale.domain()).thresholds(thresholds).value(d => d.value);
+  const bins = binner(data);
+
+  const yScale = d3.scaleLinear()
+    .domain([0, d3.max(bins, b => b.length)])
+    .nice()
+    .range([h, 0]);
+
+  svg.append("g").attr("class", "axis").attr("transform", `translate(0,${h})`)
+    .call(d3.axisBottom(xScale).ticks(8));
+  const yAxis = svg.append("g").attr("class", "axis").call(d3.axisLeft(yScale).ticks(6));
+
+  // Background bars — full dataset distribution, always visible
+  svg.selectAll(".bar-bg")
+    .data(bins)
+    .join("rect")
+    .attr("class", "bar-bg")
+    .attr("x", d => xScale(d.x0) + 1)
+    .attr("y", d => yScale(d.length))
+    .attr("width", d => Math.max(0, xScale(d.x1) - xScale(d.x0) - 2))
+    .attr("height", d => h - yScale(d.length));
+
+  // Compute stacked layout for a subset of data within each bin
+  function computeStacks(bins, selectedSet) {
+    return bins.map(bin => {
+      const barX = xScale(bin.x0) + 1;
+      const barW = Math.max(0, xScale(bin.x1) - xScale(bin.x0) - 2);
+      let y0 = h;
+      const stacks = groups.map(g => {
+        const count = selectedSet
+          ? bin.filter(d => selectedSet.has(d.id) && d.group === g).length
+          : bin.filter(d => d.group === g).length;
+        const barH = h - yScale(count);
+        y0 -= barH;
+        return { group: g, x: barX, y: y0, w: barW, h: barH, count };
+      });
+      return stacks;
+    }).flat();
+  }
+
+  // Initial stacks — full dataset
+  const stackData = computeStacks(bins, null);
+
+  const stacks = svg.selectAll(".bar-stack")
+    .data(stackData)
+    .join("rect")
+    .attr("class", "bar-stack")
+    .attr("x", d => d.x)
+    .attr("y", d => d.y)
+    .attr("width", d => d.w)
+    .attr("height", d => d.h)
+    .attr("fill", d => colorScale(d.group));
+
+  // Update stacked bars on selection
+  manager.addEventListener("selection", ({ detail: { indices } }) => {
+    const selectedSet = indices.length > 0
+      ? new Set(indices.map(i => data[i].id))
+      : null;
+
+    const updated = computeStacks(bins, selectedSet);
+
+    stacks.data(updated)
+      .transition().duration(80).ease(d3.easeExpOut)
+      .attr("y", d => d.y)
+      .attr("height", d => d.h);
+  });
+}
+
+// ============================
+// Point-in-polygon (ray casting)
+// ============================
+function pointInPolygon([x, y], polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const [xi, yi] = polygon[i];
+    const [xj, yj] = polygon[j];
+    if ((yi > y) !== (yj > y) &&
+        x < (xj - xi) * (y - yi) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+// Signal ready
+document.getElementById("layout").dataset.ready = "true";
+</script>
+</body>
+</html>

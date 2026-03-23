@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Parallel Coordinates Test</title>
+<style>
+  body { margin: 0; font-family: sans-serif; background: #fafafa; }
+  #container { position: relative; margin: 20px; }
+  canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
+  svg { position: absolute; top: 0; left: 0; }
+  .axis text { font-size: 11px; }
+  .axis .domain, .axis line { stroke: #ccc; }
+  .axis-label { font-size: 12px; font-weight: bold; cursor: pointer; fill: #333; }
+  .brush .selection { fill: steelblue; fill-opacity: 0.3; stroke: steelblue; }
+</style>
+</head>
+<body>
+<div id="container"></div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+// --- Config ---
+const margin = { top: 40, right: 20, bottom: 20, left: 20 };
+const width = 960 - margin.left - margin.right;
+const height = 500 - margin.top - margin.bottom;
+
+// --- Generate test data: 200 rows, 6 dimensions ---
+const dimensions = ["A", "B", "C", "D", "E", "F"];
+const rng = d3.randomNormal(50, 20);
+const data = d3.range(200).map(i => {
+  const base = rng();
+  return {
+    id: i,
+    A: Math.max(0, Math.min(100, base + d3.randomNormal(0, 10)())),
+    B: Math.max(0, Math.min(100, 100 - base + d3.randomNormal(0, 15)())),
+    C: Math.max(0, Math.min(100, rng())),
+    D: Math.max(0, Math.min(100, base * 0.5 + rng() * 0.5)),
+    E: Math.max(0, Math.min(100, rng())),
+    F: Math.max(0, Math.min(100, d3.randomNormal(30, 25)())),
+  };
+});
+
+// --- Scales ---
+const xScale = d3.scalePoint().domain(dimensions).range([0, width]);
+const yScales = {};
+dimensions.forEach(dim => {
+  yScales[dim] = d3.scaleLinear()
+    .domain(d3.extent(data, d => d[dim]))
+    .range([height, 0])
+    .nice();
+});
+
+// --- Container ---
+const container = d3.select("#container")
+  .style("width", (width + margin.left + margin.right) + "px")
+  .style("height", (height + margin.top + margin.bottom) + "px");
+
+// --- Canvas layer ---
+const dpr = window.devicePixelRatio || 1;
+const canvas = container.append("canvas")
+  .attr("width", (width + margin.left + margin.right) * dpr)
+  .attr("height", (height + margin.top + margin.bottom) * dpr)
+  .style("width", (width + margin.left + margin.right) + "px")
+  .style("height", (height + margin.top + margin.bottom) + "px");
+
+const ctx = canvas.node().getContext("2d");
+ctx.scale(dpr, dpr);
+ctx.translate(margin.left, margin.top);
+
+// --- SVG layer ---
+const svg = container.append("svg")
+  .attr("width", width + margin.left + margin.right)
+  .attr("height", height + margin.top + margin.bottom)
+  .append("g")
+  .attr("transform", `translate(${margin.left},${margin.top})`);
+
+// --- Draw polylines on canvas ---
+const filters = {};
+
+function drawLine(ctx, d, color, alpha) {
+  ctx.strokeStyle = color;
+  ctx.globalAlpha = alpha;
+  ctx.beginPath();
+  dimensions.forEach((dim, i) => {
+    const x = xScale(dim);
+    const y = yScales[dim](d[dim]);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+}
+
+function isSelected(d) {
+  return Object.entries(filters).every(([dim, fn]) => fn(d));
+}
+
+function renderCanvas() {
+  ctx.clearRect(-margin.left, -margin.top,
+    width + margin.left + margin.right,
+    height + margin.top + margin.bottom);
+  ctx.lineWidth = 1;
+
+  const selected = data.filter(isSelected);
+  const alpha = Math.max(0.02, Math.min(0.8, 80 / data.length));
+
+  // Dim unselected
+  data.forEach(d => {
+    if (!isSelected(d)) drawLine(ctx, d, "#ccc", 0.1);
+  });
+
+  // Bright selected
+  selected.forEach(d => drawLine(ctx, d, "steelblue", alpha));
+
+  // Mark data attribute for test verification
+  canvas.node().dataset.selectedCount = selected.length;
+  canvas.node().dataset.totalCount = data.length;
+}
+
+// --- Axes on SVG ---
+const axisGroups = svg.selectAll(".axis")
+  .data(dimensions)
+  .join("g")
+  .attr("class", "axis")
+  .attr("transform", d => `translate(${xScale(d)}, 0)`)
+  .each(function(dim) {
+    d3.select(this).call(d3.axisLeft(yScales[dim]).ticks(6));
+  });
+
+// --- Axis labels ---
+axisGroups.append("text")
+  .attr("class", "axis-label")
+  .attr("y", -12)
+  .attr("text-anchor", "middle")
+  .text(d => d)
+  .on("click", function(event, dim) {
+    // Invert axis
+    const scale = yScales[dim];
+    scale.range(scale.range().reverse());
+    d3.select(this.parentNode).call(d3.axisLeft(scale).ticks(6));
+    renderCanvas();
+  });
+
+// --- Brushes ---
+const brushes = {};
+
+axisGroups.each(function(dim) {
+  const brush = d3.brushY()
+    .extent([[-10, 0], [10, height]])
+    .on("brush end", function(event) {
+      if (!event.selection) {
+        delete filters[dim];
+      } else {
+        const [y0, y1] = event.selection;
+        const scale = yScales[dim];
+        filters[dim] = d => {
+          const v = scale(d[dim]);
+          return v >= y0 && v <= y1;
+        };
+      }
+      renderCanvas();
+    });
+
+  d3.select(this).append("g")
+    .attr("class", "brush")
+    .call(brush);
+
+  brushes[dim] = brush;
+});
+
+// --- Initial render ---
+renderCanvas();
+
+// Signal that rendering is complete
+document.getElementById("container").dataset.ready = "true";
+</script>
+</body>
+</html>

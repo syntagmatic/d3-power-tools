@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Arc Diagram</title>
+  <style>
+    body { margin: 0; font-family: system-ui, sans-serif; background: #fafafa; }
+    #controls { padding: 8px 16px; display: flex; gap: 8px; align-items: center; }
+    button { padding: 4px 12px; cursor: pointer; border: 1px solid #ccc; border-radius: 4px; background: #fff; }
+    button.active { background: #4682b4; color: #fff; border-color: #4682b4; }
+    svg { display: block; }
+    .node-circle { cursor: pointer; }
+    .node-label { font-size: 10px; cursor: pointer; }
+    #status { padding: 4px 16px; font-size: 13px; color: #666; }
+    #tooltip { position: absolute; padding: 6px 10px; background: rgba(0,0,0,0.85); color: #fff; border-radius: 4px; font-size: 12px; pointer-events: none; display: none; }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <span style="font-weight:600">Order:</span>
+    <button data-action="order-name" class="active">Name</button>
+    <button data-action="order-group">Group</button>
+    <button data-action="order-degree">Degree</button>
+    <span style="margin-left:16px; font-weight:600">Arcs:</span>
+    <button data-action="arcs-all" class="active">All</button>
+    <button data-action="arcs-top">Top 50%</button>
+  </div>
+  <svg id="chart"></svg>
+  <div id="status"></div>
+  <div id="tooltip"></div>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script>
+    const width = 960, height = 500;
+    const margin = { top: 20, right: 40, bottom: 80, left: 40 };
+    const midY = height * 0.65;
+    const maxArcH = midY - margin.top; // cap arc height to stay in viewport
+
+    const svg = d3.select("#chart")
+      .attr("width", width).attr("height", height);
+
+    const tooltip = document.getElementById("tooltip");
+    const status = document.getElementById("status");
+    const color = d3.scaleOrdinal(d3.schemeTableau10);
+
+    // Generate data — software modules with dependencies
+    const groups = ["Core", "UI", "API", "Auth", "Data"];
+    const n = 30;
+    const nodes = d3.range(n).map(i => ({
+      id: `pkg-${String.fromCharCode(97 + Math.floor(i / 26))}${String.fromCharCode(97 + (i % 26))}`,
+      group: groups[i % groups.length],
+      label: `${groups[i % groups.length].toLowerCase()}-${String.fromCharCode(97 + Math.floor(i / groups.length))}`,
+    }));
+
+    const links = [];
+    for (let i = 0; i < n; i++) {
+      // Short-range deps (common)
+      for (let j = i + 1; j < Math.min(i + 5, n); j++) {
+        if (Math.random() < 0.35) {
+          links.push({ source: nodes[i].id, target: nodes[j].id, weight: Math.ceil(Math.random() * 5) });
+        }
+      }
+      // Long-range deps (rarer)
+      if (Math.random() < 0.2) {
+        const j = Math.floor(Math.random() * n);
+        if (j !== i) {
+          links.push({ source: nodes[i].id, target: nodes[j].id, weight: Math.ceil(Math.random() * 3) });
+        }
+      }
+    }
+
+    // Compute degree
+    const degree = new Map();
+    links.forEach(d => {
+      degree.set(d.source, (degree.get(d.source) || 0) + 1);
+      degree.set(d.target, (degree.get(d.target) || 0) + 1);
+    });
+    nodes.forEach(d => { d.degree = degree.get(d.id) || 0; });
+
+    // Scales
+    const xScale = d3.scalePoint()
+      .range([margin.left + 20, width - margin.right - 20])
+      .padding(0.5);
+
+    const rScale = d3.scaleSqrt()
+      .domain([0, d3.max(nodes, d => d.degree)])
+      .range([3, 10]);
+
+    // Drawing groups
+    const gArcs = svg.append("g").attr("class", "arcs-layer");
+    const gNodes = svg.append("g").attr("class", "nodes-layer");
+    const gLabels = svg.append("g").attr("class", "labels-layer");
+
+    let currentOrder = "name";
+    let filterTop = false;
+    let highlightedNode = null;
+
+    function getOrder(type) {
+      const sorted = [...nodes];
+      if (type === "name") sorted.sort((a, b) => d3.ascending(a.label, b.label));
+      else if (type === "group") sorted.sort((a, b) => d3.ascending(a.group, b.group) || d3.descending(a.degree, b.degree));
+      else if (type === "degree") sorted.sort((a, b) => d3.descending(a.degree, b.degree));
+      return sorted.map(d => d.id);
+    }
+
+    function visibleLinks() {
+      if (!filterTop) return links;
+      const threshold = d3.quantile(links.map(d => d.weight).sort(d3.ascending), 0.5);
+      return links.filter(d => d.weight >= threshold);
+    }
+
+    function arcPath(x1, x2) {
+      const rx = Math.abs(x2 - x1) / 2;
+      const ry = Math.min(rx, maxArcH);
+      return `M${x1},${midY} A${rx},${ry} 0 0,${x1 < x2 ? 1 : 0} ${x2},${midY}`;
+    }
+
+    function render(animate = true) {
+      const oldScale = xScale.copy();
+      const order = getOrder(currentOrder);
+      xScale.domain(order);
+
+      const t = animate ? d3.transition().duration(600) : d3.transition().duration(0);
+      const vLinks = visibleLinks();
+
+      // Arcs
+      const arcSel = gArcs.selectAll(".arc")
+        .data(vLinks, d => `${d.source}-${d.target}`);
+
+      arcSel.exit().transition(t).attr("opacity", 0).remove();
+
+      const arcEnter = arcSel.enter().append("path")
+        .attr("class", "arc")
+        .attr("fill", "none")
+        .attr("opacity", 0);
+
+      const arcMerge = arcEnter.merge(arcSel);
+
+      // Style arcs (immediate, no transition needed for these)
+      arcMerge
+        .attr("stroke", d => {
+          if (highlightedNode) {
+            return (d.source === highlightedNode || d.target === highlightedNode)
+              ? color(nodes.find(n => n.id === highlightedNode)?.group) : "#ddd";
+          }
+          return "#999";
+        })
+        .attr("stroke-opacity", d => {
+          if (highlightedNode) {
+            return (d.source === highlightedNode || d.target === highlightedNode) ? 0.8 : 0.1;
+          }
+          return 0.35;
+        })
+        .attr("stroke-width", d => Math.sqrt(d.weight))
+        .attr("opacity", 1);
+
+      // Animate arc paths
+      if (animate) {
+        arcMerge.transition(t)
+          .attrTween("d", d => {
+            const sx1 = oldScale(d.source) != null ? oldScale(d.source) : xScale(d.source);
+            const sx2 = oldScale(d.target) != null ? oldScale(d.target) : xScale(d.target);
+            const ex1 = xScale(d.source);
+            const ex2 = xScale(d.target);
+            const ix1 = d3.interpolateNumber(sx1, ex1);
+            const ix2 = d3.interpolateNumber(sx2, ex2);
+            return t => arcPath(ix1(t), ix2(t));
+          });
+      } else {
+        arcMerge.attr("d", d => arcPath(xScale(d.source), xScale(d.target)));
+      }
+
+      // Nodes
+      const nodeSel = gNodes.selectAll(".node-circle")
+        .data(nodes, d => d.id);
+
+      nodeSel.enter().append("circle")
+        .attr("class", "node-circle")
+        .attr("cy", midY)
+        .attr("r", d => rScale(d.degree))
+        .attr("fill", d => color(d.group))
+        .attr("stroke", "#fff")
+        .attr("stroke-width", 1)
+      .merge(nodeSel).transition(t)
+        .attr("cx", d => xScale(d.id))
+        .attr("opacity", d => {
+          if (highlightedNode && d.id !== highlightedNode) {
+            const connected = vLinks.some(l => (l.source === d.id && l.target === highlightedNode) ||
+              (l.target === d.id && l.source === highlightedNode));
+            return connected ? 1 : 0.2;
+          }
+          return 1;
+        });
+
+      // Labels
+      const labelSel = gLabels.selectAll(".node-label")
+        .data(nodes, d => d.id);
+
+      labelSel.enter().append("text")
+        .attr("class", "node-label")
+        .attr("text-anchor", "start")
+        .text(d => d.label)
+      .merge(labelSel).transition(t)
+        .attr("x", 0).attr("y", 0)
+        .attr("transform", d => `translate(${xScale(d.id)},${midY + rScale(d.degree) + 8}) rotate(65)`)
+        .attr("fill", d => color(d.group))
+        .attr("opacity", d => {
+          if (highlightedNode && d.id !== highlightedNode) {
+            const connected = vLinks.some(l => (l.source === d.id && l.target === highlightedNode) ||
+              (l.target === d.id && l.source === highlightedNode));
+            return connected ? 0.8 : 0.15;
+          }
+          return 0.8;
+        });
+
+      // Interaction
+      gNodes.selectAll(".node-circle")
+        .on("click", (event, d) => {
+          highlightedNode = highlightedNode === d.id ? null : d.id;
+          render(false);
+          document.body.dataset.highlightedNode = highlightedNode || "";
+        })
+        .on("mouseover", (event, d) => {
+          tooltip.style.display = "block";
+          tooltip.innerHTML = `<strong>${d.label}</strong><br>Group: ${d.group}<br>Degree: ${d.degree}`;
+        })
+        .on("pointermove", (event) => {
+          tooltip.style.left = (event.pageX + 12) + "px";
+          tooltip.style.top = (event.pageY - 8) + "px";
+        })
+        .on("mouseout", () => { tooltip.style.display = "none"; });
+
+      status.textContent = `${nodes.length} nodes, ${vLinks.length} arcs | Order: ${currentOrder} | Filter: ${filterTop ? "top 50%" : "all"}`;
+      document.body.dataset.nodes = nodes.length;
+      document.body.dataset.arcs = vLinks.length;
+      document.body.dataset.order = currentOrder;
+    }
+
+    render(false);
+
+    // Controls
+    document.getElementById("controls").addEventListener("click", (e) => {
+      const action = e.target.dataset?.action;
+      if (!action) return;
+
+      if (action.startsWith("order-")) {
+        currentOrder = action.replace("order-", "");
+        document.querySelectorAll("button[data-action^=order]").forEach(b =>
+          b.classList.toggle("active", b.dataset.action === action));
+        render();
+      } else if (action === "arcs-all") {
+        filterTop = false;
+        document.querySelectorAll("button[data-action^=arcs]").forEach(b =>
+          b.classList.toggle("active", b.dataset.action === action));
+        render();
+      } else if (action === "arcs-top") {
+        filterTop = true;
+        document.querySelectorAll("button[data-action^=arcs]").forEach(b =>
+          b.classList.toggle("active", b.dataset.action === action));
+        render();
+      }
+    });
+
+    document.body.dataset.ready = "true";
+  </script>
+</body>
+</html>

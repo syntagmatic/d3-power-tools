@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Data Pipeline Demo</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: #fff; padding: 24px; color: #333; }
+  h1 { font-size: 18px; margin-bottom: 16px; }
+  .pipeline {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: auto auto auto auto;
+    gap: 0;
+    max-width: 900px;
+  }
+  .stage {
+    padding: 16px;
+    border: 1px solid #e0e0e0;
+    position: relative;
+  }
+  .stage-title {
+    font-size: 13px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.5px; color: #666; margin-bottom: 8px;
+  }
+  .stage-subtitle { font-size: 12px; color: #999; margin-bottom: 10px; }
+  .stage1 { grid-column: 1 / -1; }
+  .stage4 { grid-column: 1 / -1; }
+  .arrow {
+    grid-column: 1 / -1;
+    display: flex; align-items: center; justify-content: center;
+    padding: 4px 0; color: #aaa; font-size: 18px;
+  }
+  table.data-table {
+    width: 100%; border-collapse: collapse; font-size: 12px;
+  }
+  table.data-table th {
+    text-align: left; padding: 4px 8px; border-bottom: 2px solid #ddd;
+    font-weight: 600; color: #555;
+  }
+  table.data-table td {
+    padding: 3px 8px; border-bottom: 1px solid #eee;
+  }
+  td.problem { background: #fee; color: #c44; }
+  .summary-stat {
+    font-size: 13px; line-height: 1.8;
+  }
+  .summary-stat strong { color: #333; }
+  .multiples { display: flex; gap: 12px; flex-wrap: wrap; }
+  .multiple-label { font-size: 11px; font-weight: 600; text-align: center; color: #555; }
+  svg text { font-family: system-ui, sans-serif; }
+</style>
+</head>
+<body>
+
+<h1>Data Pipeline: Monthly Sales</h1>
+
+<div class="pipeline">
+  <div class="stage stage1" id="stage-raw"></div>
+  <div class="arrow">&#9660;</div>
+  <div class="stage stage2" id="stage-clean"></div>
+  <div class="stage stage3" id="stage-histogram"></div>
+  <div class="arrow">&#9660;</div>
+  <div class="stage stage4" id="stage-multiples"></div>
+</div>
+
+<script type="module">
+
+const csvText = `month,region,revenue,units
+2025-01,North,12400,310
+2025-01,South,9800,245
+2025-01,East,11200,280
+2025-01,West,8700,218
+2025-02,North,13100,328
+2025-02,South,,260
+2025-02,East,11800,295
+2025-02,West,9200,230
+2025-03,North,14500,363
+2025-03,South,10200,255
+2025-03,East,N/A,310
+2025-03,West,9600,240
+2025-04,North,15200,380
+2025-04,South,10800,270
+2025-04,East,12900,323
+2025-04,West,10100,253
+2025-05,North,16100,403
+2025-05,South,11500,288
+2025-05,East,13700,343
+2025-05,West,10800,270
+2025-06,North,15800,395
+2025-06,South,12100,303
+2025-06,East,14200,355
+2025-06,West,11300,283
+2025-07,North,14900,373
+2025-07,South,11800,295
+2025-07,East,13500,338
+2025-07,West,10900,273
+2025-08,North,15600,390
+2025-08,South,12400,310
+2025-08,East,14100,353
+2025-08,West,,285
+2025-09,North,16200,405
+2025-09,South,12800,320
+2025-09,East,14800,370
+2025-09,West,11700,293
+2025-10,North,15400,385
+2025-10,South,12100,303
+2025-10,East,14500,363
+2025-10,West,11400,285
+2025-10,West,11400,285
+2025-11,North,14200,355
+2025-11,South,11300,283
+2025-11,East,13600,340
+2025-11,West,10700,268
+2025-12,North,13800,345
+2025-12,South,10500,263
+2025-12,East,12800,
+2025-12,West,10100,253`;
+
+// Stage 1: Parse raw data and show table
+const rawRows = d3.csvParse(csvText);
+const totalRaw = rawRows.length;
+
+const stage1 = d3.select("#stage-raw");
+stage1.append("div").attr("class", "stage-title").text(`Raw Data (8 of ${totalRaw} rows)`);
+
+const table = stage1.append("table").attr("class", "data-table");
+const columns = ["month", "region", "revenue", "units"];
+table.append("thead").append("tr")
+  .selectAll("th").data(columns).join("th").text(d => d);
+
+const previewRows = rawRows.slice(0, 8);
+const tbody = table.append("tbody");
+const rows = tbody.selectAll("tr").data(previewRows).join("tr");
+rows.selectAll("td").data(d => columns.map(c => d[c])).join("td")
+  .text(d => d === undefined || d === "" ? "\u2014" : d)
+  .classed("problem", d => d === undefined || d === "" || d === "N/A");
+
+// Stage 2: Clean + reshape
+const parseMonth = d3.timeParse("%Y-%m");
+
+const cleaned = rawRows.filter(d => {
+  const rev = d.revenue;
+  return rev !== "" && rev !== "N/A" && rev !== undefined;
+}).map(d => ({
+  month: parseMonth(d.month),
+  region: d.region,
+  revenue: +d.revenue,
+  units: d.units === "" ? null : +d.units
+}));
+
+// Dedup — remove rows with identical month+region+revenue+units
+const seen = new Set();
+const deduped = cleaned.filter(d => {
+  const key = `${d.month}-${d.region}-${d.revenue}-${d.units}`;
+  if (seen.has(key)) return false;
+  seen.add(key);
+  return true;
+});
+
+const byRegion = d3.rollup(deduped, v => ({
+  total: d3.sum(v, d => d.revenue),
+  mean: d3.mean(v, d => d.revenue),
+  count: v.length
+}), d => d.region);
+
+const stage2 = d3.select("#stage-clean");
+stage2.append("div").attr("class", "stage-title").text("Clean + Reshape");
+stage2.append("div").attr("class", "summary-stat").html(
+  `<strong>${totalRaw}</strong> rows loaded &rarr; ` +
+  `<strong>${cleaned.length}</strong> valid &rarr; ` +
+  `<strong>${deduped.length}</strong> after dedup`
+);
+
+const rollupTable = stage2.append("table").attr("class", "data-table").style("margin-top", "10px");
+rollupTable.append("thead").append("tr")
+  .selectAll("th").data(["Region", "Total Rev", "Mean Rev"]).join("th").text(d => d);
+
+const regionRows = Array.from(byRegion, ([region, stats]) => ({
+  region, total: stats.total, mean: stats.mean
+})).sort((a, b) => d3.descending(a.total, b.total));
+
+rollupTable.append("tbody").selectAll("tr").data(regionRows).join("tr")
+  .selectAll("td").data(d => [
+    d.region,
+    d3.format("$,.0f")(d.total),
+    d3.format("$,.0f")(d.mean)
+  ]).join("td").text(d => d);
+
+// Stage 3: Histogram
+const stage3 = d3.select("#stage-histogram");
+stage3.append("div").attr("class", "stage-title").text("Revenue Distribution");
+
+const histW = 380, histH = 160, histM = { top: 10, right: 16, bottom: 28, left: 44 };
+const histIW = histW - histM.left - histM.right;
+const histIH = histH - histM.top - histM.bottom;
+
+const revenues = deduped.map(d => d.revenue);
+const xHist = d3.scaleLinear()
+  .domain([d3.min(revenues) * 0.9, d3.max(revenues) * 1.05])
+  .nice()
+  .range([0, histIW]);
+
+const bins = d3.bin().domain(xHist.domain()).thresholds(10)(revenues);
+
+const yHist = d3.scaleLinear()
+  .domain([0, d3.max(bins, d => d.length)])
+  .range([histIH, 0]);
+
+const svg3 = stage3.append("svg").attr("width", histW).attr("height", histH);
+const g3 = svg3.append("g").attr("transform", `translate(${histM.left},${histM.top})`);
+
+g3.selectAll("rect").data(bins).join("rect")
+  .attr("x", d => xHist(d.x0) + 1)
+  .attr("width", d => Math.max(0, xHist(d.x1) - xHist(d.x0) - 2))
+  .attr("y", d => yHist(d.length))
+  .attr("height", d => histIH - yHist(d.length))
+  .attr("fill", "#4a90d9");
+
+g3.append("g").attr("transform", `translate(0,${histIH})`)
+  .call(d3.axisBottom(xHist).ticks(6).tickFormat(d3.format("$,.0f")))
+  .selectAll("text").style("font-size", "10px");
+
+g3.append("g")
+  .call(d3.axisLeft(yHist).ticks(4))
+  .selectAll("text").style("font-size", "10px");
+
+// Stage 4: Small multiples line chart
+const stage4 = d3.select("#stage-multiples");
+stage4.append("div").attr("class", "stage-title").text("Revenue by Region (Monthly)");
+
+const grouped = d3.group(deduped, d => d.region);
+const regions = Array.from(grouped.keys()).sort();
+
+const smW = 200, smH = 120, smM = { top: 16, right: 12, bottom: 24, left: 44 };
+const smIW = smW - smM.left - smM.right;
+const smIH = smH - smM.top - smM.bottom;
+
+const allMonths = Array.from(new Set(deduped.map(d => +d.month))).sort().map(d => new Date(d));
+const yMax = d3.max(deduped, d => d.revenue);
+
+const xScale = d3.scaleTime().domain(d3.extent(allMonths)).range([0, smIW]);
+const yScale = d3.scaleLinear().domain([0, yMax * 1.05]).range([smIH, 0]);
+
+const line = d3.line()
+  .x(d => xScale(d.month))
+  .y(d => yScale(d.revenue));
+
+const colors = d3.scaleOrdinal().domain(regions).range(["#4a90d9", "#e5724a", "#50b86c", "#9b6fc3"]);
+
+const container = stage4.append("div").attr("class", "multiples");
+
+for (const region of regions) {
+  const data = grouped.get(region).sort((a, b) => a.month - b.month);
+  const div = container.append("div");
+  div.append("div").attr("class", "multiple-label").text(region);
+
+  const svg = div.append("svg").attr("width", smW).attr("height", smH);
+  const g = svg.append("g").attr("transform", `translate(${smM.left},${smM.top})`);
+
+  g.append("g").attr("transform", `translate(0,${smIH})`)
+    .call(d3.axisBottom(xScale).ticks(4).tickFormat(d3.timeFormat("%b")))
+    .selectAll("text").style("font-size", "9px");
+
+  g.append("g")
+    .call(d3.axisLeft(yScale).ticks(4).tickFormat(d3.format("$,.0f")))
+    .selectAll("text").style("font-size", "9px");
+
+  g.append("path")
+    .datum(data)
+    .attr("fill", "none")
+    .attr("stroke", colors(region))
+    .attr("stroke-width", 2)
+    .attr("d", line);
+
+  g.selectAll("circle").data(data).join("circle")
+    .attr("cx", d => xScale(d.month))
+    .attr("cy", d => yScale(d.revenue))
+    .attr("r", 2.5)
+    .attr("fill", colors(region));
+}
+
+document.body.dataset.ready = "true";
+
+</script>
+</body>
+</html>

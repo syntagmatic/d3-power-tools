@@ -1,0 +1,854 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebGL Rendering Test</title>
+<style>
+  body { margin: 0; font-family: sans-serif; background: #fafafa; }
+  #container { position: relative; margin: 20px; display: inline-block; }
+  canvas, svg { position: absolute; top: 0; left: 0; }
+  svg { pointer-events: all; }
+  canvas { pointer-events: none; }
+  .controls { margin: 20px 20px 0; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  button { padding: 5px 12px; border: 1px solid #ccc; border-radius: 4px;
+           background: #fff; cursor: pointer; font-size: 12px; }
+  button.active { background: #e8f0fe; border-color: #1a73e8; color: #1a73e8; }
+  #status { font-size: 12px; color: #666; margin-left: 12px; }
+  #tooltip { position: absolute; pointer-events: none; background: rgba(0,0,0,0.8);
+             color: #fff; padding: 4px 8px; border-radius: 3px; font-size: 11px;
+             display: none; white-space: nowrap; z-index: 10; }
+  #perf { font-size: 11px; color: #999; margin-left: 8px; }
+</style>
+</head>
+<body>
+<div class="controls">
+  <button data-action="points" class="active">Points (100K)</button>
+  <button data-action="instanced">Instanced Quads (100K)</button>
+  <button data-action="million">1M Points</button>
+  <button data-action="lines">Thick Lines</button>
+  <button data-action="brush">Brush Filter</button>
+  <span id="status">Loading...</span>
+  <span id="perf"></span>
+</div>
+<div id="container">
+  <div id="tooltip"></div>
+</div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+// ============================
+// Config
+// ============================
+const fullWidth = 960, fullHeight = 600;
+const margin = { top: 10, right: 10, bottom: 40, left: 50 };
+const width = fullWidth - margin.left - margin.right;
+const height = fullHeight - margin.top - margin.bottom;
+const dpr = window.devicePixelRatio || 1;
+
+// ============================
+// Container + layers
+// ============================
+const container = d3.select("#container")
+  .style("width", fullWidth + "px")
+  .style("height", fullHeight + "px");
+
+// WebGL canvas (data layer)
+const glCanvas = container.append("canvas")
+  .attr("width", fullWidth * dpr)
+  .attr("height", fullHeight * dpr)
+  .style("width", fullWidth + "px")
+  .style("height", fullHeight + "px")
+  .node();
+
+const gl = glCanvas.getContext("webgl2", {
+  antialias: true,
+  premultipliedAlpha: false,
+  alpha: true,
+  preserveDrawingBuffer: true  // for screenshots
+});
+
+if (!gl) {
+  document.body.innerHTML = '<p style="padding:20px;color:red;">WebGL2 not available</p>';
+  throw new Error("WebGL2 not supported");
+}
+
+gl.viewport(0, 0, fullWidth * dpr, fullHeight * dpr);
+
+// Canvas interaction layer (highlight ring)
+const intCanvas = container.append("canvas")
+  .attr("width", fullWidth * dpr)
+  .attr("height", fullHeight * dpr)
+  .style("width", fullWidth + "px")
+  .style("height", fullHeight + "px")
+  .node();
+const intCtx = intCanvas.getContext("2d");
+intCtx.scale(dpr, dpr);
+
+// SVG overlay for axes, pointer events, brush
+const svg = container.append("svg")
+  .attr("width", fullWidth)
+  .attr("height", fullHeight)
+  .style("position", "absolute")
+  .style("top", "0").style("left", "0");
+
+const g = svg.append("g")
+  .attr("transform", `translate(${margin.left},${margin.top})`);
+
+const tooltip = d3.select("#tooltip");
+const statusEl = d3.select("#status");
+const perfEl = d3.select("#perf");
+
+// ============================
+// Shader utilities
+// ============================
+function createShader(gl, type, source) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    console.error(gl.getShaderInfoLog(shader));
+    gl.deleteShader(shader);
+    return null;
+  }
+  return shader;
+}
+
+function createProgram(gl, vertSrc, fragSrc) {
+  const vs = createShader(gl, gl.VERTEX_SHADER, vertSrc);
+  const fs = createShader(gl, gl.FRAGMENT_SHADER, fragSrc);
+  const program = gl.createProgram();
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    console.error(gl.getProgramInfoLog(program));
+    return null;
+  }
+  return program;
+}
+
+// ============================
+// Shaders: Points
+// ============================
+const pointVert = `#version 300 es
+in vec2 a_position;
+in vec4 a_color;
+in float a_size;
+
+uniform vec2 u_resolution;
+uniform float u_dpr;
+uniform vec2 u_translate;
+uniform float u_scale;
+uniform vec2 u_margin;
+
+out vec4 v_color;
+
+void main() {
+  vec2 pos = (a_position * u_scale + u_translate) + u_margin;
+  vec2 clip = (pos / u_resolution) * 2.0 - 1.0;
+  clip.y = -clip.y;
+  gl_Position = vec4(clip, 0.0, 1.0);
+  gl_PointSize = a_size * u_dpr * u_scale;
+  v_color = a_color;
+}`;
+
+const pointFrag = `#version 300 es
+precision mediump float;
+in vec4 v_color;
+out vec4 fragColor;
+
+void main() {
+  vec2 c = gl_PointCoord - 0.5;
+  float dist = length(c);
+  if (dist > 0.5) discard;
+  float alpha = 1.0 - smoothstep(0.4, 0.5, dist);
+  fragColor = vec4(v_color.rgb, v_color.a * alpha);
+}`;
+
+// ============================
+// Shaders: Instanced quads
+// ============================
+const instancedVert = `#version 300 es
+in vec2 a_quad;
+in vec2 a_offset;
+in vec2 a_scale;
+in vec4 a_color;
+
+uniform vec2 u_resolution;
+uniform vec2 u_translate;
+uniform float u_zoom;
+uniform vec2 u_margin;
+
+out vec4 v_color;
+out vec2 v_uv;
+
+void main() {
+  vec2 pos = a_quad * a_scale + a_offset;
+  pos = pos * u_zoom + u_translate + u_margin;
+  vec2 clip = (pos / u_resolution) * 2.0 - 1.0;
+  clip.y = -clip.y;
+  gl_Position = vec4(clip, 0.0, 1.0);
+  v_color = a_color;
+  v_uv = a_quad + 0.5;
+}`;
+
+const instancedFrag = `#version 300 es
+precision mediump float;
+in vec4 v_color;
+in vec2 v_uv;
+out vec4 fragColor;
+
+void main() {
+  // Rounded rectangle: discard corners
+  vec2 d = abs(v_uv - 0.5) * 2.0;
+  float r = 0.3;
+  vec2 q = d - (1.0 - r);
+  float sdf = length(max(q, 0.0)) - r;
+  if (sdf > 0.02) discard;
+  float alpha = 1.0 - smoothstep(0.0, 0.02, sdf);
+  fragColor = vec4(v_color.rgb, v_color.a * alpha);
+}`;
+
+// ============================
+// Shaders: Thick lines
+// ============================
+const lineVert = `#version 300 es
+in vec2 a_quad;
+in vec2 a_p0;
+in vec2 a_p1;
+in vec4 a_color;
+
+uniform vec2 u_resolution;
+uniform float u_lineWidth;
+uniform vec2 u_translate;
+uniform float u_zoom;
+uniform vec2 u_margin;
+
+out vec4 v_color;
+
+void main() {
+  vec2 dir = a_p1 - a_p0;
+  float len = length(dir);
+  vec2 unit = dir / max(len, 0.001);
+  vec2 normal = vec2(-unit.y, unit.x);
+
+  vec2 pos = a_p0
+    + unit * (a_quad.x + 0.5) * len
+    + normal * a_quad.y * u_lineWidth;
+
+  pos = pos * u_zoom + u_translate + u_margin;
+  vec2 clip = (pos / u_resolution) * 2.0 - 1.0;
+  clip.y = -clip.y;
+  gl_Position = vec4(clip, 0.0, 1.0);
+  v_color = a_color;
+}`;
+
+const lineFrag = `#version 300 es
+precision mediump float;
+in vec4 v_color;
+out vec4 fragColor;
+
+void main() {
+  fragColor = v_color;
+}`;
+
+// ============================
+// Compile programs
+// ============================
+const pointProgram = createProgram(gl, pointVert, pointFrag);
+const instancedProgram = createProgram(gl, instancedVert, instancedFrag);
+const lineProgram = createProgram(gl, lineVert, lineFrag);
+
+// ============================
+// D3 Scales
+// ============================
+const categories = ["A", "B", "C", "D", "E"];
+const colorScale = d3.scaleOrdinal(d3.schemeTableau10).domain(categories);
+const xScale = d3.scaleLinear().domain([0, 100]).range([0, width]);
+const yScale = d3.scaleLinear().domain([0, 100]).range([height, 0]);
+
+// ============================
+// Axes
+// ============================
+const xAxisG = g.append("g")
+  .attr("class", "x-axis")
+  .attr("transform", `translate(0,${height})`)
+  .call(d3.axisBottom(xScale));
+
+const yAxisG = g.append("g")
+  .attr("class", "y-axis")
+  .call(d3.axisLeft(yScale));
+
+// ============================
+// Data generators
+// ============================
+function generateRandom(n) {
+  return d3.range(n).map(i => ({
+    id: i,
+    x: Math.random() * 100,
+    y: Math.random() * 100,
+    value: Math.random() * 50,
+    category: categories[Math.floor(Math.random() * categories.length)],
+    label: `P${i}`
+  }));
+}
+
+function generateClustered(n) {
+  const centers = [[20, 25], [50, 70], [80, 30], [35, 55], [70, 75]];
+  return d3.range(n).map(i => {
+    const ci = i % centers.length;
+    const [cx, cy] = centers[ci];
+    return {
+      id: i,
+      x: cx + d3.randomNormal(0, 8)(),
+      y: cy + d3.randomNormal(0, 8)(),
+      value: Math.max(1, 20 + d3.randomNormal(0, 10)()),
+      category: categories[ci],
+      label: `P${i}`
+    };
+  });
+}
+
+function generateLineData(n) {
+  // Generate random polylines (e.g. time-series-like)
+  const lines = [];
+  const lineCount = Math.min(500, Math.floor(n / 20));
+  const pointsPerLine = Math.floor(n / lineCount);
+  for (let li = 0; li < lineCount; li++) {
+    const points = [];
+    let y = 50 + d3.randomNormal(0, 20)();
+    for (let j = 0; j < pointsPerLine; j++) {
+      const x = (j / (pointsPerLine - 1)) * 100;
+      y += d3.randomNormal(0, 2)();
+      y = Math.max(0, Math.min(100, y));
+      points.push([x, y]);
+    }
+    lines.push({ points, category: categories[li % categories.length] });
+  }
+  return lines;
+}
+
+// ============================
+// State
+// ============================
+let data = [];
+let quadtree = null;
+let hoveredPoint = null;
+let currentTransform = d3.zoomIdentity;
+let currentMode = "points";
+let brushActive = false;
+let brushSelection = null;
+
+// GPU resources to clean up
+let currentBuffers = {};
+
+// ============================
+// Pack data into GPU buffers
+// ============================
+function packPointBuffers(data, pointSize, alphaOverride) {
+  const n = data.length;
+  const positions = new Float32Array(n * 2);
+  const colors = new Float32Array(n * 4);
+  const sizes = new Float32Array(n);
+
+  const alpha = alphaOverride != null ? alphaOverride : Math.max(0.5, Math.min(0.95, 8000 / n));
+  const sz = pointSize || Math.max(3, Math.min(8, 8 - Math.log10(n) + 2));
+
+  for (let i = 0; i < n; i++) {
+    positions[i * 2] = xScale(data[i].x);
+    positions[i * 2 + 1] = yScale(data[i].y);
+
+    const c = d3.rgb(colorScale(data[i].category));
+    colors[i * 4] = c.r / 255;
+    colors[i * 4 + 1] = c.g / 255;
+    colors[i * 4 + 2] = c.b / 255;
+    colors[i * 4 + 3] = alpha;
+
+    sizes[i] = sz;
+  }
+
+  return { positions, colors, sizes, n };
+}
+
+function uploadPointBuffers({ positions, colors, sizes, n }) {
+  cleanupBuffers();
+
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+
+  const posBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW);
+  const posLoc = gl.getAttribLocation(pointProgram, "a_position");
+  gl.enableVertexAttribArray(posLoc);
+  gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+  const colBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, colBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, colors, gl.DYNAMIC_DRAW);
+  const colLoc = gl.getAttribLocation(pointProgram, "a_color");
+  gl.enableVertexAttribArray(colLoc);
+  gl.vertexAttribPointer(colLoc, 4, gl.FLOAT, false, 0, 0);
+
+  const sizeBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, sizeBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, sizes, gl.DYNAMIC_DRAW);
+  const sizeLoc = gl.getAttribLocation(pointProgram, "a_size");
+  gl.enableVertexAttribArray(sizeLoc);
+  gl.vertexAttribPointer(sizeLoc, 1, gl.FLOAT, false, 0, 0);
+
+  currentBuffers = { vao, bufs: [posBuf, colBuf, sizeBuf], n, type: "points", colors, sizes };
+  return currentBuffers;
+}
+
+// ============================
+// Instanced quad buffers
+// ============================
+function uploadInstancedBuffers(data) {
+  cleanupBuffers();
+
+  const n = data.length;
+  const alpha = Math.max(0.5, Math.min(0.95, 8000 / n));
+
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+
+  // Template quad (two triangles)
+  const quadVerts = new Float32Array([
+    -0.5, -0.5,   0.5, -0.5,   0.5,  0.5,
+    -0.5, -0.5,   0.5,  0.5,  -0.5,  0.5
+  ]);
+  const quadBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, quadVerts, gl.STATIC_DRAW);
+  const quadLoc = gl.getAttribLocation(instancedProgram, "a_quad");
+  gl.enableVertexAttribArray(quadLoc);
+  gl.vertexAttribPointer(quadLoc, 2, gl.FLOAT, false, 0, 0);
+
+  // Per-instance: offsets
+  const offsets = new Float32Array(n * 2);
+  const scales = new Float32Array(n * 2);
+  const colors = new Float32Array(n * 4);
+
+  const sizeBase = Math.max(2, Math.min(8, 8 - Math.log10(n) + 2));
+
+  for (let i = 0; i < n; i++) {
+    offsets[i * 2] = xScale(data[i].x);
+    offsets[i * 2 + 1] = yScale(data[i].y);
+
+    const s = sizeBase + (data[i].value / 50) * sizeBase;
+    scales[i * 2] = s;
+    scales[i * 2 + 1] = s;
+
+    const c = d3.rgb(colorScale(data[i].category));
+    colors[i * 4] = c.r / 255;
+    colors[i * 4 + 1] = c.g / 255;
+    colors[i * 4 + 2] = c.b / 255;
+    colors[i * 4 + 3] = alpha;
+  }
+
+  const offsetBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, offsetBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, offsets, gl.DYNAMIC_DRAW);
+  const offsetLoc = gl.getAttribLocation(instancedProgram, "a_offset");
+  gl.enableVertexAttribArray(offsetLoc);
+  gl.vertexAttribPointer(offsetLoc, 2, gl.FLOAT, false, 0, 0);
+  gl.vertexAttribDivisor(offsetLoc, 1);
+
+  const scaleBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, scaleBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, scales, gl.DYNAMIC_DRAW);
+  const scaleLoc = gl.getAttribLocation(instancedProgram, "a_scale");
+  gl.enableVertexAttribArray(scaleLoc);
+  gl.vertexAttribPointer(scaleLoc, 2, gl.FLOAT, false, 0, 0);
+  gl.vertexAttribDivisor(scaleLoc, 1);
+
+  const colorBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, colorBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, colors, gl.DYNAMIC_DRAW);
+  const colorLoc = gl.getAttribLocation(instancedProgram, "a_color");
+  gl.enableVertexAttribArray(colorLoc);
+  gl.vertexAttribPointer(colorLoc, 4, gl.FLOAT, false, 0, 0);
+  gl.vertexAttribDivisor(colorLoc, 1);
+
+  currentBuffers = { vao, bufs: [quadBuf, offsetBuf, scaleBuf, colorBuf], n, type: "instanced", colors };
+  return currentBuffers;
+}
+
+// ============================
+// Line segment buffers
+// ============================
+function uploadLineBuffers(lineData) {
+  cleanupBuffers();
+
+  // Convert polylines to segments
+  let totalSegments = 0;
+  for (const line of lineData) totalSegments += line.points.length - 1;
+
+  const p0 = new Float32Array(totalSegments * 2);
+  const p1 = new Float32Array(totalSegments * 2);
+  const colors = new Float32Array(totalSegments * 4);
+  const alpha = Math.max(0.3, Math.min(0.7, 500 / lineData.length));
+
+  let si = 0;
+  for (const line of lineData) {
+    const c = d3.rgb(colorScale(line.category));
+    for (let j = 0; j < line.points.length - 1; j++) {
+      p0[si * 2] = xScale(line.points[j][0]);
+      p0[si * 2 + 1] = yScale(line.points[j][1]);
+      p1[si * 2] = xScale(line.points[j + 1][0]);
+      p1[si * 2 + 1] = yScale(line.points[j + 1][1]);
+      colors[si * 4] = c.r / 255;
+      colors[si * 4 + 1] = c.g / 255;
+      colors[si * 4 + 2] = c.b / 255;
+      colors[si * 4 + 3] = alpha;
+      si++;
+    }
+  }
+
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+
+  // Template quad
+  const quadVerts = new Float32Array([
+    -0.5, -0.5,   0.5, -0.5,   0.5,  0.5,
+    -0.5, -0.5,   0.5,  0.5,  -0.5,  0.5
+  ]);
+  const quadBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, quadVerts, gl.STATIC_DRAW);
+  const quadLoc = gl.getAttribLocation(lineProgram, "a_quad");
+  gl.enableVertexAttribArray(quadLoc);
+  gl.vertexAttribPointer(quadLoc, 2, gl.FLOAT, false, 0, 0);
+
+  const p0Buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, p0Buf);
+  gl.bufferData(gl.ARRAY_BUFFER, p0, gl.STATIC_DRAW);
+  const p0Loc = gl.getAttribLocation(lineProgram, "a_p0");
+  gl.enableVertexAttribArray(p0Loc);
+  gl.vertexAttribPointer(p0Loc, 2, gl.FLOAT, false, 0, 0);
+  gl.vertexAttribDivisor(p0Loc, 1);
+
+  const p1Buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, p1Buf);
+  gl.bufferData(gl.ARRAY_BUFFER, p1, gl.STATIC_DRAW);
+  const p1Loc = gl.getAttribLocation(lineProgram, "a_p1");
+  gl.enableVertexAttribArray(p1Loc);
+  gl.vertexAttribPointer(p1Loc, 2, gl.FLOAT, false, 0, 0);
+  gl.vertexAttribDivisor(p1Loc, 1);
+
+  const colorBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, colorBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, colors, gl.STATIC_DRAW);
+  const colorLoc = gl.getAttribLocation(lineProgram, "a_color");
+  gl.enableVertexAttribArray(colorLoc);
+  gl.vertexAttribPointer(colorLoc, 4, gl.FLOAT, false, 0, 0);
+  gl.vertexAttribDivisor(colorLoc, 1);
+
+  currentBuffers = { vao, bufs: [quadBuf, p0Buf, p1Buf, colorBuf], n: totalSegments, type: "lines" };
+  return currentBuffers;
+}
+
+function cleanupBuffers() {
+  if (currentBuffers.vao) {
+    gl.deleteVertexArray(currentBuffers.vao);
+    for (const buf of (currentBuffers.bufs || [])) gl.deleteBuffer(buf);
+  }
+  currentBuffers = {};
+}
+
+// ============================
+// Draw functions
+// ============================
+function drawPoints() {
+  const t0 = performance.now();
+  gl.clearColor(0.98, 0.98, 0.98, 1.0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+  gl.useProgram(pointProgram);
+  gl.bindVertexArray(currentBuffers.vao);
+
+  gl.uniform2f(gl.getUniformLocation(pointProgram, "u_resolution"), fullWidth, fullHeight);
+  gl.uniform1f(gl.getUniformLocation(pointProgram, "u_dpr"), dpr);
+  gl.uniform2f(gl.getUniformLocation(pointProgram, "u_translate"),
+    currentTransform.x, currentTransform.y);
+  gl.uniform1f(gl.getUniformLocation(pointProgram, "u_scale"), currentTransform.k);
+  gl.uniform2f(gl.getUniformLocation(pointProgram, "u_margin"), margin.left, margin.top);
+
+  gl.drawArrays(gl.POINTS, 0, currentBuffers.n);
+
+  const elapsed = performance.now() - t0;
+  perfEl.text(`${elapsed.toFixed(1)}ms`);
+}
+
+function drawInstanced() {
+  const t0 = performance.now();
+  gl.clearColor(0.98, 0.98, 0.98, 1.0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+  gl.useProgram(instancedProgram);
+  gl.bindVertexArray(currentBuffers.vao);
+
+  gl.uniform2f(gl.getUniformLocation(instancedProgram, "u_resolution"), fullWidth, fullHeight);
+  gl.uniform2f(gl.getUniformLocation(instancedProgram, "u_translate"),
+    currentTransform.x, currentTransform.y);
+  gl.uniform1f(gl.getUniformLocation(instancedProgram, "u_zoom"), currentTransform.k);
+  gl.uniform2f(gl.getUniformLocation(instancedProgram, "u_margin"), margin.left, margin.top);
+
+  gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, currentBuffers.n);
+
+  const elapsed = performance.now() - t0;
+  perfEl.text(`${elapsed.toFixed(1)}ms`);
+}
+
+function drawLines() {
+  const t0 = performance.now();
+  gl.clearColor(0.98, 0.98, 0.98, 1.0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+  gl.useProgram(lineProgram);
+  gl.bindVertexArray(currentBuffers.vao);
+
+  gl.uniform2f(gl.getUniformLocation(lineProgram, "u_resolution"), fullWidth, fullHeight);
+  gl.uniform1f(gl.getUniformLocation(lineProgram, "u_lineWidth"), 1.5);
+  gl.uniform2f(gl.getUniformLocation(lineProgram, "u_translate"),
+    currentTransform.x, currentTransform.y);
+  gl.uniform1f(gl.getUniformLocation(lineProgram, "u_zoom"), currentTransform.k);
+  gl.uniform2f(gl.getUniformLocation(lineProgram, "u_margin"), margin.left, margin.top);
+
+  gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, currentBuffers.n);
+
+  const elapsed = performance.now() - t0;
+  perfEl.text(`${elapsed.toFixed(1)}ms`);
+}
+
+function render() {
+  if (currentBuffers.type === "points") drawPoints();
+  else if (currentBuffers.type === "instanced") drawInstanced();
+  else if (currentBuffers.type === "lines") drawLines();
+}
+
+// ============================
+// Quadtree hit detection
+// ============================
+function buildQuadtree() {
+  quadtree = d3.quadtree()
+    .x(d => xScale(d.x))
+    .y(d => yScale(d.y))
+    .addAll(data);
+}
+
+function findNearest(mx, my, radius = 20) {
+  if (!quadtree) return null;
+  const tx = (mx - margin.left - currentTransform.x) / currentTransform.k;
+  const ty = (my - margin.top - currentTransform.y) / currentTransform.k;
+  return quadtree.find(tx, ty, radius / currentTransform.k);
+}
+
+// ============================
+// Interaction highlight (Canvas 2D)
+// ============================
+function drawHighlight(point) {
+  intCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  intCtx.clearRect(0, 0, fullWidth, fullHeight);
+  if (!point) return;
+
+  const px = margin.left + currentTransform.x + currentTransform.k * xScale(point.x);
+  const py = margin.top + currentTransform.y + currentTransform.k * yScale(point.y);
+
+  intCtx.strokeStyle = "#1a73e8";
+  intCtx.lineWidth = 2;
+  intCtx.beginPath();
+  intCtx.arc(px, py, 8, 0, Math.PI * 2);
+  intCtx.stroke();
+
+  intCtx.fillStyle = colorScale(point.category);
+  intCtx.beginPath();
+  intCtx.arc(px, py, 5, 0, Math.PI * 2);
+  intCtx.fill();
+}
+
+// ============================
+// Zoom
+// ============================
+const zoom = d3.zoom()
+  .scaleExtent([0.5, 50])
+  .on("zoom", ({ transform }) => {
+    currentTransform = transform;
+    render();
+  });
+
+svg.call(zoom);
+
+// ============================
+// Hover
+// ============================
+svg.on("pointermove", (event) => {
+  if (brushActive) return;
+  const [mx, my] = d3.pointer(event);
+  const nearest = findNearest(mx, my);
+
+  if (nearest !== hoveredPoint) {
+    hoveredPoint = nearest;
+    drawHighlight(hoveredPoint);
+
+    if (hoveredPoint) {
+      tooltip
+        .style("display", "block")
+        .style("left", (mx + 12) + "px")
+        .style("top", (my - 10) + "px")
+        .text(`${hoveredPoint.label} (${hoveredPoint.category}): ${hoveredPoint.x.toFixed(1)}, ${hoveredPoint.y.toFixed(1)}`);
+    } else {
+      tooltip.style("display", "none");
+    }
+  }
+});
+
+svg.on("pointerleave", () => {
+  hoveredPoint = null;
+  drawHighlight(null);
+  tooltip.style("display", "none");
+});
+
+// ============================
+// Brush filtering
+// ============================
+let brushG = null;
+const brush = d3.brush()
+  .extent([[0, 0], [width, height]])
+  .on("brush end", brushed);
+
+function brushed({ selection }) {
+  brushSelection = selection;
+  if (!selection || currentBuffers.type !== "points") return;
+
+  // Update alpha based on brush selection
+  const [[x0, y0], [x1, y1]] = selection;
+  const n = data.length;
+  const colors = new Float32Array(n * 4);
+  const baseAlpha = Math.max(0.5, Math.min(0.95, 8000 / n));
+
+  let selectedCount = 0;
+  for (let i = 0; i < n; i++) {
+    const px = xScale(data[i].x);
+    const py = yScale(data[i].y);
+    const inside = px >= x0 && px <= x1 && py >= y0 && py <= y1;
+    if (inside) selectedCount++;
+
+    const c = d3.rgb(colorScale(data[i].category));
+    colors[i * 4] = c.r / 255;
+    colors[i * 4 + 1] = c.g / 255;
+    colors[i * 4 + 2] = c.b / 255;
+    colors[i * 4 + 3] = inside ? Math.min(1.0, baseAlpha * 1.5) : baseAlpha * 0.3;
+  }
+
+  // Update GPU buffer
+  gl.bindBuffer(gl.ARRAY_BUFFER, currentBuffers.bufs[1]);
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, colors);
+  render();
+  statusEl.text(`${selectedCount.toLocaleString()} / ${n.toLocaleString()} selected`);
+}
+
+function enableBrush() {
+  brushG = g.append("g").attr("class", "brush").call(brush);
+  brushActive = true;
+  svg.on(".zoom", null);  // disable zoom while brushing
+}
+
+function disableBrush() {
+  if (brushG) brushG.remove();
+  brushG = null;
+  brushActive = false;
+  brushSelection = null;
+  svg.call(zoom);
+  // Restore full alpha
+  if (currentBuffers.type === "points" && data.length > 0) {
+    const packed = packPointBuffers(data);
+    gl.bindBuffer(gl.ARRAY_BUFFER, currentBuffers.bufs[1]);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, packed.colors);
+    render();
+  }
+}
+
+// ============================
+// Mode switching
+// ============================
+function loadMode(mode) {
+  currentMode = mode;
+  disableBrush();
+  hoveredPoint = null;
+  drawHighlight(null);
+  tooltip.style("display", "none");
+  currentTransform = d3.zoomIdentity;
+  svg.call(zoom.transform, d3.zoomIdentity);
+
+  const t0 = performance.now();
+
+  if (mode === "points") {
+    data = generateClustered(100000);
+    buildQuadtree();
+    const packed = packPointBuffers(data);
+    uploadPointBuffers(packed);
+    render();
+    statusEl.text(`${data.length.toLocaleString()} points (WebGL)`);
+  } else if (mode === "instanced") {
+    data = generateClustered(100000);
+    buildQuadtree();
+    uploadInstancedBuffers(data);
+    render();
+    statusEl.text(`${data.length.toLocaleString()} instanced quads (WebGL)`);
+  } else if (mode === "million") {
+    data = generateClustered(1000000);
+    buildQuadtree();
+    const packed = packPointBuffers(data, 2, 0.35);
+    uploadPointBuffers(packed);
+    render();
+    statusEl.text(`${data.length.toLocaleString()} points (WebGL)`);
+  } else if (mode === "lines") {
+    const lineData = generateLineData(10000);
+    data = [];  // no point hover for lines
+    quadtree = null;
+    uploadLineBuffers(lineData);
+    render();
+    const segCount = currentBuffers.n;
+    statusEl.text(`${lineData.length} polylines, ${segCount.toLocaleString()} segments (WebGL)`);
+  } else if (mode === "brush") {
+    data = generateClustered(100000);
+    buildQuadtree();
+    const packed = packPointBuffers(data);
+    uploadPointBuffers(packed);
+    render();
+    enableBrush();
+    statusEl.text(`${data.length.toLocaleString()} points — brush to filter`);
+  }
+
+  const loadTime = performance.now() - t0;
+  perfEl.text(`load: ${loadTime.toFixed(0)}ms`);
+
+  // Update button states
+  d3.selectAll(".controls button").classed("active", false);
+  d3.select(`[data-action=${mode}]`).classed("active", true);
+}
+
+// ============================
+// Button handlers
+// ============================
+d3.selectAll(".controls button[data-action]").on("click", function() {
+  loadMode(this.dataset.action);
+});
+
+// ============================
+// Initial load
+// ============================
+loadMode("points");
+
+// Signal ready for test runner
+document.body.setAttribute("data-ready", "true");
+</script>
+</body>
+</html>

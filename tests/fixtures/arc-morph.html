@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Arc Morph: Bar ↔ Pie Test</title>
+<style>
+  body { margin: 0; font-family: sans-serif; background: #fafafa; }
+  #controls { padding: 12px 20px; display: flex; gap: 8px; }
+  button { padding: 6px 14px; border: 1px solid #999; border-radius: 4px;
+           background: #fff; cursor: pointer; font-size: 13px; }
+  button:hover { background: #eee; }
+  button.active { background: steelblue; color: #fff; border-color: steelblue; }
+  svg { display: block; }
+  .shape { stroke: #fff; stroke-width: 1px; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <button data-action="bar" class="active">Bar</button>
+  <button data-action="pie">Pie</button>
+  <button data-action="donut">Donut</button>
+  <button data-action="add">Add Items</button>
+  <button data-action="remove">Remove Items</button>
+  <button data-action="shuffle">Shuffle</button>
+</div>
+<svg id="chart"></svg>
+<div id="status" style="padding: 4px 20px; font-size: 12px; color: #666;"></div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+const width = 960;
+const height = 500;
+const cx = width / 2;
+const cy = height / 2;
+const r = Math.min(cx, cy) - 40;
+
+const svg = d3.select("#chart")
+  .attr("width", width)
+  .attr("height", height)
+  .append("g")
+  .attr("transform", `translate(${cx},${cy})`);
+
+const arc = d3.arc();
+const color = d3.scaleOrdinal(d3.schemeTableau10);
+const pie = d3.pie().value(d => d.value).sortValues(null);
+
+let nextId = 0;
+function generateData(n) {
+  return d3.range(n).map(() => ({
+    id: nextId++,
+    label: String.fromCharCode(65 + (nextId % 26)),
+    value: 10 + Math.floor(Math.random() * 90),
+  }));
+}
+
+let data = generateData(8);
+let currentMode = "bar";
+let morphCount = 0;
+
+// Compute bar-like arc params: equal-width wedges, height = value
+function barAngles(d, i, n) {
+  const gap = 0.02;
+  const barWidth = (2 * Math.PI) / n;
+  return {
+    innerRadius: 0,
+    outerRadius: 40 + (d.data.value / 100) * (r - 40),
+    startAngle: i * barWidth + gap,
+    endAngle: (i + 1) * barWidth - gap,
+  };
+}
+
+// Standard pie wedges
+function pieAngles(d) {
+  return {
+    innerRadius: 0,
+    outerRadius: r,
+    startAngle: d.startAngle,
+    endAngle: d.endAngle,
+  };
+}
+
+// Donut wedges
+function donutAngles(d) {
+  return {
+    innerRadius: r * 0.5,
+    outerRadius: r,
+    startAngle: d.startAngle,
+    endAngle: d.endAngle,
+  };
+}
+
+function getTargetFn(mode) {
+  switch (mode) {
+    case "bar": return barAngles;
+    case "pie": return pieAngles;
+    case "donut": return donutAngles;
+  }
+}
+
+function render(mode, duration = 800) {
+  currentMode = mode;
+  const targetFn = getTargetFn(mode);
+  const pieData = pie(data);
+
+  const shapes = svg.selectAll(".shape")
+    .data(pieData, d => d.data.id);
+
+  const exitSel = shapes.exit();
+  const enterSel = shapes.enter();
+  const hasExit = !exitSel.empty();
+  const hasEnter = !enterSel.empty();
+
+  // Staging: exit → update → enter
+  const exitDur = Math.round(duration * 0.3);
+  const updateDur = Math.round(duration * 0.5);
+  const enterDur = Math.round(duration * 0.3);
+  const updateDelay = hasExit ? exitDur : 0;
+  const enterDelay = hasEnter ? updateDelay + updateDur : 0;
+
+  // Phase 1: Exit — collapse to zero-area slivers
+  exitSel
+    .transition().duration(exitDur)
+    .attrTween("d", function() {
+      const prev = this.__arcParams;
+      const collapsed = {
+        ...prev,
+        endAngle: prev.startAngle,
+        outerRadius: prev.innerRadius,
+      };
+      const interp = d3.interpolate(prev, collapsed);
+      return t => arc(interp(t));
+    })
+    .remove();
+
+  // Phase 2: Update — morph existing shapes to new positions
+  shapes
+    .transition().delay(updateDelay).duration(updateDur)
+    .attrTween("d", function(d, i) {
+      const prev = this.__arcParams;
+      const next = targetFn(d, i, data.length);
+      const interp = d3.interpolate(prev, next);
+      return t => {
+        const params = interp(t);
+        this.__arcParams = params;
+        return arc(params);
+      };
+    });
+
+  // Phase 3: Enter — new shapes expand from zero
+  enterSel
+    .append("path")
+    .attr("class", "shape")
+    .attr("fill", d => color(d.data.id))
+    .each(function(d, i) {
+      const target = targetFn(d, i, data.length);
+      const start = {
+        ...target,
+        endAngle: target.startAngle,
+        outerRadius: target.innerRadius,
+      };
+      this.__arcParams = start;
+      d3.select(this).attr("d", arc(start));
+    })
+    .transition().delay(enterDelay).duration(enterDur)
+    .attrTween("d", function(d, i) {
+      const prev = this.__arcParams;
+      const next = targetFn(d, i, data.length);
+      const interp = d3.interpolate(prev, next);
+      return t => {
+        const params = interp(t);
+        this.__arcParams = params;
+        return arc(params);
+      };
+    })
+    .on("end", function() {
+      const pathD = d3.select(this).attr("d");
+      if (!pathD || pathD === "M0,0Z" || pathD.includes("NaN")) {
+        console.error("Invalid path after morph:", pathD);
+        document.getElementById("chart").dataset.error = "invalid-path";
+      }
+    });
+
+  morphCount++;
+  const statusText = `Mode: ${mode} | Items: ${data.length} | Morphs: ${morphCount}`;
+  d3.select("#status").text(statusText);
+  const chart = document.getElementById("chart");
+  chart.dataset.morphCount = morphCount;
+  chart.dataset.itemCount = data.length;
+  chart.dataset.mode = mode;
+}
+
+// Button handlers
+d3.selectAll("button").on("click", function() {
+  const action = this.dataset.action;
+
+  d3.selectAll("button").classed("active", false);
+  d3.select(this).classed("active", true);
+
+  switch (action) {
+    case "bar":
+    case "pie":
+    case "donut":
+      render(action);
+      break;
+    case "add":
+      data = [...data, ...generateData(3)];
+      render(currentMode);
+      break;
+    case "remove":
+      // Remove last 3 items (deterministic, no shuffle)
+      if (data.length > 3) {
+        data = data.slice(0, data.length - 3);
+      }
+      render(currentMode);
+      break;
+    case "shuffle":
+      data = d3.shuffle(data.slice());
+      render(currentMode);
+      break;
+  }
+});
+
+// Initial render
+render("bar");
+document.getElementById("chart").dataset.ready = "true";
+</script>
+</body>
+</html>

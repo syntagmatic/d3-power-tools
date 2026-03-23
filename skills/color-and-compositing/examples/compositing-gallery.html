@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Canvas Compositing Gallery</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: #fff; padding: 20px; color: #333; }
+  h1 { font-size: 18px; margin-bottom: 4px; }
+  p.subtitle { font-size: 13px; color: #666; margin-bottom: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; max-width: 960px; }
+  .cell { text-align: center; }
+  .cell canvas { display: block; margin: 0 auto; border: 1px solid #eee; }
+  .cell .label { font-size: 12px; font-weight: 600; margin-top: 6px; }
+  .cell .desc { font-size: 11px; color: #888; margin-top: 2px; }
+  .controls { margin: 10px 0; display: flex; align-items: center; gap: 12px; font-size: 13px; flex-wrap: wrap; }
+  input[type=range] { width: 180px; }
+  .vision-controls { margin: 10px 0; display: flex; gap: 6px; flex-wrap: wrap; }
+  .vision-controls button {
+    padding: 4px 10px; border: 1px solid #ccc; border-radius: 4px;
+    background: #f8f8f8; cursor: pointer; font-size: 12px;
+  }
+  .vision-controls button.active { background: #4477AA; color: #fff; border-color: #4477AA; }
+  .vision-label { font-size: 12px; font-weight: 600; margin-right: 4px; }
+</style>
+</head>
+<body>
+
+<h1>Canvas Compositing Gallery</h1>
+<p class="subtitle">Same scatter data rendered with six different <code>globalCompositeOperation</code> modes</p>
+
+<div class="controls">
+  <label>Alpha: <input type="range" id="alpha-slider" min="1" max="100" value="8"> <span id="alpha-val">0.08</span></label>
+  <label>Points: <input type="range" id="count-slider" min="500" max="8000" step="500" value="3000"> <span id="count-val">3000</span></label>
+</div>
+<div class="vision-controls">
+  <span class="vision-label">Vision:</span>
+  <button data-vision="normal" class="active">Normal</button>
+  <button data-vision="protanopia">Protanopia</button>
+  <button data-vision="deuteranopia">Deuteranopia</button>
+  <button data-vision="tritanopia">Tritanopia</button>
+  <button data-vision="achromatopsia">Achromatopsia</button>
+  <button data-vision="low-contrast">Low contrast</button>
+</div>
+
+<div class="grid" id="grid"></div>
+
+<script type="module">
+const W = 280, H = 220;
+
+// --- Dichromacy simulation (Viénot/Brettel) ---
+function linearize(c) {
+  c /= 255;
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+function delinearize(c) {
+  return Math.round(Math.max(0, Math.min(1, c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1/2.4) - 0.055)) * 255);
+}
+
+const simMatrices = {
+  protanopia:    [0.152286,1.052583,-0.204868, 0.114503,0.786281,0.099216, -0.003882,-0.048116,1.051998],
+  deuteranopia:  [0.367322,0.860646,-0.227968, 0.280085,0.672501,0.047413, -0.011820,0.042940,0.968881],
+  tritanopia:    [1.255528,-0.076749,-0.178779, -0.078411,0.930809,0.147602, 0.004733,0.691367,0.303900],
+};
+
+function applyDichromacy(imageData, type) {
+  const m = simMatrices[type];
+  const d = imageData.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const lr = linearize(d[i]), lg = linearize(d[i+1]), lb = linearize(d[i+2]);
+    d[i]   = delinearize(m[0]*lr + m[1]*lg + m[2]*lb);
+    d[i+1] = delinearize(m[3]*lr + m[4]*lg + m[5]*lb);
+    d[i+2] = delinearize(m[6]*lr + m[7]*lg + m[8]*lb);
+  }
+}
+
+function applyAchromatopsia(imageData) {
+  const d = imageData.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const gray = Math.round(0.2126 * d[i] + 0.7152 * d[i+1] + 0.0722 * d[i+2]);
+    d[i] = d[i+1] = d[i+2] = gray;
+  }
+}
+
+function applyLowContrast(imageData) {
+  const d = imageData.data;
+  // Reduce contrast to ~30% — simulates low-contrast vision or washed-out display
+  for (let i = 0; i < d.length; i += 4) {
+    d[i]   = Math.round(128 + (d[i]   - 128) * 0.3);
+    d[i+1] = Math.round(128 + (d[i+1] - 128) * 0.3);
+    d[i+2] = Math.round(128 + (d[i+2] - 128) * 0.3);
+  }
+}
+
+function applyVisionSim(imageData, vision) {
+  if (vision === "normal") return;
+  if (simMatrices[vision]) { applyDichromacy(imageData, vision); return; }
+  if (vision === "achromatopsia") { applyAchromatopsia(imageData); return; }
+  if (vision === "low-contrast") { applyLowContrast(imageData); return; }
+}
+
+// --- Compositing modes ---
+const modes = [
+  { mode: "source-over", bg: "#fff", desc: "Default — later draws cover earlier ones" },
+  { mode: "lighter",     bg: "#111", desc: "RGB values sum — bright = dense" },
+  { mode: "multiply",    bg: "#fff", desc: "Darkens overlaps — Venn diagram effect" },
+  { mode: "screen",      bg: "#222", desc: "Lightens overlaps — glow on dark bg" },
+  { mode: "difference",  bg: "#888", desc: "Absolute RGB difference — change detection" },
+  { mode: "overlay",     bg: "#777", desc: "Multiply dark, screen light — needs mid-tone bg" },
+];
+
+const tolBright = ["#4477AA", "#EE6677", "#228833"];
+const groups = ["A", "B", "C"];
+const centers = { A: [W * 0.35, H * 0.4], B: [W * 0.65, H * 0.55], C: [W * 0.5, H * 0.3] };
+const color = d3.scaleOrdinal(tolBright).domain(groups);
+
+// Create grid cells
+const grid = d3.select("#grid");
+const cells = modes.map(m => {
+  const cell = grid.append("div").attr("class", "cell");
+  const canvas = cell.append("canvas").attr("width", W).attr("height", H).node();
+  cell.append("div").attr("class", "label").text(m.mode);
+  cell.append("div").attr("class", "desc").text(m.desc);
+  return { ...m, canvas };
+});
+
+function generateData(n) {
+  const rng = d3.randomLcg(42);
+  const randNorm = d3.randomNormal.source(rng)(0, 1);
+  return d3.range(n).map(() => {
+    const g = groups[Math.floor(rng() * 3)];
+    const [cx, cy] = centers[g];
+    return { x: cx + randNorm() * 40, y: cy + randNorm() * 35, group: g };
+  });
+}
+
+// Some modes attenuate colors heavily and need higher alpha to be visible
+const alphaBoost = { multiply: 3, overlay: 4, difference: 2 };
+
+let currentVision = "normal";
+
+function drawAll(alpha, n) {
+  const data = generateData(n);
+  for (const cell of cells) {
+    const ctx = cell.canvas.getContext("2d");
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = cell.bg;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.globalCompositeOperation = cell.mode;
+    const a = Math.min(1, alpha * (alphaBoost[cell.mode] || 1));
+
+    for (const g of groups) {
+      const c = d3.rgb(color(g));
+      ctx.fillStyle = `rgba(${c.r},${c.g},${c.b},${a})`;
+      ctx.beginPath();
+      for (const d of data) {
+        if (d.group !== g) continue;
+        ctx.moveTo(d.x + 2.5, d.y);
+        ctx.arc(d.x, d.y, 2.5, 0, Math.PI * 2);
+      }
+      ctx.fill();
+    }
+    ctx.globalCompositeOperation = "source-over";
+
+    // Apply vision simulation
+    if (currentVision !== "normal") {
+      const imageData = ctx.getImageData(0, 0, W, H);
+      applyVisionSim(imageData, currentVision);
+      ctx.putImageData(imageData, 0, 0);
+    }
+  }
+}
+
+// Controls
+const alphaSlider = document.getElementById("alpha-slider");
+const countSlider = document.getElementById("count-slider");
+const alphaVal = document.getElementById("alpha-val");
+const countVal = document.getElementById("count-val");
+
+function update() {
+  const alpha = +alphaSlider.value / 100;
+  const n = +countSlider.value;
+  alphaVal.textContent = alpha.toFixed(2);
+  countVal.textContent = n;
+  drawAll(alpha, n);
+}
+
+alphaSlider.addEventListener("input", update);
+countSlider.addEventListener("input", update);
+
+// Vision mode buttons
+d3.selectAll(".vision-controls button").on("click", function() {
+  currentVision = this.dataset.vision;
+  d3.selectAll(".vision-controls button").classed("active", false);
+  d3.select(this).classed("active", true);
+  update();
+});
+
+update();
+document.body.dataset.ready = "true";
+</script>
+</body>
+</html>

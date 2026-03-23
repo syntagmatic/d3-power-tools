@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hierarchical Edge Bundling</title>
+<style>
+  body { margin: 0; font-family: sans-serif; background: #fafafa; }
+  #controls { padding: 12px 20px; display: flex; gap: 12px; align-items: center; font-size: 13px; }
+  #controls label { display: flex; align-items: center; gap: 6px; }
+  #controls input[type=range] { width: 140px; }
+  .link { fill: none; stroke: #888; stroke-opacity: 0.3; stroke-width: 1; }
+  .link--highlighted { stroke: #e03131; stroke-opacity: 0.8; stroke-width: 1.5; }
+  .link--faded { stroke-opacity: 0.05; }
+  .node text { font-size: 10px; fill: #333; }
+  .node--highlighted text { fill: #e03131; font-weight: 600; }
+  .node--faded text { fill-opacity: 0.2; }
+  .node circle { cursor: pointer; }
+  #status { padding: 4px 20px; font-size: 12px; color: #666; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <label>Tension: <input id="tension" type="range" min="0" max="100" value="85">
+    <span id="tension-val">0.85</span></label>
+  <button data-action="low-tension">Low (0.2)</button>
+  <button data-action="high-tension">High (0.95)</button>
+  <button data-action="color-group">Color by Group</button>
+</div>
+<svg id="chart"></svg>
+<div id="status"></div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+const width = 960, height = 960;
+const radius = width / 2;
+
+const svg = d3.select("#chart")
+  .attr("width", width).attr("height", height)
+  .append("g").attr("transform", `translate(${radius},${radius})`);
+
+const status = d3.select("#status");
+
+// --- Inline data: software module hierarchy with cross-dependencies ---
+const nodes = [
+  { id: "root", parent: "" },
+  { id: "app", parent: "root" },
+  { id: "app.main", parent: "app" },
+  { id: "app.config", parent: "app" },
+  { id: "app.router", parent: "app" },
+  { id: "ui", parent: "root" },
+  { id: "ui.button", parent: "ui" },
+  { id: "ui.modal", parent: "ui" },
+  { id: "ui.form", parent: "ui" },
+  { id: "ui.list", parent: "ui" },
+  { id: "ui.tooltip", parent: "ui" },
+  { id: "data", parent: "root" },
+  { id: "data.store", parent: "data" },
+  { id: "data.api", parent: "data" },
+  { id: "data.cache", parent: "data" },
+  { id: "data.sync", parent: "data" },
+  { id: "util", parent: "root" },
+  { id: "util.log", parent: "util" },
+  { id: "util.format", parent: "util" },
+  { id: "util.validate", parent: "util" },
+  { id: "util.debounce", parent: "util" },
+  { id: "auth", parent: "root" },
+  { id: "auth.login", parent: "auth" },
+  { id: "auth.session", parent: "auth" },
+  { id: "auth.permissions", parent: "auth" },
+  { id: "viz", parent: "root" },
+  { id: "viz.chart", parent: "viz" },
+  { id: "viz.axis", parent: "viz" },
+  { id: "viz.legend", parent: "viz" },
+  { id: "viz.tooltip", parent: "viz" },
+];
+
+const connections = [
+  { source: "app.main", target: "app.router" },
+  { source: "app.main", target: "app.config" },
+  { source: "app.main", target: "data.store" },
+  { source: "app.main", target: "auth.login" },
+  { source: "app.router", target: "ui.modal" },
+  { source: "app.router", target: "auth.permissions" },
+  { source: "app.config", target: "util.log" },
+  { source: "ui.button", target: "util.debounce" },
+  { source: "ui.modal", target: "ui.button" },
+  { source: "ui.form", target: "util.validate" },
+  { source: "ui.form", target: "ui.button" },
+  { source: "ui.list", target: "data.api" },
+  { source: "ui.list", target: "util.format" },
+  { source: "ui.tooltip", target: "util.format" },
+  { source: "data.store", target: "data.api" },
+  { source: "data.store", target: "data.cache" },
+  { source: "data.api", target: "auth.session" },
+  { source: "data.api", target: "util.log" },
+  { source: "data.sync", target: "data.store" },
+  { source: "data.sync", target: "data.api" },
+  { source: "data.cache", target: "util.log" },
+  { source: "auth.login", target: "data.api" },
+  { source: "auth.login", target: "ui.form" },
+  { source: "auth.session", target: "data.cache" },
+  { source: "auth.permissions", target: "auth.session" },
+  { source: "viz.chart", target: "data.store" },
+  { source: "viz.chart", target: "viz.axis" },
+  { source: "viz.chart", target: "viz.legend" },
+  { source: "viz.chart", target: "ui.tooltip" },
+  { source: "viz.axis", target: "util.format" },
+  { source: "viz.tooltip", target: "ui.tooltip" },
+  { source: "viz.legend", target: "util.format" },
+];
+
+// --- Build hierarchy ---
+const root = d3.stratify()
+  .id(d => d.id)
+  .parentId(d => d.parent || null)(nodes);
+
+// --- Radial cluster layout ---
+const cluster = d3.cluster()
+  .size([2 * Math.PI, radius - 140])
+  .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth);
+
+cluster(root);
+
+// --- Compute LCA paths ---
+const nodesById = new Map(root.descendants().map(d => [d.data.id, d]));
+const links = connections.map(c => {
+  const s = nodesById.get(c.source), t = nodesById.get(c.target);
+  return s && t ? s.path(t) : null;
+}).filter(Boolean);
+
+// --- Bundle curve generator ---
+let tension = 0.85;
+const line = d3.lineRadial()
+  .curve(d3.curveBundle.beta(1 - tension))
+  .radius(d => d.y)
+  .angle(d => d.x);
+
+// --- Color scale for groups ---
+const color = d3.scaleOrdinal(d3.schemeTableau10);
+function groupOf(d) {
+  let node = d;
+  while (node.depth > 1) node = node.parent;
+  return node.data.id;
+}
+let colorByGroup = false;
+
+// --- Draw edges ---
+const linkSelection = svg.selectAll("path.link")
+  .data(links)
+  .join("path")
+    .attr("class", "link")
+    .attr("d", line);
+
+// --- Draw leaf nodes + labels ---
+const nodeSelection = svg.selectAll("g.node")
+  .data(root.leaves())
+  .join("g")
+    .attr("class", "node")
+    .attr("transform", d =>
+      `rotate(${d.x * 180 / Math.PI - 90}) translate(${d.y},0)`);
+
+nodeSelection.append("circle").attr("r", 3).attr("fill", "#555");
+
+nodeSelection.append("text")
+  .attr("dy", "0.31em")
+  .attr("x", d => d.x < Math.PI ? 6 : -6)
+  .attr("text-anchor", d => d.x < Math.PI ? "start" : "end")
+  .attr("transform", d => d.x >= Math.PI ? "rotate(180)" : null)
+  .text(d => d.data.id.split(".").pop());
+
+// --- Highlight on hover ---
+function getConnectedLinks(node) {
+  const leafIds = new Set(node.leaves().map(d => d.data.id));
+  return links.filter(l =>
+    leafIds.has(l[0].data.id) || leafIds.has(l[l.length - 1].data.id));
+}
+
+let selectedNode = null;
+
+nodeSelection
+  .on("mouseover", (event, d) => {
+    if (selectedNode) return;
+    highlight(d);
+  })
+  .on("mouseout", () => {
+    if (selectedNode) return;
+    clearHighlight();
+  })
+  .on("click", (event, d) => {
+    if (selectedNode === d) {
+      selectedNode = null;
+      clearHighlight();
+    } else {
+      selectedNode = d;
+      highlight(d);
+    }
+  });
+
+function highlight(d) {
+  const connected = getConnectedLinks(d);
+  const connectedIds = new Set();
+  connected.forEach(l => {
+    connectedIds.add(l[0].data.id);
+    connectedIds.add(l[l.length - 1].data.id);
+  });
+
+  linkSelection.classed("link--faded", true);
+  nodeSelection.classed("node--faded", true);
+  linkSelection.filter(l => connected.includes(l))
+    .classed("link--faded", false).classed("link--highlighted", true).raise();
+  nodeSelection.filter(n => connectedIds.has(n.data.id))
+    .classed("node--faded", false).classed("node--highlighted", true);
+
+  status.text(`${d.data.id}: ${connected.length} connections`);
+  document.getElementById("chart").dataset.highlighted = d.data.id;
+  document.getElementById("chart").dataset.connections = connected.length;
+}
+
+function clearHighlight() {
+  linkSelection.classed("link--faded link--highlighted", false);
+  nodeSelection.classed("node--faded node--highlighted", false);
+  status.text(`${root.leaves().length} leaves | ${links.length} connections`);
+  document.getElementById("chart").dataset.highlighted = "";
+}
+
+// --- Tension slider ---
+const tensionInput = d3.select("#tension");
+tensionInput.on("input", function() {
+  tension = +this.value / 100;
+  d3.select("#tension-val").text(tension.toFixed(2));
+  line.curve(d3.curveBundle.beta(1 - tension));
+  linkSelection.attr("d", line);
+  document.getElementById("chart").dataset.tension = tension;
+});
+
+// --- Button handlers ---
+d3.selectAll("button").on("click", function() {
+  const action = this.dataset.action;
+  if (action === "low-tension") {
+    tension = 0.2;
+    tensionInput.property("value", 20);
+    d3.select("#tension-val").text("0.20");
+    line.curve(d3.curveBundle.beta(1 - tension));
+    linkSelection.attr("d", line);
+    document.getElementById("chart").dataset.tension = tension;
+  }
+  if (action === "high-tension") {
+    tension = 0.95;
+    tensionInput.property("value", 95);
+    d3.select("#tension-val").text("0.95");
+    line.curve(d3.curveBundle.beta(1 - tension));
+    linkSelection.attr("d", line);
+    document.getElementById("chart").dataset.tension = tension;
+  }
+  if (action === "color-group") {
+    colorByGroup = !colorByGroup;
+    nodeSelection.select("circle")
+      .attr("fill", d => colorByGroup ? color(groupOf(d)) : "#555");
+    linkSelection
+      .attr("stroke", d => colorByGroup ? color(groupOf(d[0])) : null);
+    document.getElementById("chart").dataset.colored = colorByGroup;
+  }
+});
+
+// --- Initial status ---
+status.text(`${root.leaves().length} leaves | ${links.length} connections`);
+document.getElementById("chart").dataset.ready = "true";
+document.getElementById("chart").dataset.leaves = root.leaves().length;
+document.getElementById("chart").dataset.links = links.length;
+document.getElementById("chart").dataset.tension = tension;
+</script>
+</body>
+</html>

@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Zoomable Treemap</title>
+<style>
+  body { margin: 0; font-family: sans-serif; background: #fafafa; }
+  #breadcrumbs { padding: 12px 20px; font-size: 13px; display: flex; gap: 4px; align-items: center; min-height: 20px; }
+  .crumb { cursor: pointer; color: steelblue; }
+  .crumb:hover { text-decoration: underline; }
+  .crumb-sep { color: #999; }
+  .crumb-current { color: #333; font-weight: 600; }
+  svg { display: block; cursor: pointer; }
+  .cell text { font-size: 11px; fill: #333; pointer-events: none; }
+  .cell rect { stroke: #fff; stroke-width: 1px; }
+  .group-label { font-size: 11px; font-weight: 600; fill: #555; pointer-events: none; }
+  #status { padding: 4px 20px; font-size: 12px; color: #666; }
+</style>
+</head>
+<body>
+<div id="breadcrumbs"></div>
+<svg id="chart"></svg>
+<div id="status"></div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+const width = 1160;
+const height = 700;
+
+const svg = d3.select("#chart")
+  .attr("viewBox", [0, 0, width, height])
+  .attr("width", width)
+  .attr("height", height);
+
+const status = d3.select("#status");
+
+// --- Sample data ---
+const data = {
+  name: "flare", children: [
+    { name: "analytics", children: [
+      { name: "cluster", children: [
+        { name: "AgglomerativeCluster", value: 3938 },
+        { name: "CommunityStructure", value: 3812 },
+        { name: "HierarchicalCluster", value: 6714 },
+        { name: "MergeEdge", value: 743 }
+      ]},
+      { name: "graph", children: [
+        { name: "BetweennessCentrality", value: 3534 },
+        { name: "LinkDistance", value: 5731 },
+        { name: "MaxFlowMinCut", value: 7840 },
+        { name: "ShortestPaths", value: 5914 },
+        { name: "SpanningTree", value: 3416 }
+      ]},
+      { name: "optimization", children: [
+        { name: "AspectRatioBanker", value: 7074 }
+      ]}
+    ]},
+    { name: "animate", children: [
+      { name: "Easing", value: 17010 },
+      { name: "FunctionSequence", value: 5842 },
+      { name: "Parallel", value: 5176 },
+      { name: "Pause", value: 449 },
+      { name: "Scheduler", value: 5593 },
+      { name: "Tween", value: 6006 },
+      { name: "Transitioner", value: 19975 }
+    ]},
+    { name: "data", children: [
+      { name: "converters", children: [
+        { name: "Converters", value: 721 },
+        { name: "DelimitedTextConverter", value: 4294 },
+        { name: "GraphMLConverter", value: 9800 },
+        { name: "JSONConverter", value: 2220 }
+      ]},
+      { name: "DataField", value: 1759 },
+      { name: "DataSchema", value: 2165 },
+      { name: "DataSet", value: 586 },
+      { name: "DataSource", value: 3331 },
+      { name: "DataTable", value: 772 },
+      { name: "DataUtil", value: 3322 }
+    ]},
+    { name: "display", children: [
+      { name: "DirtySprite", value: 8833 },
+      { name: "LineSprite", value: 1732 },
+      { name: "RectSprite", value: 3623 },
+      { name: "TextSprite", value: 10066 }
+    ]},
+    { name: "flex", children: [
+      { name: "FlareVis", value: 4116 }
+    ]},
+    { name: "vis", children: [
+      { name: "axis", children: [
+        { name: "Axes", value: 1302 },
+        { name: "Axis", value: 24593 },
+        { name: "AxisGridLine", value: 652 },
+        { name: "AxisLabel", value: 636 }
+      ]},
+      { name: "controls", children: [
+        { name: "AnchorControl", value: 2138 },
+        { name: "ClickControl", value: 3824 },
+        { name: "Control", value: 1353 },
+        { name: "ControlList", value: 4665 },
+        { name: "DragControl", value: 2649 },
+        { name: "HoverControl", value: 4896 }
+      ]},
+      { name: "data", children: [
+        { name: "Data", value: 20544 },
+        { name: "DataList", value: 19788 },
+        { name: "DataSprite", value: 10349 },
+        { name: "EdgeSprite", value: 3301 },
+        { name: "NodeSprite", value: 19382 }
+      ]},
+      { name: "legend", children: [
+        { name: "Legend", value: 20859 },
+        { name: "LegendItem", value: 4614 },
+        { name: "LegendRange", value: 10530 }
+      ]}
+    ]}
+  ]
+};
+
+const root = d3.treemap()
+  .size([width, height])
+  .paddingOuter(3)
+  .paddingInner(1)
+  .paddingTop(19)
+  .round(true)
+  (d3.hierarchy(data)
+    .sum(d => d.value || 0)
+    .sort((a, b) => b.value - a.value));
+
+// Assign ids
+let nextId = 0;
+root.each(d => d.nodeId = nextId++);
+
+const color = d3.scaleOrdinal(d3.schemeTableau10);
+const x = d3.scaleLinear().rangeRound([0, width]);
+const y = d3.scaleLinear().rangeRound([0, height]);
+
+let currentFocus = root;
+
+// --- Render ---
+const cell = svg.selectAll("g.cell")
+  .data(root.descendants().filter(d => d.depth > 0), d => d.nodeId)
+  .join("g")
+    .attr("class", "cell")
+    .attr("transform", d => `translate(${d.x0},${d.y0})`)
+    .on("click", (event, d) => {
+      if (d.children && d !== currentFocus) zoomIn(d);
+      else if (currentFocus !== root) zoomOut();
+    });
+
+cell.append("rect")
+  .attr("width", d => d.x1 - d.x0)
+  .attr("height", d => d.y1 - d.y0)
+  .attr("fill", d => {
+    let n = d;
+    while (n.depth > 1) n = n.parent;
+    return color(n.data.name);
+  })
+  .attr("fill-opacity", d => d.children ? 0.35 : 0.85);
+
+// Leaf labels
+cell.filter(d => !d.children).append("text")
+  .attr("x", 3)
+  .attr("y", 13)
+  .text(d => d.data.name)
+  .attr("display", d => (d.x1 - d.x0 > 40 && d.y1 - d.y0 > 16) ? null : "none");
+
+// Group labels
+cell.filter(d => d.children).append("text")
+  .attr("class", "group-label")
+  .attr("x", 3)
+  .attr("y", 13)
+  .text(d => d.data.name);
+
+function zoomIn(d) {
+  currentFocus = d;
+  x.domain([d.x0, d.x1]);
+  y.domain([d.y0, d.y1]);
+  transition();
+}
+
+function zoomOut() {
+  if (currentFocus === root) return;
+  currentFocus = currentFocus.parent;
+  x.domain([currentFocus.x0, currentFocus.x1]);
+  y.domain([currentFocus.y0, currentFocus.y1]);
+  transition();
+}
+
+function transition() {
+  const t = svg.transition().duration(750);
+
+  cell.transition(t)
+    .attr("transform", d => `translate(${x(d.x0)},${y(d.y0)})`)
+    .attr("opacity", d => isVisible(d) ? 1 : 0)
+    .attr("pointer-events", d => isVisible(d) ? "auto" : "none");
+
+  cell.select("rect").transition(t)
+    .attr("width", d => Math.max(0, x(d.x1) - x(d.x0)))
+    .attr("height", d => Math.max(0, y(d.y1) - y(d.y0)));
+
+  // Show/hide leaf labels based on new cell size
+  cell.select("text:not(.group-label)").transition(t)
+    .attr("display", function(d) {
+      const w = x(d.x1) - x(d.x0);
+      const h = y(d.y1) - y(d.y0);
+      return (w > 40 && h > 16) ? null : "none";
+    });
+
+  updateBreadcrumbs();
+  updateStatus();
+}
+
+function isVisible(node) {
+  let n = node;
+  while (n) {
+    if (n === currentFocus) return true;
+    n = n.parent;
+  }
+  // Check if node is a descendant of currentFocus
+  n = node;
+  let ancestor = currentFocus;
+  const descendants = new Set();
+  ancestor.each(d => descendants.add(d.nodeId));
+  return descendants.has(node.nodeId);
+}
+
+function updateBreadcrumbs() {
+  const ancestors = currentFocus.ancestors().reverse();
+  const nav = d3.select("#breadcrumbs");
+  nav.html("");
+
+  ancestors.forEach((d, i) => {
+    if (i > 0) nav.append("span").attr("class", "crumb-sep").text(" / ");
+
+    if (i < ancestors.length - 1) {
+      nav.append("span")
+        .attr("class", "crumb")
+        .text(d.data.name)
+        .on("click", () => {
+          currentFocus = d;
+          x.domain([d.x0, d.x1]);
+          y.domain([d.y0, d.y1]);
+          transition();
+        });
+    } else {
+      nav.append("span").attr("class", "crumb-current").text(d.data.name);
+    }
+  });
+}
+
+function updateStatus() {
+  const depth = currentFocus.depth;
+  const children = currentFocus.children ? currentFocus.children.length : 0;
+  const leaves = currentFocus.leaves().length;
+  status.text(`Focus: ${currentFocus.data.name} | Depth: ${depth} | Groups: ${children} | Leaves: ${leaves}`);
+  document.getElementById("chart").dataset.focus = currentFocus.data.name;
+  document.getElementById("chart").dataset.depth = depth;
+}
+
+updateBreadcrumbs();
+updateStatus();
+document.getElementById("chart").dataset.ready = "true";
+</script>
+</body>
+</html>

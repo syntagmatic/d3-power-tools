@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cross-Layout Morph: Treemap ↔ Pack ↔ Pie</title>
+<style>
+  body { margin: 0; font-family: sans-serif; background: #fafafa; }
+  .section { padding: 12px 20px; }
+  .section h3 { margin: 0 0 8px; font-size: 14px; color: #444; }
+  #controls { display: flex; gap: 8px; margin-bottom: 8px; }
+  button { padding: 6px 14px; border: 1px solid #999; border-radius: 4px;
+           background: #fff; cursor: pointer; font-size: 13px; }
+  button:hover { background: #eee; }
+  button.active { background: steelblue; color: #fff; border-color: steelblue; }
+  svg { display: block; }
+  #status { padding: 4px 20px; font-size: 12px; color: #666; }
+</style>
+</head>
+<body>
+<div class="section">
+  <h3>Cross-Layout Morph via Point Resampling</h3>
+  <div id="controls">
+    <button data-layout="treemap" class="active">Treemap</button>
+    <button data-layout="pack">Pack</button>
+    <button data-layout="pie">Pie</button>
+  </div>
+  <svg id="chart"></svg>
+</div>
+<div id="status"></div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+const width = 600, height = 500;
+const svg = d3.select("#chart").attr("width", width).attr("height", height);
+const color = d3.scaleOrdinal(d3.schemeTableau10);
+const nPts = 64;
+
+// ─── Data ─────────────────────────────────────────────────────────────
+const rawData = {children: d3.range(10).map(i => ({
+  id: i, value: 15 + Math.random() * 85
+}))};
+const nLeaves = rawData.children.length;
+const values = rawData.children.map(d => d.value);
+
+// ─── Resampling utilities ─────────────────────────────────────────────
+
+function samplePath(pathStr, n) {
+  const tmp = svg.append("path").attr("d", pathStr).style("opacity", 0);
+  const len = tmp.node().getTotalLength();
+  const pts = d3.range(n).map(i => {
+    const p = tmp.node().getPointAtLength(i / n * len);
+    return [p.x, p.y];
+  });
+  tmp.remove();
+  return pts;
+}
+
+function sampleTranslatedPath(pathStr, tx, ty, n) {
+  const g = svg.append("g").attr("transform", `translate(${tx},${ty})`);
+  const el = g.append("path").attr("d", pathStr);
+  const len = el.node().getTotalLength();
+  const pts = d3.range(n).map(i => {
+    const p = el.node().getPointAtLength(i / n * len);
+    return [p.x + tx, p.y + ty];
+  });
+  g.remove();
+  return pts;
+}
+
+function bestRotation(source, target) {
+  const n = source.length;
+  let bestOffset = 0, bestDist = Infinity;
+  for (let offset = 0; offset < n; offset++) {
+    let dist = 0;
+    for (let i = 0; i < n; i++) {
+      const j = (i + offset) % n;
+      const dx = source[j][0] - target[i][0];
+      const dy = source[j][1] - target[i][1];
+      dist += dx * dx + dy * dy;
+    }
+    if (dist < bestDist) { bestDist = dist; bestOffset = offset; }
+  }
+  return source.map((_, i) => source[(i + bestOffset) % n]);
+}
+
+function pointsToPath(pts) {
+  return "M" + pts.map(p => p[0].toFixed(2) + "," + p[1].toFixed(2)).join("L") + "Z";
+}
+
+function roundedRectPath(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  const x1 = x + w, y1 = y + h;
+  return `M${x+r},${y}H${x1-r}Q${x1},${y} ${x1},${y+r}V${y1-r}Q${x1},${y1} ${x1-r},${y1}H${x+r}Q${x},${y1} ${x},${y1-r}V${y+r}Q${x},${y} ${x+r},${y}Z`;
+}
+
+// ─── Compute layout point arrays ──────────────────────────────────────
+
+const pad = 20;
+
+// Treemap
+const root1 = d3.hierarchy(rawData).sum(d => d.value);
+d3.treemap().size([width - pad * 2, height - pad * 2]).padding(4).round(true)(root1);
+const treemapPts = root1.leaves().map(d => {
+  const path = roundedRectPath(d.x0 + pad, d.y0 + pad, d.x1 - d.x0, d.y1 - d.y0, 3);
+  return samplePath(path, nPts);
+});
+
+// Pack
+const root2 = d3.hierarchy(rawData).sum(d => d.value);
+d3.pack().size([width - pad * 2, height - pad * 2]).padding(4)(root2);
+const packPts = root2.leaves().map(d => {
+  const r = d.r, cx = d.x + pad, cy = d.y + pad;
+  const path = `M${cx+r},${cy}A${r},${r} 0 1,1 ${cx-r},${cy}A${r},${r} 0 1,1 ${cx+r},${cy}Z`;
+  return samplePath(path, nPts);
+});
+
+// Pie
+const pieR = Math.min(width, height) / 2 - pad - 10;
+const pieCx = width / 2, pieCy = height / 2;
+const arcGen = d3.arc().innerRadius(0).outerRadius(pieR);
+const pieSlices = d3.pie().sort(null)(values);
+const piePts = pieSlices.map(d =>
+  sampleTranslatedPath(arcGen(d), pieCx, pieCy, nPts)
+);
+
+// Align rotations: pack→treemap, pack→pie
+// Use pack as the "neutral" layout and align the others to it
+const treemapAligned = treemapPts.map((pts, i) => bestRotation(pts, packPts[i]));
+const pieAligned = piePts.map((pts, i) => bestRotation(pts, packPts[i]));
+
+const layoutData = {
+  treemap: treemapAligned,
+  pack: packPts,
+  pie: pieAligned,
+};
+
+// ─── Render ───────────────────────────────────────────────────────────
+
+const paths = svg.selectAll("path.cell").data(d3.range(nLeaves)).join("path")
+  .attr("class", "cell")
+  .attr("fill", (d, i) => color(i))
+  .attr("opacity", 0.85)
+  .attr("stroke", "#fff")
+  .attr("stroke-width", 1.5)
+  .attr("d", (d, i) => pointsToPath(layoutData.treemap[i]));
+
+let currentLayout = "treemap";
+let morphCount = 0;
+
+function morphTo(layout, duration = 1000) {
+  if (layout === currentLayout) return;
+  const from = layoutData[currentLayout];
+  const to = layoutData[layout];
+  currentLayout = layout;
+
+  paths.each(function(d, i) {
+    const fromPts = from[i];
+    const toPts = to[i];
+
+    d3.select(this)
+      .transition().duration(duration)
+      .ease(d3.easeCubicInOut)
+      .attrTween("d", () => t => {
+        const interp = fromPts.map((fp, j) => [
+          fp[0] + (toPts[j][0] - fp[0]) * t,
+          fp[1] + (toPts[j][1] - fp[1]) * t
+        ]);
+        return pointsToPath(interp);
+      });
+  });
+
+  morphCount++;
+  updateStatus(layout);
+}
+
+function updateStatus(layout) {
+  d3.select("#status").text(
+    `Layout: ${layout} | Points/shape: ${nPts} | Morphs: ${morphCount}`
+  );
+  const chart = document.getElementById("chart");
+  chart.dataset.layout = layout;
+  chart.dataset.morphCount = morphCount;
+}
+
+// ─── Button handlers ──────────────────────────────────────────────────
+
+d3.selectAll("button[data-layout]").on("click", function() {
+  d3.selectAll("button[data-layout]").classed("active", false);
+  d3.select(this).classed("active", true);
+  morphTo(this.dataset.layout);
+});
+
+updateStatus("treemap");
+document.getElementById("chart").dataset.ready = "true";
+</script>
+</body>
+</html>

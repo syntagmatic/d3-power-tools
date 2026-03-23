@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Canvas Rendering Test</title>
+<style>
+  body { margin: 0; font-family: sans-serif; background: #fafafa; }
+  #container { position: relative; margin: 20px; display: inline-block; }
+  canvas, svg { position: absolute; top: 0; left: 0; }
+  svg { pointer-events: all; }
+  canvas { pointer-events: none; }
+  .controls { margin: 20px 20px 0; display: flex; gap: 8px; align-items: center; }
+  button { padding: 5px 12px; border: 1px solid #ccc; border-radius: 4px;
+           background: #fff; cursor: pointer; font-size: 12px; }
+  button.active { background: #e8f0fe; border-color: #1a73e8; color: #1a73e8; }
+  #status { font-size: 12px; color: #666; margin-left: 12px; }
+  #tooltip { position: absolute; pointer-events: none; background: rgba(0,0,0,0.8);
+             color: #fff; padding: 4px 8px; border-radius: 3px; font-size: 11px;
+             display: none; white-space: nowrap; }
+</style>
+</head>
+<body>
+<div class="controls">
+  <button data-action="random" class="active">Random (10K)</button>
+  <button data-action="clustered">Clustered (10K)</button>
+  <button data-action="large">Large (50K)</button>
+  <button data-action="density">Density view</button>
+  <span id="status">Loading...</span>
+</div>
+<div id="container">
+  <div id="tooltip"></div>
+</div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+// ============================
+// Config
+// ============================
+const fullWidth = 960, fullHeight = 600;
+const margin = { top: 10, right: 10, bottom: 40, left: 50 };
+const width = fullWidth - margin.left - margin.right;
+const height = fullHeight - margin.top - margin.bottom;
+const dpr = window.devicePixelRatio || 1;
+
+// ============================
+// Layer architecture
+// ============================
+const container = d3.select("#container")
+  .style("width", fullWidth + "px")
+  .style("height", fullHeight + "px");
+
+function createCanvas(name) {
+  const c = container.append("canvas")
+    .attr("width", fullWidth * dpr)
+    .attr("height", fullHeight * dpr)
+    .style("width", fullWidth + "px")
+    .style("height", fullHeight + "px")
+    .node();
+  const ctx = c.getContext("2d");
+  ctx.scale(dpr, dpr);
+  return { canvas: c, ctx };
+}
+
+const bg = createCanvas("background");
+const fg = createCanvas("foreground");
+const interaction = createCanvas("interaction");
+
+// SVG overlay for axes and pointer events
+const svg = container.append("svg")
+  .attr("width", fullWidth)
+  .attr("height", fullHeight)
+  .style("position", "absolute")
+  .style("top", "0").style("left", "0");
+
+const g = svg.append("g")
+  .attr("transform", `translate(${margin.left},${margin.top})`);
+
+const tooltip = d3.select("#tooltip");
+const statusEl = d3.select("#status");
+
+// ============================
+// Data generators
+// ============================
+const categories = ["A", "B", "C", "D", "E"];
+const colorScale = d3.scaleOrdinal(d3.schemeTableau10).domain(categories);
+
+function generateRandom(n) {
+  return d3.range(n).map(i => ({
+    id: i,
+    x: Math.random() * 100,
+    y: Math.random() * 100,
+    value: Math.random() * 50,
+    category: categories[Math.floor(Math.random() * categories.length)],
+    label: `P${i}`
+  }));
+}
+
+function generateClustered(n) {
+  const centers = [[20, 25], [50, 70], [80, 30], [35, 55], [70, 75]];
+  return d3.range(n).map(i => {
+    const ci = i % centers.length;
+    const [cx, cy] = centers[ci];
+    return {
+      id: i,
+      x: cx + d3.randomNormal(0, 8)(),
+      y: cy + d3.randomNormal(0, 8)(),
+      value: Math.max(0, 20 + d3.randomNormal(0, 10)()),
+      category: categories[ci],
+      label: `P${i}`
+    };
+  });
+}
+
+// ============================
+// Scales
+// ============================
+const xScale = d3.scaleLinear().domain([0, 100]).range([0, width]);
+const yScale = d3.scaleLinear().domain([0, 100]).range([height, 0]);
+
+// ============================
+// Axes
+// ============================
+const xAxis = g.append("g")
+  .attr("class", "x-axis")
+  .attr("transform", `translate(0,${height})`)
+  .call(d3.axisBottom(xScale));
+
+const yAxis = g.append("g")
+  .attr("class", "y-axis")
+  .call(d3.axisLeft(yScale));
+
+// ============================
+// State
+// ============================
+let data = [];
+let quadtree = null;
+let hoveredPoint = null;
+let currentTransform = d3.zoomIdentity;
+let densityMode = false;
+let renderQueueInstance = null;
+
+// Typed arrays for batch rendering
+let xs, ys, rs, cats;
+
+function buildTypedArrays() {
+  const n = data.length;
+  xs = new Float32Array(n);
+  ys = new Float32Array(n);
+  rs = new Float32Array(n);
+  cats = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    xs[i] = xScale(data[i].x);
+    ys[i] = yScale(data[i].y);
+    rs[i] = Math.max(1.5, Math.min(4, 3 - Math.log10(n) + 2));
+    cats[i] = categories.indexOf(data[i].category);
+  }
+}
+
+function buildQuadtree() {
+  quadtree = d3.quadtree()
+    .x(d => xScale(d.x))
+    .y(d => yScale(d.y))
+    .addAll(data);
+}
+
+// ============================
+// Render queue (progressive rendering)
+// ============================
+function createRenderQueue(drawFn, options = {}) {
+  const {
+    rate = 2000,
+    shuffle = true,
+    onProgress = null,
+    onComplete = null,
+  } = options;
+
+  let queue = [];
+  let total = 0;
+  let animId = null;
+
+  function render(items) {
+    cancel();
+    queue = shuffle ? d3.shuffle(items.slice()) : items.slice();
+    total = queue.length;
+    animId = requestAnimationFrame(drain);
+  }
+
+  function drain() {
+    const chunk = queue.splice(0, rate);
+    chunk.forEach(drawFn);
+    if (onProgress) onProgress(1 - queue.length / total);
+    if (queue.length > 0) {
+      animId = requestAnimationFrame(drain);
+    } else if (onComplete) {
+      onComplete();
+    }
+  }
+
+  function cancel() {
+    if (animId) cancelAnimationFrame(animId);
+    queue = [];
+  }
+
+  render.cancel = cancel;
+  return render;
+}
+
+// ============================
+// Batch rendering (grouped by category)
+// ============================
+function resetTransform(ctx) {
+  // Reset to DPR-scaled identity — never rely on save/restore across async frames
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function drawBatched(ctx, transform) {
+  resetTransform(ctx);
+  ctx.clearRect(0, 0, fullWidth, fullHeight);
+  ctx.translate(margin.left + transform.x, margin.top + transform.y);
+  ctx.scale(transform.k, transform.k);
+
+  const n = data.length;
+  const alpha = Math.max(0.4, Math.min(0.9, 5000 / n));
+
+  // Pre-sort by category for batched state changes
+  const indices = d3.range(n);
+  indices.sort((a, b) => cats[a] - cats[b]);
+
+  let currentCat = -1;
+  ctx.globalAlpha = alpha;
+
+  for (const i of indices) {
+    if (cats[i] !== currentCat) {
+      if (currentCat >= 0) ctx.fill();
+      currentCat = cats[i];
+      ctx.fillStyle = colorScale(categories[currentCat]);
+      ctx.beginPath();
+    }
+    ctx.moveTo(xs[i] + rs[i], ys[i]);
+    ctx.arc(xs[i], ys[i], rs[i], 0, Math.PI * 2);
+  }
+  if (currentCat >= 0) ctx.fill();
+
+  resetTransform(ctx);
+  ctx.globalAlpha = 1;
+}
+
+// ============================
+// Progressive rendering
+// ============================
+function drawProgressive(transform) {
+  const n = data.length;
+  const alpha = Math.max(0.4, Math.min(0.9, 5000 / n));
+
+  if (renderQueueInstance) renderQueueInstance.cancel();
+
+  // Reset to known state — don't use save/restore across async frames,
+  // because cancelled render queues would leave restores orphaned
+  resetTransform(bg.ctx);
+  bg.ctx.clearRect(0, 0, fullWidth, fullHeight);
+  bg.ctx.translate(margin.left + transform.x, margin.top + transform.y);
+  bg.ctx.scale(transform.k, transform.k);
+  bg.ctx.globalAlpha = alpha;
+
+  renderQueueInstance = createRenderQueue(
+    (d) => {
+      const px = xScale(d.x), py = yScale(d.y);
+      bg.ctx.fillStyle = colorScale(d.category);
+      bg.ctx.beginPath();
+      bg.ctx.arc(px, py, rs[0] || 2, 0, Math.PI * 2);
+      bg.ctx.fill();
+    },
+    {
+      rate: Math.max(500, Math.floor(n / 20)),
+      shuffle: true,
+      onProgress: (frac) => {
+        statusEl.text(`Rendering: ${Math.round(frac * 100)}%`);
+      },
+      onComplete: () => {
+        resetTransform(bg.ctx);
+        bg.ctx.globalAlpha = 1;
+        statusEl.text(`${n.toLocaleString()} points rendered`);
+      }
+    }
+  );
+
+  renderQueueInstance(data);
+}
+
+// ============================
+// Density heatmap (ImageData)
+// ============================
+function drawDensity(ctx, transform) {
+  ctx.clearRect(0, 0, fullWidth, fullHeight);
+
+  // To respect margins and clipping, we'll draw the density map to an 
+  // offscreen area that matches the chart dimensions, then draw it back.
+  const cw = Math.round(width * dpr);
+  const ch = Math.round(height * dpr);
+  
+  const offscreen = document.createElement("canvas");
+  offscreen.width = cw;
+  offscreen.height = ch;
+  const octx = offscreen.getContext("2d");
+  
+  const img = octx.createImageData(cw, ch);
+  const buf = img.data;
+  const grid = new Float32Array(cw * ch);
+  const bandwidth = Math.round(10 * dpr);
+  const r2 = bandwidth * bandwidth;
+
+  // 1. Accumulate density in chart space
+  for (const d of data) {
+    const cx = Math.round((transform.x + transform.k * xScale(d.x)) * dpr);
+    const cy = Math.round((transform.y + transform.k * yScale(d.y)) * dpr);
+    
+    if (cx < -bandwidth || cx > cw + bandwidth || cy < -bandwidth || cy > ch + bandwidth) continue;
+
+    for (let dy = -bandwidth; dy <= bandwidth; dy++) {
+      const py = cy + dy;
+      if (py < 0 || py >= ch) continue;
+      const dy2 = dy * dy;
+      const rowOffset = py * cw;
+      for (let dx = -bandwidth; dx <= bandwidth; dx++) {
+        const px = cx + dx;
+        if (px < 0 || px >= cw) continue;
+        const dist2 = dx * dx + dy2;
+        if (dist2 < r2) {
+          grid[rowOffset + px] += 1 - Math.sqrt(dist2) / bandwidth;
+        }
+      }
+    }
+  }
+
+  // 2. Colorize with LUT
+  const maxDensity = d3.max(grid) || 1;
+  const densityColor = d3.scaleSequential(d3.interpolateInferno).domain([0, maxDensity]);
+  const LUT_SIZE = 256;
+  const lut = new Uint8Array(LUT_SIZE * 4);
+  for (let i = 0; i < LUT_SIZE; i++) {
+    const c = d3.rgb(densityColor((i / (LUT_SIZE - 1)) * maxDensity));
+    lut[i * 4] = c.r;
+    lut[i * 4 + 1] = c.g;
+    lut[i * 4 + 2] = c.b;
+  }
+
+  for (let i = 0; i < grid.length; i++) {
+    const val = grid[i];
+    if (val > 0) {
+      const li = Math.min(LUT_SIZE - 1, Math.round((val / maxDensity) * (LUT_SIZE - 1))) * 4;
+      const j = i * 4;
+      buf[j] = lut[li];
+      buf[j + 1] = lut[li + 1];
+      buf[j + 2] = lut[li + 2];
+      // Non-linear alpha for smoother "glow"
+      buf[j + 3] = Math.min(255, Math.pow(val / maxDensity, 0.7) * 255);
+    }
+  }
+
+  octx.putImageData(img, 0, 0);
+
+  // 3. Draw offscreen result back to main canvas (respecting margins)
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(margin.left, margin.top, width, height);
+  ctx.clip();
+  ctx.drawImage(offscreen, 0, 0, cw, ch, margin.left, margin.top, width, height);
+  ctx.restore();
+  resetTransform(ctx);
+}
+
+// ============================
+// Interaction highlight
+// ============================
+function drawHighlight(ctx, point) {
+  resetTransform(ctx);
+  ctx.clearRect(0, 0, fullWidth, fullHeight);
+  if (!point) return;
+
+  const px = margin.left + currentTransform.x + currentTransform.k * xScale(point.x);
+  const py = margin.top + currentTransform.y + currentTransform.k * yScale(point.y);
+  const r = (rs ? rs[0] : 3) * currentTransform.k;
+
+  // Focus ring
+  ctx.strokeStyle = "#1a73e8";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(px, py, r + 4, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Filled dot
+  ctx.fillStyle = colorScale(point.category);
+  ctx.globalAlpha = 1;
+  ctx.beginPath();
+  ctx.arc(px, py, r + 1, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+// ============================
+// Quadtree hit detection
+// ============================
+function findNearest(mx, my, radius = 20) {
+  if (!quadtree) return null;
+  // Convert from screen to data coordinates
+  const dx = (mx - margin.left - currentTransform.x) / currentTransform.k;
+  const dy = (my - margin.top - currentTransform.y) / currentTransform.k;
+  return quadtree.find(dx, dy, radius / currentTransform.k);
+}
+
+// ============================
+// Zoom
+// ============================
+const zoom = d3.zoom()
+  .scaleExtent([0.5, 20])
+  .on("zoom", ({ transform }) => {
+    currentTransform = transform;
+    render();
+  });
+
+svg.call(zoom);
+
+// ============================
+// Hover
+// ============================
+svg.on("pointermove", (event) => {
+  const [mx, my] = d3.pointer(event);
+  const nearest = findNearest(mx, my);
+
+  if (nearest !== hoveredPoint) {
+    hoveredPoint = nearest;
+    drawHighlight(interaction.ctx, hoveredPoint);
+
+    if (hoveredPoint) {
+      tooltip
+        .style("display", "block")
+        .style("left", (mx + 12) + "px")
+        .style("top", (my - 10) + "px")
+        .text(`${hoveredPoint.label} (${hoveredPoint.category}): ${hoveredPoint.x.toFixed(1)}, ${hoveredPoint.y.toFixed(1)}`);
+    } else {
+      tooltip.style("display", "none");
+    }
+  }
+});
+
+svg.on("pointerleave", () => {
+  hoveredPoint = null;
+  drawHighlight(interaction.ctx, null);
+  tooltip.style("display", "none");
+});
+
+// ============================
+// Main render
+// ============================
+function render() {
+  const n = data.length;
+
+  if (densityMode) {
+    drawDensity(bg.ctx, currentTransform);
+    fg.ctx.clearRect(0, 0, fullWidth, fullHeight);
+  } else if (n > 20000) {
+    // Progressive for large datasets
+    drawProgressive(currentTransform);
+  } else {
+    // Batched for medium datasets
+    drawBatched(bg.ctx, currentTransform);
+    fg.ctx.clearRect(0, 0, fullWidth, fullHeight);
+  }
+
+  statusEl.text(`${n.toLocaleString()} points` + (densityMode ? " (density)" : ""));
+}
+
+// ============================
+// Dataset switching
+// ============================
+function loadData(generator, n) {
+  if (renderQueueInstance) renderQueueInstance.cancel();
+  data = generator(n);
+  buildTypedArrays();
+  buildQuadtree();
+  hoveredPoint = null;
+  drawHighlight(interaction.ctx, null);
+  tooltip.style("display", "none");
+  currentTransform = d3.zoomIdentity;
+  svg.call(zoom.transform, d3.zoomIdentity);
+  render();
+}
+
+d3.selectAll(".controls button[data-action]").on("click", function() {
+  const action = this.dataset.action;
+  if (action === "density") {
+    densityMode = !densityMode;
+    d3.select(this).classed("active", densityMode);
+    render();
+    return;
+  }
+
+  densityMode = false;
+  d3.select("[data-action=density]").classed("active", false);
+  d3.selectAll(".controls button[data-action]").classed("active", false);
+  d3.select(this).classed("active", true);
+
+  if (action === "random") loadData(generateRandom, 10000);
+  else if (action === "clustered") loadData(generateClustered, 10000);
+  else if (action === "large") loadData(generateRandom, 50000);
+});
+
+// ============================
+// Initial load
+// ============================
+loadData(generateRandom, 10000);
+</script>
+</body>
+</html>

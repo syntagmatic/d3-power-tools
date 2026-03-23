@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Force Simulation</title>
+  <style>
+    body { margin: 0; font-family: system-ui, sans-serif; background: #fafafa; }
+    #controls { padding: 8px 16px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    button { padding: 4px 12px; cursor: pointer; border: 1px solid #ccc; border-radius: 4px; background: #fff; }
+    button.active { background: #4682b4; color: #fff; border-color: #4682b4; }
+    canvas { display: block; }
+    #status { padding: 4px 16px; font-size: 13px; color: #666; }
+    #tooltip { position: absolute; padding: 4px 8px; background: rgba(0,0,0,0.8); color: #fff; border-radius: 4px; font-size: 12px; pointer-events: none; display: none; }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <button data-action="combined" class="active">Combined</button>
+    <button data-action="clustered">Clustered</button>
+    <button data-action="radial">Radial</button>
+    <button data-action="add-nodes">+ Nodes</button>
+    <button data-action="remove-nodes">- Nodes</button>
+    <span style="margin-left:auto">
+      <label>Charge: <input id="charge" type="range" min="-300" max="-10" value="-80" step="10"></label>
+    </span>
+  </div>
+  <canvas id="chart"></canvas>
+  <div id="status"></div>
+  <div id="tooltip"></div>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script>
+    const width = 960, height = 600;
+    const canvas = document.getElementById("chart");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    const tooltip = document.getElementById("tooltip");
+    const status = document.getElementById("status");
+    const color = d3.scaleOrdinal(d3.schemeTableau10);
+
+    // Generate clustered network data
+    const groups = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"];
+    let nodes = [], links = [];
+
+    function generateData(nodeCount = 80) {
+      nodes = d3.range(nodeCount).map(i => ({
+        id: `n${i}`,
+        group: groups[i % groups.length],
+        r: 4 + Math.random() * 6,
+      }));
+
+      links = [];
+      // Intra-group links (dense)
+      for (const [, group] of d3.groups(nodes, d => d.group)) {
+        for (let i = 1; i < group.length; i++) {
+          if (Math.random() < 0.6) {
+            links.push({ source: group[i - 1].id, target: group[i].id });
+          }
+          if (i > 1 && Math.random() < 0.2) {
+            links.push({ source: group[0].id, target: group[i].id });
+          }
+        }
+      }
+      // Inter-group links (sparse)
+      for (let i = 0; i < nodeCount * 0.15; i++) {
+        const a = nodes[Math.floor(Math.random() * nodeCount)];
+        const b = nodes[Math.floor(Math.random() * nodeCount)];
+        if (a.group !== b.group) {
+          links.push({ source: a.id, target: b.id });
+        }
+      }
+    }
+
+    generateData();
+
+    // Compute degree
+    function computeDegree() {
+      const deg = new Map();
+      links.forEach(d => {
+        const s = typeof d.source === "object" ? d.source.id : d.source;
+        const t = typeof d.target === "object" ? d.target.id : d.target;
+        deg.set(s, (deg.get(s) || 0) + 1);
+        deg.set(t, (deg.get(t) || 0) + 1);
+      });
+      nodes.forEach(d => { d.degree = deg.get(d.id) || 0; });
+    }
+    computeDegree();
+
+    // Group centers for clustered view
+    const groupCenters = new Map(groups.map((g, i) => [g, {
+      x: width / 2 + 180 * Math.cos(2 * Math.PI * i / groups.length),
+      y: height / 2 + 140 * Math.sin(2 * Math.PI * i / groups.length),
+    }]));
+
+    // Simulation
+    let simulation = d3.forceSimulation(nodes)
+      .force("link", d3.forceLink(links).id(d => d.id).distance(30))
+      .force("charge", d3.forceManyBody().strength(-80).distanceMax(300))
+      .force("center", d3.forceCenter(width / 2, height / 2))
+      .force("collide", d3.forceCollide(d => d.r + 1))
+      .on("tick", render);
+
+    let quadtree;
+    let currentMode = "combined";
+
+    function render() {
+      ctx.clearRect(0, 0, width, height);
+
+      // Links
+      ctx.globalAlpha = 0.3;
+      ctx.strokeStyle = "#999";
+      ctx.lineWidth = 0.5;
+      ctx.beginPath();
+      links.forEach(d => {
+        ctx.moveTo(d.source.x, d.source.y);
+        ctx.lineTo(d.target.x, d.target.y);
+      });
+      ctx.stroke();
+
+      // Nodes
+      ctx.globalAlpha = 0.85;
+      for (const group of groups) {
+        ctx.fillStyle = color(group);
+        ctx.beginPath();
+        nodes.filter(d => d.group === group).forEach(d => {
+          ctx.moveTo(d.x + d.r, d.y);
+          ctx.arc(d.x, d.y, d.r, 0, 2 * Math.PI);
+        });
+        ctx.fill();
+      }
+
+      // Node borders
+      ctx.globalAlpha = 0.5;
+      ctx.strokeStyle = "#333";
+      ctx.lineWidth = 0.5;
+      ctx.beginPath();
+      nodes.forEach(d => {
+        ctx.moveTo(d.x + d.r, d.y);
+        ctx.arc(d.x, d.y, d.r, 0, 2 * Math.PI);
+      });
+      ctx.stroke();
+
+      ctx.globalAlpha = 1;
+
+      // Rebuild quadtree for hit detection
+      quadtree = d3.quadtree()
+        .x(d => d.x).y(d => d.y)
+        .addAll(nodes);
+
+      // Status
+      status.textContent = `${nodes.length} nodes, ${links.length} links | alpha: ${simulation.alpha().toFixed(3)} | mode: ${currentMode}`;
+      canvas.dataset.nodeCount = nodes.length;
+      canvas.dataset.linkCount = links.length;
+      canvas.dataset.mode = currentMode;
+    }
+
+    // Drag
+    let dragNode = null;
+    d3.select(canvas).call(d3.drag()
+      .subject((event) => {
+        const [mx, my] = d3.pointer(event, canvas);
+        return quadtree?.find(mx, my, 20) || null;
+      })
+      .on("start", (event) => {
+        dragNode = event.subject;
+        if (!event.active) simulation.alphaTarget(0.3).restart();
+        dragNode.fx = dragNode.x;
+        dragNode.fy = dragNode.y;
+      })
+      .on("drag", (event) => {
+        dragNode.fx = event.x;
+        dragNode.fy = event.y;
+      })
+      .on("end", (event) => {
+        if (!event.active) simulation.alphaTarget(0);
+        dragNode.fx = null;
+        dragNode.fy = null;
+        dragNode = null;
+      })
+    );
+
+    // Hover tooltip
+    canvas.addEventListener("pointermove", (event) => {
+      const [mx, my] = d3.pointer(event, canvas);
+      const node = quadtree?.find(mx, my, 15);
+      if (node) {
+        tooltip.style.display = "block";
+        tooltip.style.left = (event.pageX + 12) + "px";
+        tooltip.style.top = (event.pageY - 8) + "px";
+        tooltip.textContent = `${node.id} (${node.group}, degree: ${node.degree})`;
+        canvas.dataset.hoveredNode = node.id;
+      } else {
+        tooltip.style.display = "none";
+        canvas.dataset.hoveredNode = "";
+      }
+    });
+
+    // Mode switching
+    function setMode(mode) {
+      currentMode = mode;
+      document.querySelectorAll("#controls button[data-action]").forEach(b => {
+        b.classList.toggle("active", b.dataset.action === mode);
+      });
+
+      if (mode === "combined") {
+        simulation
+          .force("x", null).force("y", null).force("radial", null)
+          .force("center", d3.forceCenter(width / 2, height / 2));
+      } else if (mode === "clustered") {
+        simulation
+          .force("center", null).force("radial", null)
+          .force("x", d3.forceX(d => groupCenters.get(d.group).x).strength(0.12))
+          .force("y", d3.forceY(d => groupCenters.get(d.group).y).strength(0.12));
+      } else if (mode === "radial") {
+        simulation
+          .force("center", null).force("x", null).force("y", null)
+          .force("radial", d3.forceRadial(
+            d => 60 + groups.indexOf(d.group) * 50,
+            width / 2, height / 2
+          ).strength(0.8));
+      }
+
+      simulation.alpha(0.6).restart();
+    }
+
+    // Controls
+    document.getElementById("controls").addEventListener("click", (e) => {
+      const action = e.target.dataset?.action;
+      if (!action) return;
+
+      if (action === "combined" || action === "clustered" || action === "radial") {
+        setMode(action);
+      } else if (action === "add-nodes") {
+        const startIdx = nodes.length;
+        const newNodes = d3.range(15).map(i => ({
+          id: `n${startIdx + i}`,
+          group: groups[Math.floor(Math.random() * groups.length)],
+          r: 4 + Math.random() * 6,
+        }));
+        const newLinks = newNodes.map(d => ({
+          source: d.id,
+          target: nodes[Math.floor(Math.random() * nodes.length)].id,
+        }));
+        nodes.push(...newNodes);
+        links.push(...newLinks);
+        computeDegree();
+        simulation.nodes(nodes);
+        simulation.force("link").links(links);
+        simulation.alpha(0.5).restart();
+      } else if (action === "remove-nodes") {
+        if (nodes.length <= 10) return;
+        const removeIds = new Set(nodes.slice(-10).map(d => d.id));
+        nodes = nodes.filter(d => !removeIds.has(d.id));
+        links = links.filter(d => {
+          const s = typeof d.source === "object" ? d.source.id : d.source;
+          const t = typeof d.target === "object" ? d.target.id : d.target;
+          return !removeIds.has(s) && !removeIds.has(t);
+        });
+        computeDegree();
+        simulation.nodes(nodes);
+        simulation.force("link").links(links);
+        simulation.alpha(0.5).restart();
+      }
+    });
+
+    // Charge slider
+    document.getElementById("charge").addEventListener("input", function() {
+      simulation.force("charge").strength(+this.value);
+      simulation.alpha(0.3).restart();
+    });
+
+    // Ready signal
+    canvas.dataset.ready = "true";
+  </script>
+</body>
+</html>

@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Collapsible Tree</title>
+<style>
+  body { margin: 0; font-family: sans-serif; background: #fafafa; }
+  #controls { padding: 12px 20px; display: flex; gap: 8px; align-items: center; }
+  button { padding: 6px 14px; border: 1px solid #999; border-radius: 4px;
+           background: #fff; cursor: pointer; font-size: 13px; }
+  button:hover { background: #eee; }
+  svg { display: block; }
+  .link { fill: none; stroke: #999; stroke-width: 1.5px; }
+  .node circle { stroke: #555; stroke-width: 1.5px; cursor: pointer; }
+  .node text { font-size: 11px; }
+  #status { padding: 4px 20px; font-size: 12px; color: #666; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <button data-action="expand-all">Expand All</button>
+  <button data-action="collapse-all">Collapse All</button>
+  <button data-action="collapse-depth2">Collapse Depth 2</button>
+  <span style="color:#888; font-size:12px; margin-left:8px">Click any node to toggle</span>
+</div>
+<svg id="chart"></svg>
+<div id="status"></div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+const margin = { top: 20, right: 120, bottom: 20, left: 60 };
+const width = 1160 - margin.left - margin.right;
+const height = 700 - margin.top - margin.bottom;
+
+const svg = d3.select("#chart")
+  .attr("width", width + margin.left + margin.right)
+  .attr("height", height + margin.top + margin.bottom)
+  .append("g")
+  .attr("transform", `translate(${margin.left},${margin.top})`);
+
+const treeLayout = d3.tree().size([height, width]);
+const status = d3.select("#status");
+
+// --- Sample data: department hierarchy ---
+const data = {
+  name: "Company", children: [
+    { name: "Engineering", children: [
+      { name: "Frontend", children: [
+        { name: "React" }, { name: "Vue" }, { name: "Angular" }
+      ]},
+      { name: "Backend", children: [
+        { name: "API", children: [{ name: "REST" }, { name: "GraphQL" }] },
+        { name: "Data", children: [{ name: "Postgres" }, { name: "Redis" }, { name: "Kafka" }] }
+      ]},
+      { name: "Infra", children: [
+        { name: "CI/CD" }, { name: "Monitoring" }, { name: "Cloud" }
+      ]}
+    ]},
+    { name: "Design", children: [
+      { name: "Product", children: [{ name: "UX Research" }, { name: "Interaction" }] },
+      { name: "Brand", children: [{ name: "Visual" }, { name: "Content" }] }
+    ]},
+    { name: "Operations", children: [
+      { name: "HR", children: [{ name: "Recruiting" }, { name: "People Ops" }] },
+      { name: "Finance", children: [{ name: "Accounting" }, { name: "FP&A" }] },
+      { name: "Legal" }
+    ]}
+  ]
+};
+
+const root = d3.hierarchy(data);
+root.x0 = height / 2;
+root.y0 = 0;
+
+// Assign unique ids for data joins
+let i = 0;
+root.each(d => d.id = i++);
+
+function update(source) {
+  const tree = treeLayout(root);
+  const nodes = root.descendants();
+  const links = root.links();
+
+  // Normalize depth spacing
+  nodes.forEach(d => d.y = d.depth * (width / (root.height + 1)));
+
+  // --- Nodes ---
+  const node = svg.selectAll("g.node")
+    .data(nodes, d => d.id);
+
+  const nodeEnter = node.enter().append("g")
+    .attr("class", "node")
+    .attr("transform", `translate(${source.y0},${source.x0})`)
+    .on("click", (event, d) => {
+      if (d.children) {
+        d._children = d.children;
+        d.children = null;
+      } else if (d._children) {
+        d.children = d._children;
+        d._children = null;
+      }
+      update(d);
+    });
+
+  nodeEnter.append("circle")
+    .attr("r", 1e-6)
+    .attr("fill", d => d._children ? "#555" : d.children ? "#fff" : "#999");
+
+  nodeEnter.append("text")
+    .attr("dy", "0.31em")
+    .attr("x", d => d.children || d._children ? -10 : 10)
+    .attr("text-anchor", d => d.children || d._children ? "end" : "start")
+    .text(d => d.data.name);
+
+  // Update
+  const nodeUpdate = nodeEnter.merge(node);
+
+  nodeUpdate.transition().duration(500)
+    .attr("transform", d => `translate(${d.y},${d.x})`);
+
+  nodeUpdate.select("circle")
+    .attr("r", 5)
+    .attr("fill", d => d._children ? "#555" : d.children ? "#fff" : "#999");
+
+  nodeUpdate.select("text")
+    .attr("x", d => d.children || d._children ? -10 : 10)
+    .attr("text-anchor", d => d.children || d._children ? "end" : "start");
+
+  // Exit
+  const nodeExit = node.exit().transition().duration(500)
+    .attr("transform", `translate(${source.y},${source.x})`)
+    .remove();
+
+  nodeExit.select("circle").attr("r", 1e-6);
+  nodeExit.select("text").attr("opacity", 0);
+
+  // --- Links ---
+  const link = svg.selectAll("path.link")
+    .data(links, d => d.target.id);
+
+  const linkEnter = link.enter().insert("path", "g")
+    .attr("class", "link")
+    .attr("d", () => {
+      const o = { x: source.x0, y: source.y0 };
+      return diagonal(o, o);
+    });
+
+  linkEnter.merge(link).transition().duration(500)
+    .attr("d", d => diagonal(d.source, d.target));
+
+  link.exit().transition().duration(500)
+    .attr("d", () => {
+      const o = { x: source.x, y: source.y };
+      return diagonal(o, o);
+    })
+    .remove();
+
+  // Stash positions
+  nodes.forEach(d => {
+    d.x0 = d.x;
+    d.y0 = d.y;
+  });
+
+  // Status
+  const visible = nodes.length;
+  const total = root.descendants().length + countHidden(root);
+  const collapsed = countCollapsed(root);
+  status.text(`Visible: ${visible} | Collapsed: ${collapsed} | Total: ${total}`);
+  document.getElementById("chart").dataset.visible = visible;
+  document.getElementById("chart").dataset.collapsed = collapsed;
+}
+
+function diagonal(s, d) {
+  return `M${s.y},${s.x}C${(s.y + d.y) / 2},${s.x} ${(s.y + d.y) / 2},${d.x} ${d.y},${d.x}`;
+}
+
+function countHidden(node) {
+  let count = 0;
+  if (node._children) {
+    node._children.forEach(function walk(c) {
+      count++;
+      (c.children || c._children || []).forEach(walk);
+    });
+  }
+  if (node.children) node.children.forEach(c => count += countHidden(c));
+  return count;
+}
+
+function countCollapsed(node) {
+  let count = 0;
+  if (node._children) count++;
+  (node.children || []).forEach(c => count += countCollapsed(c));
+  return count;
+}
+
+function expandAll(node) {
+  if (node._children) { node.children = node._children; node._children = null; }
+  if (node.children) node.children.forEach(expandAll);
+}
+
+function collapseAll(node) {
+  if (node.children) {
+    node.children.forEach(collapseAll);
+    node._children = node.children;
+    node.children = null;
+  }
+}
+
+function collapseAtDepth(node, depth) {
+  if (node.depth >= depth && node.children) {
+    node._children = node.children;
+    node.children = null;
+  }
+  if (node.children) node.children.forEach(c => collapseAtDepth(c, depth));
+}
+
+// --- Button handlers ---
+d3.selectAll("button").on("click", function() {
+  const action = this.dataset.action;
+  if (action === "expand-all") { expandAll(root); update(root); }
+  if (action === "collapse-all") { collapseAll(root); update(root); }
+  if (action === "collapse-depth2") {
+    expandAll(root);
+    collapseAtDepth(root, 2);
+    update(root);
+  }
+});
+
+update(root);
+document.getElementById("chart").dataset.ready = "true";
+</script>
+</body>
+</html>

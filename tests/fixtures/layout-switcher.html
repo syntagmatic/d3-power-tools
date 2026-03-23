@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hierarchy Layout Switcher</title>
+<style>
+  body { margin: 0; font-family: sans-serif; background: #fafafa; }
+  #controls { padding: 12px 20px; display: flex; gap: 6px; flex-wrap: wrap; }
+  button { padding: 6px 14px; border: 1px solid #999; border-radius: 4px;
+           background: #fff; cursor: pointer; font-size: 13px; }
+  button:hover { background: #eee; }
+  button.active { background: steelblue; color: #fff; border-color: steelblue; }
+  svg { display: block; }
+  .link { fill: none; stroke: #999; stroke-opacity: 0.4; stroke-width: 1.5px; }
+  .node text { font-size: 10px; pointer-events: none; }
+  #status { padding: 4px 20px; font-size: 12px; color: #666; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <button data-layout="tree" class="active">Tree</button>
+  <button data-layout="cluster">Cluster</button>
+  <button data-layout="radial-tree">Radial Tree</button>
+  <button data-layout="radial-cluster">Radial Cluster</button>
+  <button data-layout="treemap">Treemap</button>
+  <button data-layout="pack">Circle Pack</button>
+  <button data-layout="icicle">Icicle</button>
+  <button data-layout="sunburst">Sunburst</button>
+</div>
+<svg id="chart"></svg>
+<div id="status"></div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+const width = 1160;
+const height = 700;
+const cx = width / 2;
+const cy = height / 2;
+const radius = Math.min(width, height) / 2 - 40;
+
+const svg = d3.select("#chart")
+  .attr("width", width)
+  .attr("height", height);
+
+const g = svg.append("g");
+const status = d3.select("#status");
+
+// --- Sample data ---
+const data = {
+  name: "root", children: [
+    { name: "A", children: [
+      { name: "A1", children: [{ name: "a", value: 5 }, { name: "b", value: 8 }, { name: "c", value: 3 }] },
+      { name: "A2", children: [{ name: "d", value: 12 }, { name: "e", value: 6 }] },
+      { name: "A3", value: 9 }
+    ]},
+    { name: "B", children: [
+      { name: "B1", children: [{ name: "f", value: 7 }, { name: "g", value: 4 }, { name: "h", value: 11 }, { name: "i", value: 2 }] },
+      { name: "B2", children: [{ name: "j", value: 8 }, { name: "k", value: 5 }] }
+    ]},
+    { name: "C", children: [
+      { name: "C1", value: 15 },
+      { name: "C2", children: [{ name: "l", value: 6 }, { name: "m", value: 9 }, { name: "n", value: 3 }] },
+      { name: "C3", children: [{ name: "o", value: 4 }, { name: "p", value: 7 }] }
+    ]},
+    { name: "D", children: [
+      { name: "D1", value: 10 },
+      { name: "D2", value: 8 },
+      { name: "D3", children: [{ name: "q", value: 5 }, { name: "r", value: 6 }] }
+    ]}
+  ]
+};
+
+const root = d3.hierarchy(data)
+  .sum(d => d.value || 0)
+  .sort((a, b) => b.value - a.value);
+
+let nextId = 0;
+root.each(d => d.nodeId = nextId++);
+
+const color = d3.scaleOrdinal(d3.schemeTableau10);
+const nodes = root.descendants();
+const allLinks = root.links();
+
+nodes.forEach(d => {
+  let n = d;
+  while (n.depth > 1) n = n.parent;
+  d.groupColor = d.depth === 0 ? "#999" : color(n.data.name);
+});
+
+let currentLayout = "tree";
+
+// ─── Point resampling utilities ──────────────────────────────────────
+const nPts = 48;
+
+// Math-based point generation — guarantees corner points for sharp shapes
+
+function circlePoints(cx, cy, r, n) {
+  if (r <= 0) return d3.range(n).map(() => [cx, cy]);
+  return d3.range(n).map(i => {
+    const a = (i / n) * 2 * Math.PI;
+    return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+  });
+}
+
+function rectPoints(x, y, w, h, n) {
+  // x, y = top-left corner. Each edge starts at its corner.
+  if (w <= 0 || h <= 0) return d3.range(n).map(() => [x, y]);
+  const perim = 2 * (w + h);
+  const topN = Math.max(1, Math.round(n * w / perim));
+  const rightN = Math.max(1, Math.round(n * h / perim));
+  const bottomN = Math.max(1, Math.round(n * w / perim));
+  const leftN = Math.max(1, n - topN - rightN - bottomN);
+  const pts = [];
+  for (let i = 0; i < topN; i++) pts.push([x + w * i / topN, y]);
+  for (let i = 0; i < rightN; i++) pts.push([x + w, y + h * i / rightN]);
+  for (let i = 0; i < bottomN; i++) pts.push([x + w - w * i / bottomN, y + h]);
+  for (let i = 0; i < leftN; i++) pts.push([x, y + h - h * i / leftN]);
+  return pts;
+}
+
+function arcPoints(centerX, centerY, startAngle, endAngle, innerR, outerR, n) {
+  // Each segment starts at its corner point
+  if (endAngle - startAngle < 0.001 || outerR <= 0)
+    return d3.range(n).map(() => [centerX, centerY]);
+  const outerLen = (endAngle - startAngle) * outerR;
+  const innerLen = innerR > 0 ? (endAngle - startAngle) * innerR : 0;
+  const sideLen = outerR - innerR;
+  const total = outerLen + sideLen + innerLen + sideLen;
+  const outerN = Math.max(2, Math.round(n * outerLen / total));
+  const rightN = Math.max(1, Math.round(n * sideLen / total));
+  const innerN = innerR > 0 ? Math.max(2, Math.round(n * innerLen / total)) : 1;
+  const leftN = Math.max(1, n - outerN - rightN - innerN);
+  const pts = [];
+  for (let i = 0; i < outerN; i++) {
+    const a = startAngle + (endAngle - startAngle) * i / outerN - Math.PI / 2;
+    pts.push([centerX + outerR * Math.cos(a), centerY + outerR * Math.sin(a)]);
+  }
+  for (let i = 0; i < rightN; i++) {
+    const a = endAngle - Math.PI / 2;
+    const r = outerR - sideLen * i / rightN;
+    pts.push([centerX + r * Math.cos(a), centerY + r * Math.sin(a)]);
+  }
+  if (innerR > 0) {
+    for (let i = 0; i < innerN; i++) {
+      const a = endAngle - (endAngle - startAngle) * i / innerN - Math.PI / 2;
+      pts.push([centerX + innerR * Math.cos(a), centerY + innerR * Math.sin(a)]);
+    }
+  } else {
+    for (let i = 0; i < innerN; i++) pts.push([centerX, centerY]);
+  }
+  for (let i = 0; i < leftN; i++) {
+    const a = startAngle - Math.PI / 2;
+    const r = innerR + sideLen * i / leftN;
+    pts.push([centerX + r * Math.cos(a), centerY + r * Math.sin(a)]);
+  }
+  return pts;
+}
+
+function bestRotation(source, target) {
+  const n = source.length;
+  let bestOffset = 0, bestDist = Infinity;
+  for (let offset = 0; offset < n; offset++) {
+    let dist = 0;
+    for (let i = 0; i < n; i++) {
+      const j = (i + offset) % n;
+      const dx = source[j][0] - target[i][0];
+      const dy = source[j][1] - target[i][1];
+      dist += dx * dx + dy * dy;
+    }
+    if (dist < bestDist) { bestDist = dist; bestOffset = offset; }
+  }
+  return source.map((_, i) => source[(i + bestOffset) % n]);
+}
+
+function pointsToPath(pts) {
+  return "M" + pts.map(p => p[0].toFixed(2) + "," + p[1].toFixed(2)).join("L") + "Z";
+}
+
+// ─── Compute layout as absolute point arrays ─────────────────────────
+
+function computeLayout(layout) {
+  const pts = new Map();   // nodeId → absolute [x,y][] point array
+  const meta = new Map();  // nodeId → { x, y, opacity, ...layout-specific }
+
+  switch (layout) {
+    case "tree": {
+      d3.tree().size([height - 40, width - 200])(root);
+      nodes.forEach(d => {
+        const px = d.y + 80, py = d.x + 20;
+        pts.set(d.nodeId, circlePoints(px, py, 5, nPts));
+        meta.set(d.nodeId, { x: px, y: py, opacity: 1 });
+      });
+      break;
+    }
+    case "cluster": {
+      d3.cluster().size([height - 40, width - 200])(root);
+      nodes.forEach(d => {
+        const px = d.y + 80, py = d.x + 20;
+        pts.set(d.nodeId, circlePoints(px, py, 5, nPts));
+        meta.set(d.nodeId, { x: px, y: py, opacity: 1 });
+      });
+      break;
+    }
+    case "radial-tree": {
+      d3.tree().size([2 * Math.PI, radius])
+        .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth)(root);
+      nodes.forEach(d => {
+        const angle = d.x - Math.PI / 2;
+        const px = cx + d.y * Math.cos(angle), py = cy + d.y * Math.sin(angle);
+        pts.set(d.nodeId, circlePoints(px, py, 5, nPts));
+        meta.set(d.nodeId, { x: px, y: py, opacity: 1 });
+      });
+      break;
+    }
+    case "radial-cluster": {
+      d3.cluster().size([2 * Math.PI, radius])
+        .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth)(root);
+      nodes.forEach(d => {
+        const angle = d.x - Math.PI / 2;
+        const px = cx + d.y * Math.cos(angle), py = cy + d.y * Math.sin(angle);
+        pts.set(d.nodeId, circlePoints(px, py, 5, nPts));
+        meta.set(d.nodeId, { x: px, y: py, opacity: 1 });
+      });
+      break;
+    }
+    case "treemap": {
+      d3.treemap().size([width - 40, height - 80])
+        .paddingInner(2).paddingOuter(4).round(true)(root);
+      nodes.forEach(d => {
+        const w = d.x1 - d.x0, h = d.y1 - d.y0;
+        const x0 = 20 + d.x0, y0 = 60 + d.y0;
+        const opacity = (w > 2 && h > 2) ? 1 : 0;
+        pts.set(d.nodeId, w > 0 && h > 0
+          ? rectPoints(x0, y0, w, h, nPts)
+          : d3.range(nPts).map(() => [x0, y0]));
+        meta.set(d.nodeId, { x: x0 + w / 2, y: y0 + h / 2, opacity, w, h });
+      });
+      break;
+    }
+    case "pack": {
+      d3.pack().size([height - 80, height - 80]).padding(3)(root);
+      const ox = (width - (height - 80)) / 2;
+      nodes.forEach(d => {
+        const px = ox + d.x, py = 60 + d.y;
+        pts.set(d.nodeId, d.r > 0
+          ? circlePoints(px, py, d.r, nPts)
+          : d3.range(nPts).map(() => [px, py]));
+        meta.set(d.nodeId, { x: px, y: py, opacity: 1, r: d.r });
+      });
+      break;
+    }
+    case "icicle": {
+      d3.partition().size([width - 40, height - 80]).padding(1)(root);
+      nodes.forEach(d => {
+        const w = d.x1 - d.x0, h = d.y1 - d.y0;
+        const x0 = 20 + d.x0, y0 = 60 + d.y0;
+        const opacity = (w > 1) ? 1 : 0;
+        pts.set(d.nodeId, w > 0 && h > 0
+          ? rectPoints(x0, y0, w, h, nPts)
+          : d3.range(nPts).map(() => [x0, y0]));
+        meta.set(d.nodeId, { x: x0 + w / 2, y: y0 + h / 2, opacity, w, h });
+      });
+      break;
+    }
+    case "sunburst": {
+      d3.partition().size([2 * Math.PI, radius])(root);
+      nodes.forEach(d => {
+        const opacity = (d.x1 - d.x0 > 0.01) ? 1 : 0;
+        pts.set(d.nodeId, (d.x1 - d.x0 > 0.001 && d.y1 > 0)
+          ? arcPoints(cx, cy, d.x0, d.x1, d.y0, d.y1 - 1, nPts)
+          : d3.range(nPts).map(() => [cx, cy]));
+        const midAngle = (d.x0 + d.x1) / 2 - Math.PI / 2;
+        const midR = (d.y0 + d.y1) / 2;
+        meta.set(d.nodeId, {
+          x: cx + midR * Math.cos(midAngle),
+          y: cy + midR * Math.sin(midAngle),
+          opacity,
+          startAngle: d.x0, endAngle: d.x1,
+          innerR: d.y0, outerR: d.y1 - 1
+        });
+      });
+      break;
+    }
+  }
+  return { pts, meta };
+}
+
+// --- SVG setup ---
+const linkGroup = g.append("g").attr("class", "links");
+const nodeGroup = g.append("g").attr("class", "nodes");
+
+const linkSel = linkGroup.selectAll("line.link")
+  .data(allLinks, d => `${d.source.nodeId}-${d.target.nodeId}`)
+  .join("line")
+    .attr("class", "link");
+
+const nodeSel = nodeGroup.selectAll("g.node")
+  .data(nodes, d => d.nodeId)
+  .join("g")
+    .attr("class", "node");
+
+nodeSel.append("path")
+  .attr("fill", d => d.groupColor)
+  .attr("fill-opacity", d => d.children ? 0.4 : 0.85)
+  .attr("stroke", d => d.children ? d.groupColor : "none")
+  .attr("stroke-width", 1);
+
+nodeSel.append("text")
+  .attr("dy", "0.31em")
+  .attr("x", 8)
+  .text(d => d.data.name);
+
+// ─── State: current point arrays and metadata per node ───────────────
+const currentPoints = new Map();  // nodeId → [x,y][]
+const currentMeta = new Map();    // nodeId → { x, y, opacity, ... }
+
+function render(layout, animate = true) {
+  const { pts: targetPts, meta: targetMeta } = computeLayout(layout);
+  const duration = animate ? 800 : 0;
+  const isNodeLink = ["tree", "cluster", "radial-tree", "radial-cluster"].includes(layout);
+
+  // Align current points to target via bestRotation
+  const alignedPts = new Map();
+  for (const [nodeId, tgt] of targetPts) {
+    const cur = currentPoints.get(nodeId);
+    alignedPts.set(nodeId, cur ? bestRotation(cur, tgt) : tgt);
+  }
+
+  const t = svg.transition().duration(duration).ease(d3.easeCubicInOut);
+
+  // Nodes: interpolate point arrays, offset by <g> centroid for local coords
+  nodeSel.each(function(d) {
+    const node = d3.select(this);
+    const path = node.select("path");
+    const fromPts = alignedPts.get(d.nodeId);
+    const toPts = targetPts.get(d.nodeId);
+    const fromMeta = currentMeta.get(d.nodeId) || targetMeta.get(d.nodeId);
+    const toMeta = targetMeta.get(d.nodeId);
+
+    // <g> interpolates to centroid (keeps text positioned correctly)
+    node.transition(t)
+      .attrTween("transform", () => time => {
+        const x = fromMeta.x + (toMeta.x - fromMeta.x) * time;
+        const y = fromMeta.y + (toMeta.y - fromMeta.y) * time;
+        return `translate(${x},${y})`;
+      })
+      .attr("opacity", toMeta.opacity);
+
+    // Path: lerp absolute point arrays, subtract <g> position for local coords
+    path.transition(t)
+      .attr("transform", null)
+      .attrTween("d", () => time => {
+        const gx = fromMeta.x + (toMeta.x - fromMeta.x) * time;
+        const gy = fromMeta.y + (toMeta.y - fromMeta.y) * time;
+        const pts = fromPts.map((fp, j) => [
+          fp[0] + (toPts[j][0] - fp[0]) * time - gx,
+          fp[1] + (toPts[j][1] - fp[1]) * time - gy
+        ]);
+        return pointsToPath(pts);
+      })
+      .attr("fill-opacity", d => d.children ? 0.4 : 0.85);
+  });
+
+  // Labels
+  nodeSel.select("text").transition(t)
+    .attr("opacity", d => {
+      if (isNodeLink) return 1;
+      const m = targetMeta.get(d.nodeId);
+      if (layout === "sunburst") {
+        return (m.endAngle - m.startAngle) * (m.innerR + m.outerR) / 2 > 40 ? 1 : 0;
+      }
+      if (layout === "treemap" || layout === "icicle") {
+        return m.w > 40 && m.h > 20 ? 1 : 0;
+      }
+      if (layout === "pack") return (m.r > 20) ? 1 : 0;
+      return 0;
+    })
+    .attr("x", d => {
+      if (isNodeLink) {
+        if (layout === "tree" || layout === "cluster") return d.children ? -8 : 8;
+        return 8;
+      }
+      return 0;
+    })
+    .attr("text-anchor", d => {
+      if (isNodeLink) {
+        if (layout === "tree" || layout === "cluster") return d.children ? "end" : "start";
+        return "start";
+      }
+      return "middle";
+    })
+    .attr("transform", d => {
+      if (layout === "sunburst") {
+        const m = targetMeta.get(d.nodeId);
+        const angle = (m.startAngle + m.endAngle) / 2 * 180 / Math.PI - 90;
+        return `rotate(${angle > 90 && angle < 270 ? angle + 180 : angle})`;
+      }
+      return null;
+    });
+
+  // Links: visible only for node-link layouts
+  if (duration > 0) {
+    linkSel.each(function(linkData) {
+      const link = d3.select(this);
+      const srcFrom = currentMeta.get(linkData.source.nodeId) || targetMeta.get(linkData.source.nodeId);
+      const srcTo = targetMeta.get(linkData.source.nodeId);
+      const tgtFrom = currentMeta.get(linkData.target.nodeId) || targetMeta.get(linkData.target.nodeId);
+      const tgtTo = targetMeta.get(linkData.target.nodeId);
+
+      if (isNodeLink) link.attr("display", null);
+      link.transition(t)
+        .attrTween("x1", () => d3.interpolateNumber(srcFrom.x, srcTo.x))
+        .attrTween("y1", () => d3.interpolateNumber(srcFrom.y, srcTo.y))
+        .attrTween("x2", () => d3.interpolateNumber(tgtFrom.x, tgtTo.x))
+        .attrTween("y2", () => d3.interpolateNumber(tgtFrom.y, tgtTo.y))
+        .attr("stroke-opacity", isNodeLink ? 0.4 : 0)
+        .on("end", function() { if (!isNodeLink) d3.select(this).attr("display", "none"); });
+    });
+  } else {
+    linkSel
+      .attr("x1", d => targetMeta.get(d.source.nodeId).x)
+      .attr("y1", d => targetMeta.get(d.source.nodeId).y)
+      .attr("x2", d => targetMeta.get(d.target.nodeId).x)
+      .attr("y2", d => targetMeta.get(d.target.nodeId).y)
+      .attr("stroke-opacity", isNodeLink ? 0.4 : 0)
+      .attr("display", isNodeLink ? null : "none");
+  }
+
+  // Stash current state
+  for (const [nodeId, p] of targetPts) currentPoints.set(nodeId, p.map(pt => [...pt]));
+  for (const [nodeId, m] of targetMeta) currentMeta.set(nodeId, { ...m });
+
+  currentLayout = layout;
+  status.text(`Layout: ${layout} | Nodes: ${nodes.length} | Leaves: ${root.leaves().length}`);
+  document.getElementById("chart").dataset.layout = layout;
+}
+
+// --- Button handlers ---
+d3.selectAll("button[data-layout]").on("click", function() {
+  const layout = this.dataset.layout;
+  d3.selectAll("button").classed("active", false);
+  d3.select(this).classed("active", true);
+  render(layout);
+});
+
+render("tree", false);
+document.getElementById("chart").dataset.ready = "true";
+</script>
+</body>
+</html>

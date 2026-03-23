@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Color & Compositing — Test Fixture</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: #fff; padding: 20px; color: #333; }
+  h2 { font-size: 14px; margin: 16px 0 8px; font-weight: 600; }
+  .controls { margin: 12px 0; display: flex; gap: 8px; }
+  .controls button {
+    padding: 4px 12px; border: 1px solid #ccc; border-radius: 4px;
+    background: #f8f8f8; cursor: pointer; font-size: 12px;
+  }
+  .controls button.active { background: #4477AA; color: #fff; border-color: #4477AA; }
+  .palette-row { display: flex; gap: 2px; margin-bottom: 4px; }
+  .palette-row .swatch { width: 36px; height: 20px; border-radius: 2px; }
+  .palette-label { font-size: 11px; color: #666; margin-bottom: 2px; }
+  .canvas-row { display: flex; gap: 16px; margin: 12px 0; }
+  .canvas-row .panel { text-align: center; }
+  .canvas-row .panel-label { font-size: 11px; color: #666; margin-top: 4px; }
+  canvas { border: 1px solid #eee; display: block; }
+  .legend-section { margin: 16px 0; }
+  .swatch-legend { display: flex; gap: 12px; flex-wrap: wrap; }
+  .swatch-item { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+  .swatch-item span.color { width: 14px; height: 14px; border-radius: 2px; display: inline-block; }
+  #sim-overlay { position: relative; }
+  .sim-label {
+    position: absolute; top: 4px; left: 4px; background: rgba(0,0,0,0.7);
+    color: #fff; font-size: 10px; padding: 2px 6px; border-radius: 2px;
+    pointer-events: none; display: none;
+  }
+</style>
+</head>
+<body>
+
+<h2>Paul Tol Qualitative Palettes</h2>
+<div id="palettes"></div>
+
+<h2>Canvas Compositing Modes</h2>
+<div class="controls">
+  <button data-action="source-over" class="active">source-over (default)</button>
+  <button data-action="lighter">lighter (additive)</button>
+  <button data-action="multiply">multiply</button>
+  <button data-action="colorblind-sim">colorblind sim (deuteranopia)</button>
+</div>
+<div class="canvas-row" id="canvas-area"></div>
+
+<h2>Color Legends</h2>
+<div class="legend-section" id="legends"></div>
+
+<script type="module">
+// --- Tol palettes (inline to keep fixture self-contained) ---
+const tolBright   = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377","#BBBBBB"];
+const tolVibrant  = ["#EE7733","#0077BB","#33BBEE","#EE3377","#CC3311","#009988","#BBBBBB"];
+const tolMuted    = ["#CC6677","#332288","#DDCC77","#117733","#88CCEE","#882255","#44AA99","#999933","#AA4499"];
+const tolHighContrast = ["#004488","#DDAA33","#BB5566"];
+const tolLight    = ["#77AADD","#EE8866","#EEDD88","#FFAABB","#99DDFF","#44BB99","#BBCC33","#AAAA00","#DDDDDD"];
+
+const tolSunset = [
+  "#364B9A","#4A7BB7","#6EA6CD","#98CAE1","#C2E4EF",
+  "#EAECCC","#FEDA8B","#FDB366","#F67E4B","#DD3D2D","#A50026"
+];
+
+const palettes = { Bright: tolBright, Vibrant: tolVibrant, Muted: tolMuted, "High-Contrast": tolHighContrast, Light: tolLight };
+
+// --- Render palette swatches ---
+const palDiv = d3.select("#palettes");
+for (const [name, colors] of Object.entries(palettes)) {
+  palDiv.append("div").attr("class", "palette-label").text(name);
+  const row = palDiv.append("div").attr("class", "palette-row");
+  colors.forEach(c => {
+    row.append("div").attr("class", "swatch").style("background", c)
+      .attr("title", c);
+  });
+}
+
+// --- Generate scatter data ---
+const rng = d3.randomLcg(42);
+const randNorm = d3.randomNormal.source(rng)(0, 1);
+const W = 320, H = 280, N = 2000;
+
+const groups = ["A", "B", "C"];
+const centers = { A: [W * 0.35, H * 0.4], B: [W * 0.65, H * 0.55], C: [W * 0.5, H * 0.3] };
+const color = d3.scaleOrdinal(tolBright).domain(groups);
+
+const data = d3.range(N).map(() => {
+  const g = groups[Math.floor(rng() * 3)];
+  const [cx, cy] = centers[g];
+  return { x: cx + randNorm() * 40, y: cy + randNorm() * 35, group: g };
+});
+
+// --- Colorblind simulation (Viénot/Brettel deuteranopia) ---
+function linearize(c) {
+  c /= 255;
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+function delinearize(c) {
+  return Math.round(Math.max(0, Math.min(1, c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1/2.4) - 0.055)) * 255);
+}
+const deutMatrix = [0.367322,0.860646,-0.227968, 0.280085,0.672501,0.047413, -0.011820,0.042940,0.968881];
+function simDeuteranopia(imageData) {
+  const d = imageData.data, m = deutMatrix;
+  for (let i = 0; i < d.length; i += 4) {
+    const lr = linearize(d[i]), lg = linearize(d[i+1]), lb = linearize(d[i+2]);
+    d[i]   = delinearize(m[0]*lr + m[1]*lg + m[2]*lb);
+    d[i+1] = delinearize(m[3]*lr + m[4]*lg + m[5]*lb);
+    d[i+2] = delinearize(m[6]*lr + m[7]*lg + m[8]*lb);
+  }
+}
+
+// --- Draw scatter on canvas ---
+function drawScatter(canvas, mode, applySimulation = false) {
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, W, H);
+
+  if (mode === "lighter") {
+    ctx.fillStyle = "#111";
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  ctx.globalCompositeOperation = mode;
+
+  const alpha = mode === "lighter" ? 0.06 : 0.35;
+  for (const g of groups) {
+    const c = d3.rgb(color(g));
+    ctx.fillStyle = `rgba(${c.r},${c.g},${c.b},${alpha})`;
+    ctx.beginPath();
+    for (const d of data) {
+      if (d.group !== g) continue;
+      ctx.moveTo(d.x + 3, d.y);
+      ctx.arc(d.x, d.y, 3, 0, Math.PI * 2);
+    }
+    ctx.fill();
+  }
+
+  ctx.globalCompositeOperation = "source-over";
+
+  if (applySimulation) {
+    const imageData = ctx.getImageData(0, 0, W, H);
+    simDeuteranopia(imageData);
+    ctx.putImageData(imageData, 0, 0);
+  }
+}
+
+// --- Create canvases ---
+const canvasArea = d3.select("#canvas-area");
+const mainPanel = canvasArea.append("div").attr("class", "panel");
+const mainCanvas = mainPanel.append("canvas").attr("width", W).attr("height", H).node();
+mainPanel.append("div").attr("class", "panel-label").attr("id", "mode-label").text("source-over");
+
+const simPanel = canvasArea.append("div").attr("class", "panel").attr("id", "sim-overlay");
+const simCanvas = simPanel.append("canvas").attr("width", W).attr("height", H).style("display", "none").node();
+const simLabel = simPanel.append("div").attr("class", "sim-label").text("Deuteranopia simulation");
+simPanel.append("div").attr("class", "panel-label").attr("id", "sim-mode-label");
+
+let currentMode = "source-over";
+let showSim = false;
+
+function render() {
+  drawScatter(mainCanvas, currentMode, false);
+  d3.select("#mode-label").text(currentMode);
+  if (showSim) {
+    simCanvas.style.display = "block";
+    simLabel.style.display = "block";
+    drawScatter(simCanvas, currentMode, true);
+    d3.select("#sim-mode-label").text(currentMode + " (deuteranopia)");
+  } else {
+    simCanvas.style.display = "none";
+    simLabel.style.display = "none";
+    d3.select("#sim-mode-label").text("");
+  }
+}
+
+// --- Button handlers ---
+d3.selectAll(".controls button").on("click", function() {
+  const action = this.dataset.action;
+  if (action === "colorblind-sim") {
+    showSim = !showSim;
+    d3.select(this).classed("active", showSim);
+  } else {
+    currentMode = action;
+    d3.selectAll(".controls button").each(function() {
+      if (this.dataset.action !== "colorblind-sim") {
+        d3.select(this).classed("active", this.dataset.action === currentMode);
+      }
+    });
+  }
+  render();
+});
+
+// --- Legends ---
+const legendDiv = d3.select("#legends");
+
+// Categorical swatch legend
+legendDiv.append("div").attr("class", "palette-label").text("Categorical (Tol Bright)");
+const swatchDiv = legendDiv.append("div").attr("class", "swatch-legend");
+groups.forEach(g => {
+  const item = swatchDiv.append("div").attr("class", "swatch-item");
+  item.append("span").attr("class", "color").style("background", color(g))
+    .attr("role", "img").attr("aria-label", `Group ${g} color swatch`);
+  item.append("span").text(`Group ${g}`);
+});
+
+// Continuous legend (Sunset diverging)
+legendDiv.append("div").attr("class", "palette-label").style("margin-top", "12px").text("Continuous (Tol Sunset, diverging)");
+
+const legendW = 300, legendH = 14;
+const sunsetScale = d3.scaleSequential(
+  d3.piecewise(d3.interpolateLab, tolSunset)
+).domain([-1, 1]);
+
+const legendCanvas = legendDiv.append("canvas")
+  .attr("width", legendW).attr("height", legendH)
+  .style("display", "block").node();
+const lctx = legendCanvas.getContext("2d");
+for (let i = 0; i < legendW; i++) {
+  lctx.fillStyle = sunsetScale(-1 + 2 * i / legendW);
+  lctx.fillRect(i, 0, 1, legendH);
+}
+
+const axisSvg = legendDiv.append("svg")
+  .attr("width", legendW + 1).attr("height", 24)
+  .style("display", "block");
+const axisScale = d3.scaleLinear().domain([-1, 1]).range([0, legendW]);
+axisSvg.append("g").attr("transform", "translate(0.5,0)")
+  .call(d3.axisBottom(axisScale).ticks(5).tickSize(4));
+
+// --- Initial render ---
+render();
+document.body.dataset.ready = "true";
+</script>
+</body>
+</html>

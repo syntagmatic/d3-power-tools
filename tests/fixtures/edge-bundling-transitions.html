@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Edge Bundling with Layout Transitions</title>
+<style>
+  body { margin: 0; font-family: sans-serif; background: #fafafa; }
+  #controls { padding: 12px 20px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  button { padding: 6px 14px; border: 1px solid #999; border-radius: 4px;
+           background: #fff; cursor: pointer; font-size: 13px; }
+  button:hover { background: #eee; }
+  button.active { background: #333; color: #fff; border-color: #333; }
+  label { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+  input[type=range] { width: 120px; }
+  .link { fill: none; stroke: #476376; stroke-opacity: 0.3; stroke-width: 1; }
+  .link--highlighted { stroke: #e03131; stroke-opacity: 0.8; stroke-width: 1.5; }
+  .link--faded { stroke-opacity: 0.04; }
+  .node circle { cursor: pointer; }
+  .node text { font-size: 9px; fill: #333; pointer-events: none; }
+  .node--highlighted text { fill: #e03131; font-weight: 600; }
+  .node--faded circle { opacity: 0.15; }
+  .node--faded text { opacity: 0.1; }
+  #status { padding: 4px 20px; font-size: 12px; color: #666; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <button data-layout="bundle" class="active">Bundle</button>
+  <button data-layout="cluster">Cluster</button>
+  <button data-layout="tree">Tree</button>
+  <button data-layout="pack">Pack</button>
+  <button data-layout="treemap">Treemap</button>
+  <span style="margin-left:12px"></span>
+  <label>Tension: <input id="tension" type="range" min="0" max="100" value="85">
+    <span id="tension-val">0.85</span></label>
+  <button data-action="color-group">Color by Group</button>
+</div>
+<svg id="chart"></svg>
+<div id="status"></div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+const width = 960, height = 960;
+const radius = width / 2;
+const margin = 80;
+
+const svg = d3.select("#chart")
+  .attr("width", width).attr("height", height)
+  .append("g").attr("transform", `translate(${radius},${radius})`);
+
+const status = d3.select("#status");
+
+// --- Data: software module hierarchy ---
+const nodes = [
+  { id: "root", parent: "" },
+  { id: "app", parent: "root" },
+  { id: "app.main", parent: "app" },
+  { id: "app.config", parent: "app" },
+  { id: "app.router", parent: "app" },
+  { id: "ui", parent: "root" },
+  { id: "ui.button", parent: "ui" },
+  { id: "ui.modal", parent: "ui" },
+  { id: "ui.form", parent: "ui" },
+  { id: "ui.list", parent: "ui" },
+  { id: "ui.tooltip", parent: "ui" },
+  { id: "data", parent: "root" },
+  { id: "data.store", parent: "data" },
+  { id: "data.api", parent: "data" },
+  { id: "data.cache", parent: "data" },
+  { id: "data.sync", parent: "data" },
+  { id: "util", parent: "root" },
+  { id: "util.log", parent: "util" },
+  { id: "util.format", parent: "util" },
+  { id: "util.validate", parent: "util" },
+  { id: "util.debounce", parent: "util" },
+  { id: "auth", parent: "root" },
+  { id: "auth.login", parent: "auth" },
+  { id: "auth.session", parent: "auth" },
+  { id: "auth.permissions", parent: "auth" },
+  { id: "viz", parent: "root" },
+  { id: "viz.chart", parent: "viz" },
+  { id: "viz.axis", parent: "viz" },
+  { id: "viz.legend", parent: "viz" },
+  { id: "viz.tooltip", parent: "viz" },
+];
+
+const connections = [
+  { source: "app.main", target: "app.router" },
+  { source: "app.main", target: "app.config" },
+  { source: "app.main", target: "data.store" },
+  { source: "app.main", target: "auth.login" },
+  { source: "app.router", target: "ui.modal" },
+  { source: "app.router", target: "auth.permissions" },
+  { source: "app.config", target: "util.log" },
+  { source: "ui.button", target: "util.debounce" },
+  { source: "ui.modal", target: "ui.button" },
+  { source: "ui.form", target: "util.validate" },
+  { source: "ui.form", target: "ui.button" },
+  { source: "ui.list", target: "data.api" },
+  { source: "ui.list", target: "util.format" },
+  { source: "ui.tooltip", target: "util.format" },
+  { source: "data.store", target: "data.api" },
+  { source: "data.store", target: "data.cache" },
+  { source: "data.api", target: "auth.session" },
+  { source: "data.api", target: "util.log" },
+  { source: "data.sync", target: "data.store" },
+  { source: "data.sync", target: "data.api" },
+  { source: "data.cache", target: "util.log" },
+  { source: "auth.login", target: "data.api" },
+  { source: "auth.login", target: "ui.form" },
+  { source: "auth.session", target: "data.cache" },
+  { source: "auth.permissions", target: "auth.session" },
+  { source: "viz.chart", target: "data.store" },
+  { source: "viz.chart", target: "viz.axis" },
+  { source: "viz.chart", target: "viz.legend" },
+  { source: "viz.chart", target: "ui.tooltip" },
+  { source: "viz.axis", target: "util.format" },
+  { source: "viz.tooltip", target: "ui.tooltip" },
+  { source: "viz.legend", target: "util.format" },
+];
+
+// --- Build hierarchy ---
+const root = d3.stratify()
+  .id(d => d.id)
+  .parentId(d => d.parent || null)(nodes);
+
+root.sum(d => d.children ? 0 : 1).sort((a, b) => b.value - a.value);
+
+// --- Layout engines ---
+const layouts = {
+  bundle: d3.cluster()
+    .size([2 * Math.PI, radius - 140])
+    .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth),
+  cluster: d3.cluster()
+    .size([2 * Math.PI, radius - 100])
+    .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth),
+  tree: d3.tree().size([height - margin * 2, width - margin * 2]),
+  pack: d3.pack().size([width - margin, height - margin]).padding(8),
+  treemap: d3.treemap().size([width - margin, height - margin]).padding(4).round(true),
+};
+
+// --- Compute LCA paths ---
+const nodesById = new Map(root.descendants().map(d => [d.data.id, d]));
+const links = connections.map(c => {
+  const s = nodesById.get(c.source), t = nodesById.get(c.target);
+  return s && t ? s.path(t) : null;
+}).filter(Boolean);
+
+// --- Bundle curve generator (cartesian, using current_x/y) ---
+let tension = 0.85;
+const line = d3.line()
+  .curve(d3.curveBundle.beta(1 - tension))
+  .x(d => d.current_x)
+  .y(d => d.current_y);
+
+// --- Color ---
+const color = d3.scaleOrdinal(d3.schemeTableau10);
+function groupOf(d) {
+  let n = d; while (n.depth > 1) n = n.parent; return n.data.id;
+}
+let colorByGroup = false;
+
+// --- Position mapping: all layouts → cartesian (centered at 0,0) ---
+function computeTargets(layoutName) {
+  const layout = layouts[layoutName];
+  layout(root);
+  const hw = (width - margin) / 2, hh = (height - margin) / 2;
+
+  root.each(d => {
+    // Default rectangle size is 0
+    d.target_w = 0;
+    d.target_h = 0;
+
+    switch (layoutName) {
+      case "bundle":
+        if (!d.children) {
+          d.target_x = d.y * Math.cos(d.x - Math.PI / 2);
+          d.target_y = d.y * Math.sin(d.x - Math.PI / 2);
+          d.target_r = 3;
+        } else {
+          d.target_x = d.y * Math.cos(d.x - Math.PI / 2);
+          d.target_y = d.y * Math.sin(d.x - Math.PI / 2);
+          d.target_r = 0;
+        }
+        d.target_label_visible = !d.children;
+        d.target_label_radial = true;
+        break;
+      case "cluster":
+        d.target_x = d.y * Math.cos(d.x - Math.PI / 2);
+        d.target_y = d.y * Math.sin(d.x - Math.PI / 2);
+        d.target_r = d.children ? 2.5 : 3;
+        d.target_label_visible = !d.children;
+        d.target_label_radial = true;
+        break;
+      case "tree":
+        d.target_x = d.y - hw;
+        d.target_y = d.x - hh;
+        d.target_r = d.children ? 3 : 4;
+        d.target_label_visible = true;
+        d.target_label_radial = false;
+        break;
+      case "pack":
+        d.target_x = d.x - hw;
+        d.target_y = d.y - hh;
+        d.target_r = d.children ? d.r : 4;  // group circles show nesting, leaves are small dots
+        d.target_label_visible = !d.children;
+        d.target_label_radial = false;
+        break;
+      case "treemap":
+        d.target_x = (d.x0 + d.x1) / 2 - hw;
+        d.target_y = (d.y0 + d.y1) / 2 - hh;
+        d.target_r = d.children ? 0 : 4;  // small fixed dots for leaves
+        d.target_w = d.x1 - d.x0 - 2;
+        d.target_h = d.y1 - d.y0 - 2;
+        d.target_label_visible = !d.children && (d.x1 - d.x0) > 30;
+        d.target_label_radial = false;
+        break;
+    }
+  });
+}
+
+// --- SVG layers: nodes behind, edges on top, leaf labels on top ---
+const nodeLayer = svg.append("g").attr("class", "node-layer");
+const linkLayer = svg.append("g").attr("class", "link-layer");
+const labelLayer = svg.append("g").attr("class", "label-layer");
+
+// --- Draw ALL nodes ---
+const allNodes = root.descendants();
+const nodeSelection = nodeLayer.selectAll("g.node")
+  .data(allNodes, d => d.data.id)
+  .join("g")
+    .attr("class", "node");
+
+// --- Draw edges ---
+const linkSelection = linkLayer.selectAll("path.link")
+  .data(links)
+  .join("path")
+    .attr("class", "link");
+
+// Background rectangles (for Treemap)
+nodeSelection.append("rect")
+  .attr("class", "bg")
+  .attr("fill", d => d.children ? "none" : "#555")
+  .attr("fill-opacity", 0.05)
+  .attr("stroke", d => d.children ? "#ccc" : "none")
+  .attr("stroke-width", 1);
+
+nodeSelection.append("circle")
+  .attr("fill", d => d.children ? "none" : "#555")
+  .attr("stroke", d => d.children ? "#ccc" : null)
+  .attr("stroke-width", d => d.children ? 1 : null);
+
+nodeSelection.append("text")
+  .attr("dy", "0.31em")
+  .text(d => d.data.id.split(".").pop());
+
+// --- Rendering ---
+function redrawLinks() {
+  linkSelection.attr("d", line);
+}
+
+function redrawNodes() {
+  nodeSelection
+    .attr("transform", d => `translate(${d.current_x},${d.current_y})`);
+
+  nodeSelection.select("rect")
+    .attr("x", d => -(d.current_w || 0) / 2)
+    .attr("y", d => -(d.current_h || 0) / 2)
+    .attr("width", d => d.current_w || 0)
+    .attr("height", d => d.current_h || 0)
+    .attr("display", d => (d.current_w > 0 && d.current_h > 0) ? null : "none");
+
+  nodeSelection.select("circle")
+    .attr("r", d => d.current_r);
+
+  // Update labels: Radial vs Cartesian
+  nodeSelection.select("text")
+    .attr("display", d => d.current_label_visible ? null : "none")
+    .attr("x", d => {
+      if (d.current_label_radial) {
+        const angle = Math.atan2(d.current_y, d.current_x);
+        return (angle > -Math.PI / 2 && angle < Math.PI / 2) ? 8 : -8;
+      }
+      return 0; // Centered
+    })
+    .attr("y", d => {
+      if (!d.current_label_radial) {
+        // Offset vertically if we have a dot
+        return d.current_r > 0 ? -d.current_r - 8 : 0;
+      }
+      return 0;
+    })
+    .attr("text-anchor", d => {
+      if (d.current_label_radial) {
+        const angle = Math.atan2(d.current_y, d.current_x);
+        return (angle > -Math.PI / 2 && angle < Math.PI / 2) ? "start" : "end";
+      }
+      return "middle";
+    })
+    .attr("transform", d => {
+      if (d.current_label_radial) {
+        const angle = Math.atan2(d.current_y, d.current_x) * 180 / Math.PI;
+        return `rotate(${angle > -90 && angle < 90 ? angle : angle + 180})`;
+      }
+      return null;
+    });
+}
+
+// --- Layout transition ---
+let currentLayout = null;
+let transitioning = false;
+
+function transitionTo(layoutName) {
+  if (layoutName === currentLayout) return;
+
+  // Snapshot current positions
+  root.each(d => {
+    d.source_x = d.current_x ?? 0;
+    d.source_y = d.current_y ?? 0;
+    d.source_r = d.current_r ?? 3;
+    d.source_w = d.current_w ?? 0;
+    d.source_h = d.current_h ?? 0;
+  });
+
+  const isInitial = currentLayout === null;
+
+  // Compute target positions
+  computeTargets(layoutName);
+  currentLayout = layoutName;
+  transitioning = true;
+
+  // Highlight active button
+  d3.selectAll("[data-layout]").classed("active", function() {
+    return this.dataset.layout === layoutName;
+  });
+
+  // Apply targets immediately for initial load, animate otherwise
+  if (isInitial) {
+    root.each(d => {
+      d.current_x = d.target_x;
+      d.current_y = d.target_y;
+      d.current_r = d.target_r;
+      d.current_w = d.target_w;
+      d.current_h = d.target_h;
+      d.current_label_visible = d.target_label_visible;
+      d.current_label_radial = d.target_label_radial;
+      d.source_label_visible = d.target_label_visible;
+      d.source_label_radial = d.target_label_radial;
+    });
+    redrawNodes();
+    redrawLinks();
+    transitioning = false;
+    updateStatus();
+    document.body.dataset.layout = layoutName;
+    return;
+  }
+
+  // Data-space interpolation with per-frame edge redraw
+  svg.transition("layout").duration(1200).ease(d3.easeCubicInOut)
+    .tween("interpolate", () => t => {
+      root.each(d => {
+        d.current_x = d.source_x + (d.target_x - d.source_x) * t;
+        d.current_y = d.source_y + (d.target_y - d.source_y) * t;
+        d.current_r = d.source_r + (d.target_r - d.source_r) * t;
+        d.current_w = (d.source_w || 0) + ((d.target_w || 0) - (d.source_w || 0)) * t;
+        d.current_h = (d.source_h || 0) + ((d.target_h || 0) - (d.source_h || 0)) * t;
+        d.current_label_visible = t > 0.5 ? d.target_label_visible : (d.source_label_visible ?? d.target_label_visible);
+        d.current_label_radial = t > 0.5 ? d.target_label_radial : (d.source_label_radial ?? d.target_label_radial);
+      });
+      redrawNodes();
+      redrawLinks();
+    })
+    .on("end", () => {
+      transitioning = false;
+      // Stash final label state for next transition
+      root.each(d => {
+        d.source_label_visible = d.target_label_visible;
+        d.source_label_radial = d.target_label_radial;
+      });
+      updateStatus();
+      document.body.dataset.layout = layoutName;
+    });
+}
+
+// --- Interaction: highlight ---
+function getConnectedLinks(node) {
+  const leafIds = new Set(node.leaves().map(d => d.data.id));
+  return links.filter(l =>
+    leafIds.has(l[0].data.id) || leafIds.has(l[l.length - 1].data.id));
+}
+
+let selectedNode = null;
+
+nodeSelection.filter(d => !d.children)
+  .on("mouseover", (event, d) => {
+    if (selectedNode || transitioning) return;
+    highlightNode(d);
+  })
+  .on("mouseout", () => {
+    if (selectedNode || transitioning) return;
+    clearHighlight();
+  })
+  .on("click", (event, d) => {
+    if (transitioning) return;
+    if (selectedNode === d) { selectedNode = null; clearHighlight(); }
+    else { selectedNode = d; highlightNode(d); }
+  });
+
+function highlightNode(d) {
+  const connected = getConnectedLinks(d);
+  const connectedIds = new Set();
+  connected.forEach(l => {
+    connectedIds.add(l[0].data.id);
+    connectedIds.add(l[l.length - 1].data.id);
+  });
+
+  linkSelection.classed("link--faded", true);
+  nodeSelection.classed("node--faded", true);
+  linkSelection.filter(l => connected.includes(l))
+    .classed("link--faded", false).classed("link--highlighted", true).raise();
+  nodeSelection.filter(n => connectedIds.has(n.data.id))
+    .classed("node--faded", false).classed("node--highlighted", true);
+
+  status.text(`${d.data.id}: ${connected.length} connections`);
+  document.body.dataset.highlighted = d.data.id;
+  document.body.dataset.connections = connected.length;
+}
+
+function clearHighlight() {
+  linkSelection.classed("link--faded link--highlighted", false);
+  nodeSelection.classed("node--faded node--highlighted", false);
+  document.body.dataset.highlighted = "";
+  updateStatus();
+}
+
+function updateStatus() {
+  status.text(`${currentLayout} | ${root.leaves().length} leaves | ${links.length} connections`);
+}
+
+// --- Tension slider ---
+d3.select("#tension").on("input", function() {
+  tension = +this.value / 100;
+  d3.select("#tension-val").text(tension.toFixed(2));
+  line.curve(d3.curveBundle.beta(1 - tension));
+  if (!transitioning) redrawLinks();
+  document.body.dataset.tension = tension;
+});
+
+// --- Color toggle ---
+d3.select("[data-action=color-group]").on("click", function() {
+  colorByGroup = !colorByGroup;
+  nodeSelection.select("circle")
+    .attr("fill", d => d.children ? "none" : (colorByGroup ? color(groupOf(d)) : "#555"));
+  linkSelection
+    .attr("stroke", d => colorByGroup ? color(groupOf(d[0])) : null);
+  document.body.dataset.colored = colorByGroup;
+});
+
+// --- Layout buttons ---
+d3.selectAll("[data-layout]").on("click", function() {
+  transitionTo(this.dataset.layout);
+});
+
+// --- Initial layout ---
+transitionTo("bundle");
+const chartEl = document.getElementById("chart");
+chartEl.dataset.ready = "true";
+chartEl.dataset.leaves = root.leaves().length;
+chartEl.dataset.links = links.length;
+
+// Also set data on a wrapper div for easier test selectors
+document.body.dataset.ready = "true";
+</script>
+</body>
+</html>
