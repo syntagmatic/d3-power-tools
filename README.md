@@ -53,7 +53,7 @@ Skills produce self-contained HTML files with inline JS/CSS. No build tools, no 
 python3 scripts/test-viz.py --config tests/test.config.json
 
 # Test a single visualization
-python3 scripts/test-viz.py tests/fixtures/edge-bundling.html --out /tmp/check.png
+python3 scripts/test-viz.py skills/hierarchy-edge-bundling/examples/edge-bundling.html --out /tmp/check.png
 ```
 
 Tests use Playwright to verify pages load without JS errors, render expected DOM elements, and capture screenshots for visual inspection. See the [test config](tests/test.config.json) for the full list.

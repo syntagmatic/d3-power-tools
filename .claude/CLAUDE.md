@@ -32,7 +32,7 @@ python3 scripts/test-viz.py output.html --out /tmp/check.png --wait-for "svg"
 python3 scripts/test-viz.py --config tests/test.config.json
 ```
 
-Add new test cases to `tests/test.config.json`. After building a visualization:
+Examples live in `skills/*/examples/` and double as test fixtures. Add new test cases to `tests/test.config.json` (paths are relative to project root). After building a visualization:
 
 1. Run the test script to catch JS errors and rendering failures
 2. Read the screenshot to verify visual correctness
