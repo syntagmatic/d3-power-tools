@@ -71,4 +71,5 @@ Each subdirectory under `skills/` contains a `SKILL.md` with domain knowledge, a
 - `skills/patterned-fills/` — SVG pattern fills (hatching, dots, cross-hatch, stipple), stroke dash patterns, Canvas equivalents, markers, color+pattern dual encoding for accessibility
 - `skills/geographic-maps/` — geographic maps: projections, GeoJSON/TopoJSON, choropleth, point maps, zoom-to-feature, Canvas geo rendering, tile layers, geodesic operations
 - `skills/webgl-rendering/` — GPU-accelerated rendering for 100K–10M+ elements: shaders, instanced rendering, D3+WebGL integration, texture atlases, zoom/picking
+- `skills/color-themes/` — theming systems: light/dark/high-contrast modes, CSS custom properties, semantic color tokens, prefers-color-scheme auto dark mode, theme-aware D3 scales, Canvas theming, WCAG contrast compliance
 - `skills/zoom-and-pan/` — d3-zoom API, geometric vs semantic zoom, SVG and Canvas zoom, rescaleX/rescaleY axis integration, zoom constraints, programmatic zoom-to-fit, minimap, pinch-to-zoom, zoom-linked views, level-of-detail, brush-to-zoom
