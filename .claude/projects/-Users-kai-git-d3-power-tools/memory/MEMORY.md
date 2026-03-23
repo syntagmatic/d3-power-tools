@@ -1,1 +1,3 @@
 - [blocks folder](project_proofs_folder.md) — blocks/ is the top-level folder for standalone D3 examples and cross-skill demos
+- [parallel skill development](feedback_parallel_skill_development.md) — lessons on using parallel subagents to build multiple skills at once
+- [commit message style](feedback_commit_style.md) — moderately detailed: subject line + short body, not one-liners or essays
