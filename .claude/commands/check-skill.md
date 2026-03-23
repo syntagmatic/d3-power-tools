@@ -12,6 +12,8 @@ Scan every code block. For each variable used, verify it is either:
 - A clearly external input (like `data`, `svg`, `width`, `height`, `margin*`)
 - A D3 API (`d3.*`)
 
+**Each section's code blocks are independent.** Variables from other sections do NOT carry over — even if a variable like `zx` appears two sections up, it must be redefined if used in a new section's code block.
+
 Common problems from compression:
 - Helper variables (`n`, `gap`, `r`, `barW`, `mid`) that were in a removed wrapper function
 - Scale variables (`xScale`, `yScale`) referenced but defined in a different section
@@ -19,12 +21,12 @@ Common problems from compression:
 
 ### 2. Dangling function references
 
-Functions that were removed during compression but still called elsewhere:
-- `sparkline(this, data)` → the wrapper was removed but embedding examples still call it
-- `reset()` → referenced in click handlers but the function body was cut
-- Factory functions whose return value is used but the call was removed
+Look for any function that is called but not defined in the visible code blocks. Two common patterns:
 
-Fix: either inline the function body, show the call with a stored result, or replace with the equivalent inline code.
+- **Wrapper removed, call remains:** A function like `fooChart(container, data)` was defined as a wrapper, the wrapper was removed during compression, but another section still calls it by name.
+- **Function inlined, old name persists:** A named function was replaced with inline code during compression, but another section still calls the original name. Check every function call site against what's actually defined.
+
+Fix: either inline the function body at the call site, restore the function definition, or replace with equivalent inline code.
 
 ### 3. Cryptic one-liners
 
@@ -38,6 +40,7 @@ These are fine if the skill cross-references where to learn more. Flag only genu
 
 - Data file paths missing CDN prefix (e.g., `"us-atlas@3/..."` should be `"https://cdn.jsdelivr.net/npm/us-atlas@3/..."`)
 - Broken Observable/GitHub URLs
+- If unsure about a URL, use WebFetch to verify it resolves
 
 ### 5. Repeated computation in examples
 
