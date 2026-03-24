@@ -131,6 +131,10 @@ const data = d3.range(N).map(() => {
   return { x: cx + randNorm() * 35, y: cy + randNorm() * 30, group: g };
 });
 
+// Pre-partition by group and cache RGB strings
+const dataByGroup = d3.group(data, d => d.group);
+const groupRgb = new Map(groups.map(g => { const c = d3.rgb(color(g)); return [g, `${c.r},${c.g},${c.b}`]; }));
+
 function drawScatter(canvas, mode, applySimulation = false) {
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, W, H);
@@ -140,11 +144,9 @@ function drawScatter(canvas, mode, applySimulation = false) {
   ctx.globalCompositeOperation = mode;
   const alpha = (mode === "lighter" || mode === "screen") ? 0.06 : 0.35;
   for (const g of groups) {
-    const c = d3.rgb(color(g));
-    ctx.fillStyle = `rgba(${c.r},${c.g},${c.b},${alpha})`;
+    ctx.fillStyle = `rgba(${groupRgb.get(g)},${alpha})`;
     ctx.beginPath();
-    for (const d of data) {
-      if (d.group !== g) continue;
+    for (const d of dataByGroup.get(g)) {
       ctx.moveTo(d.x + 3, d.y); ctx.arc(d.x, d.y, 3, 0, Math.PI * 2);
     }
     ctx.fill();
@@ -164,20 +166,21 @@ mainPanel.append("div").attr("class", "panel-label").attr("id", "mode-label").te
 
 const simPanel = canvasArea.append("div").attr("class", "panel");
 const simCanvas = simPanel.append("canvas").attr("width", W).attr("height", H).style("display", "none").node();
-simPanel.append("div").attr("class", "panel-label").attr("id", "sim-label");
+const simLabelEl = simPanel.append("div").attr("class", "panel-label");
+const modeLabelEl = d3.select("#mode-label");
 
 let currentMode = "source-over", showSim = false;
 
 function renderCompositing() {
   drawScatter(mainCanvas, currentMode);
-  d3.select("#mode-label").text(currentMode);
+  modeLabelEl.text(currentMode);
   if (showSim) {
     simCanvas.style.display = "block";
     drawScatter(simCanvas, currentMode, true);
-    d3.select("#sim-label").text(currentMode + " (deuteranopia)");
+    simLabelEl.text(currentMode + " (deuteranopia)");
   } else {
     simCanvas.style.display = "none";
-    d3.select("#sim-label").text("");
+    simLabelEl.text("");
   }
 }
 
@@ -210,20 +213,17 @@ renderCompositing();
     const sw = 200, sh = 70;
     const svg = panel.append("svg").attr("width", sw).attr("height", sh);
 
-    // Color ramp
+    // Pre-compute colors and lightness once
+    const colors = d3.range(sw).map(i => interp(i / sw));
+    const lightness = colors.map(c => d3.lab(c).l);
+
     for (let i = 0; i < sw; i++) {
       svg.append("rect").attr("x", i).attr("y", 0).attr("width", 1).attr("height", 14)
-        .attr("fill", interp(i / sw));
-    }
-    // Grayscale ramp
-    for (let i = 0; i < sw; i++) {
-      const c = d3.lab(interp(i / sw));
-      const gray = Math.round(c.l * 2.55);
+        .attr("fill", colors[i]);
+      const gray = Math.round(lightness[i] * 2.55);
       svg.append("rect").attr("x", i).attr("y", 16).attr("width", 1).attr("height", 14)
         .attr("fill", `rgb(${gray},${gray},${gray})`);
     }
-    // Lightness curve
-    const lightness = d3.range(sw).map(i => d3.lab(interp(i / sw)).l);
     const lScale = d3.scaleLinear().domain([0, 100]).range([sh - 2, 34]);
     const line = d3.line().x((d, i) => i).y(d => lScale(d));
     svg.append("path").datum(lightness)
@@ -238,34 +238,9 @@ renderCompositing();
 {
   const container = d3.select("#small-area");
   const sw = 280, sh = 120;
-
-  // Normal palette
-  const p1 = container.append("div").attr("class", "panel");
-  const svg1 = p1.append("svg").attr("width", sw).attr("height", sh);
   const cats = ["A", "B", "C", "D", "E"];
   const catColor = d3.scaleOrdinal(tolBright).domain(cats);
 
-  // Large marks
-  svg1.append("text").attr("x", 0).attr("y", 12).attr("font-size", 10).attr("fill", "#666").text("Large marks");
-  cats.forEach((c, i) => {
-    svg1.append("rect").attr("x", i * 54).attr("y", 16).attr("width", 48).attr("height", 30)
-      .attr("fill", catColor(c)).attr("rx", 3);
-  });
-
-  // Small marks — same colors
-  svg1.append("text").attr("x", 0).attr("y", 62).attr("font-size", 10).attr("fill", "#666").text("Small marks — same colors");
-  const rng2 = d3.randomLcg(99);
-  for (let i = 0; i < 120; i++) {
-    const cat = cats[Math.floor(rng2() * cats.length)];
-    svg1.append("circle")
-      .attr("cx", rng2() * (sw - 10) + 5).attr("cy", 70 + rng2() * 38)
-      .attr("r", 2.5).attr("fill", catColor(cat));
-  }
-  p1.append("div").attr("class", "panel-label").text("Original palette");
-
-  // Boosted palette
-  const p2 = container.append("div").attr("class", "panel");
-  const svg2 = p2.append("svg").attr("width", sw).attr("height", sh);
   function boostColor(hex) {
     const c = d3.hcl(hex);
     c.c = Math.min(130, (c.c || 0) + 20);
@@ -274,21 +249,27 @@ renderCompositing();
   }
   const boostedColor = d3.scaleOrdinal(tolBright.map(boostColor)).domain(cats);
 
-  svg2.append("text").attr("x", 0).attr("y", 12).attr("font-size", 10).attr("fill", "#666").text("Large marks");
-  cats.forEach((c, i) => {
-    svg2.append("rect").attr("x", i * 54).attr("y", 16).attr("width", 48).attr("height", 30)
-      .attr("fill", boostedColor(c)).attr("rx", 3);
-  });
-
-  svg2.append("text").attr("x", 0).attr("y", 62).attr("font-size", 10).attr("fill", "#666").text("Small marks — boosted chroma");
-  const rng3 = d3.randomLcg(99); // same seed = same positions
-  for (let i = 0; i < 120; i++) {
-    const cat = cats[Math.floor(rng3() * cats.length)];
-    svg2.append("circle")
-      .attr("cx", rng3() * (sw - 10) + 5).attr("cy", 70 + rng3() * 38)
-      .attr("r", 2.5).attr("fill", boostedColor(cat));
+  function drawSmallAreaPanel(colorFn, smallLabel, panelLabel) {
+    const panel = container.append("div").attr("class", "panel");
+    const svg = panel.append("svg").attr("width", sw).attr("height", sh);
+    svg.append("text").attr("x", 0).attr("y", 12).attr("font-size", 10).attr("fill", "#666").text("Large marks");
+    cats.forEach((c, i) => {
+      svg.append("rect").attr("x", i * 54).attr("y", 16).attr("width", 48).attr("height", 30)
+        .attr("fill", colorFn(c)).attr("rx", 3);
+    });
+    svg.append("text").attr("x", 0).attr("y", 62).attr("font-size", 10).attr("fill", "#666").text(smallLabel);
+    const rng = d3.randomLcg(99); // same seed = same positions in both panels
+    for (let i = 0; i < 120; i++) {
+      const cat = cats[Math.floor(rng() * cats.length)];
+      svg.append("circle")
+        .attr("cx", rng() * (sw - 10) + 5).attr("cy", 70 + rng() * 38)
+        .attr("r", 2.5).attr("fill", colorFn(cat));
+    }
+    panel.append("div").attr("class", "panel-label").text(panelLabel);
   }
-  p2.append("div").attr("class", "panel-label").text("Chroma-boosted for small marks");
+
+  drawSmallAreaPanel(catColor, "Small marks — same colors", "Original palette");
+  drawSmallAreaPanel(boostedColor, "Small marks — boosted chroma", "Chroma-boosted for small marks");
 }
 
 // --- 5. Auto text color ---
@@ -315,6 +296,9 @@ renderCompositing();
 // --- 6. Dark mode adaptation ---
 {
   const container = d3.select("#dark-mode");
+  const barData = [42, 78, 55, 91, 33, 67];
+  const bx = d3.scaleBand().domain(d3.range(6)).range([20, 240]).padding(0.3);
+  const by = d3.scaleLinear().domain([0, 100]).range([90, 10]);
 
   function adaptForDarkMode(hex) {
     const c = d3.hcl(hex);
@@ -323,44 +307,21 @@ renderCompositing();
     return c.toString();
   }
 
-  // Light mode
-  const lp = container.append("div").attr("class", "panel");
-  const ls = lp.append("svg").attr("width", 260).attr("height", 100);
-  ls.append("rect").attr("width", 260).attr("height", 100).attr("fill", "#fff").attr("rx", 6)
-    .attr("stroke", "#ddd");
+  function drawDarkModePanel(bgColor, palette, label, stroke) {
+    const panel = container.append("div").attr("class", "panel");
+    const svg = panel.append("svg").attr("width", 260).attr("height", 100);
+    const bg = svg.append("rect").attr("width", 260).attr("height", 100).attr("fill", bgColor).attr("rx", 6);
+    if (stroke) bg.attr("stroke", stroke);
+    barData.forEach((v, i) => {
+      svg.append("rect").attr("x", bx(i)).attr("y", by(v)).attr("width", bx.bandwidth())
+        .attr("height", 90 - by(v)).attr("fill", palette[i % palette.length]).attr("rx", 2);
+    });
+    panel.append("div").attr("class", "panel-label").text(label);
+  }
 
-  const barData = [42, 78, 55, 91, 33, 67];
-  const bx = d3.scaleBand().domain(d3.range(6)).range([20, 240]).padding(0.3);
-  const by = d3.scaleLinear().domain([0, 100]).range([90, 10]);
-
-  barData.forEach((v, i) => {
-    ls.append("rect").attr("x", bx(i)).attr("y", by(v)).attr("width", bx.bandwidth())
-      .attr("height", 90 - by(v)).attr("fill", tolBright[i % tolBright.length]).attr("rx", 2);
-  });
-  lp.append("div").attr("class", "panel-label").text("Light mode — Tol Bright");
-
-  // Dark mode
-  const dp = container.append("div").attr("class", "panel");
-  const ds = dp.append("svg").attr("width", 260).attr("height", 100);
-  ds.append("rect").attr("width", 260).attr("height", 100).attr("fill", "#1a1a2e").attr("rx", 6);
-
-  const darkPalette = tolBright.map(adaptForDarkMode);
-  barData.forEach((v, i) => {
-    ds.append("rect").attr("x", bx(i)).attr("y", by(v)).attr("width", bx.bandwidth())
-      .attr("height", 90 - by(v)).attr("fill", darkPalette[i % darkPalette.length]).attr("rx", 2);
-  });
-  dp.append("div").attr("class", "panel-label").text("Dark mode — HCL lightness inverted");
-
-  // Vibrant on dark (recommended)
-  const vp = container.append("div").attr("class", "panel");
-  const vs = vp.append("svg").attr("width", 260).attr("height", 100);
-  vs.append("rect").attr("width", 260).attr("height", 100).attr("fill", "#1a1a2e").attr("rx", 6);
-
-  barData.forEach((v, i) => {
-    vs.append("rect").attr("x", bx(i)).attr("y", by(v)).attr("width", bx.bandwidth())
-      .attr("height", 90 - by(v)).attr("fill", tolVibrant[i % tolVibrant.length]).attr("rx", 2);
-  });
-  vp.append("div").attr("class", "panel-label").text("Dark mode — Tol Vibrant (recommended)");
+  drawDarkModePanel("#fff", tolBright, "Light mode — Tol Bright", "#ddd");
+  drawDarkModePanel("#1a1a2e", tolBright.map(adaptForDarkMode), "Dark mode — HCL lightness inverted");
+  drawDarkModePanel("#1a1a2e", tolVibrant, "Dark mode — Tol Vibrant (recommended)");
 }
 
 // --- 7. Masking with source-in ---

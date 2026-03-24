@@ -710,17 +710,9 @@ sizes.forEach((val, i) => {
 
 8. **Dark mode palette mismatch.** Palettes for white backgrounds (Tol Bright) look washed out on dark. Use Tol Vibrant or adjust lightness in HCL.
 
-9. **Hue interpolation through neutral.** Interpolating HCL through white/black hits undefined hue — midpoint jumps unpredictably. Use Lab for neutral zones.
+9. **Printing transparency.** `rgba()` alpha renders inconsistently across printers. Use opaque colors with pattern fills for print-safe output.
 
-10. **Sequential scale with constant lightness.** Varying only hue makes the scale invisible in grayscale. Monotonic lightness ramp is essential.
-
-11. **Diverging scale with asymmetric lightness.** If one arm is darker than the other, it dominates visually. Check `d3.lab(color).l` at both extremes.
-
-12. **Small marks losing saturation.** A 4px dot appears less saturated than a 40px bar of the same color. Boost chroma for small marks.
-
-13. **Printing transparency.** `rgba()` alpha renders inconsistently across printers. Use opaque colors with pattern fills for print-safe output.
-
-14. **`d3.color()` in tight loops.** Parsing hex strings allocates objects. Cache parsed colors outside the render loop.
+10. **`d3.color()` in tight loops.** Parsing hex strings allocates objects. Cache parsed colors outside the render loop.
 
 ## References
 
