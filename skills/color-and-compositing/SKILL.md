@@ -7,7 +7,7 @@ description: "Color science and compositing for D3.js data visualization: percep
 
 Color in data visualization is an encoding channel, not decoration. This skill covers **choosing** colors (perceptual spaces, palettes, scale design), **blending** them (compositing, alpha), **communicating** them (legends, accessibility), and **adapting** them (dark mode, print, wide gamut).
 
-Related: `canvas-rendering` (batching by color, density heatmaps), `animated-transitions` (color interpolation), `canvas-accessibility` (ARIA for canvas), `patterned-fills` (redundant encoding), `color-themes` (CSS custom properties, theme switching).
+Related: `canvas-rendering` (batching by color, density heatmaps), `animated-transitions` (color interpolation), `canvas-accessibility` (ARIA for canvas), `patterned-fills` (redundant encoding).
 
 ```
 data values → d3.scale* → color strings → rendering context
@@ -514,7 +514,7 @@ See `canvas-rendering` for full batching patterns.
 
 ## Dark Mode Adaptation
 
-Palettes designed for white backgrounds need adjustment for dark mode. The key: lightness inversion. See `color-themes` skill for the full theming system.
+Palettes designed for white backgrounds need adjustment for dark mode. The key: lightness inversion.
 
 ### HCL lightness adjustment
 

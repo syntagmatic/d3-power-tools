@@ -34,8 +34,6 @@ Claude Code skills for building advanced D3.js visualizations. Each skill encode
 
 **[color-and-compositing](skills/color-and-compositing/SKILL.md)** — Color spaces (Lab, HCL, OKLab), color perception (simultaneous contrast, small-area, Mach bands), scale design principles (sequential lightness, diverging symmetry), Paul Tol colorblind-safe palettes, CVD simulation, Canvas compositing (lighter, multiply, source-in, masking), SVG blending/feColorMatrix, alpha/opacity strategies, dark mode adaptation, wide gamut (P3, oklch), WCAG contrast, color legends (continuous, categorical, bivariate, size).
 
-**[color-themes](skills/color-themes/SKILL.md)** — Light/dark/high-contrast theming with CSS custom properties, semantic color tokens, prefers-color-scheme auto detection, theme-aware D3 scales, Canvas theming, and WCAG contrast compliance.
-
 ### Time & Responsiveness
 
 **[temporal-time-series](skills/temporal-time-series/SKILL.md)** — Time scales (scaleTime vs scaleUtc), date parsing pitfalls, time-aware axes, gap handling, horizon charts, swimlanes, Gantt charts, cycle plots, real-time streaming with sliding window and WebSocket, brushed time selection, multi-series with Voronoi nearest, LTTB downsampling.

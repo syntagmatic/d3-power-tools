@@ -63,25 +63,24 @@ Full review of all 27 skills, 40 examples, and 145 tests. Ranked by how much eac
 10. **data-preparation** — autoType FIPS pitfall, circular buffer, columnar typed arrays, pre-computed sort indices.
 11. **hierarchy-edge-bundling** — LCA paths, Holten reference, data-space interpolation for layout transitions. Niche but thorough.
 12. **webgl-rendering** — Breaks the boilerplate wall. Full shader code, instanced rendering, color-picking framebuffer, honest regl recommendation.
-13. **color-themes** — Semantic tokens, CSS-driven SVG updates, FOWT prevention, WCAG contrast function. Deep for a theming skill.
 
 ### Tier 3 — Competent reference
-14. **zoom-and-pan** — Geometric vs semantic distinction, minimap, linked-zoom loop prevention. Solid but mostly API docs.
-15. **network-visualization** — 5 layouts in 532 lines = breadth over depth. Decision table and validation scripts are strong.
-16. **patterned-fills** — Expanded from 262→615 lines. Now includes diamond/triangle/zigzag patterns, perceptual distinctiveness ranking, SVG filter textures (feTurbulence, halftone), Canvas pattern atlas, accessible choropleth patterns, pattern+color compositing. 12 pitfalls. Moved from Tier 4 #25.
-17. **hierarchy-layouts** — Good validation helpers, layout-switcher example. "Which layout for which insight" deserves more than a table.
-18. **hierarchy-interaction** — Well-executed standard patterns (zoomable treemap/sunburst/pack). Observable notebook translations.
-19. **linked-views** — Bitmap crossfilter is useful. Core patterns (dispatch, shared selection) are standard.
-20. **statistical-charts** — Deep stats (KDE bandwidth, Tukey fences, QQ). Reads like a textbook adapted for D3, not visualization wisdom.
-21. **temporal-time-series** — 847 lines. Horizon/cycle plot sections are interesting; date parsing and time scale sections are well-covered elsewhere.
-22. **axes-and-scales** — D3 API organized well. Time gap via band scale is the most interesting pattern.
+13. **zoom-and-pan** — Geometric vs semantic distinction, minimap, linked-zoom loop prevention. Solid but mostly API docs.
+14. **network-visualization** — 5 layouts in 532 lines = breadth over depth. Decision table and validation scripts are strong.
+15. **patterned-fills** — Expanded from 262→615 lines. Now includes diamond/triangle/zigzag patterns, perceptual distinctiveness ranking, SVG filter textures (feTurbulence, halftone), Canvas pattern atlas, accessible choropleth patterns, pattern+color compositing. 12 pitfalls. Moved from Tier 4 #25.
+16. **hierarchy-layouts** — Good validation helpers, layout-switcher example. "Which layout for which insight" deserves more than a table.
+17. **hierarchy-interaction** — Well-executed standard patterns (zoomable treemap/sunburst/pack). Observable notebook translations.
+18. **linked-views** — Bitmap crossfilter is useful. Core patterns (dispatch, shared selection) are standard.
+19. **statistical-charts** — Deep stats (KDE bandwidth, Tukey fences, QQ). Reads like a textbook adapted for D3, not visualization wisdom.
+20. **temporal-time-series** — 847 lines. Horizon/cycle plot sections are interesting; date parsing and time scale sections are well-covered elsewhere.
+21. **axes-and-scales** — D3 API organized well. Time gap via band scale is the most interesting pattern.
 
 ### Tier 4 — Useful but thin
-23. **annotations-and-labels** — 769 lines, encyclopedic. Hard part (editorial judgment) untouched.
-24. **responsive-charts** — Standard web engineering applied to D3. 628 lines for "use ResizeObserver."
-25. **small-multiples** — Core insight (shared scales) is one section. Rest is grid math.
-26. **sparkcharts** — Nice pattern collection, fundamentally simple domain.
-27. **fallback-table** — HTML table patterns with D3 joins. Merge candidate with canvas-accessibility.
+22. **annotations-and-labels** — 769 lines, encyclopedic. Hard part (editorial judgment) untouched.
+23. **responsive-charts** — Standard web engineering applied to D3. 628 lines for "use ResizeObserver."
+24. **small-multiples** — Core insight (shared scales) is one section. Rest is grid math.
+25. **sparkcharts** — Nice pattern collection, fundamentally simple domain.
+26. **fallback-table** — HTML table patterns with D3 joins. Merge candidate with canvas-accessibility.
 
 ### Most transformative paths
 1. ~~**Cross-skill composition guide**~~ — Done. `cross-skill-composition` skill added.
@@ -103,7 +102,6 @@ Full review of all 27 skills, 40 examples, and 145 tests. Ranked by how much eac
 
 ### 2026-03-21 → 2026-03-23 — Skill Expansion & Infrastructure
 - **3 new skills:** `annotations-and-labels` (768 lines), `statistical-charts` (855 lines), `small-multiples` (642 lines). All three were high/medium priority items from IDEAS.md.
-- **Color themes skill:** `color-themes` (664 lines) with shared theme system (`style/d3-power-tools.css`), light/dark mode switcher, FOWT prevention, CSS custom properties.
 - **Block generator:** 32 animated D3 compositions in `blocks/generator.html` — demonstrates cross-skill composition at scale.
 - **Sparkcharts enhancement:** Shared scales and number columns for sparkcharts in tables.
 - **Repo reorganization:** `proofs/` → `blocks/`, `docs/` → `notes/`, test fixtures moved into `skills/*/examples/` for self-contained distribution.

@@ -143,7 +143,7 @@ Skills have implicit dependencies that create a required initialization order. G
 7. Data render              (marks on Canvas or SVG)
 8. Interaction bind         (brushes, zoom, drag, tooltips)
 9. Accessibility setup      (canvas-accessibility, fallback-table)
-10. Theme apply             (color-themes)
+10. Theme apply             (color-and-compositing — dark mode adaptation)
 ```
 
 Why this order:
@@ -208,7 +208,7 @@ Steps 1, 4-10. Container size doesn't change, layer stack doesn't change. But sc
 
 ### What Runs on Theme Change
 
-Steps 7, 10 only. Canvas must re-read CSS custom properties and redraw; SVG updates automatically if colors are set via CSS classes rather than inline attributes. See `color-themes` for the CSS-driven SVG pattern that avoids JS rebuilds.
+Steps 7, 10 only. Canvas must re-read CSS custom properties and redraw; SVG updates automatically if colors are set via CSS classes rather than inline attributes.
 
 ## State Architecture
 
@@ -339,7 +339,7 @@ Multiple views of one dataset, all linked. Brush in any view, all others filter.
 
 ### The Narrative
 
-**Skills:** `animated-transitions` + `annotations-and-labels` + `responsive-charts` + `color-themes`
+**Skills:** `animated-transitions` + `annotations-and-labels` + `responsive-charts` + `color-and-compositing`
 
 A sequence of states driven by scroll or step buttons. Each state changes the data subset, scale domain, annotation set, or chart type. Transitions communicate what changed.
 
@@ -349,7 +349,7 @@ A sequence of states driven by scroll or step buttons. Each state changes the da
 
 ### The Dashboard
 
-**Skills:** `responsive-charts` + `linked-views` + `axes-and-scales` + `color-themes` + `fallback-table`
+**Skills:** `responsive-charts` + `linked-views` + `axes-and-scales` + `color-and-compositing` + `fallback-table`
 
 CSS Grid of independent charts sharing a dataset and color scale. Filters at the top drive all views.
 

@@ -7,7 +7,7 @@ description: "Making D3.js visualizations responsive and adaptive. Use this skil
 
 Patterns for making D3 visualizations adapt to any container size, device, and context. The core principle: **observe the container, re-render the chart**. CSS handles layout; D3 handles drawing.
 
-Related skills: `axes-and-scales` (tick formatting, label collision), `canvas-rendering` (DPI, layer architecture), `small-multiples` (responsive reflow), `sparkcharts` (inline sizing), `color-themes` (media queries, CSS custom properties), `zoom-and-pan` (touch gestures).
+Related skills: `axes-and-scales` (tick formatting, label collision), `canvas-rendering` (DPI, layer architecture), `small-multiples` (responsive reflow), `sparkcharts` (inline sizing), `zoom-and-pan` (touch gestures).
 
 ```
 container resizes (CSS, window, iframe)
