@@ -1,3 +1,10 @@
+---
+name: check-skill
+description: "Audit a D3 power-tools skill for errors introduced by compression. Use this skill when the user says 'check skill', 'audit skill', or wants to verify a SKILL.md for dangling references, undefined variables, broken code examples, or incorrect descriptions after editing or compression."
+---
+
+# Check Skill
+
 Audit the D3 power-tools skill at `$ARGUMENTS` for errors introduced by compression.
 
 Read the full SKILL.md file and check for every issue below. Report each finding with the line number and a fix. Then apply all fixes.

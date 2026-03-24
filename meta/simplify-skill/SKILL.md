@@ -1,3 +1,10 @@
+---
+name: simplify-skill
+description: "Compress and simplify a D3 power-tools SKILL.md for clarity and token efficiency. Use this skill when the user says 'simplify skill', 'compress skill', 'shorten skill', or wants to reduce a SKILL.md's line count while preserving all teaching value."
+---
+
+# Simplify Skill
+
 Simplify the D3 power-tools skill at `$ARGUMENTS`.
 
 Read the full SKILL.md file, then compress it using these techniques — in order of impact:
