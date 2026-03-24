@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Composition Explorer — Cross-Skill Composition</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #fafafa; color: #222; padding: 16px; }
+  h1 { font-size: 1.1rem; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { font-size: 0.8rem; color: #666; margin-bottom: 12px; }
+  .dashboard { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; gap: 12px; max-width: 1100px; }
+  .panel { background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 12px; position: relative; }
+  .panel-title { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #888; margin-bottom: 8px; }
+  .scatter-panel { grid-column: 1; grid-row: 1 / 3; }
+  .histogram-panel { grid-column: 2; grid-row: 1; }
+  .table-panel { grid-column: 2; grid-row: 2; }
+  .chart-container { position: relative; width: 100%; }
+  .chart-container canvas, .chart-container svg { position: absolute; top: 0; left: 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.75rem; }
+  th { text-align: left; padding: 4px 8px; border-bottom: 2px solid #ddd; cursor: pointer; user-select: none; white-space: nowrap; }
+  th:hover { color: #1a73e8; }
+  th .sort-arrow { font-size: 0.6rem; margin-left: 2px; }
+  td { padding: 3px 8px; border-bottom: 1px solid #f0f0f0; }
+  tr.dimmed td { color: #bbb; }
+  tr.highlighted td { background: #e8f0fe; font-weight: 500; }
+  .table-scroll { max-height: 260px; overflow-y: auto; }
+  .status { font-size: 0.7rem; color: #888; margin-top: 6px; }
+  .legend { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; font-size: 0.7rem; }
+  .legend-item { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+  .legend-swatch { width: 10px; height: 10px; border-radius: 2px; }
+</style>
+</head>
+<body>
+<h1>Composition Explorer</h1>
+<p class="subtitle">Canvas scatter + SVG histogram + HTML table, linked via shared selection. Brush the scatter to filter; click table rows to highlight.</p>
+
+<div class="legend" id="legend"></div>
+<div class="dashboard">
+  <div class="panel scatter-panel">
+    <div class="panel-title">Revenue vs Growth</div>
+    <div class="chart-container" id="scatter-container"></div>
+    <div class="status" id="scatter-status"></div>
+  </div>
+  <div class="panel histogram-panel">
+    <div class="panel-title">Revenue Distribution</div>
+    <div class="chart-container" id="histogram-container"></div>
+  </div>
+  <div class="panel table-panel">
+    <div class="panel-title">Data Table</div>
+    <div class="table-scroll" id="table-container"></div>
+    <div class="status" id="table-status"></div>
+  </div>
+</div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// ── Step 1: Data ──────────────────────────────────────────────────────
+const rng = d3.randomLcg(42);
+const randNorm = d3.randomNormal.source(rng);
+const categories = ["SaaS", "Fintech", "Health", "AI/ML", "E-commerce"];
+const color = d3.scaleOrdinal().domain(categories).range(d3.schemeTableau10);
+
+const data = d3.range(300).map(i => {
+  const cat = categories[i % categories.length];
+  const base = { SaaS: 50, Fintech: 70, Health: 40, "AI/ML": 90, "E-commerce": 30 }[cat];
+  const rev = Math.max(5, randNorm(base, 25)());
+  const growth = randNorm(cat === "AI/ML" ? 40 : 15, 20)();
+  return {
+    id: `c-${i}`,
+    name: `Company ${i + 1}`,
+    category: cat,
+    revenue: Math.round(rev * 10) / 10,
+    growth: Math.round(growth * 10) / 10,
+    employees: Math.round(Math.max(10, randNorm(rev * 8, 50)())),
+  };
+});
+
+// ── Step 2: Container measurement ─────────────────────────────────────
+const margin = { top: 10, right: 16, bottom: 36, left: 48 };
+const histMargin = { top: 10, right: 12, bottom: 36, left: 48 };
+
+// ── Shared state ──────────────────────────────────────────────────────
+const selected = new Set(); // interaction state: selected keys
+const dispatch = d3.dispatch("selection", "hover");
+
+function isSelected(d) { return selected.size === 0 || selected.has(d.id); }
+
+// ── Dirty-flag rendering ──────────────────────────────────────────────
+const SCATTER = 1, HISTOGRAM = 2, TABLE = 4, ALL = 7;
+let dirtyLayers = 0, rafId = 0;
+function markDirty(layers) {
+  dirtyLayers |= layers;
+  if (!rafId) rafId = requestAnimationFrame(flush);
+}
+function flush() {
+  rafId = 0;
+  if (dirtyLayers & SCATTER) renderScatter();
+  if (dirtyLayers & HISTOGRAM) renderHistogram();
+  if (dirtyLayers & TABLE) renderTable();
+  dirtyLayers = 0;
+}
+
+// ── Step 3: Layer stack — Scatter (Canvas + SVG) ──────────────────────
+const scatterDiv = d3.select("#scatter-container");
+let scatterW, scatterH, innerW, innerH;
+let dataCtx, hlCtx, scatterSvg, scatterG;
+let xScale, yScale, quadtree;
+
+function setupScatter(w, h) {
+  scatterW = w; scatterH = h;
+  innerW = w - margin.left - margin.right;
+  innerH = h - margin.top - margin.bottom;
+
+  scatterDiv.selectAll("*").remove();
+  scatterDiv.style("height", `${h}px`);
+
+  dataCtx = addCanvas(scatterDiv, w, h);
+  hlCtx = addCanvas(scatterDiv, w, h);
+
+  scatterSvg = scatterDiv.append("svg")
+    .attr("width", w).attr("height", h)
+    .style("position", "absolute").style("top", 0).style("left", 0);
+  scatterG = scatterSvg.append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+  // Translate canvases to match margin
+  dataCtx.translate(margin.left, margin.top);
+  hlCtx.translate(margin.left, margin.top);
+
+  // Scales (step 4)
+  xScale = d3.scaleLinear().domain(d3.extent(data, d => d.revenue)).nice().range([0, innerW]);
+  yScale = d3.scaleLinear().domain(d3.extent(data, d => d.growth)).nice().range([innerH, 0]);
+
+  // Axes (step 6)
+  scatterG.append("g").attr("class", "x-axis")
+    .attr("transform", `translate(0,${innerH})`).call(d3.axisBottom(xScale).ticks(6));
+  scatterG.append("g").attr("class", "y-axis").call(d3.axisLeft(yScale).ticks(6));
+  scatterG.append("text").attr("x", innerW / 2).attr("y", innerH + 30)
+    .attr("text-anchor", "middle").attr("font-size", "0.7rem").attr("fill", "#666").text("Revenue ($M)");
+  scatterG.append("text").attr("transform", "rotate(-90)").attr("x", -innerH / 2).attr("y", -36)
+    .attr("text-anchor", "middle").attr("font-size", "0.7rem").attr("fill", "#666").text("Growth (%)");
+
+  // Quadtree (step 7 prep)
+  quadtree = d3.quadtree().x(d => xScale(d.revenue)).y(d => yScale(d.growth)).addAll(data);
+
+  // Brush (step 8)
+  const brush = d3.brush()
+    .extent([[0, 0], [innerW, innerH]])
+    .on("brush end", (event) => {
+      if (!event.sourceEvent) return;
+      selected.clear();
+      if (event.selection) {
+        const [[x0, y0], [x1, y1]] = event.selection;
+        for (const d of data) {
+          const px = xScale(d.revenue), py = yScale(d.growth);
+          if (px >= x0 && px <= x1 && py >= y0 && py <= y1) selected.add(d.id);
+        }
+      }
+      dispatch.call("selection", null, { source: "scatter" });
+    });
+  scatterG.append("g").attr("class", "brush").call(brush);
+
+  // Hover
+  scatterSvg.on("pointermove", (event) => {
+    const [mx, my] = d3.pointer(event, scatterG.node());
+    const nearest = quadtree.find(mx, my, 15);
+    dispatch.call("hover", null, nearest);
+  }).on("pointerleave", () => dispatch.call("hover", null, null));
+}
+
+function renderScatter() {
+  const dpr = devicePixelRatio;
+  // Data layer
+  dataCtx.clearRect(-margin.left, -margin.top, scatterW, scatterH);
+  for (const cat of categories) {
+    dataCtx.fillStyle = selected.size === 0 ? color(cat) : `${color(cat)}30`;
+    dataCtx.beginPath();
+    for (const d of data) {
+      if (d.category !== cat) continue;
+      if (selected.size > 0 && selected.has(d.id)) continue;
+      const px = xScale(d.revenue), py = yScale(d.growth);
+      dataCtx.moveTo(px + 4, py);
+      dataCtx.arc(px, py, 4, 0, Math.PI * 2);
+    }
+    dataCtx.fill();
+  }
+
+  // Highlight layer
+  hlCtx.clearRect(-margin.left, -margin.top, scatterW, scatterH);
+  if (selected.size > 0) {
+    for (const cat of categories) {
+      hlCtx.fillStyle = color(cat);
+      hlCtx.strokeStyle = "#fff";
+      hlCtx.lineWidth = 1.5;
+      hlCtx.beginPath();
+      const pts = [];
+      for (const d of data) {
+        if (d.category !== cat || !selected.has(d.id)) continue;
+        const px = xScale(d.revenue), py = yScale(d.growth);
+        hlCtx.moveTo(px + 5, py);
+        hlCtx.arc(px, py, 5, 0, Math.PI * 2);
+        pts.push([px, py]);
+      }
+      hlCtx.fill();
+      hlCtx.stroke();
+    }
+  }
+
+  // Status
+  d3.select("#scatter-status").text(
+    selected.size === 0 ? `${data.length} companies` : `${selected.size} of ${data.length} selected`
+  );
+}
+
+// ── Step 3: Histogram (SVG) ───────────────────────────────────────────
+const histDiv = d3.select("#histogram-container");
+let histSvg, histG, histW, histH, histInnerW, histInnerH;
+let histX, histY, histXAxisG, histYAxisG;
+
+function setupHistogram(w, h) {
+  histW = w; histH = h;
+  histInnerW = w - histMargin.left - histMargin.right;
+  histInnerH = h - histMargin.top - histMargin.bottom;
+
+  histDiv.selectAll("*").remove();
+  histDiv.style("height", `${h}px`);
+
+  histSvg = histDiv.append("svg").attr("width", w).attr("height", h);
+  histG = histSvg.append("g")
+    .attr("transform", `translate(${histMargin.left},${histMargin.top})`);
+
+  histX = d3.scaleLinear().domain(d3.extent(data, d => d.revenue)).nice().range([0, histInnerW]);
+  histY = d3.scaleLinear().range([histInnerH, 0]);
+
+  histXAxisG = histG.append("g").attr("class", "x-axis").attr("transform", `translate(0,${histInnerH})`);
+  histYAxisG = histG.append("g").attr("class", "y-axis");
+
+  histG.append("text").attr("x", histInnerW / 2).attr("y", histInnerH + 30)
+    .attr("text-anchor", "middle").attr("font-size", "0.7rem").attr("fill", "#666").text("Revenue ($M)");
+}
+
+function renderHistogram() {
+  const thresholds = histX.ticks(20);
+  const binner = d3.bin().domain(histX.domain()).thresholds(thresholds).value(d => d.revenue);
+
+  const allBins = binner(data);
+  const filteredBins = selected.size > 0 ? binner(data.filter(d => selected.has(d.id))) : null;
+
+  histY.domain([0, d3.max(allBins, d => d.length)]).nice();
+  histXAxisG.call(d3.axisBottom(histX).ticks(6));
+  histYAxisG.call(d3.axisLeft(histY).ticks(4));
+
+  const barW = Math.max(1, histInnerW / allBins.length - 1);
+
+  // Background bars (full data)
+  histG.selectAll(".bar-bg").data(allBins)
+    .join("rect").attr("class", "bar-bg")
+    .attr("x", d => histX(d.x0) + 0.5).attr("width", Math.max(0, barW))
+    .attr("y", d => histY(d.length)).attr("height", d => histInnerH - histY(d.length))
+    .attr("fill", selected.size > 0 ? "#e0e0e0" : "#4285f4")
+    .attr("rx", 1);
+
+  // Foreground bars (selected)
+  if (filteredBins) {
+    histG.selectAll(".bar-fg").data(filteredBins)
+      .join("rect").attr("class", "bar-fg")
+      .attr("x", d => histX(d.x0) + 0.5).attr("width", Math.max(0, barW))
+      .attr("y", d => histY(d.length)).attr("height", d => histInnerH - histY(d.length))
+      .attr("fill", "#4285f4").attr("rx", 1);
+  } else {
+    histG.selectAll(".bar-fg").remove();
+  }
+}
+
+// ── Step 3: Data Table (HTML) ─────────────────────────────────────────
+const tableDiv = d3.select("#table-container");
+const columns = [
+  { key: "name", label: "Name" },
+  { key: "category", label: "Category" },
+  { key: "revenue", label: "Revenue", fmt: d => `$${d.toFixed(1)}M` },
+  { key: "growth", label: "Growth", fmt: d => `${d.toFixed(1)}%` },
+  { key: "employees", label: "Emp." },
+];
+let sortKey = "revenue", sortAsc = false;
+
+function setupTable() {
+  tableDiv.html("");
+  const table = tableDiv.append("table");
+  const thead = table.append("thead").append("tr");
+  thead.selectAll("th").data(columns).join("th")
+    .text(d => d.label)
+    .on("click", (event, col) => {
+      if (sortKey === col.key) sortAsc = !sortAsc;
+      else { sortKey = col.key; sortAsc = col.key === "name"; }
+      markDirty(TABLE);
+    });
+  table.append("tbody");
+}
+
+function renderTable() {
+  const sorted = [...data].sort((a, b) => {
+    // Selected items first when there's a selection
+    if (selected.size > 0) {
+      const sa = selected.has(a.id), sb = selected.has(b.id);
+      if (sa !== sb) return sa ? -1 : 1;
+    }
+    const va = a[sortKey], vb = b[sortKey];
+    return sortAsc
+      ? (typeof va === "string" ? va.localeCompare(vb) : va - vb)
+      : (typeof va === "string" ? vb.localeCompare(va) : vb - va);
+  });
+
+  const tbody = tableDiv.select("tbody");
+  tbody.selectAll("tr").data(sorted, d => d.id).join("tr")
+    .attr("class", d => {
+      if (selected.size === 0) return "";
+      return selected.has(d.id) ? "highlighted" : "dimmed";
+    })
+    .on("click", (event, d) => {
+      if (selected.has(d.id)) selected.delete(d.id);
+      else selected.add(d.id);
+      dispatch.call("selection", null, { source: "table" });
+    })
+    .selectAll("td").data(d => columns.map(c => c.fmt ? c.fmt(d[c.key]) : d[c.key]))
+    .join("td").text(d => d);
+
+  // Sort arrows
+  tableDiv.selectAll("th").data(columns)
+    .html(d => d.label + (d.key === sortKey ? ` <span class="sort-arrow">${sortAsc ? "▲" : "▼"}</span>` : ""));
+
+  d3.select("#table-status").text(
+    selected.size === 0 ? `${data.length} rows` : `${selected.size} selected`
+  );
+}
+
+// ── Legend ─────────────────────────────────────────────────────────────
+function setupLegend() {
+  const legend = d3.select("#legend");
+  legend.selectAll(".legend-item").data(categories).join("div")
+    .attr("class", "legend-item")
+    .html(d => `<span class="legend-swatch" style="background:${color(d)}"></span>${d}`);
+}
+
+// ── Wiring — dispatch connects all views ──────────────────────────────
+dispatch.on("selection", ({ source }) => {
+  markDirty(ALL);
+});
+
+let hoveredItem = null;
+dispatch.on("hover", (item) => {
+  if (item === hoveredItem) return;
+  hoveredItem = item;
+  // Draw hover ring on highlight canvas
+  if (!hlCtx) return;
+  markDirty(SCATTER);
+  if (item) {
+    // Draw after scatter renders — use microtask
+    queueMicrotask(() => {
+      const px = xScale(item.revenue), py = yScale(item.growth);
+      hlCtx.strokeStyle = "#222";
+      hlCtx.lineWidth = 2;
+      hlCtx.beginPath();
+      hlCtx.arc(px, py, 7, 0, Math.PI * 2);
+      hlCtx.stroke();
+    });
+  }
+});
+
+// ── Canvas helper ─────────────────────────────────────────────────────
+function addCanvas(parent, w, h) {
+  const dpr = devicePixelRatio;
+  const canvas = parent.append("canvas")
+    .attr("width", w * dpr).attr("height", h * dpr)
+    .style("width", `${w}px`).style("height", `${h}px`)
+    .style("position", "absolute").style("top", "0").style("left", "0")
+    .node();
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  return ctx;
+}
+
+// ── Initialize & Resize ───────────────────────────────────────────────
+function init() {
+  const dashW = Math.min(1100, window.innerWidth - 32);
+  const scatterPanelW = (dashW - 12) / 2 - 24;
+  const rightPanelW = scatterPanelW;
+  const scatterPanelH = 420;
+  const histPanelH = 180;
+
+  setupScatter(scatterPanelW, scatterPanelH);
+  setupHistogram(rightPanelW, histPanelH);
+  setupTable();
+  setupLegend();
+  markDirty(ALL);
+}
+
+init();
+
+// Signal for test runner
+document.body.dataset.ready = "true";
+</script>
+</body>
+</html>

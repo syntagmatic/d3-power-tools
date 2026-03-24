@@ -117,8 +117,9 @@
 - [ ] Touch adaptation demo (pointer-type-aware interactions)
 
 ### Cross-skill composition
-- [ ] Composition guide — how skills combine in practice (every interesting visualization uses 2-3 skills). Common pairings: force+animation, hierarchy+morphing, brushing+axes, canvas+zoom
-- [ ] SVG ↔ Canvas decision guide — when to use which, hybrid patterns, handoff during animation
+- [x] Composition guide — `skills/cross-skill-composition/SKILL.md`: layer stack, init sequence, state architecture, performance budgets, 5 archetypes, resize contract
+- [x] SVG ↔ Canvas decision guide — covered in composition skill: decision matrix, hybrid pattern, Canvas→SVG handoff
+- [ ] Additional archetype examples — narrative (scrollytelling), spatial explorer (map+linked panels)
 
 ---
 

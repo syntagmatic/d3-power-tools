@@ -28,9 +28,13 @@ Claude Code skills for building advanced D3.js visualizations. Each skill encode
 
 **[network-visualization](skills/network-visualization/SKILL.md)** — Network and graph visualization types: node-link diagrams, adjacency matrices, arc diagrams, chord diagrams, and Sankey flow diagrams. Data preparation, layout comparison, and interaction patterns.
 
-### Styling & Patterns
+### Styling & Color
 
 **[patterned-fills](skills/patterned-fills/SKILL.md)** — SVG pattern fills (diagonal hatching, cross-hatch, dots, stipple, checkerboard, wavy lines), stroke dash patterns, Canvas pattern equivalents, SVG markers for decorated strokes, and color+pattern dual encoding for accessible, print-friendly charts.
+
+**[color-and-compositing](skills/color-and-compositing/SKILL.md)** — Color spaces, Paul Tol colorblind-safe palettes, colorblind simulation, Canvas compositing modes, SVG blending, alpha/opacity strategies, and color legends (continuous, categorical, bivariate).
+
+**[color-themes](skills/color-themes/SKILL.md)** — Light/dark/high-contrast theming with CSS custom properties, semantic color tokens, prefers-color-scheme auto detection, theme-aware D3 scales, Canvas theming, and WCAG contrast compliance.
 
 ### Time & Responsiveness
 
@@ -48,6 +52,32 @@ Claude Code skills for building advanced D3.js visualizations. Each skill encode
 
 **[canvas-accessibility](skills/canvas-accessibility/SKILL.md)** — Making canvas visualizations accessible. Keyboard tree navigation (arrow keys, Home/End, Enter/Escape), ARIA roles and live regions, shape-adaptive focus rings, screen reader announcements, and data table fallback views.
 
+**[webgl-rendering](skills/webgl-rendering/SKILL.md)** — GPU-accelerated rendering for 100K–10M+ elements. Vertex/fragment shaders, instanced rendering, D3+WebGL integration, texture atlases, zoom via uniforms, and GPU picking.
+
+### Charts & Statistics
+
+**[axes-and-scales](skills/axes-and-scales/SKILL.md)** — Scale selection, axis customization, tick formats, responsive tick counts, label collision avoidance, broken axes, dual-y, time gaps, ordinal grouping.
+
+**[data-preparation](skills/data-preparation/SKILL.md)** — Data loading, type coercion, cleaning, reshaping (group/rollup/pivot), aggregation, binning, joining, normalization, columnar typed arrays.
+
+**[sparkcharts](skills/sparkcharts/SKILL.md)** — Word-sized inline charts: sparklines, spark bars, win/loss strips, bullet charts, band/range charts, dot strips, embedded in tables and text.
+
+**[statistical-charts](skills/statistical-charts/SKILL.md)** — Box plots, violin plots, ridgeline/joy plots, bee swarm plots, strip/jitter plots, density plots, QQ plots, kernel density estimation.
+
+**[small-multiples](skills/small-multiples/SKILL.md)** — Trellis/faceted layouts, grid layout math, shared vs independent scales, synchronized cross-panel interaction, responsive reflow.
+
+**[annotations-and-labels](skills/annotations-and-labels/SKILL.md)** — Callout annotations, leader lines, force-based label collision avoidance, responsive labels, rich tooltips, threshold/reference lines.
+
+**[geographic-maps](skills/geographic-maps/SKILL.md)** — Projections, GeoJSON/TopoJSON, choropleth, point maps, zoom-to-feature, Canvas geo rendering, tile layers, globe, geodesic operations.
+
+**[fallback-table](skills/fallback-table/SKILL.md)** — Accessible data tables as chart alternatives: sortable columns, filtering, chart↔table toggle, linked highlighting, virtual scrolling, CSV export.
+
+**[zoom-and-pan](skills/zoom-and-pan/SKILL.md)** — d3-zoom API, geometric vs semantic zoom, SVG and Canvas zoom, rescaleX/rescaleY axis integration, zoom constraints, minimap, pinch-to-zoom, level-of-detail.
+
+### Composition
+
+**[cross-skill-composition](skills/cross-skill-composition/SKILL.md)** — Architectural patterns for combining skills: Canvas+SVG+HTML layer stacks, initialization sequencing, state architecture (data/view/interaction), dirty-flag rendering, performance budgets, five composition archetypes (explorer, narrative, dashboard, spatial, morpher), and the resize contract.
+
 ## How It Works
 
 Each skill is a `SKILL.md` file containing patterns, code snippets, and pitfalls for a specific visualization type. When you ask Claude Code to build a visualization, the relevant skill loads automatically based on what you're building — you don't need to reference them directly.
@@ -56,7 +86,7 @@ Skills produce self-contained HTML files with inline JS/CSS. No build tools, no 
 
 ## Testing
 
-28 test fixtures with 123 test cases covering rendering, interactions, transitions, and edge cases:
+41 test fixtures with 161 test cases covering rendering, interactions, transitions, and edge cases:
 
 ```bash
 # Run the full suite

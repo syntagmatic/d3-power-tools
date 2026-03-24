@@ -44,6 +44,55 @@ Gemini reviewed the skill collection with a focus on production-readiness: acces
 
 ---
 
+## Quality Audit (2026-03-23)
+
+Full review of all 27 skills, 40 examples, and 145 tests. Ranked by how much each skill encodes **hard-won insight** vs reorganized API docs.
+
+### Tier 1 — Genuinely hand-crafted
+1. **parallel-coordinates** — Color-picking hit detection, opacity scaling formula, render queue w/ shuffle, Canvas+SVG hybrid. Feels built from real parcoords work.
+2. **canvas-rendering** — 12 real pitfalls. Progressive render queue, DPR as systematic concern, typed array layouts, batch-by-style, quadtree rebuild timing.
+3. **canvas-accessibility** — Solves a problem most skip. Quadtree directional nav with 90° cone, navigation model taxonomy, announce function with field config, DOM mirror.
+4. **animated-transitions** — TransitionManager for mid-flight interruption. Named transition collision semantics, FLIP, Canvas timer with background-tab fallback.
+5. **brushing-and-selection** — Segment intersection geometry, SelectionManager on EventTarget, "all selected if empty" semantics, 80ms+easeExpOut linked timing, spatial grid indexing.
+6. **color-and-compositing** — Tol palettes with bad-color per scheme, overdraw alpha formula+solver, Brettel/Viénot simulation matrices, bivariate legend recipes.
+
+### Tier 2 — Strong domain knowledge
+7. **force-simulation** — Verlet internals, custom force recipes, 5K performance cliff, hybrid a11y example.
+8. **shape-morphing** — Parametric > resampling > topology hierarchy. bestRotation, stash on DOM element not datum.
+9. **data-preparation** — autoType FIPS pitfall, circular buffer, columnar typed arrays, pre-computed sort indices.
+10. **hierarchy-edge-bundling** — LCA paths, Holten reference, data-space interpolation for layout transitions. Niche but thorough.
+11. **webgl-rendering** — Breaks the boilerplate wall. Full shader code, instanced rendering, color-picking framebuffer, honest regl recommendation.
+12. **color-themes** — Semantic tokens, CSS-driven SVG updates, FOWT prevention, WCAG contrast function. Deep for a theming skill.
+
+### Tier 3 — Competent reference
+13. **zoom-and-pan** — Geometric vs semantic distinction, minimap, linked-zoom loop prevention. Solid but mostly API docs.
+14. **network-visualization** — 5 layouts in 532 lines = breadth over depth. Decision table and validation scripts are strong.
+15. **hierarchy-layouts** — Good validation helpers, layout-switcher example. "Which layout for which insight" deserves more than a table.
+16. **hierarchy-interaction** — Well-executed standard patterns (zoomable treemap/sunburst/pack). Observable notebook translations.
+17. **linked-views** — Bitmap crossfilter is useful. Core patterns (dispatch, shared selection) are standard.
+18. **statistical-charts** — Deep stats (KDE bandwidth, Tukey fences, QQ). Reads like a textbook adapted for D3, not visualization wisdom.
+19. **temporal-time-series** — 847 lines. Horizon/cycle plot sections are interesting; date parsing and time scale sections are well-covered elsewhere.
+20. **axes-and-scales** — D3 API organized well. Time gap via band scale is the most interesting pattern.
+
+### Tier 4 — Useful but thin
+21. **annotations-and-labels** — 769 lines, encyclopedic. Hard part (editorial judgment) untouched.
+22. **responsive-charts** — Standard web engineering applied to D3. 628 lines for "use ResizeObserver."
+23. **small-multiples** — Core insight (shared scales) is one section. Rest is grid math.
+24. **sparkcharts** — Nice pattern collection, fundamentally simple domain.
+25. **patterned-fills** — One section of insight stretched into a skill. Merge candidate with color-and-compositing.
+26. **fallback-table** — HTML table patterns with D3 joins. Merge candidate with canvas-accessibility.
+27. **geographic-maps** — Shallowest skill relative to domain depth. D3's crown jewel deserves more than 348 lines.
+
+### Most transformative paths
+1. **Cross-skill composition guide** — Every real viz uses 3-5 skills. No guidance on how they combine. Highest leverage.
+2. **Deepen geographic-maps** — Projection math, tiles, large GeoJSON, cartograms. 3x content waiting.
+3. **Voronoi & Delaunay** — Missing interaction infrastructure. Touches parallel-coords, brushing, canvas, force, time-series.
+4. **Consolidate thin skills** — fallback-table→canvas-accessibility, patterned-fills→color-and-compositing. Fewer skills, higher average quality.
+5. **Real data examples** — 38/40 examples use synthetic data. Real messy data would ground the collection.
+6. **Live streaming skill** — temporal-time-series covers theory; a working WebSocket example fills a real production gap.
+
+---
+
 ## Iteration Log
 
 ### 2026-03-21 — Visual Bug Fixes
