@@ -26,7 +26,7 @@ Test runner: `scripts/test-viz.py`. Quick reference:
 
 ```bash
 # Test a single file
-python3 scripts/test-viz.py output.html --out /tmp/check.png --wait-for "svg"
+python3 scripts/test-viz.py output.html --out temp/check.png --wait-for "svg"
 
 # Run the test suite
 python3 scripts/test-viz.py --config tests/test.config.json

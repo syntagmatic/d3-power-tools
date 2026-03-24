@@ -4,7 +4,7 @@ Playwright test runner for D3 visualizations.
 
 Single file mode:
   python3 scripts/test-viz.py path/to/viz.html
-  python3 scripts/test-viz.py path/to/viz.html --interactions hover,brush --out /tmp/shot.png
+  python3 scripts/test-viz.py path/to/viz.html --interactions hover,brush --out temp/shot.png
 
 Config mode (runs a test suite):
   python3 scripts/test-viz.py --config bubble-treemap/tests/test.config.json
@@ -17,7 +17,7 @@ Config format (test.config.json):
   {
     "name": "my-project",
     "root": "..",                     // resolved relative to config file
-    "screenshot_dir": "/tmp/tests",   // where screenshots go
+    "screenshot_dir": "temp/tests",   // where screenshots go
     "defaults": {                     // applied to all tests unless overridden
       "timeout": 10000,
       "width": 1200,
@@ -46,6 +46,10 @@ import threading
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
+
+# Screenshots go to temp/ inside the repo, gitignored
+REPO_ROOT = Path(__file__).resolve().parent.parent
+TEMP_DIR = REPO_ROOT / "temp"
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +103,7 @@ def run_single_test(pw_browser, test_spec):
     wait_for = test_spec.get("wait_for")
     interactions = test_spec.get("interactions", [])
     setup_js = test_spec.get("setup")
-    out_path = test_spec.get("out", f"/tmp/d3-test-{html_path.stem}.png")
+    out_path = test_spec.get("out", str(TEMP_DIR / f"d3-test-{html_path.stem}.png"))
 
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
 
@@ -303,7 +307,8 @@ def load_config(config_path):
     config_dir = config_path.parent
     root = (config_dir / config.get("root", ".")).resolve()
     defaults = config.get("defaults", {})
-    screenshot_dir = config.get("screenshot_dir", "/tmp/d3-tests")
+    raw_ss_dir = config.get("screenshot_dir", str(TEMP_DIR / "tests"))
+    screenshot_dir = str((root / raw_ss_dir).resolve()) if not os.path.isabs(raw_ss_dir) else raw_ss_dir
 
     specs = []
     for i, test in enumerate(config.get("tests", [])):
@@ -406,7 +411,7 @@ def main():
             # Single file mode
             spec = {
                 "file": args.html_file,
-                "out": args.out or f"/tmp/d3-test-{Path(args.html_file).stem}.png",
+                "out": args.out or str(TEMP_DIR / f"d3-test-{Path(args.html_file).stem}.png"),
                 "width": args.width,
                 "height": args.height,
                 "timeout": args.timeout,
