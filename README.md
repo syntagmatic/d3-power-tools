@@ -30,9 +30,9 @@ Claude Code skills for building advanced D3.js visualizations. Each skill encode
 
 ### Styling & Color
 
-**[patterned-fills](skills/patterned-fills/SKILL.md)** — SVG pattern fills (diagonal hatching, cross-hatch, dots, stipple, checkerboard, wavy lines), stroke dash patterns, Canvas pattern equivalents, SVG markers for decorated strokes, and color+pattern dual encoding for accessible, print-friendly charts.
+**[patterned-fills](skills/patterned-fills/SKILL.md)** — SVG pattern fills (hatching, dots, cross-hatch, stipple, diamonds, triangles, zigzag), perceptual distinctiveness ranking, SVG filter textures (feTurbulence, halftone), stroke dash patterns, Canvas pattern atlas, Canvas pattern+color compositing, SVG markers, color+pattern dual encoding for accessible choropleth, animated patterns, print considerations.
 
-**[color-and-compositing](skills/color-and-compositing/SKILL.md)** — Color spaces, Paul Tol colorblind-safe palettes, colorblind simulation, Canvas compositing modes, SVG blending, alpha/opacity strategies, and color legends (continuous, categorical, bivariate).
+**[color-and-compositing](skills/color-and-compositing/SKILL.md)** — Color spaces (Lab, HCL, OKLab), color perception (simultaneous contrast, small-area, Mach bands), scale design principles (sequential lightness, diverging symmetry), Paul Tol colorblind-safe palettes, CVD simulation, Canvas compositing (lighter, multiply, source-in, masking), SVG blending/feColorMatrix, alpha/opacity strategies, dark mode adaptation, wide gamut (P3, oklch), WCAG contrast, color legends (continuous, categorical, bivariate, size).
 
 **[color-themes](skills/color-themes/SKILL.md)** — Light/dark/high-contrast theming with CSS custom properties, semantic color tokens, prefers-color-scheme auto detection, theme-aware D3 scales, Canvas theming, and WCAG contrast compliance.
 
@@ -68,7 +68,7 @@ Claude Code skills for building advanced D3.js visualizations. Each skill encode
 
 **[annotations-and-labels](skills/annotations-and-labels/SKILL.md)** — Callout annotations, leader lines, force-based label collision avoidance, responsive labels, rich tooltips, threshold/reference lines.
 
-**[geographic-maps](skills/geographic-maps/SKILL.md)** — Projections, GeoJSON/TopoJSON, choropleth, point maps, zoom-to-feature, Canvas geo rendering, tile layers, globe, geodesic operations.
+**[geographic-maps](skills/geographic-maps/SKILL.md)** — Projections, GeoJSON/TopoJSON topology operations (merge/dissolve/neighbors), choropleth (sequential, diverging, bivariate), bubble maps with force-collision, hex binning, cartograms, flow maps (great-circle, curved, animated), geographic label placement, zoom-to-feature, globe (versor rotation, back-face), Canvas multi-layer architecture with hit detection, tile layers, geodesic operations, large geometry/LOD, projection transitions.
 
 **[fallback-table](skills/fallback-table/SKILL.md)** — Accessible data tables as chart alternatives: sortable columns, filtering, chart↔table toggle, linked highlighting, virtual scrolling, CSV export.
 

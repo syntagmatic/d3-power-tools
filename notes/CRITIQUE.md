@@ -54,40 +54,40 @@ Full review of all 27 skills, 40 examples, and 145 tests. Ranked by how much eac
 3. **canvas-accessibility** — Solves a problem most skip. Quadtree directional nav with 90° cone, navigation model taxonomy, announce function with field config, DOM mirror.
 4. **animated-transitions** — TransitionManager for mid-flight interruption. Named transition collision semantics, FLIP, Canvas timer with background-tab fallback.
 5. **brushing-and-selection** — Segment intersection geometry, SelectionManager on EventTarget, "all selected if empty" semantics, 80ms+easeExpOut linked timing, spatial grid indexing.
-6. **color-and-compositing** — Tol palettes with bad-color per scheme, overdraw alpha formula+solver, Brettel/Viénot simulation matrices, bivariate legend recipes.
+6. **color-and-compositing** — Tol palettes with bad-color per scheme, overdraw alpha formula+solver, Brettel/Viénot simulation matrices, bivariate legend recipes. Now also: color perception (simultaneous contrast, small-area, Mach bands), scale design principles (sequential lightness, diverging symmetry), dark mode HCL adaptation, wide gamut, masking compositing, auto text color. 375→736 lines.
 
 ### Tier 2 — Strong domain knowledge
-7. **force-simulation** — Verlet internals, custom force recipes, 5K performance cliff, hybrid a11y example.
-8. **shape-morphing** — Parametric > resampling > topology hierarchy. bestRotation, stash on DOM element not datum.
-9. **data-preparation** — autoType FIPS pitfall, circular buffer, columnar typed arrays, pre-computed sort indices.
-10. **hierarchy-edge-bundling** — LCA paths, Holten reference, data-space interpolation for layout transitions. Niche but thorough.
-11. **webgl-rendering** — Breaks the boilerplate wall. Full shader code, instanced rendering, color-picking framebuffer, honest regl recommendation.
-12. **color-themes** — Semantic tokens, CSS-driven SVG updates, FOWT prevention, WCAG contrast function. Deep for a theming skill.
+7. **geographic-maps** — Expanded from 348→1169 lines. Topology operations (merge/dissolve/neighbors), bivariate choropleth, bubble maps with force-collision, hex binning, cartograms (non-contiguous, Dorling), flow maps (great-circle, curved, animated), geographic label placement (polylabel, collision), Canvas multi-layer architecture with color-pick hit detection and frame budgeting, large geometry/LOD, globe versor rotation with back-face, projection transitions. 14 pitfalls. Moved from Tier 4 #27.
+8. **force-simulation** — Verlet internals, custom force recipes, 5K performance cliff, hybrid a11y example.
+9. **shape-morphing** — Parametric > resampling > topology hierarchy. bestRotation, stash on DOM element not datum.
+10. **data-preparation** — autoType FIPS pitfall, circular buffer, columnar typed arrays, pre-computed sort indices.
+11. **hierarchy-edge-bundling** — LCA paths, Holten reference, data-space interpolation for layout transitions. Niche but thorough.
+12. **webgl-rendering** — Breaks the boilerplate wall. Full shader code, instanced rendering, color-picking framebuffer, honest regl recommendation.
+13. **color-themes** — Semantic tokens, CSS-driven SVG updates, FOWT prevention, WCAG contrast function. Deep for a theming skill.
 
 ### Tier 3 — Competent reference
-13. **zoom-and-pan** — Geometric vs semantic distinction, minimap, linked-zoom loop prevention. Solid but mostly API docs.
-14. **network-visualization** — 5 layouts in 532 lines = breadth over depth. Decision table and validation scripts are strong.
-15. **hierarchy-layouts** — Good validation helpers, layout-switcher example. "Which layout for which insight" deserves more than a table.
-16. **hierarchy-interaction** — Well-executed standard patterns (zoomable treemap/sunburst/pack). Observable notebook translations.
-17. **linked-views** — Bitmap crossfilter is useful. Core patterns (dispatch, shared selection) are standard.
-18. **statistical-charts** — Deep stats (KDE bandwidth, Tukey fences, QQ). Reads like a textbook adapted for D3, not visualization wisdom.
-19. **temporal-time-series** — 847 lines. Horizon/cycle plot sections are interesting; date parsing and time scale sections are well-covered elsewhere.
-20. **axes-and-scales** — D3 API organized well. Time gap via band scale is the most interesting pattern.
+14. **zoom-and-pan** — Geometric vs semantic distinction, minimap, linked-zoom loop prevention. Solid but mostly API docs.
+15. **network-visualization** — 5 layouts in 532 lines = breadth over depth. Decision table and validation scripts are strong.
+16. **patterned-fills** — Expanded from 262→615 lines. Now includes diamond/triangle/zigzag patterns, perceptual distinctiveness ranking, SVG filter textures (feTurbulence, halftone), Canvas pattern atlas, accessible choropleth patterns, pattern+color compositing. 12 pitfalls. Moved from Tier 4 #25.
+17. **hierarchy-layouts** — Good validation helpers, layout-switcher example. "Which layout for which insight" deserves more than a table.
+18. **hierarchy-interaction** — Well-executed standard patterns (zoomable treemap/sunburst/pack). Observable notebook translations.
+19. **linked-views** — Bitmap crossfilter is useful. Core patterns (dispatch, shared selection) are standard.
+20. **statistical-charts** — Deep stats (KDE bandwidth, Tukey fences, QQ). Reads like a textbook adapted for D3, not visualization wisdom.
+21. **temporal-time-series** — 847 lines. Horizon/cycle plot sections are interesting; date parsing and time scale sections are well-covered elsewhere.
+22. **axes-and-scales** — D3 API organized well. Time gap via band scale is the most interesting pattern.
 
 ### Tier 4 — Useful but thin
-21. **annotations-and-labels** — 769 lines, encyclopedic. Hard part (editorial judgment) untouched.
-22. **responsive-charts** — Standard web engineering applied to D3. 628 lines for "use ResizeObserver."
-23. **small-multiples** — Core insight (shared scales) is one section. Rest is grid math.
-24. **sparkcharts** — Nice pattern collection, fundamentally simple domain.
-25. **patterned-fills** — One section of insight stretched into a skill. Merge candidate with color-and-compositing.
-26. **fallback-table** — HTML table patterns with D3 joins. Merge candidate with canvas-accessibility.
-27. **geographic-maps** — Shallowest skill relative to domain depth. D3's crown jewel deserves more than 348 lines.
+23. **annotations-and-labels** — 769 lines, encyclopedic. Hard part (editorial judgment) untouched.
+24. **responsive-charts** — Standard web engineering applied to D3. 628 lines for "use ResizeObserver."
+25. **small-multiples** — Core insight (shared scales) is one section. Rest is grid math.
+26. **sparkcharts** — Nice pattern collection, fundamentally simple domain.
+27. **fallback-table** — HTML table patterns with D3 joins. Merge candidate with canvas-accessibility.
 
 ### Most transformative paths
-1. **Cross-skill composition guide** — Every real viz uses 3-5 skills. No guidance on how they combine. Highest leverage.
-2. **Deepen geographic-maps** — Projection math, tiles, large GeoJSON, cartograms. 3x content waiting.
+1. ~~**Cross-skill composition guide**~~ — Done. `cross-skill-composition` skill added.
+2. ~~**Deepen geographic-maps**~~ — Done. 348→1169 lines. Cartograms, flow maps, hex bins, Canvas architecture, LOD, globe versor.
 3. **Voronoi & Delaunay** — Missing interaction infrastructure. Touches parallel-coords, brushing, canvas, force, time-series.
-4. **Consolidate thin skills** — fallback-table→canvas-accessibility, patterned-fills→color-and-compositing. Fewer skills, higher average quality.
+4. ~~**Consolidate thin skills**~~ — Partially done. patterned-fills deepened to 615 lines (Tier 3), no longer a merge candidate. fallback-table→canvas-accessibility still open.
 5. **Real data examples** — 38/40 examples use synthetic data. Real messy data would ground the collection.
 6. **Live streaming skill** — temporal-time-series covers theory; a working WebSocket example fills a real production gap.
 

@@ -1,13 +1,13 @@
 ---
 name: color-and-compositing
-description: "Color science and compositing for D3.js data visualization: perceptual color spaces (Lab, HCL, OKLab), Paul Tol colorblind-safe palettes, D3 color scales and interpolation, globalCompositeOperation on Canvas, SVG mix-blend-mode and feColorMatrix, alpha/opacity strategies for overdraw, colorblind simulation, WCAG contrast checking, and color legends (continuous, categorical, bivariate). Use this skill when the user needs colorblind-safe palettes, custom color schemes as D3 scales, canvas compositing modes for density visualization, blending or alpha tuning for overlapping elements, color legends, or needs to evaluate color choices for accessibility."
+description: "Color science and compositing for D3.js data visualization: perceptual color spaces (Lab, HCL, OKLab), Paul Tol colorblind-safe palettes, D3 color scales and interpolation, globalCompositeOperation on Canvas, SVG mix-blend-mode and feColorMatrix, alpha/opacity strategies for overdraw, colorblind simulation, WCAG contrast checking, color perception pitfalls, scale design principles, dark mode adaptation, wide gamut, and color legends (continuous, categorical, bivariate). Use this skill when the user needs colorblind-safe palettes, custom color schemes as D3 scales, canvas compositing modes for density visualization, blending or alpha tuning for overlapping elements, color legends, sequential/diverging/categorical scale design, dark mode color adaptation, or needs to evaluate color choices for accessibility."
 ---
 
 # Color and Compositing
 
-Color in data visualization is an encoding channel, not decoration. This skill covers **choosing** colors (perceptual spaces, palettes), **blending** them (compositing, alpha), and **communicating** them (legends, accessibility).
+Color in data visualization is an encoding channel, not decoration. This skill covers **choosing** colors (perceptual spaces, palettes, scale design), **blending** them (compositing, alpha), **communicating** them (legends, accessibility), and **adapting** them (dark mode, print, wide gamut).
 
-Related: `canvas-rendering` (batching by color, density heatmaps), `animated-transitions` (color interpolation), `canvas-accessibility` (ARIA for canvas).
+Related: `canvas-rendering` (batching by color, density heatmaps), `animated-transitions` (color interpolation), `canvas-accessibility` (ARIA for canvas), `patterned-fills` (redundant encoding), `color-themes` (CSS custom properties, theme switching).
 
 ```
 data values → d3.scale* → color strings → rendering context
@@ -38,7 +38,7 @@ d3.interpolateHcl("steelblue", "orange")(0.5); // hue rotation
 
 **Lab**: perceptually uniform lightness. `d3.lab(l, a, b)` — L is lightness (0–100).
 
-**HCL**: explicit hue angle. `d3.interpolateHclLong` goes the full way around the hue wheel.
+**HCL**: explicit hue angle. `d3.interpolateHclLong` goes the full way around the hue wheel. Short path (`d3.interpolateHcl`) takes the shortest arc — usually what you want.
 
 **OKLab**: better uniformity than Lab in blues. Not in D3 core. Conversion function:
 ```js
@@ -61,6 +61,143 @@ function srgbToOklab(r, g, b) {
 const ramp = d3.piecewise(d3.interpolateLab, ["#364B9A", "#6EA6CD", "#EAECCC", "#F67E4B", "#A50026"]);
 const scale = d3.scaleSequential(ramp).domain([min, max]);
 ```
+
+### Hue interpolation pitfalls
+
+HCL interpolation through white or black hits undefined hue — the midpoint hue jumps unpredictably. This matters for diverging scales that pass through a neutral midpoint:
+
+```js
+// BAD: interpolating hue through near-white
+d3.interpolateHcl("#2166AC", "#F7F7F7")(0.5); // hue is undefined at L≈97
+
+// GOOD: use Lab for the neutral zone, HCL for the chromatic arms
+const left  = d3.piecewise(d3.interpolateLab, ["#2166AC", "#F7F7F7"]);
+const right = d3.piecewise(d3.interpolateLab, ["#F7F7F7", "#B2182B"]);
+const diverging = t => t < 0.5 ? left(t * 2) : right((t - 0.5) * 2);
+```
+
+In practice, use D3's built-in diverging interpolators (`d3.interpolateRdBu`, etc.) which handle this correctly.
+
+---
+
+## Color Perception
+
+Understanding how humans perceive color prevents encoding mistakes that look correct on screen but mislead readers.
+
+### Lightness dominates
+
+The visual system processes lightness variations ~10× faster than chromatic differences. A sequential scale that only varies hue (constant lightness) looks flat — the data disappears:
+
+```js
+// BAD: constant lightness, varying hue — data is invisible in grayscale
+d3.scaleSequential(t => d3.hcl(t * 360, 60, 65).toString());
+
+// GOOD: monotonic lightness ramp — readable even without color vision
+d3.scaleSequential(d3.interpolateBlues); // L goes from ~97 to ~30
+```
+
+**Test**: convert your color scale to grayscale. If the ordering is still clear, it works. If values merge, the scale relies too heavily on hue.
+
+### Simultaneous contrast
+
+A color looks different depending on what surrounds it. A medium gray on white looks darker than the same gray on black. This affects choropleths — a county's perceived color shifts based on its neighbors.
+
+Mitigations:
+- Use borders between regions (white or black) to break contrast effects
+- Avoid scales where adjacent bins differ only in chroma, not lightness
+- For small areas on varying backgrounds, increase the lightness range of the scale
+
+### Small-area color
+
+Small marks (dots, thin lines) appear less saturated and lighter than large areas of the same color. A carefully designed palette may lose its distinctiveness when applied to a scatter plot.
+
+Mitigations:
+- Increase saturation for small marks (~20% more chroma in HCL)
+- Use darker, more saturated versions of the palette for points
+- Add dark outlines to small marks to maintain perceived distinctness
+
+```js
+// Boost chroma for small marks
+function boostedColor(hex, chromaBoost = 20) {
+  const c = d3.hcl(hex);
+  c.c = Math.min(130, (c.c || 0) + chromaBoost);
+  c.l = Math.max(20, c.l - 5); // slightly darker too
+  return c.toString();
+}
+```
+
+### Mach bands
+
+The visual system exaggerates lightness differences at boundaries. In continuous color legends, this makes each color bin appear to have a slight gradient — lighter on the light side, darker on the dark side — even when the fill is uniform. This is an optical illusion, not a rendering bug. Discrete legends avoid this entirely.
+
+---
+
+## Scale Design Principles
+
+### Sequential scales
+
+The key property: **monotonic lightness**. Lightness should decrease (or increase) steadily from low to high values. Readers perceive "darker = more" intuitively.
+
+```
+light (low) ────────────────────► dark (high)
+   L=95                              L=25
+```
+
+Multi-hue sequentials (e.g., `interpolateViridis`, `interpolateYlGnBu`) are more perceptually uniform than single-hue because they use more of the color space. But single-hue (e.g., `interpolateBlues`) is simpler to read for audiences unfamiliar with color scales.
+
+**Designing a custom sequential scale**:
+```js
+// Define stops with controlled lightness ramp in HCL
+const stops = [
+  d3.hcl(220, 10, 95),   // very light blue-gray
+  d3.hcl(220, 40, 75),   // light blue
+  d3.hcl(220, 60, 55),   // medium blue
+  d3.hcl(220, 70, 35),   // dark blue
+  d3.hcl(220, 50, 20),   // very dark blue
+].map(c => c.toString());
+const scale = d3.scaleSequential(d3.piecewise(d3.interpolateLab, stops));
+```
+
+### Diverging scales
+
+Two properties: (1) **symmetric lightness** around the midpoint, and (2) **distinct hue** on each arm. The midpoint should be the lightest (or near-white) so zero/neutral values recede visually.
+
+```
+dark warm ◄──── light neutral ────► dark cool
+   L=35            L=95              L=35
+```
+
+The lightness must mirror: if "high positive" is L=35, "high negative" must also be L=35. Otherwise one arm dominates visually.
+
+```js
+// Verify symmetry of an existing scale
+const scale = d3.scaleDiverging(d3.interpolateRdBu);
+const low  = d3.lab(scale(0)).l;   // left extreme
+const mid  = d3.lab(scale(0.5)).l; // midpoint
+const high = d3.lab(scale(1)).l;   // right extreme
+console.log(low, mid, high);       // ~40, ~97, ~40 — symmetric ✓
+```
+
+### Categorical scales
+
+Maximum perceptual distance between colors. Rules:
+
+1. **≤7 categories** for line charts and scatter — beyond this, colors become indistinguishable
+2. **≤12 categories** for choropleth/grouped bars with labels — the label carries more than the color
+3. **Top N + "Other"** when you have more categories — clamp, don't add colors
+4. **Lightness variety** — don't make all colors the same lightness. Viewers need lightness as a secondary cue.
+5. **No red-green pairs** as the sole differentiator — indistinguishable under deuteranopia
+
+### Choosing a scale type
+
+| Data characteristic | Scale type | D3 constructor |
+|---|---|---|
+| Continuous, ratio (counts, amounts) | Sequential | `scaleSequential` / `scaleLinear` |
+| Continuous, centered on meaningful zero | Diverging | `scaleDiverging` |
+| Continuous, skewed distribution | Sequential + quantile breaks | `scaleQuantile` |
+| Discrete, unordered | Categorical/ordinal | `scaleOrdinal` |
+| Discrete, ordered (Likert, rating) | Sequential discrete | `scaleOrdinal` with ordered scheme |
+| Binary (yes/no, above/below) | Two-color | Manual |
 
 ---
 
@@ -131,6 +268,15 @@ const [r, g, b] = simulateDichromacy(68, 119, 170, "deuteranopia");
 applySimulationToImageData(ctx.getImageData(0, 0, w, h), "deuteranopia");
 ```
 
+### Types of color vision deficiency
+
+| Type | Prevalence | Confusion axis | What merges |
+|---|---|---|---|
+| Deuteranopia | ~6% males | Red–green | Red/green/brown become indistinguishable |
+| Protanopia | ~2% males | Red–green | Similar to deuteranopia, red appears darker |
+| Tritanopia | ~0.01% | Blue–yellow | Blue/green merge, yellow/pink merge |
+| Achromatopsia | Very rare | All hue | Only lightness is perceived |
+
 ### Redundant encoding — color should never be the sole channel
 
 ```js
@@ -142,7 +288,7 @@ svg.selectAll("path").data(data).join("path")
   .attr("transform", d => `translate(${x(d.x)},${y(d.y)})`);
 ```
 
-Other redundant channels: pattern fills, direct labels, dash arrays, size.
+Other redundant channels: pattern fills (see `patterned-fills`), direct labels, dash arrays, size, position.
 
 ### WCAG contrast checking
 
@@ -161,6 +307,21 @@ function contrastRatio(a, b) {
 // WCAG AA: ≥4.5:1 normal text, ≥3:1 large. AAA: ≥7:1.
 ```
 
+### Auto-selecting text color for labels on colored backgrounds
+
+```js
+function textColor(bgHex) {
+  return relativeLuminance(bgHex) > 0.4 ? "#000000" : "#ffffff";
+}
+
+// More nuanced: check WCAG ratio against both options
+function textColorWCAG(bgHex) {
+  const onBlack = contrastRatio(bgHex, "#000000");
+  const onWhite = contrastRatio(bgHex, "#ffffff");
+  return onBlack > onWhite ? "#000000" : "#ffffff";
+}
+```
+
 ---
 
 ## Canvas Compositing
@@ -175,6 +336,9 @@ Source (what you draw next) composites onto destination (what's already there).
 | `screen` | Lighten overlap | Glow on dark backgrounds |
 | `difference` | Abs difference | Change detection |
 | `destination-out` | Eraser | Masking, cutouts |
+| `source-in` | Keep only overlap | Clipping to existing content |
+| `destination-over` | Draw behind | Background insertion |
+| `xor` | Show only non-overlapping | Symmetric difference |
 
 ### Canonical pattern — additive density with `lighter`
 
@@ -195,7 +359,29 @@ ctx.globalCompositeOperation = "source-over"; // always reset!
 
 Alpha tuning: `0.02–0.05` for 10K+, `0.08–0.15` for 1K–10K.
 
-**Multiply variant** — two regions that darken where they overlap:
+### Multi-group density
+
+For multiple groups with overlapping density, use different color channels:
+
+```js
+ctx.fillStyle = "#000";
+ctx.fillRect(0, 0, width, height);
+ctx.globalCompositeOperation = "lighter";
+
+// Each group gets a distinct RGB channel emphasis
+const groupColors = ["rgba(180, 60, 60, 0.06)", "rgba(60, 130, 180, 0.06)", "rgba(60, 180, 80, 0.06)"];
+groups.forEach((group, gi) => {
+  ctx.fillStyle = groupColors[gi];
+  ctx.beginPath();
+  for (const d of group) { ctx.moveTo(d.x + r, d.y); ctx.arc(d.x, d.y, r, 0, Math.PI * 2); }
+  ctx.fill();
+});
+ctx.globalCompositeOperation = "source-over";
+// Overlapping regions blend to white/yellow/cyan/magenta — distinct colors reveal overlap
+```
+
+### Multiply variant — overlapping regions
+
 ```js
 ctx.globalCompositeOperation = "multiply";
 ctx.fillStyle = "rgba(238, 102, 119, 0.6)"; ctx.fill(pathA);
@@ -203,7 +389,32 @@ ctx.fillStyle = "rgba(68, 119, 170, 0.6)"; ctx.fill(pathB);
 ctx.globalCompositeOperation = "source-over";
 ```
 
-**Difference variant** — render state A normally, then state B with `"difference"` to highlight changes.
+### Masking with `source-in`
+
+Clip rendering to an existing shape:
+
+```js
+// Draw the mask shape first
+ctx.beginPath(); ctx.arc(cx, cy, radius, 0, Math.PI * 2); ctx.fill();
+// Switch to source-in: subsequent draws only appear where mask exists
+ctx.globalCompositeOperation = "source-in";
+// Draw the image/data — clipped to the circle
+ctx.drawImage(mapImage, 0, 0);
+ctx.globalCompositeOperation = "source-over";
+```
+
+### Difference variant
+
+Render state A normally, then state B with `"difference"` to highlight changes. Pixels that differ glow; identical pixels are black.
+
+```js
+// Draw state A
+renderMap(dataA);
+// Overlay state B with difference
+ctx.globalCompositeOperation = "difference";
+renderMap(dataB);
+ctx.globalCompositeOperation = "source-over";
+```
 
 ---
 
@@ -217,7 +428,9 @@ svg.selectAll("circle").data(groups).join("circle")
 d3.select("svg").style("isolation", "isolate"); // prevent bleed to page background
 ```
 
-### feColorMatrix desaturation — dim unfocused elements
+### feColorMatrix — advanced SVG color transforms
+
+Desaturation for focus+context:
 
 ```html
 <filter id="desat"><feColorMatrix type="saturate" values="0.15"/></filter>
@@ -225,6 +438,23 @@ d3.select("svg").style("isolation", "isolate"); // prevent bleed to page backgro
 ```js
 selection.filter(d => !focused.has(d.id)).attr("filter", "url(#desat)").attr("opacity", 0.4);
 selection.filter(d => focused.has(d.id)).attr("filter", null).attr("opacity", 1);
+```
+
+Hue rotation (shift all colors):
+
+```html
+<filter id="hue-shift"><feColorMatrix type="hueRotate" values="90"/></filter>
+```
+
+Custom matrix (full control over RGBA channels):
+
+```html
+<!-- Sepia tone -->
+<filter id="sepia"><feColorMatrix type="matrix" values="
+  0.393 0.769 0.189 0 0
+  0.349 0.686 0.168 0 0
+  0.272 0.534 0.131 0 0
+  0     0     0     1 0"/></filter>
 ```
 
 Use SVG blending for <500 elements with declarative control. Use Canvas compositing for 1K+ or pixel-level control.
@@ -254,6 +484,18 @@ const alpha = 1 - Math.pow(1 - 0.9, 1 / 50); // 50 overlaps, 90% max → ~0.045
 
 See [`scripts/alpha-solver.js`](scripts/alpha-solver.js) for utilities.
 
+### Adaptive alpha by dataset size
+
+```js
+// Auto-tune alpha based on data density
+function autoAlpha(dataLength, expectedOverlap = 10) {
+  const target = 0.85; // desired opacity at expected overlap
+  return 1 - Math.pow(1 - target, 1 / expectedOverlap);
+}
+// Or simpler heuristic: alpha = clamp(100 / data.length, 0.01, 0.8)
+const alpha = Math.max(0.01, Math.min(0.8, 100 / data.length));
+```
+
 ### Batch by alpha — avoid per-element `globalAlpha` changes
 
 ```js
@@ -270,12 +512,91 @@ See `canvas-rendering` for full batching patterns.
 
 ---
 
+## Dark Mode Adaptation
+
+Palettes designed for white backgrounds need adjustment for dark mode. The key: lightness inversion. See `color-themes` skill for the full theming system.
+
+### HCL lightness adjustment
+
+```js
+function adaptForDarkMode(hex) {
+  const c = d3.hcl(hex);
+  // Invert lightness around 50, boost chroma slightly
+  c.l = 100 - c.l;
+  c.c = Math.min(130, (c.c || 0) * 1.1);
+  return c.toString();
+}
+
+// Apply to an entire palette
+const darkBright = tolBright.map(adaptForDarkMode);
+```
+
+This simple inversion works for qualitative palettes. Sequential and diverging scales need more care — the lightness ramp direction may need to flip depending on whether your background is dark or light.
+
+### Sequential scales on dark backgrounds
+
+On dark backgrounds, "darker = more" still works if "darker" means further from the background. A light-to-dark sequential scale on a dark background becomes confusing because dark values merge with the background.
+
+```js
+// On dark background: reverse the lightness direction
+const darkSequential = d3.scaleSequential(
+  d3.piecewise(d3.interpolateLab, [
+    d3.hcl(220, 50, 25).toString(),   // near background — low value
+    d3.hcl(200, 80, 90).toString(),   // bright — high value
+  ])
+);
+```
+
+### Pre-tested dark mode palettes
+
+| Light mode | Dark mode adaptation |
+|---|---|
+| Tol Bright | Tol Vibrant (designed for dark) |
+| `d3.schemeBlues` | Reverse: dark→light, or use `d3.schemeYlGnBu` |
+| Tol Sunset (diverging) | Works on dark if midpoint is adjusted |
+
+---
+
+## Wide Gamut and Modern Color
+
+Display P3 covers ~50% more colors than sRGB. Modern browsers support P3 via CSS `color()`:
+
+```js
+// Check for wide-gamut support
+const hasP3 = window.matchMedia("(color-gamut: p3)").matches;
+
+// CSS P3 color in D3 context
+svg.selectAll("rect").style("fill", hasP3
+  ? "color(display-p3 0.9 0.2 0.1)"   // vivid red beyond sRGB
+  : "#e63946"                            // sRGB fallback
+);
+```
+
+For Canvas, use `canvas.getContext("2d", { colorSpace: "display-p3" })` — but this affects the entire canvas. In practice, P3 is most useful for saturated accent colors; data encoding benefits are marginal.
+
+### CSS `oklch()` for scale design
+
+OKLab's cylindrical form (LCH) is the best perceptual color space for designing scales. Available in all modern browsers via CSS:
+
+```css
+/* Sequential scale defined in oklch */
+.value-1 { fill: oklch(0.95 0.02 250); }  /* very light blue */
+.value-5 { fill: oklch(0.60 0.15 250); }  /* medium blue */
+.value-9 { fill: oklch(0.30 0.10 250); }  /* dark blue */
+```
+
+For D3 scales, convert oklch to hex at scale-creation time — D3's interpolation doesn't natively support oklch.
+
+---
+
 ## Performance
 
 - **Batch by color** — every `fillStyle` change flushes canvas state. See `canvas-rendering` skill.
 - **Pre-compute RGBA arrays** for 100K+ elements, compute once when scale changes, not per frame.
 - **Compositing mode switching** is expensive — draw all content for one mode before switching. Never toggle per element.
 - **Cache color strings** — `d3.rgb().toString()` allocates. Pre-compute: `const colors = data.map(d => colorScale(d.category));`
+- **Avoid `d3.color()` in hot loops** — parsing hex strings is slow. For pixel-level operations (ImageData), work with raw RGB numbers.
+- **`feColorMatrix` filter performance** — SVG filters trigger a compositing layer. Apply to a group, not per element.
 
 ---
 
@@ -291,6 +612,18 @@ for (let i = 0; i < 300; i++) { ctx.fillStyle = colorScale(min + (max - min) * i
 const axisScale = d3.scaleLinear([min, max], [0, 300]);
 container.append("svg").attr("width", 301).attr("height", 24).style("display", "block")
   .append("g").attr("transform", "translate(0.5,0)").call(d3.axisBottom(axisScale).ticks(5));
+```
+
+### Diverging legend
+
+Same as continuous but with the zero/midpoint labeled prominently:
+
+```js
+const axisScale = d3.scaleLinear([min, max], [0, 300]);
+container.append("svg").attr("width", 301).attr("height", 30).style("display", "block")
+  .append("g").attr("transform", "translate(0.5,0)")
+  .call(d3.axisBottom(axisScale).tickValues([min, mid, max]).tickSize(6))
+  .call(g => g.select(".domain").remove());
 ```
 
 ### Categorical swatches
@@ -343,6 +676,20 @@ g.append("text").attr("x", size * 1.5).attr("y", size * 3 + 16).attr("text-ancho
 g.append("text").attr("transform", `translate(-8, ${size * 1.5}) rotate(-90)`).attr("text-anchor", "middle").text("Y →");
 ```
 
+### Size legend (for bubble maps)
+
+```js
+const sizes = [100, 1000, 5000];
+const legendG = svg.append("g").attr("transform", `translate(${width - 80}, ${height - 100})`);
+sizes.forEach((val, i) => {
+  const r = radiusScale(val);
+  legendG.append("circle").attr("cy", -r).attr("r", r)
+    .attr("fill", "none").attr("stroke", "#333").attr("stroke-width", 0.5);
+  legendG.append("text").attr("y", -2 * r).attr("x", r + 6)
+    .attr("font-size", "10px").text(d3.format(",")(val));
+});
+```
+
 ---
 
 ## Common Pitfalls
@@ -363,6 +710,18 @@ g.append("text").attr("transform", `translate(-8, ${size * 1.5}) rotate(-90)`).a
 
 8. **Dark mode palette mismatch.** Palettes for white backgrounds (Tol Bright) look washed out on dark. Use Tol Vibrant or adjust lightness in HCL.
 
+9. **Hue interpolation through neutral.** Interpolating HCL through white/black hits undefined hue — midpoint jumps unpredictably. Use Lab for neutral zones.
+
+10. **Sequential scale with constant lightness.** Varying only hue makes the scale invisible in grayscale. Monotonic lightness ramp is essential.
+
+11. **Diverging scale with asymmetric lightness.** If one arm is darker than the other, it dominates visually. Check `d3.lab(color).l` at both extremes.
+
+12. **Small marks losing saturation.** A 4px dot appears less saturated than a 40px bar of the same color. Boost chroma for small marks.
+
+13. **Printing transparency.** `rgba()` alpha renders inconsistently across printers. Use opaque colors with pattern fills for print-safe output.
+
+14. **`d3.color()` in tight loops.** Parsing hex strings allocates objects. Cache parsed colors outside the render loop.
+
 ## References
 
 - [Paul Tol's Colour Schemes](https://personal.sron.nl/~pault/)
@@ -372,3 +731,6 @@ g.append("text").attr("transform", `translate(-8, ${size * 1.5}) rotate(-90)`).a
 - [Canvas Compositing (MDN)](https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/globalCompositeOperation)
 - [How to Pick More Beautiful Colors](https://blog.datawrapper.de/beautifulcolors/) — Lisa Charlotte Muth
 - [Viz Palette](https://projects.susielu.com/viz-palette) — Susie Lu & Elijah Meeks
+- [Joshua Stevens: Bivariate Choropleth](https://www.joshuastevens.net/cartography/make-a-bivariate-choropleth-map/)
+- [OKLab Color Space](https://bottosson.github.io/posts/oklab/) — Björn Ottosson
+- [WCAG Contrast (Understanding SC 1.4.3)](https://www.w3.org/WAI/WCAG21/Understanding/contrast-minimum.html)
