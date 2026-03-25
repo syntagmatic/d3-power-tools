@@ -1,5 +1,5 @@
 ---
-name: axes-and-scales
+name: scales
 description: "D3.js axes and scales for production charts: scale selection (linear, log, symlog, pow, time, band, point), axis generation and customization, custom tick formats, responsive tick counts with ResizeObserver, label collision avoidance (rotation, staggering, ellipsis), broken/discontinuous axes, dual-y axes with independent scales, time scales with gaps (weekends, holidays), ordinal grouping and nested axes, axis transitions, grid lines, and Canvas axis rendering. Use this skill when the user needs axes, scales, tick formatting, label layout, dual-y charts, log scale gotchas, broken axes, time axis gaps, responsive axes, or any scale-to-visual-encoding pipeline."
 ---
 

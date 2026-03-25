@@ -7,7 +7,7 @@ description: "Build small multiples (trellis/faceted) layouts with D3.js. Use th
 
 Patterns for building small multiples (trellis, faceted, lattice) layouts with D3.
 
-For axes and tick formatting, see `axes-and-scales`. For brushing and cross-chart linking, see `brushing`. For canvas rendering patterns, see `canvas`.
+For axes and tick formatting, see `scales`. For brushing and cross-chart linking, see `brushing`. For canvas rendering patterns, see `canvas`.
 
 ## Scale Strategies
 

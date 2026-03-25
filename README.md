@@ -20,13 +20,13 @@ Claude Code skills for building advanced D3.js visualizations. Each skill encode
 
 **[hierarchy-interaction](skills/hierarchy-interaction/SKILL.md)** — Expand/collapse trees, zoomable treemaps and sunbursts, focus+context circle packing, pan and zoom. Animated transitions between hierarchy states.
 
-**[hierarchy-edge-bundling](skills/hierarchy-edge-bundling/SKILL.md)** — Hierarchical edge bundling for dependency graphs and module relationships. LCA path routing with `node.path()`, `d3.curveBundle.beta()` tension control, and animated layout transitions (bundle, cluster, tree, pack, treemap) with continuous per-frame edge redrawing via data-space interpolation.
+**[edge-bundling](skills/edge-bundling/SKILL.md)** — Hierarchical edge bundling for dependency graphs and module relationships. LCA path routing with `node.path()`, `d3.curveBundle.beta()` tension control, and animated layout transitions (bundle, cluster, tree, pack, treemap) with continuous per-frame edge redrawing via data-space interpolation.
 
 ### Networks & Forces
 
-**[force-simulation](skills/force-simulation/SKILL.md)** — Force-directed layouts with `d3.forceSimulation`. Simulation lifecycle, all built-in forces, custom forces, tick management, drag interaction, constrained layouts, clustering, and performance at 10K+ nodes.
+**[force](skills/force/SKILL.md)** — Force-directed layouts with `d3.forceSimulation`. Simulation lifecycle, all built-in forces, custom forces, tick management, drag interaction, constrained layouts, clustering, and performance at 10K+ nodes.
 
-**[network-visualization](skills/network-visualization/SKILL.md)** — Network and graph visualization types: node-link diagrams, adjacency matrices, arc diagrams, chord diagrams, and Sankey flow diagrams. Data preparation, layout comparison, and interaction patterns.
+**[network](skills/network/SKILL.md)** — Network and graph visualization types: node-link diagrams, adjacency matrices, arc diagrams, chord diagrams, and Sankey flow diagrams. Data preparation, layout comparison, and interaction patterns.
 
 ### Styling & Color
 
@@ -50,11 +50,11 @@ Claude Code skills for building advanced D3.js visualizations. Each skill encode
 
 **[canvas-accessibility](skills/canvas-accessibility/SKILL.md)** — Making canvas visualizations accessible. Keyboard tree navigation (arrow keys, Home/End, Enter/Escape), ARIA roles and live regions, shape-adaptive focus rings, screen reader announcements, and data table fallback views.
 
-**[webgl-rendering](skills/webgl-rendering/SKILL.md)** — GPU-accelerated rendering for 100K–10M+ elements. Vertex/fragment shaders, instanced rendering, D3+WebGL integration, texture atlases, zoom via uniforms, and GPU picking.
+**[webgl](skills/webgl/SKILL.md)** — GPU-accelerated rendering for 100K–10M+ elements. Vertex/fragment shaders, instanced rendering, D3+WebGL integration, texture atlases, zoom via uniforms, and GPU picking.
 
 ### Charts & Statistics
 
-**[axes-and-scales](skills/axes-and-scales/SKILL.md)** — Scale selection, axis customization, tick formats, responsive tick counts, label collision avoidance, broken axes, dual-y, time gaps, ordinal grouping.
+**[scales](skills/scales/SKILL.md)** — Scale selection, axis customization, tick formats, responsive tick counts, label collision avoidance, broken axes, dual-y, time gaps, ordinal grouping.
 
 **[data-gathering](skills/data-gathering/SKILL.md)** — Data loading, type coercion, cleaning, reshaping (group/rollup/pivot), aggregation, binning, joining, normalization, columnar typed arrays.
 
@@ -101,7 +101,7 @@ Skills produce self-contained HTML files with inline JS/CSS. No build tools, no 
 python3 scripts/test-viz.py --config tests/test.config.json
 
 # Test a single visualization
-python3 scripts/test-viz.py skills/hierarchy-edge-bundling/examples/edge-bundling.html --out /tmp/check.png
+python3 scripts/test-viz.py skills/edge-bundling/examples/edge-bundling.html --out /tmp/check.png
 ```
 
 Tests use Playwright to verify pages load without JS errors, render expected DOM elements, and capture screenshots for visual inspection. See the [test config](tests/test.config.json) for the full list.

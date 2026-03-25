@@ -4,29 +4,29 @@ Gemini reviewed the skill collection with a focus on production-readiness: acces
 
 ## Core Architectural Goals
 
-- [x] **A11y-by-Default** — Every Canvas/WebGL skill now cross-references `canvas-accessibility` and `data-table`. `force-simulation` has spatial keyboard nav, `aria-live` announcements, and a hybrid Canvas+SVG example. `network-visualization` has per-layout ARIA role guidance.
+- [x] **A11y-by-Default** — Every Canvas/WebGL skill now cross-references `canvas-accessibility` and `data-table`. `force` has spatial keyboard nav, `aria-live` announcements, and a hybrid Canvas+SVG example. `network` has per-layout ARIA role guidance.
 
 - [ ] ~~**Modularity (ESM)**~~ — Won't do. Separating layout from rendering into ES modules would require a build step, which conflicts with the self-contained HTML constraint. The separation already exists conceptually within each skill.
 
-- [x] **Data Robustness** — `validateHierarchy()` / `cleanHierarchy()` in `skills/hierarchy-layouts/scripts/validate-hierarchy.js`. `validateNetwork()` / `cleanNetwork()` in `skills/network-visualization/scripts/validate-network.js`. Both handle cycles, orphans, duplicates, and missing roots.
+- [x] **Data Robustness** — `validateHierarchy()` / `cleanHierarchy()` in `skills/hierarchy-layouts/scripts/validate-hierarchy.js`. `validateNetwork()` / `cleanNetwork()` in `skills/network/scripts/validate-network.js`. Both handle cycles, orphans, duplicates, and missing roots.
 
 - [ ] **Performance Throttling** — Partially addressed. `canvas` and `brushing` already document rAF frame budgeting and render queues. A standardized cross-skill scheduler was deemed unnecessary coupling — the skills that hit high element counts already handle it.
 
-- [x] **Off-Main-Thread** — `canvas` covers Web Workers + OffscreenCanvas. `webgl-rendering` covers worker-based buffer preparation. `brushing` documents offloading intersection tests to workers for 10K+ rows.
+- [x] **Off-Main-Thread** — `canvas` covers Web Workers + OffscreenCanvas. `webgl` covers worker-based buffer preparation. `brushing` documents offloading intersection tests to workers for 10K+ rows.
 
 ---
 
 ## Skill-Specific Critiques
 
-### canvas & webgl-rendering
+### canvas & webgl
 **Gap:** High-performance but "black boxes" for accessibility.
 **Fix:** Added Accessibility sections pointing to `canvas-accessibility` and `data-table`.
 
-### force-simulation
+### force
 **Gap:** No accessibility pattern for dynamic force layouts.
 **Fix:** Added spatial keyboard nav via quadtree (`scripts/spatial-keyboard-nav.js`), `aria-live` convergence announcements, and a hybrid Canvas+SVG example (`examples/hybrid-canvas-svg.html`). ARIA role corrected from the proposed `role="application"` (which disables screen reader shortcuts) to `role="img"` with `aria-roledescription`.
 
-### network-visualization
+### network
 **Gap:** No ARIA guidance for different graph layouts, no standard data validation step.
 **Fix:** Added per-layout ARIA roles (`role="grid"` for adjacency matrix, `role="img"` for arc/force/chord/Sankey). Added "Always validate first" callout linking to `validate-network.js`. Cross-referenced `data-table` for hairball graphs.
 
@@ -36,7 +36,7 @@ Gemini reviewed the skill collection with a focus on production-readiness: acces
 
 ### brushing
 **Gap:** SVG-on-Canvas coordination jittery at high element counts.
-**Fix:** Added "Performance at Scale" section cross-referencing frame budgeting from `canvas` and `bufferSubData` from `webgl-rendering`.
+**Fix:** Added "Performance at Scale" section cross-referencing frame budgeting from `canvas` and `bufferSubData` from `webgl`.
 
 ### shape-morphing
 **Gap:** Morph engine was code snippets, not a reusable function.
@@ -58,22 +58,22 @@ Full review of all 27 skills, 40 examples, and 145 tests. Ranked by how much eac
 
 ### Tier 2 — Strong domain knowledge
 7. **cartography** — Expanded from 348→1169 lines. Topology operations (merge/dissolve/neighbors), bivariate choropleth, bubble maps with force-collision, hex binning, cartograms (non-contiguous, Dorling), flow maps (great-circle, curved, animated), geographic label placement (polylabel, collision), Canvas multi-layer architecture with color-pick hit detection and frame budgeting, large geometry/LOD, globe versor rotation with back-face, projection transitions. 14 pitfalls. Moved from Tier 4 #27.
-8. **force-simulation** — Verlet internals, custom force recipes, 5K performance cliff, hybrid a11y example.
+8. **force** — Verlet internals, custom force recipes, 5K performance cliff, hybrid a11y example.
 9. **shape-morphing** — Parametric > resampling > topology hierarchy. bestRotation, stash on DOM element not datum.
 10. **data-gathering** — autoType FIPS pitfall, circular buffer, columnar typed arrays, pre-computed sort indices.
-11. **hierarchy-edge-bundling** — LCA paths, Holten reference, data-space interpolation for layout transitions. Niche but thorough.
-12. **webgl-rendering** — Breaks the boilerplate wall. Full shader code, instanced rendering, color-picking framebuffer, honest regl recommendation.
+11. **edge-bundling** — LCA paths, Holten reference, data-space interpolation for layout transitions. Niche but thorough.
+12. **webgl** — Breaks the boilerplate wall. Full shader code, instanced rendering, color-picking framebuffer, honest regl recommendation.
 
 ### Tier 3 — Competent reference
 13. **navigation** — Geometric vs semantic distinction, minimap, linked-zoom loop prevention. Solid but mostly API docs.
-14. **network-visualization** — 5 layouts in 532 lines = breadth over depth. Decision table and validation scripts are strong.
+14. **network** — 5 layouts in 532 lines = breadth over depth. Decision table and validation scripts are strong.
 15. **visual-texture** — Expanded from 262→615 lines. Now includes diamond/triangle/zigzag patterns, perceptual distinctiveness ranking, SVG filter textures (feTurbulence, halftone), Canvas pattern atlas, accessible choropleth patterns, pattern+color compositing. 12 pitfalls. Moved from Tier 4 #25.
 16. **hierarchy-layouts** — Good validation helpers, layout-switcher example. "Which layout for which insight" deserves more than a table.
 17. **hierarchy-interaction** — Well-executed standard patterns (zoomable treemap/sunburst/pack). Observable notebook translations.
 18. **linked-views** — Bitmap crossfilter is useful. Core patterns (dispatch, shared selection) are standard.
 19. **distributions** — Deep stats (KDE bandwidth, Tukey fences, QQ). Reads like a textbook adapted for D3, not visualization wisdom.
 20. **time-series** — 847 lines. Horizon/cycle plot sections are interesting; date parsing and time scale sections are well-covered elsewhere.
-21. **axes-and-scales** — D3 API organized well. Time gap via band scale is the most interesting pattern.
+21. **scales** — D3 API organized well. Time gap via band scale is the most interesting pattern.
 
 ### Tier 4 — Useful but thin
 22. **annotation** — 769 lines, encyclopedic. Hard part (editorial judgment) untouched.

@@ -7,7 +7,7 @@ description: "D3.js zoom and pan interactions: d3-zoom API, geometric vs semanti
 
 D3's `d3-zoom` manages transform state (translate + scale) and maps pointer, wheel, and touch gestures to smooth, interruptible transitions. The critical design choice is **geometric vs semantic zoom**: whether zooming magnifies pixels or reveals more detail.
 
-Related skills: `axes-and-scales` (rescaled axes), `canvas` (quadtree culling, LOD), `brushing` (brush-to-zoom), `cartography` (map zoom), `hierarchy-interaction` (zoomable treemap/sunburst).
+Related skills: `scales` (rescaled axes), `canvas` (quadtree culling, LOD), `brushing` (brush-to-zoom), `cartography` (map zoom), `hierarchy-interaction` (zoomable treemap/sunburst).
 
 ```
 user gesture (wheel/pinch/drag)
@@ -331,7 +331,7 @@ Essential for Canvas with 10K+ elements. For SVG with <1K elements, direct updat
 
 5. **Geometric zoom of text.** Font size scales with zoom. Either counter-scale (`fontSize / k`) or use semantic zoom.
 
-6. **`rescaleX` with time scales.** Works fine — domain becomes a narrower time range. But tick formatting may need adjustment: use multi-level time format (see `axes-and-scales` skill).
+6. **`rescaleX` with time scales.** Works fine — domain becomes a narrower time range. But tick formatting may need adjustment: use multi-level time format (see `scales` skill).
 
 7. **Canvas zoom without clearing.** Forgetting `ctx.clearRect()` produces layered artifacts.
 

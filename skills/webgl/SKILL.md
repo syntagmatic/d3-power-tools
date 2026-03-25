@@ -1,5 +1,5 @@
 ---
-name: webgl-rendering
+name: webgl
 description: "High-performance WebGL rendering patterns for D3.js visualizations. Use this skill whenever the user needs to render 100K–10M+ data points, build GPU-accelerated scatter plots or particle visualizations, use instanced rendering for large datasets, implement WebGL-based heatmaps or density plots, integrate D3 scales/layouts with WebGL rendering, or hit performance limits with Canvas 2D. Also use when the user mentions WebGL, GPU rendering, shaders, instanced drawing, vertex buffers, or wants to push a D3 visualization well beyond what Canvas 2D can handle."
 ---
 

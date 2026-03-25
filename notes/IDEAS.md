@@ -66,7 +66,7 @@
 - [ ] Cross-layout chart morphing — coordinating shape-morphing with layout recomputation (bar→pie, scatter→line)
 - [ ] Momentum/inertial motion — easing into rest, not just eased transitions
 
-### force-simulation
+### force
 - [ ] Precomputed layout interpolation — distinguish "force as layout engine" (run to convergence, interpolate snapshots) from "force as animation driver" (live simulation). The precomputed approach avoids jitter in animated transitions between force configs
 - [ ] Force-directed label placement — labels that don't overlap, as a custom force or post-simulation pass
 - [ ] Multi-layer forces — applying different force sets to different node subsets simultaneously

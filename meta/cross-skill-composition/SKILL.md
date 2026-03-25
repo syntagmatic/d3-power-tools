@@ -5,7 +5,7 @@ description: "Architectural patterns for combining multiple D3 visualization ski
 
 # Cross-Skill Composition
 
-Every interesting visualization is a composition. A brushable Canvas scatterplot with linked histogram is five skills at once: `canvas`, `axes-and-scales`, `brushing`, `linked-views`, `responsive`. This skill documents the **glue**: how they initialize, how state flows, where the performance budget goes, and what breaks when ordering is wrong.
+Every interesting visualization is a composition. A brushable Canvas scatterplot with linked histogram is five skills at once: `canvas`, `scales`, `brushing`, `linked-views`, `responsive`. This skill documents the **glue**: how they initialize, how state flows, where the performance budget goes, and what breaks when ordering is wrong.
 
 ## The Layer Stack
 
@@ -63,8 +63,8 @@ Useful for layout transitions where animation needs Canvas but resting state nee
 1. Data load + clean        (data-gathering)
 2. Container measure        (responsive)
 3. Layer stack create       (canvas + this skill)
-4. Scales construct         (axes-and-scales)
-5. Layout compute           (hierarchy-layouts, force-simulation, d3.bin)
+4. Scales construct         (scales)
+5. Layout compute           (hierarchy-layouts, force, d3.bin)
 6. Static chrome render     (axes, gridlines, legends)
 7. Data render              (marks on Canvas or SVG)
 8. Interaction bind         (brushes, zoom, drag, tooltips)
@@ -135,10 +135,10 @@ Example: brush event on 10K rows:
 |------|------|-------|
 | Brush event handler | ~0.5ms | brushing |
 | Filter 10K rows | ~1ms | linked-views |
-| Re-bin histogram | ~0.5ms | axes-and-scales |
+| Re-bin histogram | ~0.5ms | scales |
 | Canvas scatter redraw (10K) | ~3ms | canvas |
 | Canvas histogram (20 bars) | ~0.5ms | canvas |
-| SVG axis transition | ~1ms | axes-and-scales |
+| SVG axis transition | ~1ms | scales |
 | Quadtree rebuild | ~2ms | canvas |
 | **Total** | **~8.5ms** | |
 
@@ -172,10 +172,10 @@ Switch layout algorithms with smooth transitions. Key challenge: shape interpola
 | Skill | On Resize |
 |-------|-----------|
 | `canvas` | Resize backing store (`canvas.width = w * dpr`), re-apply DPR, clear, redraw |
-| `axes-and-scales` | Recompute scale ranges, re-call generators |
+| `scales` | Recompute scale ranges, re-call generators |
 | `brushing` | Update extent, clear or re-map existing selection |
 | `navigation` | Recompute `translateExtent`, preserve viewport center |
-| `force-simulation` | Update center force, reheat |
+| `force` | Update center force, reheat |
 | quadtree | Rebuild — spatial index is in pixel coordinates |
 | `annotation` | Recompute positions, re-check collision |
 | `canvas-accessibility` | Update hidden DOM positions, resize focus ring |

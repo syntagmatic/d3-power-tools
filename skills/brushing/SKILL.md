@@ -545,7 +545,7 @@ Build the grid once when data/layout changes. Queries against it are O(cells tou
 
 ## Performance at Scale
 
-For brushing over 10K+ elements on Canvas, see the `canvas` skill's frame budgeting and render queue patterns — rAF-gated redraws prevent main-thread blocking during continuous brush updates. For WebGL-backed views, see `webgl-rendering` for `bufferSubData` partial updates during interaction.
+For brushing over 10K+ elements on Canvas, see the `canvas` skill's frame budgeting and render queue patterns — rAF-gated redraws prevent main-thread blocking during continuous brush updates. For WebGL-backed views, see `webgl` for `bufferSubData` partial updates during interaction.
 
 ## Common Pitfalls
 

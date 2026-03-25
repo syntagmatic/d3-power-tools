@@ -1,5 +1,5 @@
 ---
-name: network-visualization
+name: network
 description: "D3.js network and graph visualization: node-link diagrams, adjacency matrices, arc diagrams, chord diagrams, and Sankey flow diagrams. Use this skill whenever the user wants to visualize relationships, dependencies, flows, or connections between entities. Also use when the user mentions network graph, graph layout, adjacency matrix, arc diagram, d3.chord, d3.ribbon, d3.sankey, flow diagram, dependency graph, node-link, or wants to choose between different graph visualization types."
 ---
 
@@ -7,7 +7,7 @@ description: "D3.js network and graph visualization: node-link diagrams, adjacen
 
 Patterns for visualizing graph and network data with D3. Covers data preparation, five major layout types, and guidance on choosing between them.
 
-For force-directed node positioning and simulation tuning, see the `force-simulation` skill. For hierarchical edge bundling, see `hierarchy-edge-bundling`.
+For force-directed node positioning and simulation tuning, see the `force` skill. For hierarchical edge bundling, see `edge-bundling`.
 
 ## Data Validation
 

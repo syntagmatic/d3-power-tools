@@ -7,7 +7,7 @@ description: "Making D3.js visualizations responsive and adaptive. Use this skil
 
 The core principle: **observe the container, re-render the chart**. CSS handles layout; D3 handles drawing.
 
-Related skills: `axes-and-scales` (tick formatting), `canvas` (DPI, layers), `small-multiples` (responsive reflow).
+Related skills: `scales` (tick formatting), `canvas` (DPI, layers), `small-multiples` (responsive reflow).
 
 ## ResizeObserver: Avoiding Infinite Loops
 

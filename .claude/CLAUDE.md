@@ -66,7 +66,7 @@ Examples live in `skills/*/examples/` and double as test fixtures. Add new test 
 
 Each subdirectory under `skills/` contains a `SKILL.md` with domain knowledge, architecture patterns, interaction recipes, and common pitfalls for a specific visualization type.
 
-- `skills/axes-and-scales/` — scale selection (linear, log, symlog, pow, time, band, point), axis customization, tick formats, responsive tick counts, label collision avoidance, broken axes, dual-y, time gaps, ordinal grouping, Canvas axis rendering
+- `skills/scales/` — scale selection (linear, log, symlog, pow, time, band, point), axis customization, tick formats, responsive tick counts, label collision avoidance, broken axes, dual-y, time gaps, ordinal grouping, Canvas axis rendering
 - `skills/data-gathering/` — data loading, type coercion, cleaning, reshaping (group/rollup/pivot), aggregation, binning, joining, normalization
 - `skills/sparkcharts/` — word-sized inline charts: sparklines, spark bars, win/loss, bullet charts, band/range, dot strips, embedding in tables and text
 - `skills/parallel-coordinates/` — high-performance multivariate data exploration
@@ -77,14 +77,14 @@ Each subdirectory under `skills/` contains a `SKILL.md` with domain knowledge, a
 - `skills/canvas/` — high-performance Canvas 2D patterns: quadtree hit detection, typed arrays, batched rendering, zoom, LOD
 - `skills/color/` — color spaces (Lab, HCL, OKLab), color perception (simultaneous contrast, small-area, Mach bands), scale design principles (sequential lightness ramp, diverging symmetry, categorical distance), Paul Tol colorblind-safe palettes, CVD types and simulation, canvas compositing (lighter, multiply, source-in, xor, masking), SVG blending and feColorMatrix, alpha/opacity strategies (overdraw formula, adaptive alpha), dark mode adaptation (HCL lightness inversion), wide gamut (P3, oklch), WCAG contrast, auto text color, color legends (continuous, categorical, bivariate, size)
 - `skills/data-table/` — accessible data tables as chart alternatives: sortable columns, filtering, chart↔table toggle, linked highlighting, virtual scrolling, CSV export
-- `skills/force-simulation/` — force-directed layouts: simulation lifecycle, all built-in forces, custom forces, drag interaction, constrained layouts, clustering, performance at 10K+ nodes
-- `skills/hierarchy-edge-bundling/` — hierarchical edge bundling: LCA path routing, d3.curveBundle tension, radial dendrograms with cross-links, SVG and Canvas rendering
+- `skills/force/` — force-directed layouts: simulation lifecycle, all built-in forces, custom forces, drag interaction, constrained layouts, clustering, performance at 10K+ nodes
+- `skills/edge-bundling/` — hierarchical edge bundling: LCA path routing, d3.curveBundle tension, radial dendrograms with cross-links, SVG and Canvas rendering
 - `skills/hierarchy-interaction/` — expand/collapse, zoomable treemap/sunburst/pack, focus+context navigation
 - `skills/hierarchy-layouts/` — treemap, pack, tree, cluster, partition, stratify, tiling strategies, labels, color encoding
-- `skills/network-visualization/` — network graph types: node-link diagrams, adjacency matrix, arc diagrams, chord diagrams, Sankey flow diagrams
+- `skills/network/` — network graph types: node-link diagrams, adjacency matrix, arc diagrams, chord diagrams, Sankey flow diagrams
 - `skills/visual-texture/` — SVG pattern fills (hatching, dots, cross-hatch, stipple, diamonds, triangles, zigzag), perceptual distinctiveness ranking, SVG filter textures (feTurbulence, halftone), stroke dash patterns, Canvas pattern equivalents and atlas, Canvas pattern+color compositing, markers, color+pattern dual encoding for accessibility, accessible choropleth patterns, animated patterns, pattern performance, print considerations
 - `skills/cartography/` — geographic maps: projections (selection, fitSize, rotation, clipping, insets), GeoJSON/TopoJSON (mesh, merge, neighbors, topology operations), choropleth (sequential, diverging, bivariate), point/bubble maps (scaleSqrt, force-collision), hex binning, cartograms (non-contiguous, Dorling), flow maps (great-circle arcs, curved, animated), geographic label placement (centroid, pole of inaccessibility, collision), zoom-to-feature (viewBox, d3.zoom, projection-based), globe rendering (versor rotation, back-face), Canvas architecture (multi-layer stack, batch-by-color, color-pick hit detection, frame budgeting), tile layers (SVG, Canvas with caching), geodesic operations, large geometry (simplification, LOD, streaming), small multiples, projection transitions
-- `skills/webgl-rendering/` — GPU-accelerated rendering for 100K–10M+ elements: shaders, instanced rendering, D3+WebGL integration, texture atlases, zoom/picking
+- `skills/webgl/` — GPU-accelerated rendering for 100K–10M+ elements: shaders, instanced rendering, D3+WebGL integration, texture atlases, zoom/picking
 - `skills/navigation/` — d3-zoom API, geometric vs semantic zoom, SVG and Canvas zoom, rescaleX/rescaleY axis integration, zoom constraints, programmatic zoom-to-fit, minimap, pinch-to-zoom, zoom-linked views, level-of-detail, brush-to-zoom
 - `skills/annotation/` — callout annotations, leader lines (straight/elbow/curved), force-based label collision avoidance, responsive labels, rich tooltips, threshold/reference lines, Canvas annotations
 - `skills/distributions/` — box plots, violin plots, ridgeline/joy plots, bee swarm plots, strip/jitter plots, density plots, QQ plots, kernel density estimation, quartile calculation

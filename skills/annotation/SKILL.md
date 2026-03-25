@@ -7,7 +7,7 @@ description: "Build annotations, callouts, leader lines, and responsive labels f
 
 Patterns for adding explanatory text, callouts, leader lines, and labels to D3 visualizations.
 
-For axis labels and tick formatting, see `axes-and-scales`. For color legends, see `color`. For accessible text alternatives, see `canvas-accessibility`.
+For axis labels and tick formatting, see `scales`. For color legends, see `color`. For accessible text alternatives, see `canvas-accessibility`.
 
 ## Leader Line Geometry
 

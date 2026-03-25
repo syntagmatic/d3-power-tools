@@ -1,11 +1,11 @@
 ---
-name: force-simulation
+name: force
 description: "D3.js force-directed layouts and physics simulations: node positioning with forces, collision detection, clustering, constrained layouts, and drag interaction. Use this skill whenever the user wants to build force-directed graphs, network node-link diagrams, physics-based layouts, bubble collision charts, or interactive simulations. Also use when the user mentions d3.forceSimulation, forceManyBody, forceLink, forceCollide, forceCenter, forceX, forceY, forceRadial, alpha decay, tick management, velocity Verlet, node dragging with fx/fy, force-directed clustering, or scaling force layouts to 10K+ nodes."
 ---
 
 # Force Simulation
 
-Patterns for force-directed layouts with `d3.forceSimulation`. For network graph types (Sankey, chord, arc), see `network-visualization`. For Canvas rendering, see `canvas`. For GPU at 100K+, see `webgl-rendering`.
+Patterns for force-directed layouts with `d3.forceSimulation`. For network graph types (Sankey, chord, arc), see `network`. For Canvas rendering, see `canvas`. For GPU at 100K+, see `webgl`.
 
 ## Alpha, Cooling, and Convergence
 

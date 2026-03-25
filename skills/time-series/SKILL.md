@@ -7,7 +7,7 @@ description: "Build time-series visualizations with D3.js. Use this skill when t
 
 Patterns for building time-series visualizations with D3.js v7+.
 
-For axis customization and tick formatting, see `axes-and-scales`. For brush mechanics, see `brushing`. For zoom integration, see `navigation`. For Canvas performance patterns, see `canvas`. For animated transitions, see `motion`. For callout annotations on time series, see `annotation`.
+For axis customization and tick formatting, see `scales`. For brush mechanics, see `brushing`. For zoom integration, see `navigation`. For Canvas performance patterns, see `canvas`. For animated transitions, see `motion`. For callout annotations on time series, see `annotation`.
 
 ## DST and Timezone Pitfalls
 

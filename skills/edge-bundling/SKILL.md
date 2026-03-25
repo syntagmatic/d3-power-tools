@@ -1,5 +1,5 @@
 ---
-name: hierarchy-edge-bundling
+name: edge-bundling
 description: "Hierarchical edge bundling for D3.js: visualize connections between leaf nodes in a hierarchy by routing edges through least common ancestors with d3.curveBundle. Use this skill whenever the user wants to build a hierarchical edge bundling diagram, radial dendrograms with bundled connections, dependency graphs, import/export visualizations, package dependency wheels, software architecture diagrams showing module relationships, or any visualization that combines tree structure with cross-links between leaves. Covers d3.cluster radial layout, node.path() for LCA routing, d3.curveBundle.beta() tension control, SVG and Canvas rendering of bundled curves, interactive highlighting, data preparation from flat dependency lists, and animated layout transitions (bundle↔pack↔treemap↔tree) with continuous edge redrawing via data-space interpolation."
 ---
 
