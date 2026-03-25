@@ -2,9 +2,9 @@
 
 ## What This Is
 
-A collection of skills for building advanced D3.js visualizations. Each skill encodes deep domain knowledge so you get production-quality results without rediscovering every pitfall.
+Skills that encode how to *see*, not just how to draw. Each one captures the judgment calls — where the tick falls, when to use color vs. position, why this projection — that separate a chart that communicates from one that merely renders. The goal is a floor of quality so you can spend attention on what can't be codified. See [WHY.md](../notes/WHY.md) for the philosophy.
 
-Skills are designed to be useful across contexts: as Claude Code skills, as Gemini skills, and eventually as interactive tutorials for humans.
+Skills work across contexts: Claude Code, Gemini, and eventually as interactive tutorials for humans.
 
 ## Workflow
 
@@ -64,34 +64,47 @@ Examples live in `skills/*/examples/` and double as test fixtures. Add new test 
 
 ## Skills
 
-Each subdirectory under `skills/` contains a `SKILL.md` with domain knowledge, architecture patterns, interaction recipes, and common pitfalls for a specific visualization type.
+Each `SKILL.md` encodes domain knowledge, architecture patterns, interaction recipes, and common pitfalls. Grouped by what the viewer needs.
 
-- `skills/scales/` — scale selection (linear, log, symlog, pow, time, band, point), axis customization, tick formats, responsive tick counts, label collision avoidance, broken axes, dual-y, time gaps, ordinal grouping, Canvas axis rendering
-- `skills/data-gathering/` — data loading, type coercion, cleaning, reshaping (group/rollup/pivot), aggregation, binning, joining, normalization
-- `skills/sparkcharts/` — word-sized inline charts: sparklines, spark bars, win/loss, bullet charts, band/range, dot strips, embedding in tables and text
+### Seeing patterns
 - `skills/parallel-coordinates/` — high-performance multivariate data exploration
-- `skills/motion/` — enter/update/exit, canvas animation, staggering, scrollytelling
-- `skills/shape-morphing/` — circle↔rect via cornerRadius, bar↔pie via arc params, arbitrary path morphing via point resampling, map projection transitions
 - `skills/brushing/` — intersection brushing, lasso, fisheye, cross-chart linking
-- `skills/canvas-accessibility/` — keyboard navigation, screen reader support, ARIA, focus rings, data table fallback
-- `skills/canvas/` — high-performance Canvas 2D patterns: quadtree hit detection, typed arrays, batched rendering, zoom, LOD
-- `skills/color/` — color spaces (Lab, HCL, OKLab), color perception (simultaneous contrast, small-area, Mach bands), scale design principles (sequential lightness ramp, diverging symmetry, categorical distance), Paul Tol colorblind-safe palettes, CVD types and simulation, canvas compositing (lighter, multiply, source-in, xor, masking), SVG blending and feColorMatrix, alpha/opacity strategies (overdraw formula, adaptive alpha), dark mode adaptation (HCL lightness inversion), wide gamut (P3, oklch), WCAG contrast, auto text color, color legends (continuous, categorical, bivariate, size)
-- `skills/data-table/` — accessible data tables as chart alternatives: sortable columns, filtering, chart↔table toggle, linked highlighting, virtual scrolling, CSV export
-- `skills/force/` — force-directed layouts: simulation lifecycle, all built-in forces, custom forces, drag interaction, constrained layouts, clustering, performance at 10K+ nodes
-- `skills/edge-bundling/` — hierarchical edge bundling: LCA path routing, d3.curveBundle tension, radial dendrograms with cross-links, SVG and Canvas rendering
-- `skills/hierarchy-interaction/` — expand/collapse, zoomable treemap/sunburst/pack, focus+context navigation
+- `skills/linked-views/` — coordinating multiple views: d3.dispatch, shared state, crossfilter bitmap indexing, coordinated brushing/zoom, overview+detail
+- `skills/distributions/` — box plots, violin plots, ridgeline/joy plots, bee swarm, strip/jitter, density, QQ plots, KDE
+
+### Seeing structure
 - `skills/hierarchy-layouts/` — treemap, pack, tree, cluster, partition, stratify, tiling strategies, labels, color encoding
-- `skills/network/` — network graph types: node-link diagrams, adjacency matrix, arc diagrams, chord diagrams, Sankey flow diagrams
-- `skills/visual-texture/` — SVG pattern fills (hatching, dots, cross-hatch, stipple, diamonds, triangles, zigzag), perceptual distinctiveness ranking, SVG filter textures (feTurbulence, halftone), stroke dash patterns, Canvas pattern equivalents and atlas, Canvas pattern+color compositing, markers, color+pattern dual encoding for accessibility, accessible choropleth patterns, animated patterns, pattern performance, print considerations
-- `skills/cartography/` — geographic maps: projections (selection, fitSize, rotation, clipping, insets), GeoJSON/TopoJSON (mesh, merge, neighbors, topology operations), choropleth (sequential, diverging, bivariate), point/bubble maps (scaleSqrt, force-collision), hex binning, cartograms (non-contiguous, Dorling), flow maps (great-circle arcs, curved, animated), geographic label placement (centroid, pole of inaccessibility, collision), zoom-to-feature (viewBox, d3.zoom, projection-based), globe rendering (versor rotation, back-face), Canvas architecture (multi-layer stack, batch-by-color, color-pick hit detection, frame budgeting), tile layers (SVG, Canvas with caching), geodesic operations, large geometry (simplification, LOD, streaming), small multiples, projection transitions
-- `skills/webgl/` — GPU-accelerated rendering for 100K–10M+ elements: shaders, instanced rendering, D3+WebGL integration, texture atlases, zoom/picking
-- `skills/navigation/` — d3-zoom API, geometric vs semantic zoom, SVG and Canvas zoom, rescaleX/rescaleY axis integration, zoom constraints, programmatic zoom-to-fit, minimap, pinch-to-zoom, zoom-linked views, level-of-detail, brush-to-zoom
-- `skills/annotation/` — callout annotations, leader lines (straight/elbow/curved), force-based label collision avoidance, responsive labels, rich tooltips, threshold/reference lines, Canvas annotations
-- `skills/distributions/` — box plots, violin plots, ridgeline/joy plots, bee swarm plots, strip/jitter plots, density plots, QQ plots, kernel density estimation, quartile calculation
-- `skills/small-multiples/` — trellis/faceted layouts, grid layout math, shared vs independent scales, synchronized cross-panel interaction, responsive reflow, Canvas small multiples, lazy rendering
-- `skills/time-series/` — time scales (scaleTime vs scaleUtc), date parsing pitfalls, time-aware axes, gap handling, horizon charts, swimlanes/event timelines, Gantt charts, cycle plots, real-time streaming (sliding window, circular buffer, WebSocket), brushed time selection, multi-series with Voronoi nearest, LTTB downsampling
-- `skills/linked-views/` — coordinating multiple views: event bus (d3.dispatch), shared state store, crossfilter pattern, coordinated brushing/zoom, overview+detail, focus+context, shared scales, heterogeneous chart linking, state serialization, bitmap indexing for large datasets
-- `skills/responsive/` — ResizeObserver lifecycle, container-based sizing, viewBox vs redraw-on-resize, aspect ratio strategies, responsive margins, breakpoint-driven layout, responsive text/labels, touch adaptation, Canvas DPI handling, iframe embedding with postMessage, print styles
+- `skills/hierarchy-interaction/` — expand/collapse, zoomable treemap/sunburst/pack, focus+context navigation
+- `skills/hierarchy-edge-bundling/` — LCA path routing, d3.curveBundle tension, radial dendrograms, SVG and Canvas rendering
+- `skills/force-simulation/` — simulation lifecycle, all built-in forces, custom forces, drag, constrained layouts, clustering, 10K+ nodes
+- `skills/network-visualization/` — node-link diagrams, adjacency matrix, arc diagrams, chord diagrams, Sankey flow
+
+### Seeing place
+- `skills/cartography/` — projections, TopoJSON topology operations, choropleth, bubble maps, hex binning, cartograms, flow maps, geographic labels, zoom-to-feature, globe versor rotation, Canvas multi-layer architecture, tile layers, large geometry/LOD, projection transitions
+
+### Seeing change
+- `skills/time-series/` — scaleTime vs scaleUtc, time-aware axes, gap handling, horizon charts, swimlanes, Gantt, cycle plots, real-time streaming, brushed time selection, LTTB downsampling
+- `skills/motion/` — enter/update/exit, canvas animation, staggering, scrollytelling
+- `skills/shape-morphing/` — circle↔rect via cornerRadius, bar↔pie via arc params, arbitrary path morphing via point resampling, projection transitions
+
+### Making it legible
+- `skills/axes-and-scales/` — scale selection, axis customization, tick formats, responsive ticks, label collision, broken axes, dual-y, time gaps
+- `skills/color/` — perceptual color spaces, Tol colorblind-safe palettes, compositing, alpha/overdraw, CVD simulation, dark mode, wide gamut, WCAG contrast, color legends
+- `skills/visual-texture/` — SVG/Canvas pattern fills (hatching, stipple, diamonds, zigzag), filter textures, pattern+color dual encoding for accessibility
+- `skills/annotation/` — callout annotations, leader lines, force-based label collision, responsive labels, tooltips, threshold/reference lines
+- `skills/data-table/` — accessible data tables as chart alternatives: sortable, filterable, chart↔table toggle, linked highlighting
+- `skills/canvas-accessibility/` — keyboard navigation, screen reader support, ARIA, focus rings, data table fallback
+
+### Making it work
+- `skills/canvas/` — high-performance Canvas 2D: quadtree hit detection, typed arrays, batched rendering, zoom, LOD
+- `skills/webgl-rendering/` — GPU-accelerated rendering for 100K–10M+ elements: shaders, instanced rendering, texture atlases, zoom/picking
+- `skills/navigation/` — d3-zoom, geometric vs semantic zoom, rescaleX/rescaleY, zoom constraints, minimap, pinch-to-zoom, level-of-detail
+- `skills/responsive/` — ResizeObserver, container sizing, viewBox vs redraw, aspect ratio, breakpoints, touch, Canvas DPI, iframe embedding
+
+### Before you render
+- `skills/data-gathering/` — data loading, type coercion, cleaning, reshaping (group/rollup/pivot), aggregation, binning, joining, normalization
+- `skills/sparkcharts/` — word-sized inline charts: sparklines, spark bars, win/loss, bullet charts, dot strips, embedding in tables and text
+- `skills/small-multiples/` — trellis/faceted layouts, grid layout math, shared vs independent scales, synchronized cross-panel interaction
 
 ### Meta Skills
 
