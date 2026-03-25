@@ -4,7 +4,7 @@
 # Usage:
 #   ./scripts/worktree.sh <name>              # create worktree + open Claude
 #   ./scripts/worktree.sh <name> --no-claude  # create worktree only
-#   ./scripts/worktree.sh --merge [<name>]    # rebase session onto main + fast-forward
+#   ./scripts/worktree.sh --rebase [<name>]    # rebase session onto main + fast-forward
 #   ./scripts/worktree.sh --list              # list active worktrees
 #   ./scripts/worktree.sh --remove <name>     # remove a worktree
 
@@ -16,7 +16,7 @@ PREFIX="d3-pt"
 
 usage() {
   echo "Usage: $0 <name> [--no-claude]"
-  echo "       $0 --merge [<name>]"
+  echo "       $0 --rebase [<name>]"
   echo "       $0 --list"
   echo "       $0 --remove <name>"
   exit 1
@@ -28,7 +28,7 @@ case "$1" in
   --list|-l)
     git worktree list
     ;;
-  --merge|-m)
+  --rebase|-r)
     # Rebase session branch onto main, then fast-forward main (no merge commits).
     # If <name> is omitted, infers from current branch (session/<name>).
     if [ -n "$2" ]; then
@@ -41,8 +41,11 @@ case "$1" in
       fi
     fi
 
+    # Fetch latest main from remote before rebasing
+    git fetch origin main 2>/dev/null || true
+
     # Rebase onto main (no-op if already up to date)
-    git rebase main "$BRANCH"
+    git rebase origin/main "$BRANCH"
 
     # Fast-forward main to the rebased tip.
     # update-ref bypasses the "checked out in another worktree" restriction.
@@ -54,7 +57,7 @@ case "$1" in
     fi
     echo "Rebased $BRANCH onto main (fast-forward to $(git rev-parse --short "$NEW_TIP"))"
     ;;
-  --remove|-r)
+  --remove|-R)
     [ -z "$2" ] && usage
     git worktree remove "$PARENT/$PREFIX-$2"
     git branch -d "session/$2" 2>/dev/null && echo "Deleted branch session/$2" || true
