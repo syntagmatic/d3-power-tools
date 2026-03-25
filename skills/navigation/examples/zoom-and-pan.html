@@ -461,23 +461,20 @@ const groupColors = ["#4e79a7", "#e15759", "#59a14f", "#f28e2b"];
   // Precompute hex bins at original scale
   const hexRadius = 15;
 
-  function drawLOD(transform) {
-    const k = transform.k;
-    const zx = transform.rescaleX(xScale);
-    const zy = transform.rescaleY(yScale);
-    const chartW = w - margin.left - margin.right;
+  // Track current LOD level for fade transitions
+  let currentLODLevel = null;
 
-    // Axes
-    xAxisG.call(d3.axisBottom(zx).ticks(Math.max(3, Math.floor(chartW / 80))));
-    yAxisG.call(d3.axisLeft(zy).ticks(6));
-    gridG.call(d3.axisLeft(zy).tickSize(-chartW).tickFormat("").ticks(6))
-      .call(g => g.select(".domain").remove());
+  function getLODLevel(k) {
+    if (k < 2.5) return "density";
+    if (k < 6) return "points";
+    return "labeled";
+  }
 
-    chartArea.selectAll("*").remove();
+  function renderLODContent(zx, zy, k, entering) {
+    const fadeDuration = entering ? 200 : 0;
 
     if (k < 2.5) {
       // Overview: binned density circles
-      lodLabel.text("density");
       const [xMin, xMax] = zx.domain();
       const [yMin, yMax] = zy.domain();
       const binSize = 10;
@@ -494,50 +491,72 @@ const groupColors = ["#4e79a7", "#e15759", "#59a14f", "#f28e2b"];
       const maxCount = d3.max([...bins.values()]) || 1;
       const rScale = d3.scaleSqrt().domain([0, maxCount]).range([2, hexRadius * k * 0.4]);
 
-      chartArea.selectAll("circle")
+      const circles = chartArea.selectAll("circle")
         .data([...bins.entries()])
         .join("circle")
           .attr("cx", ([key]) => zx(+key.split(",")[0]))
           .attr("cy", ([key]) => zy(+key.split(",")[1]))
           .attr("r", ([, count]) => rScale(count))
-          .attr("fill", "#4e79a7")
+          .attr("fill", "#4e79a7");
+
+      if (entering) {
+        circles
+          .attr("opacity", 0)
+          .transition().duration(fadeDuration)
           .attr("opacity", ([, count]) => 0.15 + 0.5 * count / maxCount);
+      } else {
+        circles.attr("opacity", ([, count]) => 0.15 + 0.5 * count / maxCount);
+      }
 
     } else if (k < 6) {
       // Mid: individual points, no labels
-      lodLabel.text("points");
       const [xMin, xMax] = zx.domain();
       const [yMin, yMax] = zy.domain();
 
-      chartArea.selectAll("circle")
+      const circles = chartArea.selectAll("circle")
         .data(data.filter(d => d.x >= xMin && d.x <= xMax && d.y >= yMin && d.y <= yMax))
         .join("circle")
           .attr("cx", d => zx(d.x))
           .attr("cy", d => zy(d.y))
           .attr("r", d => d.r)
-          .attr("fill", d => groupColors[d.group])
+          .attr("fill", d => groupColors[d.group]);
+
+      if (entering) {
+        circles
+          .attr("opacity", 0)
+          .transition().duration(fadeDuration)
           .attr("opacity", 0.6);
+      } else {
+        circles.attr("opacity", 0.6);
+      }
 
     } else {
       // Zoomed: points with coordinate labels
-      lodLabel.text("labeled");
       const [xMin, xMax] = zx.domain();
       const [yMin, yMax] = zy.domain();
       const visible = data.filter(d => d.x >= xMin && d.x <= xMax && d.y >= yMin && d.y <= yMax);
 
-      chartArea.selectAll("circle")
+      const circles = chartArea.selectAll("circle")
         .data(visible)
         .join("circle")
           .attr("cx", d => zx(d.x))
           .attr("cy", d => zy(d.y))
           .attr("r", d => d.r + 1)
           .attr("fill", d => groupColors[d.group])
-          .attr("opacity", 0.7)
           .attr("stroke", "#fff")
           .attr("stroke-width", 0.5);
 
+      if (entering) {
+        circles
+          .attr("opacity", 0)
+          .transition().duration(fadeDuration)
+          .attr("opacity", 0.7);
+      } else {
+        circles.attr("opacity", 0.7);
+      }
+
       // Show labels for up to 30 visible points
-      chartArea.selectAll("text")
+      const labels = chartArea.selectAll("text")
         .data(visible.slice(0, 30))
         .join("text")
           .attr("x", d => zx(d.x))
@@ -546,6 +565,61 @@ const groupColors = ["#4e79a7", "#e15759", "#59a14f", "#f28e2b"];
           .attr("font-size", "8px")
           .attr("fill", "#666")
           .text(d => `${d.x.toFixed(0)},${d.y.toFixed(0)}`);
+
+      if (entering) {
+        labels
+          .attr("opacity", 0)
+          .transition().duration(fadeDuration)
+          .attr("opacity", 1);
+      } else {
+        labels.attr("opacity", 1);
+      }
+    }
+  }
+
+  function drawLOD(transform) {
+    const k = transform.k;
+    const zx = transform.rescaleX(xScale);
+    const zy = transform.rescaleY(yScale);
+    const chartW = w - margin.left - margin.right;
+
+    // Axes
+    xAxisG.call(d3.axisBottom(zx).ticks(Math.max(3, Math.floor(chartW / 80))));
+    yAxisG.call(d3.axisLeft(zy).ticks(6));
+    gridG.call(d3.axisLeft(zy).tickSize(-chartW).tickFormat("").ticks(6))
+      .call(g => g.select(".domain").remove());
+
+    const newLevel = getLODLevel(k);
+    lodLabel.text(newLevel);
+
+    if (newLevel !== currentLODLevel) {
+      // LOD level changed: fade out old, then fade in new
+      const oldElements = chartArea.selectAll("*");
+      if (currentLODLevel === null || oldElements.empty()) {
+        // First render or nothing to fade out
+        chartArea.selectAll("*").remove();
+        currentLODLevel = newLevel;
+        renderLODContent(zx, zy, k, true);
+      } else {
+        currentLODLevel = newLevel;
+        oldElements
+          .transition().duration(200)
+          .attr("opacity", 0)
+          .remove()
+          .end()
+          .then(() => {
+            renderLODContent(zx, zy, k, true);
+          })
+          .catch(() => {
+            // Transition interrupted — clean up and render anyway
+            chartArea.selectAll("*").remove();
+            renderLODContent(zx, zy, k, true);
+          });
+      }
+    } else {
+      // Same LOD level: update positions without transitions
+      chartArea.selectAll("*").remove();
+      renderLODContent(zx, zy, k, false);
     }
   }
 
