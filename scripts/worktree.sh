@@ -11,8 +11,7 @@
 set -e
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-PARENT="$(dirname "$REPO_ROOT")"
-PREFIX="d3-pt"
+WORKTREE_DIR="$REPO_ROOT/.worktrees"
 
 usage() {
   echo "Usage: $0 <name> [--no-claude]"
@@ -61,7 +60,7 @@ case "$1" in
     ;;
   --remove|-R)
     [ -z "$2" ] && usage
-    git worktree remove "$PARENT/$PREFIX-$2"
+    git worktree remove "$WORKTREE_DIR/$2"
     git branch -d "session/$2" 2>/dev/null && echo "Deleted branch session/$2" || true
     ;;
   --help|-h)
@@ -69,7 +68,7 @@ case "$1" in
     ;;
   *)
     NAME="$1"
-    WORKTREE="$PARENT/$PREFIX-$NAME"
+    WORKTREE="$WORKTREE_DIR/$NAME"
     BRANCH="session/$NAME"
 
     if [ -d "$WORKTREE" ]; then
