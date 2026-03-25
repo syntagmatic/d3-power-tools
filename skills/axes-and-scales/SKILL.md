@@ -7,7 +7,7 @@ description: "D3.js axes and scales for production charts: scale selection (line
 
 The scale→axis pipeline is the backbone of quantitative charts. A scale maps data to visual properties; an axis makes that mapping legible.
 
-Related skills: `data-preparation` (type coercion before scaling), `brushing-and-selection` (brush extents map through scales), `animated-transitions` (scale domain transitions), `canvas-rendering` (drawing axes on Canvas).
+Related skills: `data-gathering` (type coercion before scaling), `brushing` (brush extents map through scales), `motion` (scale domain transitions), `canvas` (drawing axes on Canvas).
 
 ```
 raw data → d3.scale*() → pixel coordinates
@@ -306,7 +306,7 @@ Update the scale first, then transition axis and data elements together so nothi
 
 ## Canvas Axis Rendering
 
-For Canvas-only charts, draw axes manually — iterate `scale.ticks()`, draw tick lines with `ctx.moveTo`/`ctx.lineTo`, labels with `ctx.fillText`. Set `ctx.textAlign` and `ctx.textBaseline` based on orientation. See `canvas-rendering` skill for full setup.
+For Canvas-only charts, draw axes manually — iterate `scale.ticks()`, draw tick lines with `ctx.moveTo`/`ctx.lineTo`, labels with `ctx.fillText`. Set `ctx.textAlign` and `ctx.textBaseline` based on orientation. See `canvas` skill for full setup.
 
 ## .nice() — When and When Not
 

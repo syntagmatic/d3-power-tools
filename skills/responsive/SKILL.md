@@ -1,5 +1,5 @@
 ---
-name: responsive-charts
+name: responsive
 description: "Making D3.js visualizations responsive and adaptive. Use this skill when the user needs charts that resize with their container, adapt layout at different screen sizes, handle mobile/touch interactions, embed charts in iframes, support retina/HiDPI Canvas, print cleanly, or implement any resize-aware D3 visualization."
 ---
 
@@ -7,7 +7,7 @@ description: "Making D3.js visualizations responsive and adaptive. Use this skil
 
 The core principle: **observe the container, re-render the chart**. CSS handles layout; D3 handles drawing.
 
-Related skills: `axes-and-scales` (tick formatting), `canvas-rendering` (DPI, layers), `small-multiples` (responsive reflow).
+Related skills: `axes-and-scales` (tick formatting), `canvas` (DPI, layers), `small-multiples` (responsive reflow).
 
 ## ResizeObserver: Avoiding Infinite Loops
 

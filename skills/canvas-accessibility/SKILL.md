@@ -7,7 +7,7 @@ description: "Make D3.js canvas visualizations accessible to keyboard and screen
 
 Make canvas-rendered D3 visualizations navigable by keyboard and perceivable by screen readers.
 
-Related: `canvas-rendering` (DPR, batching), `fallback-table` (data table alternative).
+Related: `canvas` (DPR, batching), `data-table` (data table alternative).
 
 **When to just use SVG**: <500 elements with simple interactions — SVG gives accessibility for free. Canvas accessibility is worth the effort when you need canvas for performance.
 

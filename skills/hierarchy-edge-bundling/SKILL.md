@@ -9,7 +9,7 @@ Patterns for visualizing connections between nodes in a hierarchy by routing edg
 
 The canonical reference is Danny Holten's 2006 paper. D3's implementation uses `d3.cluster` for radial leaf placement and `d3.curveBundle` for tension-controlled bundling through LCA paths.
 
-For hierarchy construction and layout details, see the `hierarchy-layouts` skill. For canvas performance patterns, see `canvas-rendering`. For advanced highlight/selection patterns, see `brushing-and-selection`.
+For hierarchy construction and layout details, see the `hierarchy-layouts` skill. For canvas performance patterns, see `canvas`. For advanced highlight/selection patterns, see `brushing`.
 
 ## Core Concept
 
@@ -218,7 +218,7 @@ nodeSelection
 .node--faded text { fill-opacity: 0.2; }
 ```
 
-For canvas highlighting, render in two passes (faded first, highlighted on top). See `canvas-rendering` for batched draw patterns and `brushing-and-selection` for advanced highlight state management.
+For canvas highlighting, render in two passes (faded first, highlighted on top). See `canvas` for batched draw patterns and `brushing` for advanced highlight state management.
 
 ## Color by Group
 

@@ -4,10 +4,10 @@
 
 ### High value
 - ~~**Axes & scales**~~ ✅ Built (initial commit)
-- ~~**Annotations & storytelling**~~ ✅ Built as `annotations-and-labels` (fc08228)
-- ~~**Responsive charts**~~ ✅ Built as `responsive-charts`
+- ~~**Annotations & storytelling**~~ ✅ Built as `annotation` (fc08228)
+- ~~**Responsive charts**~~ ✅ Built as `responsive`
 - ~~**Zoom & pan**~~ ✅ Built (initial commit, expanded with SVG-overlay-on-Canvas in 5bdc13d)
-- ~~**Temporal & time-series**~~ ✅ Built as `temporal-time-series`
+- ~~**Temporal & time-series**~~ ✅ Built as `time-series`
 
 ### Medium value
 - ~~**Statistical charts**~~ ✅ Built (fc08228)
@@ -58,7 +58,7 @@
 - [ ] Combined morph + stagger — morphing shapes with staggered timing per element
 - [ ] Performance guidance — sample count tradeoffs, caching strategies for complex paths
 
-### animated-transitions
+### motion
 - [ ] Collapse/expand animations — children fade to opacity 0 and converge to parent position, then layout recomputes
 - [ ] SVG ↔ Canvas handoff — animate in Canvas then settle into interactive SVG
 - [ ] Text morphing — number tickers, interpolating formatted values
@@ -76,7 +76,7 @@
 - [ ] Animated layout transitions — complete working code for treemap↔sunburst↔pack with shape morphing
 - [ ] Responsive hierarchy sizing — ResizeObserver, reflowing layouts on resize
 
-### brushing-and-selection
+### brushing
 - [ ] Dual-phase highlighting — hover = temporary, click = persistent with context fading
 - [ ] Highlight propagation via graph connectivity — `node.descendants()` + connected links
 - [ ] Compound selections — union, intersection, difference of multiple brush regions
@@ -85,12 +85,12 @@
 - [ ] `d3.curveBundle.beta().context(ctx)` — D3 curve generators on Canvas with tunable tension
 - [ ] Statistical overlays — box-and-whisker per axis, density ribbons, confidence bands
 
-### annotations-and-labels
+### annotation
 - [ ] Canvas annotation recipe (skill covers it, example is SVG-only)
 - [ ] Leader line variants: straight, elbow, curved in example
 - [ ] Force-based label collision avoidance in example
 
-### statistical-charts
+### distributions
 - [ ] Standalone density plot / KDE panel (example shows violin but not standalone)
 - [ ] QQ plot panel
 - [ ] Strip/jitter plot panel
@@ -100,7 +100,7 @@
 - [ ] Synchronized cross-panel hover in example
 - [ ] Lazy rendering for offscreen panels
 
-### temporal-time-series
+### time-series
 - [ ] Cycle plot panel in example
 - [ ] Gantt chart example (separate file or panel)
 - [ ] LTTB downsampling toggle (show raw vs downsampled)
@@ -111,7 +111,7 @@
 - [ ] State serialization (URL encoding of brush/selection state)
 - [ ] Undo/redo (StateHistory pattern from skill)
 
-### responsive-charts
+### responsive
 - [ ] Print styles in example (@media print)
 - [ ] Iframe embedding example (postMessage height negotiation)
 - [ ] Touch adaptation demo (pointer-type-aware interactions)

@@ -1,5 +1,5 @@
 ---
-name: color-and-compositing
+name: color
 description: "Color science and compositing for D3.js data visualization: perceptual color spaces (Lab, HCL, OKLab), Paul Tol colorblind-safe palettes, D3 color scales and interpolation, globalCompositeOperation on Canvas, SVG mix-blend-mode and feColorMatrix, alpha/opacity strategies for overdraw, colorblind simulation, WCAG contrast checking, color perception pitfalls, scale design principles, dark mode adaptation, wide gamut, and color legends (continuous, categorical, bivariate). Use this skill when the user needs colorblind-safe palettes, custom color schemes as D3 scales, canvas compositing modes for density visualization, blending or alpha tuning for overlapping elements, color legends, sequential/diverging/categorical scale design, dark mode color adaptation, or needs to evaluate color choices for accessibility."
 ---
 
@@ -7,7 +7,7 @@ description: "Color science and compositing for D3.js data visualization: percep
 
 Color in data visualization is an encoding channel, not decoration. Covers **choosing** colors (perceptual spaces, palettes, scale design), **blending** them (compositing, alpha), **communicating** them (legends, accessibility), and **adapting** them (dark mode, wide gamut).
 
-Related: `canvas-rendering` (batching by color), `visual-texture` (redundant encoding).
+Related: `canvas` (batching by color), `visual-texture` (redundant encoding).
 
 ## Color Perception
 

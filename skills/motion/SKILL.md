@@ -1,5 +1,5 @@
 ---
-name: animated-transitions
+name: motion
 description: "Build fluid, purposeful D3.js animated transitions. Use this skill whenever the user wants to animate data changes, add enter/update/exit transitions, create staggered animations, build scrollytelling narratives, animate on canvas, or make any D3 visualization transition smoothly between states. Also use when the user mentions animation, tweening, easing, or wants to make a visualization feel alive. For shape morphing (circle↔rect, bar↔pie, arbitrary path morphing), use the shape-morphing skill instead."
 ---
 
@@ -479,7 +479,7 @@ function advance() {
 
 ### Frame Budget
 
-At 60fps you have 16ms per frame. Canvas draw calls are fast, but complex compositing or filters eat into that budget. When animation frames exceed the budget, use progressive rendering (see the `canvas-rendering` skill for the `createRenderQueue` pattern and frame profiling techniques).
+At 60fps you have 16ms per frame. Canvas draw calls are fast, but complex compositing or filters eat into that budget. When animation frames exceed the budget, use progressive rendering (see the `canvas` skill for the `createRenderQueue` pattern and frame profiling techniques).
 
 ## Accessibility: prefers-reduced-motion
 
@@ -532,7 +532,7 @@ window.matchMedia("(prefers-reduced-motion: reduce)")
 - [D3 Transition documentation](https://d3js.org/d3-transition) — Mike Bostock's API reference for `d3-transition`
 - [General Update Pattern](https://observablehq.com/@d3/selection-join) — canonical enter/update/exit with `.join()`
 - [Object Constancy](https://bost.ocks.org/mike/constancy/) — foundational article on key-based transitions
-- [Animated Transitions in Statistical Data Graphics](https://idl.cs.washington.edu/papers/animated-transitions/) — Jeffrey Heer & George Robertson's research on how animation aids perception of data changes (IEEE InfoVis 2007)
+- [Animated Transitions in Statistical Data Graphics](https://idl.cs.washington.edu/papers/motion/) — Jeffrey Heer & George Robertson's research on how animation aids perception of data changes (IEEE InfoVis 2007)
 - [D3 Easing Functions](https://observablehq.com/@d3/easing) — visual reference for all `d3-ease` curves
 - [Staggered Transitions](https://observablehq.com/@d3/staggered-transitions) — staggered delay patterns
 - [prefers-reduced-motion](https://developer.mozilla.org/en-US/docs/Web/CSS/@media/prefers-reduced-motion) — MDN reference for respecting user motion preferences

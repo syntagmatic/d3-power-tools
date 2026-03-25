@@ -1,5 +1,5 @@
 ---
-name: geographic-maps
+name: cartography
 description: "D3.js geographic maps and spatial visualization: projections, choropleth, point maps, TopoJSON, zoom-to-feature, canvas geo rendering, tile layers, and geodesic operations. Use this skill whenever the user wants to build maps, choropleths, cartograms, dot maps, flow maps, tile/slippy maps, hex bin maps, bubble maps, bivariate choropleth, or any geographic visualization. Also use when the user mentions d3.geoPath, d3.geoProjection, geoMercator, geoAlbersUsa, geoEqualEarth, geoOrthographic, geoNaturalEarth1, fitSize, fitExtent, topojson, topojson.feature, topojson.mesh, topojson.merge, topojson.neighbors, d3.tile, d3.geoGraticule, d3.geoCircle, d3.geoDistance, d3.geoContains, d3.geoStream, d3.hexbin, projection.clipAngle, projection.clipExtent, choropleth, geographic brushing, zoom-to-feature, canvas map rendering, cartogram, flow map, or bivariate choropleth."
 ---
 
@@ -7,7 +7,7 @@ description: "D3.js geographic maps and spatial visualization: projections, chor
 
 D3's geographic stack is its deepest subsystem — spherical math, streaming geometry, topological operations — and production maps require architectural decisions that simple examples don't reveal.
 
-Related: `shape-morphing` (projection transitions), `color-and-compositing` (choropleth color scales, bivariate palettes), `visual-texture` (accessible pattern choropleth), `canvas-rendering` (DPR, batching), `canvas-accessibility` (keyboard nav for canvas maps).
+Related: `shape-morphing` (projection transitions), `color` (choropleth color scales, bivariate palettes), `visual-texture` (accessible pattern choropleth), `canvas` (DPR, batching), `canvas-accessibility` (keyboard nav for canvas maps).
 
 ```
 GeoJSON / TopoJSON ──► topojson.feature() / mesh() / merge() / neighbors()

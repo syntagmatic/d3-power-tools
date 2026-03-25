@@ -1,5 +1,5 @@
 ---
-name: temporal-time-series
+name: time-series
 description: "Build time-series visualizations with D3.js. Use this skill when the user wants line charts over time, horizon charts, swimlane/event timelines, Gantt charts, cycle plots, real-time streaming charts, brushed time selection, or multi-series spaghetti plots. Covers d3.scaleTime/scaleUtc, time parsing/formatting, DST handling, gap detection, downsampling (LTTB), Canvas rendering for large time series, overview+detail, and crosshair tooltips."
 ---
 
@@ -7,7 +7,7 @@ description: "Build time-series visualizations with D3.js. Use this skill when t
 
 Patterns for building time-series visualizations with D3.js v7+.
 
-For axis customization and tick formatting, see `axes-and-scales`. For brush mechanics, see `brushing-and-selection`. For zoom integration, see `zoom-and-pan`. For Canvas performance patterns, see `canvas-rendering`. For animated transitions, see `animated-transitions`. For callout annotations on time series, see `annotations-and-labels`.
+For axis customization and tick formatting, see `axes-and-scales`. For brush mechanics, see `brushing`. For zoom integration, see `navigation`. For Canvas performance patterns, see `canvas`. For animated transitions, see `motion`. For callout annotations on time series, see `annotation`.
 
 ## DST and Timezone Pitfalls
 

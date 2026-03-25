@@ -1,5 +1,5 @@
 ---
-name: zoom-and-pan
+name: navigation
 description: "D3.js zoom and pan interactions: d3-zoom API, geometric vs semantic zoom, SVG and Canvas zoom patterns, rescaleX/rescaleY for axis integration, zoom extent and translate constraints, programmatic zoom (zoom-to-fit, zoom-to-element), minimap/overview+detail, pinch-to-zoom and touch gestures, zoom-linked views, level-of-detail rendering, brush-to-zoom (focus+context), smooth animated transitions between zoom states, and Canvas zoom with quadtree culling. Use this skill when the user needs zoom, pan, scroll-to-zoom, pinch-to-zoom, zoom-to-fit, minimap, semantic zoom, focus+context navigation, or any d3.zoom integration with charts or maps."
 ---
 
@@ -7,7 +7,7 @@ description: "D3.js zoom and pan interactions: d3-zoom API, geometric vs semanti
 
 D3's `d3-zoom` manages transform state (translate + scale) and maps pointer, wheel, and touch gestures to smooth, interruptible transitions. The critical design choice is **geometric vs semantic zoom**: whether zooming magnifies pixels or reveals more detail.
 
-Related skills: `axes-and-scales` (rescaled axes), `canvas-rendering` (quadtree culling, LOD), `brushing-and-selection` (brush-to-zoom), `geographic-maps` (map zoom), `hierarchy-interaction` (zoomable treemap/sunburst).
+Related skills: `axes-and-scales` (rescaled axes), `canvas` (quadtree culling, LOD), `brushing` (brush-to-zoom), `cartography` (map zoom), `hierarchy-interaction` (zoomable treemap/sunburst).
 
 ```
 user gesture (wheel/pinch/drag)
@@ -118,7 +118,7 @@ function zoomed({ transform }) {
 }
 ```
 
-For large datasets, use `quadtree.visit()` to enumerate only visible points. See `canvas-rendering` skill.
+For large datasets, use `quadtree.visit()` to enumerate only visible points. See `canvas` skill.
 
 ## SVG Overlay for Canvas/WebGL Zoom
 

@@ -236,7 +236,7 @@ ctx.fill();
 
 ## Map Projection Transitions
 
-Interpolate between projection functions — a technique from syntagmatic's projection comparison work. For general geographic map patterns (projections, choropleth, TopoJSON, zoom-to-feature), see the `geographic-maps` skill.
+Interpolate between projection functions — a technique from syntagmatic's projection comparison work. For general geographic map patterns (projections, choropleth, TopoJSON, zoom-to-feature), see the `cartography` skill.
 
 ```js
 function projectTransition(projA, projB, duration = 1500) {
@@ -278,7 +278,7 @@ function projectTransition(projA, projB, duration = 1500) {
 
 - [flubber](https://github.com/veltman/flubber) — Noah Veltman's library for smooth shape interpolation, handling topology mismatches and winding order
 - [d3-interpolate-path](https://github.com/pbeshai/d3-interpolate-path) — Peter Beshai's plugin for interpolating SVG paths with mismatched commands
-- [Animated Transitions in Statistical Data Graphics](https://idl.cs.washington.edu/papers/animated-transitions/) — Jeffrey Heer & George Robertson's research on shape transition perception (IEEE InfoVis 2007)
+- [Animated Transitions in Statistical Data Graphics](https://idl.cs.washington.edu/papers/motion/) — Jeffrey Heer & George Robertson's research on shape transition perception (IEEE InfoVis 2007)
 - [D3 Interpolate documentation](https://d3js.org/d3-interpolate) — Mike Bostock's core interpolation module
 - [D3 Geo Projection](https://d3js.org/d3-geo/projection) — API reference for map projection transitions via `d3.geoProjection`
 - [Shape Tweening](https://en.wikipedia.org/wiki/Morphing#Shape_tweening) — overview of morphing techniques from simple interpolation to topology-aware methods

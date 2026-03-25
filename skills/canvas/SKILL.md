@@ -1,5 +1,5 @@
 ---
-name: canvas-rendering
+name: canvas
 description: "High-performance Canvas 2D rendering patterns for D3.js visualizations. Use this skill whenever the user needs to render large datasets (1K–1M+ points) on canvas, build fast interactive canvas visualizations with D3, implement quadtree hit detection, optimize canvas draw calls, use typed arrays for visualization data, do pixel-level operations like heatmaps or density plots, set up multi-layer canvas architectures, or profile and optimize canvas rendering performance. Also use when the user mentions canvas performance, frame budget, batched rendering, spatial indexing for hover, ImageData manipulation, or wants to scale a D3 visualization to handle significantly more data."
 ---
 
@@ -258,7 +258,7 @@ function drawWithZoom(ctx, transform) {
 }
 ```
 
-See `zoom-and-pan` skill for semantic zoom, culling, and minimap patterns.
+See `navigation` skill for semantic zoom, culling, and minimap patterns.
 
 ### Culling Off-Screen Elements
 
@@ -289,7 +289,7 @@ Combine with zoom: zooming in reduces visible count, automatically increasing de
 
 ## Accessibility
 
-Canvas is a black box for screen readers. See `canvas-accessibility` for hidden DOM mirrors, `aria-activedescendant`, keyboard navigation, focus rings. See `fallback-table` for data table alternatives.
+Canvas is a black box for screen readers. See `canvas-accessibility` for hidden DOM mirrors, `aria-activedescendant`, keyboard navigation, focus rings. See `data-table` for data table alternatives.
 
 ## Common Pitfalls
 

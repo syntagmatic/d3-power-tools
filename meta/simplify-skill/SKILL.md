@@ -25,7 +25,7 @@ Read the full SKILL.md file, then compress it using these techniques — in orde
 
 4. **Collapse variants.** When multiple chart types share structure (e.g., sparkline variants, hierarchy layouts), show one canonical form in full, then describe each variant's delta in 2-3 lines of code + 1 line of prose. Don't repeat the shared scaffolding.
 
-5. **Deduplicate cross-skill content.** If a pattern is covered thoroughly in another skill, replace with a one-line reference: "See `canvas-rendering` skill for DPR setup." Don't re-explain.
+5. **Deduplicate cross-skill content.** If a pattern is covered thoroughly in another skill, replace with a one-line reference: "See `canvas` skill for DPR setup." Don't re-explain.
 
 6. **Tighten prose.** Cut sentences that restate what the code shows. One line of context before a code block is usually enough. Remove "Note that..." / "It's important to..." / "You should..." filler.
 

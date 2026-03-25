@@ -5,7 +5,7 @@ description: "D3.js force-directed layouts and physics simulations: node positio
 
 # Force Simulation
 
-Patterns for force-directed layouts with `d3.forceSimulation`. For network graph types (Sankey, chord, arc), see `network-visualization`. For Canvas rendering, see `canvas-rendering`. For GPU at 100K+, see `webgl-rendering`.
+Patterns for force-directed layouts with `d3.forceSimulation`. For network graph types (Sankey, chord, arc), see `network-visualization`. For Canvas rendering, see `canvas`. For GPU at 100K+, see `webgl-rendering`.
 
 ## Alpha, Cooling, and Convergence
 

@@ -1,5 +1,5 @@
 ---
-name: statistical-charts
+name: distributions
 description: "Build statistical distribution charts with D3.js. Use this skill when the user wants box plots, violin plots, ridgeline/joy plots, density plots, bee swarm plots, strip/jitter plots, or QQ plots. Covers kernel density estimation, quartile calculation, outlier detection, grouped/faceted statistical comparisons, and animated transitions between distribution views."
 ---
 
@@ -7,7 +7,7 @@ description: "Build statistical distribution charts with D3.js. Use this skill w
 
 Patterns for building distribution-visualization charts with D3.js: box plots, violin plots, ridgeline (joy) plots, density plots, bee swarm plots, strip/jitter plots, and QQ plots.
 
-For axis patterns, see `axes-and-scales`. For animated transitions, see `animated-transitions`. For force-based layouts (bee swarm), see `force-simulation`. For color palettes, see `color-and-compositing`.
+For axis patterns, see `axes-and-scales`. For animated transitions, see `motion`. For force-based layouts (bee swarm), see `force-simulation`. For color palettes, see `color`.
 
 ## Choosing a Distribution Chart
 

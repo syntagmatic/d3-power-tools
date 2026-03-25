@@ -1,5 +1,5 @@
 ---
-name: brushing-and-selection
+name: brushing
 description: "Build advanced brushing, selection, and cross-chart linking interactions for D3.js visualizations. Use this skill whenever the user wants to add brushing, filtering, linked views, coordinated highlighting, lasso selection, fisheye distortion, or any form of interactive data selection to a D3 visualization. Also use when the user mentions cross-filtering, brush-and-link, focus+context, intersection brushing, or wants to connect multiple charts that highlight the same data."
 ---
 
@@ -155,9 +155,9 @@ self.onmessage = ({ data: { queryStart, queryEnd, polylines } }) => {
 
 ## Render Queue
 
-Use the `createRenderQueue` from the `canvas-rendering` skill for progressive rendering with shuffle support. For brushing visualizations, connect the render queue's `onProgress` callback to a progress indicator and use `cancel()` to abort in-flight renders when the selection changes — this prevents stale renders from overwriting fresh ones.
+Use the `createRenderQueue` from the `canvas` skill for progressive rendering with shuffle support. For brushing visualizations, connect the render queue's `onProgress` callback to a progress indicator and use `cancel()` to abort in-flight renders when the selection changes — this prevents stale renders from overwriting fresh ones.
 
-For very large datasets, move rendering to a Web Worker via `OffscreenCanvas` (also covered in the `canvas-rendering` skill). Note: workers don't have `requestAnimationFrame` — use `setTimeout(0)` between batches to stay responsive to cancel messages.
+For very large datasets, move rendering to a Web Worker via `OffscreenCanvas` (also covered in the `canvas` skill). Note: workers don't have `requestAnimationFrame` — use `setTimeout(0)` between batches to stay responsive to cancel messages.
 
 ## Fisheye Distortion
 
@@ -545,7 +545,7 @@ Build the grid once when data/layout changes. Queries against it are O(cells tou
 
 ## Performance at Scale
 
-For brushing over 10K+ elements on Canvas, see the `canvas-rendering` skill's frame budgeting and render queue patterns — rAF-gated redraws prevent main-thread blocking during continuous brush updates. For WebGL-backed views, see `webgl-rendering` for `bufferSubData` partial updates during interaction.
+For brushing over 10K+ elements on Canvas, see the `canvas` skill's frame budgeting and render queue patterns — rAF-gated redraws prevent main-thread blocking during continuous brush updates. For WebGL-backed views, see `webgl-rendering` for `bufferSubData` partial updates during interaction.
 
 ## Common Pitfalls
 

@@ -5,7 +5,7 @@ description: "Architectural patterns for combining multiple D3 visualization ski
 
 # Cross-Skill Composition
 
-Every interesting visualization is a composition. A brushable Canvas scatterplot with linked histogram is five skills at once: `canvas-rendering`, `axes-and-scales`, `brushing-and-selection`, `linked-views`, `responsive-charts`. This skill documents the **glue**: how they initialize, how state flows, where the performance budget goes, and what breaks when ordering is wrong.
+Every interesting visualization is a composition. A brushable Canvas scatterplot with linked histogram is five skills at once: `canvas`, `axes-and-scales`, `brushing`, `linked-views`, `responsive`. This skill documents the **glue**: how they initialize, how state flows, where the performance budget goes, and what breaks when ordering is wrong.
 
 ## The Layer Stack
 
@@ -60,16 +60,16 @@ Useful for layout transitions where animation needs Canvas but resting state nee
 ## Initialization Sequence
 
 ```
-1. Data load + clean        (data-preparation)
-2. Container measure        (responsive-charts)
-3. Layer stack create       (canvas-rendering + this skill)
+1. Data load + clean        (data-gathering)
+2. Container measure        (responsive)
+3. Layer stack create       (canvas + this skill)
 4. Scales construct         (axes-and-scales)
 5. Layout compute           (hierarchy-layouts, force-simulation, d3.bin)
 6. Static chrome render     (axes, gridlines, legends)
 7. Data render              (marks on Canvas or SVG)
 8. Interaction bind         (brushes, zoom, drag, tooltips)
-9. Accessibility setup      (canvas-accessibility, fallback-table)
-10. Theme apply             (color-and-compositing)
+9. Accessibility setup      (canvas-accessibility, data-table)
+10. Theme apply             (color)
 ```
 
 Why this order:
@@ -133,21 +133,21 @@ Example: brush event on 10K rows:
 
 | Step | Cost | Skill |
 |------|------|-------|
-| Brush event handler | ~0.5ms | brushing-and-selection |
+| Brush event handler | ~0.5ms | brushing |
 | Filter 10K rows | ~1ms | linked-views |
 | Re-bin histogram | ~0.5ms | axes-and-scales |
-| Canvas scatter redraw (10K) | ~3ms | canvas-rendering |
-| Canvas histogram (20 bars) | ~0.5ms | canvas-rendering |
+| Canvas scatter redraw (10K) | ~3ms | canvas |
+| Canvas histogram (20 bars) | ~0.5ms | canvas |
 | SVG axis transition | ~1ms | axes-and-scales |
-| Quadtree rebuild | ~2ms | canvas-rendering |
+| Quadtree rebuild | ~2ms | canvas |
 | **Total** | **~8.5ms** | |
 
 ### When Exceeded
 
 1. **Split cheap/expensive.** Highlight immediately; debounce histogram rebin 16ms after last brush event.
-2. **Progressive rendering** for data layer (see `canvas-rendering` `createRenderQueue`).
+2. **Progressive rendering** for data layer (see `canvas` `createRenderQueue`).
 3. **Skip transitions during continuous interaction.** Apply only on brush `end`.
-4. **Offload filtering to Worker** — see `canvas-rendering` for transfer pattern.
+4. **Offload filtering to Worker** — see `canvas` for transfer pattern.
 5. **Bitmap indexing** — `BitFilter` from `linked-views` for 100K+ rows.
 
 ## Composition Archetypes
@@ -171,13 +171,13 @@ Switch layout algorithms with smooth transitions. Key challenge: shape interpola
 
 | Skill | On Resize |
 |-------|-----------|
-| `canvas-rendering` | Resize backing store (`canvas.width = w * dpr`), re-apply DPR, clear, redraw |
+| `canvas` | Resize backing store (`canvas.width = w * dpr`), re-apply DPR, clear, redraw |
 | `axes-and-scales` | Recompute scale ranges, re-call generators |
-| `brushing-and-selection` | Update extent, clear or re-map existing selection |
-| `zoom-and-pan` | Recompute `translateExtent`, preserve viewport center |
+| `brushing` | Update extent, clear or re-map existing selection |
+| `navigation` | Recompute `translateExtent`, preserve viewport center |
 | `force-simulation` | Update center force, reheat |
 | quadtree | Rebuild — spatial index is in pixel coordinates |
-| `annotations-and-labels` | Recompute positions, re-check collision |
+| `annotation` | Recompute positions, re-check collision |
 | `canvas-accessibility` | Update hidden DOM positions, resize focus ring |
 
 ### Debouncing

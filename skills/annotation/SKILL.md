@@ -1,5 +1,5 @@
 ---
-name: annotations-and-labels
+name: annotation
 description: "Build annotations, callouts, leader lines, and responsive labels for D3.js visualizations. Use this skill when the user needs to add explanatory text, callouts with connector lines, responsive label placement, collision-free labeling, or rich tooltips to charts. Covers d3-annotation patterns, custom callout shapes, leader lines, force-based label placement, and responsive strategies."
 ---
 
@@ -7,7 +7,7 @@ description: "Build annotations, callouts, leader lines, and responsive labels f
 
 Patterns for adding explanatory text, callouts, leader lines, and labels to D3 visualizations.
 
-For axis labels and tick formatting, see `axes-and-scales`. For color legends, see `color-and-compositing`. For accessible text alternatives, see `canvas-accessibility`.
+For axis labels and tick formatting, see `axes-and-scales`. For color legends, see `color`. For accessible text alternatives, see `canvas-accessibility`.
 
 ## Leader Line Geometry
 

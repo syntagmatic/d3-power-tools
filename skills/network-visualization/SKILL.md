@@ -122,7 +122,7 @@ Requires `d3-sankey` (separate package, not in d3 core). CDN: `https://cdn.jsdel
 Different layouts need different ARIA strategies:
 
 - **Adjacency matrix** — `role="grid"` with `role="row"` and `role="gridcell"`. The most inherently accessible layout because it maps directly to a table.
-- **Arc diagram / Node-link** — `role="img"` with descriptive `aria-label`. Provide a hidden data table as the accessible alternative (see `fallback-table`).
+- **Arc diagram / Node-link** — `role="img"` with descriptive `aria-label`. Provide a hidden data table as the accessible alternative (see `data-table`).
 - **Chord / Sankey** — `role="img"` with summary label. Offer underlying matrix/flow data as an accessible table. Chord group-hover should announce via `aria-live`.
 
 ## Common Pitfalls

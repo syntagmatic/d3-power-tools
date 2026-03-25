@@ -261,7 +261,7 @@ svg.attr("viewBox", `0 0 ${w} ${h}`)
 
 ## Canvas Sparklines
 
-For 200+ sparklines on a page, Canvas is lighter than 200 SVGs. Same scale/line logic, but draw with `ctx.beginPath()` + manual `moveTo`/`lineTo` loop + `ctx.stroke()`. Remember DPR setup (see `canvas-rendering` skill).
+For 200+ sparklines on a page, Canvas is lighter than 200 SVGs. Same scale/line logic, but draw with `ctx.beginPath()` + manual `moveTo`/`lineTo` loop + `ctx.stroke()`. Remember DPR setup (see `canvas` skill).
 
 ## Interaction
 

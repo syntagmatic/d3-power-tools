@@ -7,7 +7,7 @@ description: "Coordinate multiple D3.js visualizations that share state. Use thi
 
 Patterns for coordinating multiple D3 visualizations that share state.
 
-For brush mechanics and lasso selection, see `brushing-and-selection`. For scale construction, see `axes-and-scales`. For zoom API details, see `zoom-and-pan`. For faceted layouts of the same chart type, see `small-multiples`. For data reshaping, see `data-preparation`. For parallel coordinates linking, see `parallel-coordinates`.
+For brush mechanics and lasso selection, see `brushing`. For scale construction, see `axes-and-scales`. For zoom API details, see `navigation`. For faceted layouts of the same chart type, see `small-multiples`. For data reshaping, see `data-gathering`. For parallel coordinates linking, see `parallel-coordinates`.
 
 ## Coordination Architecture
 

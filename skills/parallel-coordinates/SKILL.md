@@ -39,7 +39,7 @@ data → scales → polyline paths → canvas draw → brush filter → highligh
 
 ### Progressive Rendering (Render Queue)
 
-For large datasets, don't draw all lines in one frame. Use the `createRenderQueue` from the `canvas-rendering` skill — it renders in chunks via `requestAnimationFrame` with shuffle support so partial renders are representative. Shuffle is especially important for parallel coordinates: without it, the first frame shows only the first N rows (often sorted by a default column).
+For large datasets, don't draw all lines in one frame. Use the `createRenderQueue` from the `canvas` skill — it renders in chunks via `requestAnimationFrame` with shuffle support so partial renders are representative. Shuffle is especially important for parallel coordinates: without it, the first frame shows only the first N rows (often sorted by a default column).
 
 ### Opacity Scaling
 
@@ -230,7 +230,7 @@ For highly skewed data (e.g., populations, prices), offer log scale toggle per a
 
 ### OffscreenCanvas in Web Worker (Modern Approach)
 
-For 50K+ rows, move rendering to a worker via `canvas.transferControlToOffscreen()`. See the `canvas-rendering` skill for the full OffscreenCanvas pattern — transfer the canvas to a worker, render polylines there, and report progress back to the main thread.
+For 50K+ rows, move rendering to a worker via `canvas.transferControlToOffscreen()`. See the `canvas` skill for the full OffscreenCanvas pattern — transfer the canvas to a worker, render polylines there, and report progress back to the main thread.
 
 ## Data Export
 
@@ -314,7 +314,7 @@ Re-render the hit canvas whenever the layout changes (axis reorder, brush, resiz
 
 ## Responsive Design
 
-Use `ResizeObserver` on the container to trigger resize. On resize: update canvas dimensions (see `canvas-rendering` skill for DPR setup), rebuild all scales with the new height/width, update SVG viewBox, and redraw. Also listen for DPR changes when the window moves between displays — the `canvas-rendering` skill covers the `matchMedia` pattern for this.
+Use `ResizeObserver` on the container to trigger resize. On resize: update canvas dimensions (see `canvas` skill for DPR setup), rebuild all scales with the new height/width, update SVG viewBox, and redraw. Also listen for DPR changes when the window moves between displays — the `canvas` skill covers the `matchMedia` pattern for this.
 
 Re-render the hit canvas whenever the layout changes (resize, axis reorder, brush).
 
@@ -338,7 +338,7 @@ For parallel coordinates specifically, color encodes a dimension's value across 
 
 ## Common Pitfalls
 
-1. **Canvas blurriness on retina displays**: See the `canvas-rendering` skill's DPR section. TL;DR: set `canvas.width = width * dpr`, `ctx.scale(dpr, dpr)`, CSS size stays at `width`.
+1. **Canvas blurriness on retina displays**: See the `canvas` skill's DPR section. TL;DR: set `canvas.width = width * dpr`, `ctx.scale(dpr, dpr)`, CSS size stays at `width`.
 2. **Brush coordinates after axis reorder**: Brushes are attached to axis groups — when axes move, brush extents are still valid because they're in local coordinates.
 3. **Ordinal axis sorting**: Sort categories by frequency or a meaningful order, not alphabetically (unless that's meaningful).
 4. **Too many colors**: With >7 categories, color encoding becomes useless. Fall back to highlight-on-hover.

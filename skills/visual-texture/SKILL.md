@@ -7,7 +7,7 @@ description: "Visual texture for D3.js data visualization: SVG pattern fills (ha
 
 Pattern fills add a second visual channel beyond color — essential for accessibility (colorblind-safe redundant encoding), print reproduction, and visual richness.
 
-Related: `color-and-compositing` (color palettes, bivariate legends), `canvas-rendering` (batched drawing, DPR), `geographic-maps` (choropleth with pattern fills).
+Related: `color` (color palettes, bivariate legends), `canvas` (batched drawing, DPR), `cartography` (choropleth with pattern fills).
 
 **Always use `patternUnits="userSpaceOnUse"`** — pattern density stays constant regardless of shape size. `objectBoundingBox` stretches to fit each shape, so a large rectangle has sparse hatching while a small one has dense hatching.
 

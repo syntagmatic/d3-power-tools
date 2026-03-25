@@ -12,7 +12,7 @@ GPU-accelerated rendering for datasets too large for Canvas 2D. D3 handles data,
 | Scale | Renderer | Why |
 |-------|----------|-----|
 | < 10K | Canvas 2D | Simpler API, good enough perf |
-| 10K–100K | Canvas 2D with batching | See `canvas-rendering` skill |
+| 10K–100K | Canvas 2D with batching | See `canvas` skill |
 | 100K–1M | WebGL | Canvas draw calls become bottleneck |
 | 1M–10M+ | WebGL + instanced rendering | One draw call for millions of shapes |
 
@@ -27,7 +27,7 @@ GPU-accelerated rendering for datasets too large for Canvas 2D. D3 handles data,
 └─────────────────────────────────────┘
 ```
 
-SVG captures pointer events, WebGL has `pointer-events: none`. For DPR-aware canvas/SVG layer setup, see `canvas-rendering` skill.
+SVG captures pointer events, WebGL has `pointer-events: none`. For DPR-aware canvas/SVG layer setup, see `canvas` skill.
 
 ```js
 const gl = canvas.getContext("webgl2", { antialias: true, premultipliedAlpha: false, alpha: true });
@@ -225,7 +225,7 @@ d3.zoom().scaleExtent([0.5, 100]).on("zoom", ({ transform }) => {
 
 ## Hit Detection
 
-### Quadtree — same as canvas-rendering
+### Quadtree — same as canvas
 
 ```js
 const qt = d3.quadtree().x(d => x(d.x)).y(d => y(d.y)).addAll(data);
@@ -355,7 +355,7 @@ Use regl when you want WebGL perf without managing raw GL state. Skip for fine-g
 
 ## Accessibility
 
-WebGL is invisible to assistive technology. See `canvas-accessibility` for hidden DOM mirrors and keyboard nav. See `fallback-table` for data table alternatives.
+WebGL is invisible to assistive technology. See `canvas-accessibility` for hidden DOM mirrors and keyboard nav. See `data-table` for data table alternatives.
 
 ## Common Pitfalls
 

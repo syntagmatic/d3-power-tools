@@ -1,5 +1,5 @@
 ---
-name: fallback-table
+name: data-table
 description: "Build accessible data tables as fallback views for D3.js visualizations. Use this skill when the user needs a table alternative to a chart, sortable/filterable data tables, chart↔table toggle, linked highlighting between table rows and chart elements, virtual scrolling for large datasets, CSV export, sticky headers, or any pattern where tabular data complements or replaces a visualization."
 ---
 

@@ -110,8 +110,8 @@ baseline techniques:
   - unbatched rendering (same as with-skill)
 
 patterns skill teaches but neither output uses:
-  - render queue with shuffle (canvas-rendering)
-  - spatial grid indexing (brushing-and-selection)
+  - render queue with shuffle (canvas)
+  - spatial grid indexing (brushing)
 
 gap type: PROMPT TOO EASY
   The prompt asks for 10K points which both handle without

@@ -10,7 +10,7 @@ Claude Code skills for building advanced D3.js visualizations. Each skill encode
 
 **[parallel-coordinates](skills/parallel-coordinates/SKILL.md)** — High-performance multivariate data exploration. Canvas rendering with D3 curve generators, axis reordering, composite brushing, and progressive rendering for large datasets.
 
-**[brushing-and-selection](skills/brushing-and-selection/SKILL.md)** — Intersection brushing, lasso selection, fisheye distortion, and cross-chart linking. Covers both SVG and canvas selection state management with fade/highlight patterns.
+**[brushing](skills/brushing/SKILL.md)** — Intersection brushing, lasso selection, fisheye distortion, and cross-chart linking. Covers both SVG and canvas selection state management with fade/highlight patterns.
 
 **[linked-views](skills/linked-views/SKILL.md)** — Coordinating multiple views: d3.dispatch event bus, shared state stores, crossfilter-style filtering with bitmap indexing, coordinated brushing and zoom, overview+detail, focus+context, state serialization with undo/redo.
 
@@ -32,19 +32,19 @@ Claude Code skills for building advanced D3.js visualizations. Each skill encode
 
 **[visual-texture](skills/visual-texture/SKILL.md)** — SVG pattern fills (hatching, dots, cross-hatch, stipple, diamonds, triangles, zigzag), perceptual distinctiveness ranking, SVG filter textures (feTurbulence, halftone), stroke dash patterns, Canvas pattern atlas, Canvas pattern+color compositing, SVG markers, color+pattern dual encoding for accessible choropleth, animated patterns, print considerations.
 
-**[color-and-compositing](skills/color-and-compositing/SKILL.md)** — Color spaces (Lab, HCL, OKLab), color perception (simultaneous contrast, small-area, Mach bands), scale design principles (sequential lightness, diverging symmetry), Paul Tol colorblind-safe palettes, CVD simulation, Canvas compositing (lighter, multiply, source-in, masking), SVG blending/feColorMatrix, alpha/opacity strategies, dark mode adaptation, wide gamut (P3, oklch), WCAG contrast, color legends (continuous, categorical, bivariate, size).
+**[color](skills/color/SKILL.md)** — Color spaces (Lab, HCL, OKLab), color perception (simultaneous contrast, small-area, Mach bands), scale design principles (sequential lightness, diverging symmetry), Paul Tol colorblind-safe palettes, CVD simulation, Canvas compositing (lighter, multiply, source-in, masking), SVG blending/feColorMatrix, alpha/opacity strategies, dark mode adaptation, wide gamut (P3, oklch), WCAG contrast, color legends (continuous, categorical, bivariate, size).
 
 ### Time & Responsiveness
 
-**[temporal-time-series](skills/temporal-time-series/SKILL.md)** — Time scales (scaleTime vs scaleUtc), date parsing pitfalls, time-aware axes, gap handling, horizon charts, swimlanes, Gantt charts, cycle plots, real-time streaming with sliding window and WebSocket, brushed time selection, multi-series with Voronoi nearest, LTTB downsampling.
+**[time-series](skills/time-series/SKILL.md)** — Time scales (scaleTime vs scaleUtc), date parsing pitfalls, time-aware axes, gap handling, horizon charts, swimlanes, Gantt charts, cycle plots, real-time streaming with sliding window and WebSocket, brushed time selection, multi-series with Voronoi nearest, LTTB downsampling.
 
-**[responsive-charts](skills/responsive-charts/SKILL.md)** — ResizeObserver lifecycle, container-based sizing, viewBox vs redraw-on-resize, aspect ratio strategies, responsive margins, breakpoint-driven layout changes, responsive text and labels, touch adaptation, Canvas DPI handling, iframe embedding, print styles.
+**[responsive](skills/responsive/SKILL.md)** — ResizeObserver lifecycle, container-based sizing, viewBox vs redraw-on-resize, aspect ratio strategies, responsive margins, breakpoint-driven layout changes, responsive text and labels, touch adaptation, Canvas DPI handling, iframe embedding, print styles.
 
 ### Rendering & Animation
 
-**[canvas-rendering](skills/canvas-rendering/SKILL.md)** — High-performance Canvas 2D patterns for 1K–1M+ elements. Quadtree hit detection, typed arrays, batched rendering, multi-layer canvas architecture, zoom with LOD, and frame budget management.
+**[canvas](skills/canvas/SKILL.md)** — High-performance Canvas 2D patterns for 1K–1M+ elements. Quadtree hit detection, typed arrays, batched rendering, multi-layer canvas architecture, zoom with LOD, and frame budget management.
 
-**[animated-transitions](skills/animated-transitions/SKILL.md)** — Enter/update/exit with keyed joins, canvas animation pipelines with D3 interpolators, staggered animations, and scrollytelling.
+**[motion](skills/motion/SKILL.md)** — Enter/update/exit with keyed joins, canvas animation pipelines with D3 interpolators, staggered animations, and scrollytelling.
 
 **[shape-morphing](skills/shape-morphing/SKILL.md)** — Smoothly morph between shapes: circle↔rect via cornerRadius, bar↔pie via arc parameters, arbitrary path morphing via point resampling with rotation alignment. No external libraries.
 
@@ -56,21 +56,21 @@ Claude Code skills for building advanced D3.js visualizations. Each skill encode
 
 **[axes-and-scales](skills/axes-and-scales/SKILL.md)** — Scale selection, axis customization, tick formats, responsive tick counts, label collision avoidance, broken axes, dual-y, time gaps, ordinal grouping.
 
-**[data-preparation](skills/data-preparation/SKILL.md)** — Data loading, type coercion, cleaning, reshaping (group/rollup/pivot), aggregation, binning, joining, normalization, columnar typed arrays.
+**[data-gathering](skills/data-gathering/SKILL.md)** — Data loading, type coercion, cleaning, reshaping (group/rollup/pivot), aggregation, binning, joining, normalization, columnar typed arrays.
 
 **[sparkcharts](skills/sparkcharts/SKILL.md)** — Word-sized inline charts: sparklines, spark bars, win/loss strips, bullet charts, band/range charts, dot strips, embedded in tables and text.
 
-**[statistical-charts](skills/statistical-charts/SKILL.md)** — Box plots, violin plots, ridgeline/joy plots, bee swarm plots, strip/jitter plots, density plots, QQ plots, kernel density estimation.
+**[distributions](skills/distributions/SKILL.md)** — Box plots, violin plots, ridgeline/joy plots, bee swarm plots, strip/jitter plots, density plots, QQ plots, kernel density estimation.
 
 **[small-multiples](skills/small-multiples/SKILL.md)** — Trellis/faceted layouts, grid layout math, shared vs independent scales, synchronized cross-panel interaction, responsive reflow.
 
-**[annotations-and-labels](skills/annotations-and-labels/SKILL.md)** — Callout annotations, leader lines, force-based label collision avoidance, responsive labels, rich tooltips, threshold/reference lines.
+**[annotation](skills/annotation/SKILL.md)** — Callout annotations, leader lines, force-based label collision avoidance, responsive labels, rich tooltips, threshold/reference lines.
 
-**[geographic-maps](skills/geographic-maps/SKILL.md)** — Projections, GeoJSON/TopoJSON topology operations (merge/dissolve/neighbors), choropleth (sequential, diverging, bivariate), bubble maps with force-collision, hex binning, cartograms, flow maps (great-circle, curved, animated), geographic label placement, zoom-to-feature, globe (versor rotation, back-face), Canvas multi-layer architecture with hit detection, tile layers, geodesic operations, large geometry/LOD, projection transitions.
+**[cartography](skills/cartography/SKILL.md)** — Projections, GeoJSON/TopoJSON topology operations (merge/dissolve/neighbors), choropleth (sequential, diverging, bivariate), bubble maps with force-collision, hex binning, cartograms, flow maps (great-circle, curved, animated), geographic label placement, zoom-to-feature, globe (versor rotation, back-face), Canvas multi-layer architecture with hit detection, tile layers, geodesic operations, large geometry/LOD, projection transitions.
 
-**[fallback-table](skills/fallback-table/SKILL.md)** — Accessible data tables as chart alternatives: sortable columns, filtering, chart↔table toggle, linked highlighting, virtual scrolling, CSV export.
+**[data-table](skills/data-table/SKILL.md)** — Accessible data tables as chart alternatives: sortable columns, filtering, chart↔table toggle, linked highlighting, virtual scrolling, CSV export.
 
-**[zoom-and-pan](skills/zoom-and-pan/SKILL.md)** — d3-zoom API, geometric vs semantic zoom, SVG and Canvas zoom, rescaleX/rescaleY axis integration, zoom constraints, minimap, pinch-to-zoom, level-of-detail.
+**[navigation](skills/navigation/SKILL.md)** — d3-zoom API, geometric vs semantic zoom, SVG and Canvas zoom, rescaleX/rescaleY axis integration, zoom constraints, minimap, pinch-to-zoom, level-of-detail.
 
 ### Meta Skills
 
