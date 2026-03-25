@@ -20,6 +20,20 @@ OffscreenCanvas, Web Workers, pointer events, ResizeObserver, CSS custom propert
 **Canvas for data, SVG for interaction.**
 When rendering more than ~500 elements, use Canvas for the data layer and SVG for axes, labels, and interaction targets. This is a proven pattern from the d3.parcoords library.
 
+## Launcher Symlinks
+
+Create these symlinks in the project root (gitignored):
+
+```bash
+ln -s scripts/worktree.sh branch
+ln -s scripts/claude-container.sh box
+ln -s scripts/claude-container-shell.sh shell
+```
+
+- `./branch <name>` — start a new Claude Code session in a git worktree
+- `./box [name] [project]` — start a Claude Code session in an Apple Container (auto-builds image on first run)
+- `./shell [name]` — open a shell in a running container
+
 ## Testing with Playwright
 
 Test runner: `scripts/test-viz.py`. Quick reference:

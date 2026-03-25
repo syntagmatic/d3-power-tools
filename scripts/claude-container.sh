@@ -2,8 +2,9 @@
 set -e
 
 IMAGE="claude-code-sandbox-playwright"
+NAME="${1:-claude}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT="${1:-.}"
+PROJECT="${2:-.}"
 PROJECT="$(cd "$PROJECT" && pwd)"
 
 # Build image if missing
@@ -14,6 +15,7 @@ fi
 
 # No ANTHROPIC_API_KEY — use Max subscription OAuth
 container run -it --rm \
+	--name "$NAME" \
 	--cpus 4 --memory 8G \
 	-v "$PROJECT:/workspace" \
 	-v "$HOME/.claude:/home/node/.claude" \
@@ -22,4 +24,4 @@ container run -it --rm \
 	-e GIT_CONFIG_GLOBAL=/tmp/.gitconfig \
 	-u node -w /workspace \
 	"$IMAGE" \
-	claude --dangerously-skip-permissions "${@:2}"
+	claude --dangerously-skip-permissions "${@:3}"
