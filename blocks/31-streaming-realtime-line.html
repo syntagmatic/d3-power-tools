@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Real-Time Streaming Line Chart</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #fafafa; color: #333; padding: 20px; }
+  h1 { font-size: 1.2rem; font-weight: 600; margin-bottom: 12px; }
+  .container { position: relative; max-width: 960px; margin: 0 auto; }
+  .chart-wrap { position: relative; }
+  canvas, svg { position: absolute; top: 0; left: 0; }
+  svg { pointer-events: none; }
+  .controls { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  .controls button { padding: 4px 12px; border: 1px solid #999; border-radius: 4px; background: #fff; cursor: pointer; font: inherit; font-size: 0.85rem; }
+  .controls button.active { background: #4477AA; color: #fff; border-color: #4477AA; }
+  .stats { display: flex; gap: 16px; font-size: 0.85rem; color: #555; margin-bottom: 8px; flex-wrap: wrap; }
+  .stats span { font-weight: 600; color: #333; }
+  .fps { position: absolute; top: 4px; right: 4px; font-size: 0.75rem; color: #999; z-index: 10; }
+  .overview-wrap { position: relative; margin-top: 4px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Real-Time Streaming Line Chart (Ornstein-Uhlenbeck Process)</h1>
+  <div class="controls">
+    <button id="btn-pause">Pause</button>
+    <span style="font-size:0.85rem;color:#555;">Speed:</span>
+    <button class="speed-btn active" data-speed="1">1x</button>
+    <button class="speed-btn" data-speed="5">5x</button>
+    <button class="speed-btn" data-speed="10">10x</button>
+  </div>
+  <div class="stats" id="stats">
+    Current: <span id="stat-current">--</span> &nbsp;
+    Min: <span id="stat-min">--</span> &nbsp;
+    Max: <span id="stat-max">--</span> &nbsp;
+    Mean: <span id="stat-mean">--</span>
+  </div>
+  <div class="chart-wrap" id="main-chart">
+    <div class="fps" id="fps">-- fps</div>
+  </div>
+  <div class="overview-wrap" id="overview-chart"></div>
+</div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Config ---
+const MAIN_HEIGHT = 400;
+const OVERVIEW_HEIGHT = 80;
+const MARGIN = { top: 20, right: 60, bottom: 30, left: 50 };
+const MAIN_WINDOW_MS = 60_000;   // 60s visible window
+const OVERVIEW_WINDOW_MS = 300_000; // 5 min total
+const DATA_INTERVAL_MS = 100;    // one point per 100ms simulated time
+const MAX_POINTS = Math.ceil(OVERVIEW_WINDOW_MS / DATA_INTERVAL_MS); // 3000
+const LTTB_TARGET = 300;
+const TOL_BLUE = "#4477AA";
+
+// --- Layout ---
+const containerEl = document.querySelector(".container");
+const fullWidth = Math.min(960, containerEl.clientWidth);
+const width = fullWidth - MARGIN.left - MARGIN.right;
+const mainHeight = MAIN_HEIGHT - MARGIN.top - MARGIN.bottom;
+const overviewHeight = OVERVIEW_HEIGHT - 10 - 10; // top/bottom padding
+
+// --- DPR-aware canvas helper ---
+function createCanvas(parent, w, h, cssLeft, cssTop) {
+  const dpr = devicePixelRatio;
+  const canvas = document.createElement("canvas");
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  canvas.style.width = w + "px";
+  canvas.style.height = h + "px";
+  canvas.style.position = "absolute";
+  canvas.style.left = cssLeft + "px";
+  canvas.style.top = cssTop + "px";
+  parent.appendChild(canvas);
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  return { canvas, ctx };
+}
+
+// --- Main chart setup ---
+const mainWrap = document.getElementById("main-chart");
+mainWrap.style.width = fullWidth + "px";
+mainWrap.style.height = MAIN_HEIGHT + "px";
+
+const { ctx: mainCtx } = createCanvas(mainWrap, width, mainHeight, MARGIN.left, MARGIN.top);
+
+const mainSvg = d3.select(mainWrap).append("svg")
+    .attr("width", fullWidth).attr("height", MAIN_HEIGHT)
+    .style("pointer-events", "none");
+
+const xMainScale = d3.scaleUtc().range([0, width]);
+const yMainScale = d3.scaleLinear().range([mainHeight, 0]);
+
+const xAxisG = mainSvg.append("g")
+    .attr("transform", `translate(${MARGIN.left},${MARGIN.top + mainHeight})`);
+const yAxisG = mainSvg.append("g")
+    .attr("transform", `translate(${MARGIN.left},${MARGIN.top})`);
+
+// --- Overview chart setup ---
+const overviewWrap = document.getElementById("overview-chart");
+overviewWrap.style.width = fullWidth + "px";
+overviewWrap.style.height = OVERVIEW_HEIGHT + "px";
+overviewWrap.style.position = "relative";
+
+const { ctx: overCtx } = createCanvas(overviewWrap, width, overviewHeight, MARGIN.left, 10);
+
+const overviewSvg = d3.select(overviewWrap).append("svg")
+    .attr("width", fullWidth).attr("height", OVERVIEW_HEIGHT)
+    .style("position", "absolute").style("top", "0").style("left", "0");
+
+const xOverviewScale = d3.scaleUtc().range([0, width]);
+const yOverviewScale = d3.scaleLinear().range([overviewHeight, 0]);
+
+// Brush on overview
+const brushG = overviewSvg.append("g")
+    .attr("transform", `translate(${MARGIN.left},10)`);
+
+let brushOverride = null; // when user brushes, lock viewport to that range
+
+const brush = d3.brushX()
+    .extent([[0, 0], [width, overviewHeight]])
+    .on("brush", onBrush)
+    .on("end", onBrushEnd);
+
+brushG.call(brush);
+
+function onBrush(event) {
+  if (!event.selection || !event.sourceEvent) return;
+  const [x0, x1] = event.selection.map(xOverviewScale.invert);
+  brushOverride = [x0, x1];
+}
+
+function onBrushEnd(event) {
+  if (!event.selection) {
+    brushOverride = null; // cleared brush -> resume live
+  }
+}
+
+// --- Data ---
+const data = []; // {time: Date, value: number}
+let currentValue = 50;
+let simTime = Date.now();
+let paused = false;
+let speed = 1;
+
+// Ornstein-Uhlenbeck: dx = speed*(mean - x)*dt + vol*sqrt(dt)*N(0,1)
+const OU_MEAN = 50, OU_SPEED = 0.05, OU_VOL = 2;
+const dt = DATA_INTERVAL_MS / 1000;
+
+function randn() {
+  // Box-Muller
+  const u1 = Math.random(), u2 = Math.random();
+  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+}
+
+function step() {
+  currentValue += OU_SPEED * (OU_MEAN - currentValue) * dt + OU_VOL * Math.sqrt(dt) * randn();
+  simTime += DATA_INTERVAL_MS;
+  data.push({ time: new Date(simTime), value: currentValue });
+  if (data.length > MAX_POINTS) data.shift();
+}
+
+// Seed with some initial data (2 seconds worth)
+for (let i = 0; i < 20; i++) step();
+
+// --- LTTB ---
+function lttb(data, threshold) {
+  const n = data.length;
+  if (threshold >= n || threshold < 3) return data;
+  const sampled = [data[0]];
+  const bucketSize = (n - 2) / (threshold - 2);
+  let prevIdx = 0;
+  for (let i = 0; i < threshold - 2; i++) {
+    const bucketStart = Math.floor(i * bucketSize) + 1;
+    const bucketEnd = Math.floor((i + 1) * bucketSize) + 1;
+    const nextStart = bucketEnd;
+    const nextEnd = Math.min(Math.floor((i + 2) * bucketSize) + 1, n);
+    let avgX = 0, avgY = 0;
+    for (let j = nextStart; j < nextEnd; j++) {
+      avgX += +data[j].time;
+      avgY += data[j].value;
+    }
+    avgX /= (nextEnd - nextStart);
+    avgY /= (nextEnd - nextStart);
+    let maxArea = -1, maxIdx = bucketStart;
+    const prev = data[prevIdx];
+    for (let j = bucketStart; j < bucketEnd; j++) {
+      const area = Math.abs(
+        (+prev.time - avgX) * (data[j].value - prev.value) -
+        (+prev.time - +data[j].time) * (avgY - prev.value)
+      );
+      if (area > maxArea) { maxArea = area; maxIdx = j; }
+    }
+    sampled.push(data[maxIdx]);
+    prevIdx = maxIdx;
+  }
+  sampled.push(data[n - 1]);
+  return sampled;
+}
+
+// --- Drawing ---
+function drawLine(ctx, points, xScale, yScale, w, h, color, lineWidth) {
+  ctx.clearRect(0, 0, w, h);
+  if (points.length < 2) return;
+  ctx.beginPath();
+  ctx.moveTo(xScale(points[0].time), yScale(points[0].value));
+  for (let i = 1; i < points.length; i++) {
+    ctx.lineTo(xScale(points[i].time), yScale(points[i].value));
+  }
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lineWidth;
+  ctx.lineJoin = "round";
+  ctx.stroke();
+}
+
+function getVisibleData() {
+  if (brushOverride) {
+    const [t0, t1] = brushOverride;
+    return data.filter(d => d.time >= t0 && d.time <= t1);
+  }
+  const latest = data[data.length - 1].time;
+  const earliest = new Date(+latest - MAIN_WINDOW_MS);
+  return data.filter(d => d.time >= earliest);
+}
+
+function updateStats(visible) {
+  if (visible.length === 0) return;
+  const vals = visible.map(d => d.value);
+  document.getElementById("stat-current").textContent = vals[vals.length - 1].toFixed(2);
+  document.getElementById("stat-min").textContent = d3.min(vals).toFixed(2);
+  document.getElementById("stat-max").textContent = d3.max(vals).toFixed(2);
+  document.getElementById("stat-mean").textContent = d3.mean(vals).toFixed(2);
+}
+
+// --- FPS ---
+let frameCount = 0, lastFpsTime = performance.now();
+const fpsEl = document.getElementById("fps");
+
+function updateFps() {
+  frameCount++;
+  const now = performance.now();
+  if (now - lastFpsTime >= 1000) {
+    fpsEl.textContent = frameCount + " fps";
+    frameCount = 0;
+    lastFpsTime = now;
+  }
+}
+
+// --- Render loop ---
+function render() {
+  if (data.length < 2) return;
+
+  const visible = getVisibleData();
+  if (visible.length < 2) return;
+
+  // Main chart scales
+  const tExtent = d3.extent(visible, d => d.time);
+  const [vMin, vMax] = d3.extent(visible, d => d.value);
+  const pad = (vMax - vMin) * 0.1 || 1;
+  xMainScale.domain(tExtent);
+  yMainScale.domain([vMin - pad, vMax + pad]);
+
+  // Draw main line
+  drawLine(mainCtx, visible, xMainScale, yMainScale, width, mainHeight, TOL_BLUE, 1.5);
+
+  // Axes
+  xAxisG.call(d3.axisBottom(xMainScale).ticks(6).tickFormat(d3.utcFormat("%H:%M:%S")));
+  yAxisG.call(d3.axisLeft(yMainScale).ticks(6));
+
+  // Stats
+  updateStats(visible);
+
+  // Overview
+  const overviewExtent = d3.extent(data, d => d.time);
+  const [oMin, oMax] = d3.extent(data, d => d.value);
+  const oPad = (oMax - oMin) * 0.05 || 1;
+  xOverviewScale.domain(overviewExtent);
+  yOverviewScale.domain([oMin - oPad, oMax + oPad]);
+
+  const downsampled = lttb(data, LTTB_TARGET);
+  drawLine(overCtx, downsampled, xOverviewScale, yOverviewScale, width, overviewHeight, "#999", 1);
+
+  // Update brush highlight (only when live, not user-driven)
+  if (!brushOverride) {
+    const bx0 = xOverviewScale(tExtent[0]);
+    const bx1 = xOverviewScale(tExtent[1]);
+    brushG.call(brush.move, [bx0, bx1]);
+  }
+
+  updateFps();
+}
+
+// --- Data generation timer ---
+let genTimer = null;
+
+function startGeneration() {
+  if (genTimer) clearInterval(genTimer);
+  const interval = Math.max(1, Math.round(DATA_INTERVAL_MS / speed));
+  genTimer = setInterval(() => {
+    if (!paused) {
+      step();
+    }
+  }, interval);
+}
+
+startGeneration();
+
+// --- Animation loop ---
+function tick() {
+  render();
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+// --- Controls ---
+document.getElementById("btn-pause").addEventListener("click", (e) => {
+  paused = !paused;
+  e.target.textContent = paused ? "Resume" : "Pause";
+});
+
+document.querySelectorAll(".speed-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".speed-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    speed = +btn.dataset.speed;
+    startGeneration();
+  });
+});
+</script>
+</body>
+</html>

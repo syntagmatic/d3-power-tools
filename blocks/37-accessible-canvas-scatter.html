@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Accessible Canvas Scatterplot</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    color: #333;
+    margin: 0;
+    padding: 20px;
+  }
+  h1 { font-size: 1.3rem; margin: 0 0 4px; }
+  .subtitle { font-size: 0.85rem; color: #666; margin: 0 0 12px; }
+  .chart-container {
+    position: relative;
+    display: inline-block;
+  }
+  canvas {
+    display: block;
+  }
+  svg.overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    pointer-events: none;
+  }
+  .controls {
+    margin: 10px 0;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  button {
+    font-family: inherit;
+    font-size: 0.85rem;
+    padding: 6px 14px;
+    border: 1px solid #999;
+    border-radius: 4px;
+    background: #fff;
+    cursor: pointer;
+  }
+  button:hover { background: #eee; }
+  button:focus-visible { outline: 2px solid #1a73e8; outline-offset: 2px; }
+  .legend {
+    display: flex;
+    gap: 14px;
+    font-size: 0.8rem;
+    align-items: center;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .legend-swatch {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+  .info-bar {
+    font-size: 0.8rem;
+    color: #555;
+    min-height: 1.4em;
+    margin: 6px 0;
+  }
+  .selection-list {
+    font-size: 0.8rem;
+    margin: 8px 0;
+    color: #555;
+  }
+  .selection-list strong { color: #333; }
+
+  /* Data table */
+  .table-container {
+    max-height: 500px;
+    overflow: auto;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+  }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.8rem;
+  }
+  thead { position: sticky; top: 0; z-index: 1; }
+  th {
+    background: #e8e8e8;
+    padding: 6px 10px;
+    text-align: left;
+    border-bottom: 2px solid #bbb;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+  }
+  th:hover { background: #ddd; }
+  th .sort-arrow { font-size: 0.7rem; margin-left: 4px; }
+  td {
+    padding: 4px 10px;
+    border-bottom: 1px solid #e0e0e0;
+  }
+  tr.selected-row { background: #e3f2fd; }
+  tr:hover { background: #f5f5f5; }
+  tr.selected-row:hover { background: #bbdefb; }
+  .keyboard-hint {
+    font-size: 0.75rem;
+    color: #888;
+    margin: 4px 0 8px;
+  }
+</style>
+</head>
+<body>
+
+<h1>Income vs. Age by Group</h1>
+<p class="subtitle">1,500 synthetic individuals across 4 demographic groups</p>
+
+<div class="controls">
+  <button id="toggleView">Show Data Table</button>
+  <div class="legend" id="legend"></div>
+</div>
+
+<div class="keyboard-hint">Tab to chart, arrow keys to navigate points, Enter to select, Home/End for first/last, Escape to clear.</div>
+
+<div id="chartView">
+  <div class="chart-container" id="container"></div>
+  <div class="info-bar" id="infoBar"></div>
+  <div aria-live="polite" aria-atomic="true" class="sr-only" id="liveRegion"></div>
+</div>
+
+<div id="tableView" style="display:none;"></div>
+
+<div class="selection-list" id="selectionList"></div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(function() {
+  // --- Constants ---
+  const width = 700, height = 500;
+  const margin = { top: 20, right: 20, bottom: 50, left: 70 };
+  const plotW = width - margin.left - margin.right;
+  const plotH = height - margin.top - margin.bottom;
+
+  const categories = ["Group A", "Group B", "Group C", "Group D"];
+  // Tol bright palette
+  const tolBright = ["#4477AA", "#EE6677", "#228833", "#CCBB44"];
+  const colorMap = new Map(categories.map((c, i) => [c, tolBright[i]]));
+
+  // --- Generate data ---
+  const rng = d3.randomLcg(42);
+  const randAge = d3.randomUniform.source(rng)(18, 80);
+  const randIncome = d3.randomUniform.source(rng)(20000, 200000);
+  const randCat = d3.randomInt.source(rng)(0, 4);
+
+  const data = Array.from({ length: 1500 }, (_, i) => ({
+    id: i,
+    name: `Person ${i + 1}`,
+    age: Math.round(randAge()),
+    income: Math.round(randIncome()),
+    category: categories[randCat()]
+  }));
+
+  // Sort by x (age) for left-to-right keyboard navigation
+  data.sort((a, b) => a.age - b.age || a.income - b.income);
+
+  // --- Scales ---
+  const xScale = d3.scaleLinear().domain([18, 80]).range([0, plotW]);
+  const yScale = d3.scaleLinear().domain([20000, 200000]).range([plotH, 0]);
+
+  // --- Legend ---
+  const legendEl = document.getElementById("legend");
+  categories.forEach(cat => {
+    const item = document.createElement("span");
+    item.className = "legend-item";
+    item.innerHTML = `<span class="legend-swatch" style="background:${colorMap.get(cat)}"></span>${cat}`;
+    legendEl.appendChild(item);
+  });
+
+  // --- Canvas setup (DPR-aware) ---
+  const container = d3.select("#container");
+  const dpr = devicePixelRatio || 1;
+
+  const canvas = container.append("canvas")
+    .attr("width", width * dpr)
+    .attr("height", height * dpr)
+    .style("width", `${width}px`)
+    .style("height", `${height}px`)
+    .attr("tabindex", "0")
+    .attr("role", "application")
+    .attr("aria-label", "Scatterplot of income versus age for 1500 people in 4 groups. Use arrow keys to navigate between points.")
+    .node();
+
+  canvas.textContent = "Scatterplot with 1500 data points. Use arrow keys to navigate, Enter to select.";
+
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  // --- SVG overlay for axes and focus ring ---
+  const svg = container.append("svg")
+    .attr("class", "overlay")
+    .attr("width", width)
+    .attr("height", height)
+    .attr("aria-hidden", "true");
+
+  const g = svg.append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+  // Axes
+  g.append("g")
+    .attr("transform", `translate(0,${plotH})`)
+    .call(d3.axisBottom(xScale).ticks(10))
+  .append("text")
+    .attr("x", plotW / 2)
+    .attr("y", 38)
+    .attr("fill", "#333")
+    .attr("text-anchor", "middle")
+    .attr("font-size", "0.85rem")
+    .text("Age");
+
+  g.append("g")
+    .call(d3.axisLeft(yScale).ticks(6).tickFormat(d => `$${d3.format(",.0f")(d / 1000)}k`))
+  .append("text")
+    .attr("transform", "rotate(-90)")
+    .attr("x", -plotH / 2)
+    .attr("y", -55)
+    .attr("fill", "#333")
+    .attr("text-anchor", "middle")
+    .attr("font-size", "0.85rem")
+    .text("Income");
+
+  // Focus ring (SVG circle, hidden initially)
+  const focusRing = g.append("circle")
+    .attr("r", 8)
+    .attr("fill", "none")
+    .attr("stroke", "#1a73e8")
+    .attr("stroke-width", 2)
+    .attr("stroke-dasharray", "4 3")
+    .style("display", "none");
+
+  // --- State ---
+  let focusedIndex = -1;
+  let canvasHasFocus = false;
+  const selectedIds = new Set();
+
+  const liveRegion = document.getElementById("liveRegion");
+  const infoBar = document.getElementById("infoBar");
+
+  // --- Quadtree for click hit detection ---
+  const quadtree = d3.quadtree()
+    .x(d => xScale(d.age))
+    .y(d => yScale(d.income))
+    .addAll(data);
+
+  // --- Draw functions ---
+  function drawPoints() {
+    ctx.clearRect(0, 0, width, height);
+    ctx.save();
+    ctx.translate(margin.left, margin.top);
+
+    // Batch by category
+    const groups = d3.group(data, d => d.category);
+    for (const [cat, points] of groups) {
+      ctx.globalAlpha = 0.5;
+      ctx.fillStyle = colorMap.get(cat);
+      ctx.beginPath();
+      for (const d of points) {
+        const px = xScale(d.age), py = yScale(d.income);
+        ctx.moveTo(px + 3, py);
+        ctx.arc(px, py, 3, 0, Math.PI * 2);
+      }
+      ctx.fill();
+    }
+
+    // Draw selected points with stronger opacity and ring
+    if (selectedIds.size > 0) {
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = "#333";
+      for (const d of data) {
+        if (!selectedIds.has(d.id)) continue;
+        const px = xScale(d.age), py = yScale(d.income);
+        ctx.fillStyle = colorMap.get(d.category);
+        ctx.beginPath();
+        ctx.arc(px, py, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+
+    ctx.restore();
+  }
+
+  function updateFocusRing() {
+    if (focusedIndex < 0 || !canvasHasFocus) {
+      focusRing.style("display", "none");
+      infoBar.textContent = "";
+      return;
+    }
+    const d = data[focusedIndex];
+    focusRing
+      .attr("cx", xScale(d.age))
+      .attr("cy", yScale(d.income))
+      .style("display", null);
+
+    infoBar.textContent = `${d.name} | Age ${d.age} | Income $${d3.format(",")(d.income)} | ${d.category}`;
+  }
+
+  function announce(d, stateText) {
+    const parts = [
+      `Point: ${d.name}`,
+      `Age ${d.age}`,
+      `Income $${d3.format(",")(d.income)}`,
+      `Group ${d.category}`
+    ];
+    if (stateText) parts.push(stateText);
+    liveRegion.textContent = parts.join(", ");
+  }
+
+  // Debounce for held arrow keys
+  let announceTimer;
+  function debouncedAnnounce(d, stateText) {
+    clearTimeout(announceTimer);
+    announceTimer = setTimeout(() => announce(d, stateText), 150);
+  }
+
+  function updateSelectionList() {
+    const el = document.getElementById("selectionList");
+    if (selectedIds.size === 0) {
+      el.innerHTML = "";
+      return;
+    }
+    const items = data.filter(d => selectedIds.has(d.id));
+    el.innerHTML = `<strong>Selected (${items.length}):</strong> ` +
+      items.map(d => `${d.name} (${d.age}, $${d3.format(",")(d.income)})`).join(" | ");
+  }
+
+  function render() {
+    drawPoints();
+    updateFocusRing();
+  }
+
+  // --- Keyboard navigation ---
+  canvas.addEventListener("keydown", e => {
+    const len = data.length;
+    let handled = true;
+
+    switch (e.key) {
+      case "ArrowRight":
+        focusedIndex = Math.min(focusedIndex + 1, len - 1);
+        if (focusedIndex < 0) focusedIndex = 0;
+        break;
+      case "ArrowLeft":
+        focusedIndex = Math.max(focusedIndex - 1, 0);
+        break;
+      case "ArrowUp": {
+        // Move to nearest point above (higher income) at similar x
+        if (focusedIndex < 0) { focusedIndex = 0; break; }
+        const cur = data[focusedIndex];
+        const cx = xScale(cur.age), cy = yScale(cur.income);
+        let bestIdx = -1, bestDist = Infinity;
+        for (let i = 0; i < len; i++) {
+          if (i === focusedIndex) continue;
+          const d = data[i];
+          const px = xScale(d.age), py = yScale(d.income);
+          const dy = py - cy; // negative = above in screen
+          if (dy >= 0) continue; // must be above
+          const dist = Math.hypot(px - cx, py - cy);
+          if (dist < bestDist) { bestDist = dist; bestIdx = i; }
+        }
+        if (bestIdx >= 0) focusedIndex = bestIdx;
+        break;
+      }
+      case "ArrowDown": {
+        if (focusedIndex < 0) { focusedIndex = 0; break; }
+        const cur = data[focusedIndex];
+        const cx = xScale(cur.age), cy = yScale(cur.income);
+        let bestIdx = -1, bestDist = Infinity;
+        for (let i = 0; i < len; i++) {
+          if (i === focusedIndex) continue;
+          const d = data[i];
+          const px = xScale(d.age), py = yScale(d.income);
+          const dy = py - cy;
+          if (dy <= 0) continue; // must be below
+          const dist = Math.hypot(px - cx, py - cy);
+          if (dist < bestDist) { bestDist = dist; bestIdx = i; }
+        }
+        if (bestIdx >= 0) focusedIndex = bestIdx;
+        break;
+      }
+      case "Home":
+        focusedIndex = 0;
+        break;
+      case "End":
+        focusedIndex = len - 1;
+        break;
+      case "Enter":
+      case " ":
+        if (focusedIndex >= 0) {
+          const d = data[focusedIndex];
+          if (selectedIds.has(d.id)) {
+            selectedIds.delete(d.id);
+            announce(d, "deselected");
+          } else {
+            selectedIds.add(d.id);
+            announce(d, "selected");
+          }
+          updateSelectionList();
+          render();
+        }
+        break;
+      case "Escape":
+        selectedIds.clear();
+        liveRegion.textContent = "Selection cleared";
+        updateSelectionList();
+        render();
+        break;
+      default:
+        handled = false;
+    }
+
+    if (handled) {
+      e.preventDefault();
+      if (e.key.startsWith("Arrow") || e.key === "Home" || e.key === "End") {
+        debouncedAnnounce(data[focusedIndex]);
+      }
+      updateFocusRing();
+      render();
+    }
+  });
+
+  canvas.addEventListener("focus", () => {
+    canvasHasFocus = true;
+    if (focusedIndex < 0) focusedIndex = 0;
+    debouncedAnnounce(data[focusedIndex]);
+    updateFocusRing();
+  });
+
+  canvas.addEventListener("blur", () => {
+    canvasHasFocus = false;
+    updateFocusRing();
+  });
+
+  // Click to focus a point
+  canvas.addEventListener("pointerdown", e => {
+    canvas.focus();
+    const rect = canvas.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) - margin.left;
+    const my = (e.clientY - rect.top) - margin.top;
+    const nearest = quadtree.find(mx, my, 15);
+    if (nearest) {
+      focusedIndex = data.indexOf(nearest);
+      debouncedAnnounce(nearest);
+      render();
+      updateFocusRing();
+    }
+  });
+
+  // --- Data Table ---
+  const toggleBtn = document.getElementById("toggleView");
+  const chartView = document.getElementById("chartView");
+  const tableView = document.getElementById("tableView");
+  let showingTable = false;
+  let tableBuilt = false;
+
+  let sortCol = "id";
+  let sortAsc = true;
+
+  function buildTable() {
+    if (tableBuilt) return;
+    tableBuilt = true;
+
+    const wrapper = document.createElement("div");
+    wrapper.className = "table-container";
+
+    const table = document.createElement("table");
+    table.setAttribute("role", "table");
+    table.setAttribute("aria-label", "Data table for scatterplot: 1500 people with age, income, and group");
+
+    const thead = document.createElement("thead");
+    const headerRow = document.createElement("tr");
+    const cols = [
+      { key: "name", label: "Name" },
+      { key: "age", label: "Age" },
+      { key: "income", label: "Income" },
+      { key: "category", label: "Group" }
+    ];
+
+    cols.forEach(col => {
+      const th = document.createElement("th");
+      th.setAttribute("scope", "col");
+      th.textContent = col.label;
+      th.dataset.key = col.key;
+      th.addEventListener("click", () => sortTable(col.key));
+      headerRow.appendChild(th);
+    });
+    thead.appendChild(headerRow);
+    table.appendChild(thead);
+
+    const tbody = document.createElement("tbody");
+    tbody.id = "tableBody";
+    table.appendChild(tbody);
+    wrapper.appendChild(table);
+    tableView.appendChild(wrapper);
+
+    renderTableRows();
+  }
+
+  function renderTableRows() {
+    const tbody = document.getElementById("tableBody");
+    if (!tbody) return;
+
+    const sorted = data.slice().sort((a, b) => {
+      let va = a[sortCol], vb = b[sortCol];
+      if (typeof va === "string") {
+        return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+      }
+      return sortAsc ? va - vb : vb - va;
+    });
+
+    tbody.innerHTML = "";
+    const frag = document.createDocumentFragment();
+    sorted.forEach(d => {
+      const tr = document.createElement("tr");
+      if (selectedIds.has(d.id)) tr.className = "selected-row";
+      tr.innerHTML = `<td>${d.name}</td><td>${d.age}</td><td>$${d3.format(",")(d.income)}</td><td>${d.category}</td>`;
+      frag.appendChild(tr);
+    });
+    tbody.appendChild(frag);
+
+    // Update sort arrows in headers
+    document.querySelectorAll("#tableView th").forEach(th => {
+      const arrow = th.querySelector(".sort-arrow");
+      if (arrow) arrow.remove();
+      if (th.dataset.key === sortCol) {
+        const span = document.createElement("span");
+        span.className = "sort-arrow";
+        span.textContent = sortAsc ? " \u25B2" : " \u25BC";
+        th.appendChild(span);
+      }
+    });
+  }
+
+  function sortTable(key) {
+    if (sortCol === key) {
+      sortAsc = !sortAsc;
+    } else {
+      sortCol = key;
+      sortAsc = true;
+    }
+    renderTableRows();
+  }
+
+  toggleBtn.addEventListener("click", () => {
+    showingTable = !showingTable;
+    if (showingTable) {
+      buildTable();
+      renderTableRows(); // refresh selection highlights
+      chartView.style.display = "none";
+      tableView.style.display = "block";
+      toggleBtn.textContent = "Show Chart";
+    } else {
+      chartView.style.display = "block";
+      tableView.style.display = "none";
+      toggleBtn.textContent = "Show Data Table";
+    }
+  });
+
+  // --- Initial render ---
+  render();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Bee Swarm: Income by Education Level</title>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif; background: #f9f9f9; }
+  svg { display: block; margin: 0 auto; }
+  .axis text { font-size: 11px; fill: #555; }
+  .axis path, .axis line { stroke: #bbb; }
+  .percentile-line { stroke: #888; stroke-width: 1; stroke-dasharray: 4,3; }
+  .percentile-label { font-size: 10px; fill: #666; text-anchor: middle; }
+  .callout-line { fill: none; stroke: #555; stroke-width: 0.8; }
+  .callout-text { font-size: 10px; fill: #333; }
+  .callout-circle { fill: none; stroke: #555; stroke-width: 1.2; }
+  .legend-label { font-size: 11px; fill: #444; }
+  .title { font-size: 15px; font-weight: 600; fill: #222; }
+  .subtitle { font-size: 11px; fill: #777; }
+  .boxplot-label { font-size: 9px; fill: #666; }
+  .tooltip {
+    position: absolute; pointer-events: none; opacity: 0;
+    background: white; border: 1px solid #ccc; border-radius: 4px;
+    padding: 6px 9px; font-size: 11px; font-family: system-ui, sans-serif;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.12); line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+<svg id="chart"></svg>
+<div class="tooltip" id="tooltip"></div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(() => {
+  // --- Dimensions (margin convention) ---
+  const totalWidth = 960, totalHeight = 480;
+  const margin = { top: 60, right: 120, bottom: 50, left: 50 };
+  const width = totalWidth - margin.left - margin.right;
+  const height = totalHeight - margin.top - margin.bottom;
+
+  const svg = d3.select("#chart")
+    .attr("viewBox", `0 0 ${totalWidth} ${totalHeight}`)
+    .attr("width", totalWidth)
+    .attr("height", totalHeight);
+
+  const g = svg.append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+  // --- Tol bright palette (colorblind-safe) ---
+  const eduLevels = ["High School", "Bachelor's", "Master's", "PhD"];
+  const tolBright = ["#4477AA", "#EE6677", "#228833", "#CCBB44"];
+  const colorScale = d3.scaleOrdinal().domain(eduLevels).range(tolBright);
+
+  // --- Seeded random for reproducibility ---
+  const rng = d3.randomLcg(42);
+  const randNormal = d3.randomNormal.source(d3.randomLcg(123));
+
+  // --- Generate 400 synthetic people ---
+  // Log-normal: exp(mu + sigma * Z), target median ~55K
+  // median = exp(mu), so mu = ln(55000) ~ 10.915
+  const mu = Math.log(55000);
+  const sigma = 0.55;
+  const normalRng = randNormal(0, 1);
+
+  const data = d3.range(400).map((_, i) => {
+    // Base income from log-normal
+    let z = normalRng();
+    let rawIncome = Math.exp(mu + sigma * z);
+
+    // Assign education correlated with income
+    // Higher income -> higher chance of advanced degree
+    const pct = d3.cumsum([0.35, 0.35, 0.20, 0.10]); // base rates
+    const r = rng();
+    // Shift probabilities based on income percentile proxy (z-score)
+    let edu;
+    if (z > 1.2) edu = r < 0.10 ? 0 : r < 0.30 ? 1 : r < 0.60 ? 2 : 3;
+    else if (z > 0.3) edu = r < 0.20 ? 0 : r < 0.50 ? 1 : r < 0.80 ? 2 : 3;
+    else if (z > -0.5) edu = r < 0.35 ? 0 : r < 0.70 ? 1 : r < 0.90 ? 2 : 3;
+    else edu = r < 0.55 ? 0 : r < 0.85 ? 1 : r < 0.95 ? 2 : 3;
+
+    // Clamp income to 15K-500K
+    rawIncome = Math.max(15000, Math.min(500000, rawIncome));
+
+    // Age: 22-65, slightly correlated with education (more edu -> slightly older on average)
+    const ageBase = 22 + rng() * 43;
+    const age = Math.round(Math.min(65, Math.max(22, ageBase + edu * 1.5)));
+
+    return {
+      id: i,
+      income: Math.round(rawIncome),
+      education: eduLevels[edu],
+      age
+    };
+  });
+
+  // --- Scales ---
+  const xScale = d3.scaleLog()
+    .domain([12000, 600000])
+    .range([0, width]);
+
+  // --- Force simulation for bee swarm ---
+  // forceX positions by income, forceY centers at 0, forceCollide prevents overlap
+  const simulation = d3.forceSimulation(data)
+    .force("x", d3.forceX(d => xScale(d.income)).strength(1))
+    .force("y", d3.forceY(height / 2).strength(0.07))
+    .force("collide", d3.forceCollide(3.5))
+    .stop();
+
+  // Run to convergence
+  for (let i = 0; i < 300; i++) simulation.tick();
+
+  // --- X axis ---
+  const xAxis = d3.axisBottom(xScale)
+    .tickValues([15000, 25000, 50000, 100000, 200000, 500000])
+    .tickFormat(d => d >= 1000 ? `$${d / 1000}k` : `$${d}`);
+
+  g.append("g")
+    .attr("class", "axis")
+    .attr("transform", `translate(0,${height})`)
+    .call(xAxis);
+
+  g.append("text")
+    .attr("x", width / 2)
+    .attr("y", height + 38)
+    .attr("text-anchor", "middle")
+    .attr("fill", "#555")
+    .attr("font-size", 12)
+    .text("Annual Income (log scale)");
+
+  // --- Percentile lines ---
+  const incomes = data.map(d => d.income).sort(d3.ascending);
+  const q25 = d3.quantile(incomes, 0.25);
+  const q50 = d3.quantile(incomes, 0.50);
+  const q75 = d3.quantile(incomes, 0.75);
+
+  const percentiles = [
+    { value: q25, label: "25th" },
+    { value: q50, label: "Median" },
+    { value: q75, label: "75th" }
+  ];
+
+  percentiles.forEach(p => {
+    const px = xScale(p.value);
+    g.append("line")
+      .attr("class", "percentile-line")
+      .attr("x1", px).attr("x2", px)
+      .attr("y1", 0).attr("y2", height);
+
+    g.append("text")
+      .attr("class", "percentile-label")
+      .attr("x", px)
+      .attr("y", -6)
+      .text(`${p.label}: $${Math.round(p.value / 1000)}k`);
+  });
+
+  // --- Dots ---
+  g.selectAll(".dot")
+    .data(data)
+    .join("circle")
+      .attr("class", "dot")
+      .attr("cx", d => d.x)
+      .attr("cy", d => d.y)
+      .attr("r", 3)
+      .attr("fill", d => colorScale(d.education))
+      .attr("fill-opacity", 0.8)
+      .attr("stroke", d => d3.color(colorScale(d.education)).darker(0.3))
+      .attr("stroke-width", 0.4)
+      .style("cursor", "pointer");
+
+  // --- Tooltip ---
+  const tooltip = d3.select("#tooltip");
+
+  g.selectAll(".dot")
+    .on("pointerenter", (event, d) => {
+      tooltip.html(`<strong>$${(d.income / 1000).toFixed(0)}k</strong><br>${d.education}<br>Age ${d.age}`)
+        .style("opacity", 1);
+    })
+    .on("pointermove", (event) => {
+      tooltip.style("left", `${event.pageX + 12}px`)
+        .style("top", `${event.pageY - 12}px`);
+    })
+    .on("pointerleave", () => tooltip.style("opacity", 0));
+
+  // --- Callout annotations for top 3 earners ---
+  const top3 = [...data].sort((a, b) => b.income - a.income).slice(0, 3);
+
+  const calloutOffsets = [
+    { dx: 30, dy: -50 },
+    { dx: 35, dy: 45 },
+    { dx: -40, dy: -55 }
+  ];
+
+  top3.forEach((d, i) => {
+    const off = calloutOffsets[i];
+    const cx = d.x, cy = d.y;
+    const tx = cx + off.dx, ty = cy + off.dy;
+
+    // Circle highlight
+    g.append("circle")
+      .attr("class", "callout-circle")
+      .attr("cx", cx).attr("cy", cy).attr("r", 6);
+
+    // Leader line (elbow)
+    g.append("path")
+      .attr("class", "callout-line")
+      .attr("d", `M${cx},${cy} L${tx},${cy} L${tx},${ty}`);
+
+    // Label
+    const label = `$${Math.round(d.income / 1000)}k, ${d.education}, age ${d.age}`;
+    g.append("text")
+      .attr("class", "callout-text")
+      .attr("x", tx + (off.dx > 0 ? 4 : -4))
+      .attr("y", ty - 3)
+      .attr("text-anchor", off.dx > 0 ? "start" : "end")
+      .text(label);
+  });
+
+  // --- Side box plot (right margin) ---
+  const boxX = width + 20;
+  const boxWidth = 24;
+  const boxG = g.append("g").attr("transform", `translate(${boxX},0)`);
+
+  // Compute stats
+  const p5 = d3.quantile(incomes, 0.05);
+  const p95 = d3.quantile(incomes, 0.95);
+
+  // Map income to y via a linear scale matching the swarm's vertical extent
+  const yExtent = d3.extent(data, d => d.y);
+  // Box plot uses its own vertical scale: income -> y position
+  const boxYScale = d3.scaleLog()
+    .domain([12000, 600000])
+    .range([height, 0]);
+
+  // Whiskers (5th to 95th)
+  boxG.append("line")
+    .attr("x1", boxWidth / 2).attr("x2", boxWidth / 2)
+    .attr("y1", boxYScale(p5)).attr("y2", boxYScale(p95))
+    .attr("stroke", "#888").attr("stroke-width", 1);
+
+  // Whisker caps
+  [p5, p95].forEach(v => {
+    boxG.append("line")
+      .attr("x1", boxWidth * 0.25).attr("x2", boxWidth * 0.75)
+      .attr("y1", boxYScale(v)).attr("y2", boxYScale(v))
+      .attr("stroke", "#888").attr("stroke-width", 1);
+  });
+
+  // Box (Q1-Q3)
+  boxG.append("rect")
+    .attr("x", 0).attr("y", boxYScale(q75))
+    .attr("width", boxWidth)
+    .attr("height", boxYScale(q25) - boxYScale(q75))
+    .attr("fill", "#ddd").attr("stroke", "#888").attr("stroke-width", 1);
+
+  // Median line
+  boxG.append("line")
+    .attr("x1", 0).attr("x2", boxWidth)
+    .attr("y1", boxYScale(q50)).attr("y2", boxYScale(q50))
+    .attr("stroke", "#333").attr("stroke-width", 2);
+
+  // Labels
+  const boxLabels = [
+    { val: p95, label: "95th", anchor: "start" },
+    { val: q75, label: "Q3", anchor: "start" },
+    { val: q50, label: "Med", anchor: "start" },
+    { val: q25, label: "Q1", anchor: "start" },
+    { val: p5, label: "5th", anchor: "start" }
+  ];
+
+  boxLabels.forEach(bl => {
+    boxG.append("text")
+      .attr("class", "boxplot-label")
+      .attr("x", boxWidth + 4)
+      .attr("y", boxYScale(bl.val) + 3)
+      .attr("text-anchor", "start")
+      .text(`${bl.label}: $${Math.round(bl.val / 1000)}k`);
+  });
+
+  // Box plot title
+  boxG.append("text")
+    .attr("x", boxWidth / 2)
+    .attr("y", -10)
+    .attr("text-anchor", "middle")
+    .attr("font-size", 10)
+    .attr("fill", "#555")
+    .text("Distribution");
+
+  // --- Legend (top-right) ---
+  const legendG = svg.append("g")
+    .attr("transform", `translate(${totalWidth - margin.right - 10}, ${margin.top - 40})`);
+
+  eduLevels.forEach((edu, i) => {
+    const row = legendG.append("g")
+      .attr("transform", `translate(${-(eduLevels.length - 1 - i) * 110}, 0)`);
+
+    row.append("circle")
+      .attr("cx", 0).attr("cy", 0).attr("r", 4)
+      .attr("fill", colorScale(edu));
+
+    row.append("text")
+      .attr("class", "legend-label")
+      .attr("x", 8).attr("y", 4)
+      .text(edu);
+  });
+
+  // --- Title ---
+  svg.append("text")
+    .attr("class", "title")
+    .attr("x", margin.left)
+    .attr("y", 24)
+    .text("Income Distribution by Education Level");
+
+  svg.append("text")
+    .attr("class", "subtitle")
+    .attr("x", margin.left)
+    .attr("y", 42)
+    .text("400 synthetic individuals | bee swarm on log-scaled income");
+
+})();
+</script>
+</body>
+</html>

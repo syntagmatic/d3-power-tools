@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Crossfilter Flight Explorer</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #f8f8f8;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px;
+    color: #333;
+  }
+  .header {
+    display: flex;
+    align-items: baseline;
+    gap: 20px;
+    margin-bottom: 12px;
+    width: 800px;
+  }
+  .header h1 {
+    font-size: 18px;
+    font-weight: 600;
+    margin: 0;
+  }
+  #counter {
+    font-size: 14px;
+    color: #555;
+  }
+  #reset-btn {
+    margin-left: auto;
+    font-family: system-ui;
+    font-size: 13px;
+    padding: 4px 12px;
+    border: 1px solid #999;
+    border-radius: 4px;
+    background: #fff;
+    cursor: pointer;
+    color: #333;
+  }
+  #reset-btn:hover { background: #eee; }
+  .panel-label {
+    font-size: 13px;
+    font-weight: 600;
+    fill: #555;
+  }
+  .bar-bg { fill: #ddd; }
+  .bar-fg { fill: #4477AA; }
+  .axis text { font-size: 11px; }
+  .axis path, .axis line { stroke: #999; }
+  .brush .selection {
+    fill: #4477AA;
+    fill-opacity: 0.15;
+    stroke: #4477AA;
+    stroke-width: 1;
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Flight Explorer</h1>
+  <span id="counter">Showing 2,000 of 2,000 flights</span>
+  <button id="reset-btn">Reset All</button>
+</div>
+<div id="chart"></div>
+
+<script type="module">
+// --- Data generation ---
+const N = 2000;
+const carriers = ["AA", "DL", "UA", "WN", "B6", "AS"];
+
+function randomHour() {
+  // Bimodal peaks at 8 and 17
+  const r = Math.random();
+  if (r < 0.5) {
+    // Peak around 8
+    let h = Math.round(d3.randomNormal(8, 3)());
+    return Math.max(0, Math.min(23, h));
+  }
+  // Peak around 17
+  let h = Math.round(d3.randomNormal(17, 3)());
+  return Math.max(0, Math.min(23, h));
+}
+
+function randomDelay() {
+  // Right-skewed: mostly small, occasional large
+  const r = Math.random();
+  if (r < 0.3) return Math.round(d3.randomUniform(-10, 0)());
+  if (r < 0.8) return Math.round(d3.randomNormal(15, 20)());
+  return Math.round(d3.randomNormal(60, 40)());
+}
+
+const data = d3.range(N).map(i => ({
+  id: i,
+  departure_hour: randomHour(),
+  delay_minutes: Math.max(-10, Math.min(180, randomDelay())),
+  distance_miles: Math.round(100 + Math.random() * 2900),
+  carrier: carriers[Math.floor(Math.random() * carriers.length)],
+  day_of_week: Math.floor(Math.random() * 7),
+}));
+
+// --- Layout ---
+const width = 800;
+const panelHeight = 200;
+const margin = { top: 30, right: 20, bottom: 30, left: 50 };
+const innerW = width - margin.left - margin.right;
+const innerH = panelHeight - margin.top - margin.bottom;
+const totalHeight = panelHeight * 3;
+
+const svg = d3.select("#chart")
+  .append("svg")
+    .attr("width", width)
+    .attr("height", totalHeight);
+
+// --- Panel configs ---
+const panels = [
+  {
+    key: "departure_hour",
+    label: "Departure Hour",
+    accessor: d => d.departure_hour,
+    thresholds: d3.range(25), // 0..24 gives 24 bins
+    domain: [0, 24],
+    tickFormat: d => `${d}:00`,
+    tickValues: [0, 4, 8, 12, 16, 20, 24],
+  },
+  {
+    key: "delay_minutes",
+    label: "Delay (minutes)",
+    accessor: d => d.delay_minutes,
+    thresholds: d3.range(-10, 181, 10), // 20 bins from -10 to 180, step ~10
+    domain: [-10, 180],
+    tickFormat: d => d,
+    tickValues: null,
+  },
+  {
+    key: "distance_miles",
+    label: "Distance (miles)",
+    accessor: d => d.distance_miles,
+    // ~15 bins from 100 to 3100
+    thresholds: d3.range(100, 3101, 200),
+    domain: [100, 3100],
+    tickFormat: d => d,
+    tickValues: null,
+  },
+];
+
+// --- State: active brush extents per dimension ---
+const filters = {};
+
+function getFiltered(excludeKey) {
+  return data.filter(d => {
+    for (const [key, [lo, hi]] of Object.entries(filters)) {
+      if (key === excludeKey) continue;
+      const panel = panels.find(p => p.key === key);
+      const val = panel.accessor(d);
+      if (val < lo || val > hi) return false;
+    }
+    return true;
+  });
+}
+
+function getFullyFiltered() {
+  return data.filter(d => {
+    for (const [key, [lo, hi]] of Object.entries(filters)) {
+      const panel = panels.find(p => p.key === key);
+      const val = panel.accessor(d);
+      if (val < lo || val > hi) return false;
+    }
+    return true;
+  });
+}
+
+// --- Build panels ---
+const panelState = [];
+
+panels.forEach((cfg, i) => {
+  const g = svg.append("g")
+      .attr("transform", `translate(0, ${i * panelHeight})`);
+
+  const inner = g.append("g")
+      .attr("transform", `translate(${margin.left}, ${margin.top})`);
+
+  // Label
+  g.append("text")
+      .attr("class", "panel-label")
+      .attr("x", margin.left)
+      .attr("y", 16)
+      .text(cfg.label);
+
+  // Scales
+  const x = d3.scaleLinear()
+      .domain(cfg.domain)
+      .range([0, innerW]);
+
+  // Bin all data for background
+  const allBins = d3.bin()
+      .value(cfg.accessor)
+      .domain(cfg.domain)
+      .thresholds(cfg.thresholds)(data);
+
+  const maxCount = d3.max(allBins, b => b.length);
+  const y = d3.scaleLinear()
+      .domain([0, maxCount])
+      .nice()
+      .range([innerH, 0]);
+
+  // Background bars (total)
+  inner.selectAll(".bar-bg")
+    .data(allBins)
+    .join("rect")
+      .attr("class", "bar-bg")
+      .attr("x", d => x(d.x0) + 1)
+      .attr("width", d => Math.max(0, x(d.x1) - x(d.x0) - 2))
+      .attr("y", d => y(d.length))
+      .attr("height", d => innerH - y(d.length));
+
+  // Foreground bars (filtered)
+  const fgBars = inner.selectAll(".bar-fg")
+    .data(allBins)
+    .join("rect")
+      .attr("class", "bar-fg")
+      .attr("x", d => x(d.x0) + 1)
+      .attr("width", d => Math.max(0, x(d.x1) - x(d.x0) - 2))
+      .attr("y", d => y(d.length))
+      .attr("height", d => innerH - y(d.length));
+
+  // Axes
+  const xAxis = d3.axisBottom(x);
+  if (cfg.tickValues) xAxis.tickValues(cfg.tickValues);
+  if (cfg.tickFormat) xAxis.tickFormat(cfg.tickFormat);
+  inner.append("g")
+      .attr("class", "axis")
+      .attr("transform", `translate(0, ${innerH})`)
+      .call(xAxis);
+
+  inner.append("g")
+      .attr("class", "axis")
+      .call(d3.axisLeft(y).ticks(5));
+
+  // Brush
+  const brush = d3.brushX()
+      .extent([[0, 0], [innerW, innerH]])
+      .on("brush end", (event) => {
+        if (event.selection) {
+          const [px0, px1] = event.selection;
+          filters[cfg.key] = [x.invert(px0), x.invert(px1)];
+        } else {
+          delete filters[cfg.key];
+        }
+        updateAll();
+      });
+
+  const brushG = inner.append("g")
+      .attr("class", "brush")
+      .call(brush);
+
+  panelState.push({ cfg, x, y, allBins, fgBars, brush, brushG, inner });
+});
+
+// --- Update logic ---
+function updateAll() {
+  const fullyFiltered = getFullyFiltered();
+  d3.select("#counter").text(
+    `Showing ${d3.format(",")(fullyFiltered.length)} of ${d3.format(",")(N)} flights`
+  );
+
+  panelState.forEach(({ cfg, x, y, allBins, fgBars }) => {
+    // Filter data excluding this panel's own brush (crossfilter semantics)
+    const filtered = getFiltered(cfg.key);
+
+    // Re-bin the filtered data using same thresholds
+    const filteredBins = d3.bin()
+        .value(cfg.accessor)
+        .domain(cfg.domain)
+        .thresholds(cfg.thresholds)(filtered);
+
+    // Match bins by index (same thresholds guarantee same count)
+    fgBars.data(filteredBins)
+      .transition().duration(300).ease(d3.easeExpOut)
+        .attr("y", d => y(d.length))
+        .attr("height", d => innerH - y(d.length));
+  });
+}
+
+// --- Reset button ---
+d3.select("#reset-btn").on("click", () => {
+  for (const key of Object.keys(filters)) delete filters[key];
+  panelState.forEach(({ brush, brushG }) => {
+    brushG.call(brush.move, null);
+  });
+  updateAll();
+});
+</script>
+</body>
+</html>

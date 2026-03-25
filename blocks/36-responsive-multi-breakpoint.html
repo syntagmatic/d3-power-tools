@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Responsive Multi-Breakpoint Chart</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    color: #333;
+  }
+  #chart-wrapper {
+    width: 100%;
+    height: 100vh;
+    overflow: hidden;
+    position: relative;
+  }
+  .instruction {
+    position: absolute;
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 13px;
+    color: #777;
+    z-index: 10;
+    pointer-events: none;
+  }
+  .breakpoint-label {
+    position: absolute;
+    top: 8px;
+    left: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #999;
+    z-index: 10;
+    pointer-events: none;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+</style>
+</head>
+<body>
+<div id="chart-wrapper">
+  <div class="instruction">Resize the browser to see layout changes</div>
+  <div class="breakpoint-label" id="bp-label"></div>
+</div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script type="module">
+
+// --- Data ---
+const rng = d3.randomLcg(42);
+const randUniform = d3.randomUniform.source(rng);
+const categories = ["Alpha", "Beta", "Gamma", "Delta"];
+const tolBright = ["#4477AA", "#EE6677", "#228833", "#CCBB44"];
+const colorScale = d3.scaleOrdinal().domain(categories).range(tolBright);
+
+const data = d3.range(80).map(i => ({
+  x: randUniform(0, 100)(),
+  y: randUniform(0, 100)(),
+  category: categories[i % 4],
+  size: randUniform(1, 10)()
+}));
+
+// --- Setup ---
+const wrapper = document.getElementById("chart-wrapper");
+const bpLabel = document.getElementById("bp-label");
+
+const svg = d3.select(wrapper).append("svg")
+  .style("width", "100%")
+  .style("height", "100%");
+
+let currentLayout = null;
+
+function getBreakpoint(w) {
+  if (w >= 1000) return "wide";
+  if (w >= 600) return "medium";
+  return "narrow";
+}
+
+// --- Render ---
+function render(width, height) {
+  const bp = getBreakpoint(width);
+  bpLabel.textContent = `${bp} (${Math.round(width)}px)`;
+
+  svg.attr("viewBox", null)
+    .attr("width", width)
+    .attr("height", height);
+
+  const t = currentLayout !== bp
+    ? svg.transition().duration(500)
+    : svg.transition().duration(200);
+
+  currentLayout = bp;
+
+  if (bp === "wide") renderWide(width, height, t);
+  else if (bp === "medium") renderMedium(width, height, t);
+  else renderNarrow(width, height, t);
+}
+
+// --- Wide: Scatterplot + marginal histograms ---
+function renderWide(W, H, t) {
+  const margin = { top: 50, right: 160, bottom: 60, left: 60 };
+  const histH = 50; // marginal histogram height
+  const gap = 4;
+  const plotL = margin.left;
+  const plotT = margin.top + histH + gap;
+  const plotW = W - margin.left - margin.right - histH - gap;
+  const plotH = H - margin.top - margin.bottom - histH - gap;
+
+  const x = d3.scaleLinear().domain([0, 100]).range([0, plotW]);
+  const y = d3.scaleLinear().domain([0, 100]).range([plotH, 0]);
+  const r = d3.scaleSqrt().domain([1, 10]).range([3, 10]);
+
+  // Axes
+  ensureGroup("x-axis")
+    .transition(t)
+    .attr("transform", `translate(${plotL},${plotT + plotH})`)
+    .call(d3.axisBottom(x).ticks(Math.floor(plotW / 80)));
+
+  ensureGroup("y-axis")
+    .transition(t)
+    .attr("transform", `translate(${plotL},${plotT})`)
+    .call(d3.axisLeft(y).ticks(Math.floor(plotH / 60)));
+
+  // Points
+  const dots = ensureGroup("dots")
+    .attr("transform", `translate(${plotL},${plotT})`);
+
+  dots.selectAll("circle")
+    .data(data, (d, i) => i)
+    .join(
+      enter => enter.append("circle")
+        .attr("cx", d => x(d.x))
+        .attr("cy", d => y(d.y))
+        .attr("r", 0)
+        .attr("fill", d => colorScale(d.category))
+        .attr("opacity", 0.7)
+        .call(e => e.transition(t).attr("r", d => r(d.size))),
+      update => update.call(u => u.transition(t)
+        .attr("cx", d => x(d.x))
+        .attr("cy", d => y(d.y))
+        .attr("r", d => r(d.size))
+        .attr("fill", d => colorScale(d.category))
+        .attr("opacity", 0.7))
+    );
+
+  // Top marginal histogram (x distribution)
+  const xBins = d3.bin().domain([0, 100]).thresholds(20)(data.map(d => d.x));
+  const xHistY = d3.scaleLinear()
+    .domain([0, d3.max(xBins, b => b.length)])
+    .range([histH, 0]);
+
+  const topHist = ensureGroup("top-hist")
+    .attr("transform", `translate(${plotL},${margin.top})`);
+
+  topHist.selectAll("rect")
+    .data(xBins)
+    .join(
+      enter => enter.append("rect")
+        .attr("x", d => x(d.x0))
+        .attr("width", d => Math.max(0, x(d.x1) - x(d.x0) - 1))
+        .attr("y", histH)
+        .attr("height", 0)
+        .attr("fill", "#999")
+        .attr("opacity", 0.4)
+        .call(e => e.transition(t)
+          .attr("y", d => xHistY(d.length))
+          .attr("height", d => histH - xHistY(d.length))),
+      update => update.call(u => u.transition(t)
+        .attr("x", d => x(d.x0))
+        .attr("width", d => Math.max(0, x(d.x1) - x(d.x0) - 1))
+        .attr("y", d => xHistY(d.length))
+        .attr("height", d => histH - xHistY(d.length))
+        .attr("fill", "#999")
+        .attr("opacity", 0.4))
+    );
+
+  // Right marginal histogram (y distribution)
+  const yBins = d3.bin().domain([0, 100]).thresholds(20)(data.map(d => d.y));
+  const yHistX = d3.scaleLinear()
+    .domain([0, d3.max(yBins, b => b.length)])
+    .range([0, histH]);
+
+  const rightHist = ensureGroup("right-hist")
+    .attr("transform", `translate(${plotL + plotW + gap},${plotT})`);
+
+  rightHist.selectAll("rect")
+    .data(yBins)
+    .join(
+      enter => enter.append("rect")
+        .attr("x", 0)
+        .attr("width", 0)
+        .attr("y", d => y(d.x1))
+        .attr("height", d => Math.max(0, y(d.x0) - y(d.x1) - 1))
+        .attr("fill", "#999")
+        .attr("opacity", 0.4)
+        .call(e => e.transition(t)
+          .attr("width", d => yHistX(d.length))),
+      update => update.call(u => u.transition(t)
+        .attr("y", d => y(d.x1))
+        .attr("height", d => Math.max(0, y(d.x0) - y(d.x1) - 1))
+        .attr("width", d => yHistX(d.length))
+        .attr("fill", "#999")
+        .attr("opacity", 0.4))
+    );
+
+  // Legend top-right
+  const legend = ensureGroup("legend");
+  legend.transition(t)
+    .attr("transform", `translate(${plotL + plotW + gap + histH + 16},${plotT})`);
+
+  const items = legend.selectAll(".legend-item")
+    .data(categories)
+    .join(enter => {
+      const g = enter.append("g").attr("class", "legend-item");
+      g.append("circle").attr("r", 5).attr("cx", 0);
+      g.append("text").attr("x", 12).attr("dy", "0.35em")
+        .style("font-size", "12px").style("fill", "#555");
+      return g;
+    });
+
+  items.transition(t)
+    .attr("transform", (d, i) => `translate(0,${i * 22})`);
+  items.select("circle").attr("fill", d => colorScale(d));
+  items.select("text").text(d => d);
+
+  // Hide box-plot elements
+  ensureGroup("boxes").selectAll("*").remove();
+  ensureGroup("strip-axis").selectAll("*").remove();
+}
+
+// --- Medium: Scatterplot only, legend below ---
+function renderMedium(W, H, t) {
+  const margin = { top: 50, right: 20, bottom: 80, left: 50 };
+  const plotW = W - margin.left - margin.right;
+  const plotH = H - margin.top - margin.bottom;
+
+  const x = d3.scaleLinear().domain([0, 100]).range([0, plotW]);
+  const y = d3.scaleLinear().domain([0, 100]).range([plotH, 0]);
+  const r = d3.scaleSqrt().domain([1, 10]).range([3, 9]);
+
+  ensureGroup("x-axis")
+    .transition(t)
+    .attr("transform", `translate(${margin.left},${margin.top + plotH})`)
+    .call(d3.axisBottom(x).ticks(Math.floor(plotW / 80)));
+
+  ensureGroup("y-axis")
+    .transition(t)
+    .attr("transform", `translate(${margin.left},${margin.top})`)
+    .call(d3.axisLeft(y).ticks(Math.floor(plotH / 60)));
+
+  const dots = ensureGroup("dots")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+  dots.selectAll("circle")
+    .data(data, (d, i) => i)
+    .join(
+      enter => enter.append("circle")
+        .attr("cx", d => x(d.x))
+        .attr("cy", d => y(d.y))
+        .attr("r", 0)
+        .attr("fill", d => colorScale(d.category))
+        .attr("opacity", 0.7)
+        .call(e => e.transition(t).attr("r", d => r(d.size))),
+      update => update.call(u => u.transition(t)
+        .attr("cx", d => x(d.x))
+        .attr("cy", d => y(d.y))
+        .attr("r", d => r(d.size))
+        .attr("fill", d => colorScale(d.category))
+        .attr("opacity", 0.7))
+    );
+
+  // Legend below chart
+  const legend = ensureGroup("legend");
+  const legendY = margin.top + plotH + 40;
+  const legendSpacing = Math.min(120, plotW / categories.length);
+  const legendStartX = margin.left + (plotW - legendSpacing * categories.length) / 2;
+  legend.transition(t)
+    .attr("transform", `translate(${legendStartX},${legendY})`);
+
+  const items = legend.selectAll(".legend-item")
+    .data(categories)
+    .join(enter => {
+      const g = enter.append("g").attr("class", "legend-item");
+      g.append("circle").attr("r", 5).attr("cx", 0);
+      g.append("text").attr("x", 12).attr("dy", "0.35em")
+        .style("font-size", "12px").style("fill", "#555");
+      return g;
+    });
+
+  items.transition(t)
+    .attr("transform", (d, i) => `translate(${i * legendSpacing},0)`);
+  items.select("circle").attr("fill", d => colorScale(d));
+  items.select("text").text(d => d);
+
+  // Hide marginal histograms and box plots
+  ensureGroup("top-hist").selectAll("*").remove();
+  ensureGroup("right-hist").selectAll("*").remove();
+  ensureGroup("boxes").selectAll("*").remove();
+  ensureGroup("strip-axis").selectAll("*").remove();
+}
+
+// --- Narrow: Strip plot with box plots ---
+function renderNarrow(W, H, t) {
+  const margin = { top: 50, right: 20, bottom: 40, left: 50 };
+  const plotW = W - margin.left - margin.right;
+  const plotH = H - margin.top - margin.bottom;
+
+  const x = d3.scaleBand().domain(categories).range([0, plotW]).padding(0.3);
+  const y = d3.scaleLinear().domain([0, 100]).range([plotH, 0]);
+
+  // Strip axis (band)
+  const stripAxis = ensureGroup("strip-axis");
+  stripAxis.transition(t)
+    .attr("transform", `translate(${margin.left},${margin.top + plotH})`);
+  stripAxis.call(d3.axisBottom(x));
+
+  ensureGroup("x-axis").selectAll("*").remove();
+
+  ensureGroup("y-axis")
+    .transition(t)
+    .attr("transform", `translate(${margin.left},${margin.top})`)
+    .call(d3.axisLeft(y).ticks(Math.floor(plotH / 60)));
+
+  // Jitter using deterministic offset per point
+  const jitterRng = d3.randomLcg(99);
+  const jitters = data.map(() => (jitterRng() - 0.5) * x.bandwidth() * 0.7);
+
+  const dots = ensureGroup("dots")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+  dots.selectAll("circle")
+    .data(data, (d, i) => i)
+    .join(
+      enter => enter.append("circle")
+        .attr("cx", (d, i) => x(d.category) + x.bandwidth() / 2 + jitters[i])
+        .attr("cy", d => y(d.y))
+        .attr("r", 0)
+        .attr("fill", d => colorScale(d.category))
+        .attr("opacity", 0.6)
+        .call(e => e.transition(t).attr("r", 3.5)),
+      update => update.call(u => u.transition(t)
+        .attr("cx", (d, i) => x(d.category) + x.bandwidth() / 2 + jitters[i])
+        .attr("cy", d => y(d.y))
+        .attr("r", 3.5)
+        .attr("fill", d => colorScale(d.category))
+        .attr("opacity", 0.6))
+    );
+
+  // Box plots
+  const grouped = d3.groups(data, d => d.category);
+  const boxes = ensureGroup("boxes")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+  const boxW = Math.min(x.bandwidth() * 0.4, 30);
+
+  const boxG = boxes.selectAll(".box")
+    .data(grouped, d => d[0])
+    .join(enter => enter.append("g").attr("class", "box"));
+
+  boxG.each(function([cat, vals]) {
+    const g = d3.select(this);
+    const sorted = vals.map(d => d.y).sort(d3.ascending);
+    const q1 = d3.quantile(sorted, 0.25);
+    const median = d3.quantile(sorted, 0.5);
+    const q3 = d3.quantile(sorted, 0.75);
+    const iqr = q3 - q1;
+    const lo = Math.max(d3.min(sorted), q1 - 1.5 * iqr);
+    const hi = Math.min(d3.max(sorted), q3 + 1.5 * iqr);
+    const cx = x(cat) + x.bandwidth() / 2;
+
+    // Whisker line
+    const whisker = g.selectAll(".whisker").data([0]);
+    whisker.join("line").attr("class", "whisker")
+      .attr("stroke", "#555").attr("stroke-width", 1)
+      .transition(t)
+      .attr("x1", cx).attr("x2", cx)
+      .attr("y1", y(lo)).attr("y2", y(hi));
+
+    // Box rect
+    const rect = g.selectAll(".box-rect").data([0]);
+    rect.join("rect").attr("class", "box-rect")
+      .attr("fill", "none").attr("stroke", "#555").attr("stroke-width", 1.5)
+      .transition(t)
+      .attr("x", cx - boxW / 2).attr("width", boxW)
+      .attr("y", y(q3)).attr("height", y(q1) - y(q3));
+
+    // Median line
+    const med = g.selectAll(".med-line").data([0]);
+    med.join("line").attr("class", "med-line")
+      .attr("stroke", "#333").attr("stroke-width", 2)
+      .transition(t)
+      .attr("x1", cx - boxW / 2).attr("x2", cx + boxW / 2)
+      .attr("y1", y(median)).attr("y2", y(median));
+  });
+
+  // Hide marginals and reposition legend off-screen (hidden)
+  ensureGroup("top-hist").selectAll("*").remove();
+  ensureGroup("right-hist").selectAll("*").remove();
+  ensureGroup("legend").selectAll("*").remove();
+}
+
+// --- Helpers ---
+function ensureGroup(id) {
+  let g = svg.select(`g.${id}`);
+  if (g.empty()) g = svg.append("g").attr("class", id);
+  return g;
+}
+
+// --- ResizeObserver ---
+let lastWidth = 0;
+const ro = new ResizeObserver(([entry]) => {
+  const { width, height } = entry.contentRect;
+  if (width < 1 || Math.abs(width - lastWidth) < 1) return;
+  lastWidth = width;
+  render(width, height);
+});
+ro.observe(wrapper);
+
+</script>
+</body>
+</html>

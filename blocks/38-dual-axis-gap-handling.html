@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Weather Station — Temperature & Rainfall (2023-2024)</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #fafafa; font-family: system-ui, sans-serif; display: flex; justify-content: center; padding: 2rem; }
+  svg { max-width: 100%; height: auto; }
+  .axis-left text, .axis-left .tick line { color: #4477AA; stroke: #4477AA; }
+  .axis-left .domain { stroke: #4477AA; }
+  .axis-right text, .axis-right .tick line { color: #44AA99; stroke: #44AA99; }
+  .axis-right .domain { stroke: #44AA99; }
+  .axis-bottom .domain, .axis-bottom .tick line { stroke: #666; }
+  .axis-bottom text { fill: #666; }
+  .gap-label { font-size: 9px; fill: #888; }
+</style>
+</head>
+<body>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Data generation ---
+const tempGapStart = Date.UTC(2023, 6, 5);  // July 5
+const tempGapEnd   = Date.UTC(2023, 6, 26); // July 26 (3-week gap)
+const rainGapStart = Date.UTC(2023, 9, 1);  // Oct 1
+const rainGapEnd   = Date.UTC(2023, 9, 15); // Oct 15 (2-week gap)
+
+// Daily temperature with seasonal pattern
+const dayMs = 86400000;
+const startDate = Date.UTC(2023, 0, 1);
+const endDate   = Date.UTC(2024, 11, 31);
+const tempData = [];
+for (let t = startDate; t <= endDate; t += dayMs) {
+  // Skip gap period
+  if (t >= tempGapStart && t < tempGapEnd) continue;
+  const d = new Date(t);
+  const dayOfYear = (t - Date.UTC(d.getUTCFullYear(), 0, 1)) / dayMs;
+  // Seasonal: peaks ~July (day ~185), troughs ~Jan
+  const seasonal = 62.5 + 32.5 * Math.sin((dayOfYear - 80) * 2 * Math.PI / 365);
+  const noise = (Math.random() - 0.5) * 12;
+  const value = Math.max(30, Math.min(95, seasonal + noise));
+  tempData.push({ date: new Date(t), value });
+}
+
+// Monthly rainfall
+const rainData = [];
+for (let y = 2023; y <= 2024; y++) {
+  for (let m = 0; m < 12; m++) {
+    const monthStart = new Date(Date.UTC(y, m, 1));
+    // Check if this month overlaps the rain gap
+    const isGapMonth = (y === 2023 && m === 9); // October 2023
+    // Seasonal: higher spring/summer
+    const seasonal = 3.5 + 3 * Math.sin((m - 1) * Math.PI / 6);
+    const noise = (Math.random() - 0.5) * 2;
+    const value = isGapMonth ? null : Math.max(0, Math.min(8, seasonal + noise));
+    rainData.push({ date: monthStart, value });
+  }
+}
+
+// --- Dimensions ---
+const width = 800, height = 400;
+const margin = { top: 50, right: 65, bottom: 40, left: 60 };
+const w = width - margin.left - margin.right;
+const h = height - margin.top - margin.bottom;
+
+const svg = d3.select("body").append("svg")
+    .attr("viewBox", `0 0 ${width} ${height}`)
+    .attr("width", width)
+    .attr("height", height);
+
+// Hatching pattern for missing rain bars
+const defs = svg.append("defs");
+const hatch = defs.append("pattern")
+    .attr("id", "hatch")
+    .attr("patternUnits", "userSpaceOnUse")
+    .attr("width", 6)
+    .attr("height", 6);
+hatch.append("path")
+    .attr("d", "M0,6 L6,0")
+    .attr("stroke", "#44AA99")
+    .attr("stroke-width", 1)
+    .attr("stroke-opacity", 0.5);
+
+const g = svg.append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+// --- Scales ---
+const x = d3.scaleUtc()
+    .domain([new Date(Date.UTC(2023, 0, 1)), new Date(Date.UTC(2025, 0, 1))])
+    .range([0, w]);
+
+const tempExtent = d3.extent(tempData, d => d.value);
+const yTempMin = Math.floor(tempExtent[0] / 5) * 5;
+const yTempMax = Math.ceil(tempExtent[1] / 5) * 5;
+const yTemp = d3.scaleLinear()
+    .domain([yTempMin, yTempMax])
+    .range([h, 0])
+    .nice();
+
+const yRain = d3.scaleLinear()
+    .domain([0, 8])
+    .range([h, 0]);
+
+// --- Reference band: normal temp range (60-85°F) ---
+g.append("rect")
+    .attr("x", 0)
+    .attr("y", yTemp(85))
+    .attr("width", w)
+    .attr("height", yTemp(60) - yTemp(85))
+    .attr("fill", "#4477AA")
+    .attr("opacity", 0.1);
+
+g.append("text")
+    .attr("x", 4)
+    .attr("y", yTemp(85) + 12)
+    .attr("fill", "#4477AA")
+    .attr("font-size", "9px")
+    .attr("opacity", 0.7)
+    .text("Normal range (60–85°F)");
+
+// --- Heavy rain threshold ---
+g.append("line")
+    .attr("x1", 0)
+    .attr("x2", w)
+    .attr("y1", yRain(6))
+    .attr("y2", yRain(6))
+    .attr("stroke", "#EE7733")
+    .attr("stroke-width", 1.5)
+    .attr("stroke-dasharray", "6,3");
+
+g.append("text")
+    .attr("x", w - 4)
+    .attr("y", yRain(6) - 4)
+    .attr("text-anchor", "end")
+    .attr("fill", "#EE7733")
+    .attr("font-size", "9px")
+    .text("Heavy rain threshold (6 in.)");
+
+// --- Rainfall bars ---
+const barWidth = w / 28; // ~24 months, a bit narrower
+rainData.forEach(d => {
+  const bx = x(d.date) + 2;
+  if (d.value === null) {
+    // Hatched empty bar for missing data
+    g.append("rect")
+        .attr("x", bx)
+        .attr("y", yRain(4))
+        .attr("width", barWidth)
+        .attr("height", yRain(0) - yRain(4))
+        .attr("fill", "url(#hatch)")
+        .attr("stroke", "#44AA99")
+        .attr("stroke-opacity", 0.4)
+        .attr("stroke-width", 0.5);
+    g.append("text")
+        .attr("x", bx + barWidth / 2)
+        .attr("y", yRain(4) - 4)
+        .attr("text-anchor", "middle")
+        .attr("class", "gap-label")
+        .text("No data");
+  } else {
+    g.append("rect")
+        .attr("x", bx)
+        .attr("y", yRain(d.value))
+        .attr("width", barWidth)
+        .attr("height", yRain(0) - yRain(d.value))
+        .attr("fill", "#44AA99")
+        .attr("opacity", 0.45);
+  }
+});
+
+// --- Temperature line with gap handling ---
+// Find gap boundaries
+const gapStartIdx = tempData.findIndex(d => d.date.getTime() >= tempGapEnd) - 1;
+const lastBeforeGap = tempData.filter(d => d.date.getTime() < tempGapStart).at(-1);
+const firstAfterGap = tempData.find(d => d.date.getTime() >= tempGapEnd);
+
+// Segments: before gap, after gap
+const beforeGap = tempData.filter(d => d.date.getTime() < tempGapStart);
+const afterGap  = tempData.filter(d => d.date.getTime() >= tempGapEnd);
+
+const line = d3.line()
+    .x(d => x(d.date))
+    .y(d => yTemp(d.value))
+    .curve(d3.curveMonotoneX);
+
+// Solid segments
+[beforeGap, afterGap].forEach(segment => {
+  g.append("path")
+      .datum(segment)
+      .attr("d", line)
+      .attr("fill", "none")
+      .attr("stroke", "#4477AA")
+      .attr("stroke-width", 1.5);
+});
+
+// Dashed bridge across gap
+if (lastBeforeGap && firstAfterGap) {
+  g.append("line")
+      .attr("x1", x(lastBeforeGap.date))
+      .attr("y1", yTemp(lastBeforeGap.value))
+      .attr("x2", x(firstAfterGap.date))
+      .attr("y2", yTemp(firstAfterGap.value))
+      .attr("stroke", "#4477AA")
+      .attr("stroke-width", 1.5)
+      .attr("stroke-dasharray", "5,4")
+      .attr("opacity", 0.6);
+
+  // Gap boundary markers: small "x" marks
+  [lastBeforeGap, firstAfterGap].forEach((pt, i) => {
+    const px = x(pt.date), py = yTemp(pt.value);
+    const sz = 4;
+    g.append("line").attr("x1", px - sz).attr("y1", py - sz).attr("x2", px + sz).attr("y2", py + sz)
+        .attr("stroke", "#CC3311").attr("stroke-width", 1.5);
+    g.append("line").attr("x1", px - sz).attr("y1", py + sz).attr("x2", px + sz).attr("y2", py - sz)
+        .attr("stroke", "#CC3311").attr("stroke-width", 1.5);
+  });
+
+  // "Sensor offline" label at midpoint of gap
+  const midGapDate = new Date((lastBeforeGap.date.getTime() + firstAfterGap.date.getTime()) / 2);
+  const midGapVal = (lastBeforeGap.value + firstAfterGap.value) / 2;
+  g.append("text")
+      .attr("x", x(midGapDate))
+      .attr("y", yTemp(midGapVal) - 10)
+      .attr("text-anchor", "middle")
+      .attr("fill", "#CC3311")
+      .attr("font-size", "9px")
+      .text("Sensor offline");
+}
+
+// --- Broken axis zigzag (if temp doesn't start at 0) ---
+if (yTempMin > 0) {
+  const zigY = h; // bottom of chart area
+  const zigW = 8, zigH = 6, zigCount = 3;
+  const zigPath = d3.range(zigCount).map(i => {
+    const yOff = zigY - i * zigH;
+    return `${i % 2 === 0 ? -zigW / 2 : zigW / 2},${yOff}`;
+  });
+  // Draw zigzag on left axis
+  const pts = [];
+  for (let i = 0; i <= zigCount; i++) {
+    pts.push([i % 2 === 0 ? -zigW : zigW, h - 2 - i * zigH]);
+  }
+  g.append("polyline")
+      .attr("points", pts.map(p => p.join(",")).join(" "))
+      .attr("fill", "none")
+      .attr("stroke", "#4477AA")
+      .attr("stroke-width", 1.5);
+  // White rect to cover axis line behind zigzag
+  g.append("rect")
+      .attr("x", -zigW - 2)
+      .attr("y", h - 2 - (zigCount + 0.5) * zigH)
+      .attr("width", zigW * 2 + 4)
+      .attr("height", (zigCount + 1) * zigH)
+      .attr("fill", "#fafafa")
+      .attr("opacity", 0.8)
+      .lower();
+}
+
+// --- Axes ---
+// X axis
+g.append("g")
+    .attr("class", "axis-bottom")
+    .attr("transform", `translate(0,${h})`)
+    .call(d3.axisBottom(x)
+        .ticks(d3.utcMonth.every(2))
+        .tickFormat(d3.utcFormat("%b '%y"))
+        .tickSizeOuter(0))
+  .selectAll("text")
+    .attr("transform", "rotate(-30)")
+    .attr("text-anchor", "end")
+    .attr("dx", "-0.5em")
+    .attr("dy", "0.3em");
+
+// Left Y axis (temperature)
+g.append("g")
+    .attr("class", "axis-left")
+    .call(d3.axisLeft(yTemp).ticks(6).tickFormat(d => `${d}°F`).tickSizeOuter(0));
+
+// Left axis label
+g.append("text")
+    .attr("transform", "rotate(-90)")
+    .attr("x", -h / 2)
+    .attr("y", -45)
+    .attr("text-anchor", "middle")
+    .attr("fill", "#4477AA")
+    .attr("font-size", "12px")
+    .text("Temperature (°F)");
+
+// Right Y axis (rainfall)
+g.append("g")
+    .attr("class", "axis-right")
+    .attr("transform", `translate(${w},0)`)
+    .call(d3.axisRight(yRain).ticks(5).tickFormat(d => `${d} in.`).tickSizeOuter(0));
+
+// Right axis label
+g.append("text")
+    .attr("transform", "rotate(90)")
+    .attr("x", h / 2)
+    .attr("y", -w - 50)
+    .attr("text-anchor", "middle")
+    .attr("fill", "#44AA99")
+    .attr("font-size", "12px")
+    .text("Rainfall (inches)");
+
+// --- Title ---
+svg.append("text")
+    .attr("x", width / 2)
+    .attr("y", 24)
+    .attr("text-anchor", "middle")
+    .attr("font-size", "16px")
+    .attr("font-weight", 600)
+    .attr("fill", "#333")
+    .text("Weather Station \u2014 Temperature & Rainfall (2023\u20132024)");
+
+// --- Legend ---
+const legend = svg.append("g")
+    .attr("transform", `translate(${margin.left + 10}, ${margin.top - 12})`);
+
+legend.append("line").attr("x1", 0).attr("x2", 20).attr("y1", 0).attr("y2", 0)
+    .attr("stroke", "#4477AA").attr("stroke-width", 1.5);
+legend.append("text").attr("x", 24).attr("y", 4).attr("font-size", "10px").attr("fill", "#4477AA").text("Temperature");
+
+legend.append("rect").attr("x", 110).attr("y", -6).attr("width", 12).attr("height", 12)
+    .attr("fill", "#44AA99").attr("opacity", 0.45);
+legend.append("text").attr("x", 126).attr("y", 4).attr("font-size", "10px").attr("fill", "#44AA99").text("Rainfall");
+</script>
+</body>
+</html>

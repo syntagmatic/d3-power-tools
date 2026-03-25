@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Daily Energy Consumption by Month — Small Multiples</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    color: #333;
+    display: flex;
+    justify-content: center;
+    padding: 1rem;
+  }
+  #chart-container {
+    width: 100%;
+    max-width: 960px;
+  }
+  svg { display: block; width: 100%; height: auto; }
+  .panel-title {
+    font-size: 11px;
+    font-weight: 600;
+    fill: #444;
+  }
+  .axis text {
+    font-size: 9px;
+    fill: #666;
+  }
+  .axis line, .axis path {
+    stroke: #ccc;
+  }
+  .axis-label {
+    font-size: 11px;
+    fill: #555;
+  }
+  .crosshair {
+    stroke: #999;
+    stroke-width: 0.5;
+    stroke-dasharray: 2,2;
+    pointer-events: none;
+  }
+  .tooltip-bg {
+    fill: rgba(255,255,255,0.92);
+    stroke: #ccc;
+    stroke-width: 0.5;
+    rx: 3;
+  }
+  .tooltip-text {
+    font-size: 9px;
+    fill: #333;
+  }
+  .chart-title {
+    font-size: 16px;
+    font-weight: 600;
+    fill: #222;
+  }
+  .legend-text {
+    font-size: 10px;
+    fill: #555;
+  }
+</style>
+</head>
+<body>
+<div id="chart-container"></div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Tol sequential blues for 3 years ---
+const yearColors = {
+  2022: "#BBCCEE",  // light
+  2023: "#6699CC",  // medium
+  2024: "#224477"   // dark
+};
+const years = [2022, 2023, 2024];
+const monthNames = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+// --- Generate synthetic data ---
+function generateData() {
+  const data = [];
+  const rng = d3.randomNormal(0, 3);
+  for (const year of years) {
+    for (let month = 0; month < 12; month++) {
+      const daysInMonth = new Date(year, month + 1, 0).getDate();
+      for (let day = 1; day <= daysInMonth; day++) {
+        const date = new Date(year, month, day);
+        const dow = date.getDay();
+        // Seasonal pattern: winter high (~45), summer AC (~40), spring/fall low (~25)
+        // Use cosine to model: peak in Jan (month=0) and Jul (month=6)
+        const winterComponent = 20 * Math.cos((month) * Math.PI / 6);   // peaks Jan, trough Jul
+        const summerAC = 15 * Math.cos((month - 6) * Math.PI / 6);      // peaks Jul, trough Jan
+        const base = 25 + Math.max(winterComponent, 0) + Math.max(summerAC, 0);
+        // Weekend reduction
+        const weekendFactor = (dow === 0 || dow === 6) ? -5 : 0;
+        const value = Math.max(5, base + weekendFactor + rng());
+        data.push({ year, month, day, value, dow });
+      }
+    }
+  }
+  return data;
+}
+
+const data = generateData();
+
+// --- Layout dimensions ---
+const totalWidth = 960;
+const cols = 4;
+const rows = 3;
+const margin = { top: 50, right: 20, bottom: 40, left: 50 };
+const cellGap = { x: 12, y: 10 };
+const cellWidth = (totalWidth - margin.left - margin.right - (cols - 1) * cellGap.x) / cols;
+const cellHeight = 100;
+const cellMargin = { top: 18, right: 4, bottom: 16, left: 0 };
+const plotWidth = cellWidth - cellMargin.left - cellMargin.right;
+const plotHeight = cellHeight - cellMargin.top - cellMargin.bottom;
+const totalHeight = margin.top + rows * cellHeight + (rows - 1) * cellGap.y + margin.bottom;
+
+// --- Shared scales (computed before loop) ---
+const xScale = d3.scaleLinear().domain([1, 31]).range([0, plotWidth]);
+const yScale = d3.scaleLinear().domain([0, 60]).range([plotHeight, 0]);
+
+// --- Group data by month, then year ---
+const byMonth = d3.group(data, d => d.month);
+
+// --- Create SVG with viewBox ---
+const svg = d3.select("#chart-container")
+  .append("svg")
+    .attr("viewBox", `0 0 ${totalWidth} ${totalHeight}`)
+    .attr("preserveAspectRatio", "xMidYMid meet");
+
+// Title
+svg.append("text")
+    .attr("class", "chart-title")
+    .attr("x", totalWidth / 2)
+    .attr("y", 22)
+    .attr("text-anchor", "middle")
+    .text("Daily Energy Consumption by Month (2022\u20132024)");
+
+// Legend
+const legendG = svg.append("g")
+    .attr("transform", `translate(${totalWidth / 2 - 80}, 33)`);
+years.forEach((yr, i) => {
+  const lx = i * 60;
+  legendG.append("rect")
+      .attr("x", lx).attr("y", -4).attr("width", 14).attr("height", 3)
+      .attr("fill", yearColors[yr]);
+  legendG.append("text")
+      .attr("class", "legend-text")
+      .attr("x", lx + 18).attr("y", 0)
+      .text(yr);
+});
+
+// Shared y-axis label
+svg.append("text")
+    .attr("class", "axis-label")
+    .attr("transform", `translate(14, ${margin.top + totalHeight / 2 - margin.top / 2}) rotate(-90)`)
+    .attr("text-anchor", "middle")
+    .text("kWh");
+
+// Shared x-axis label
+svg.append("text")
+    .attr("class", "axis-label")
+    .attr("x", totalWidth / 2)
+    .attr("y", totalHeight - 6)
+    .attr("text-anchor", "middle")
+    .text("Day of Month");
+
+// --- Line and area generators ---
+const lineGen = d3.line()
+    .x(d => xScale(d.day))
+    .y(d => yScale(d.value))
+    .curve(d3.curveMonotoneX);
+
+const areaGen = d3.area()
+    .x(d => xScale(d.day))
+    .y0(plotHeight)
+    .y1(d => yScale(d.value))
+    .curve(d3.curveMonotoneX);
+
+// --- Render panels ---
+const panels = [];
+const crosshairs = [];
+
+for (let month = 0; month < 12; month++) {
+  const col = month % cols;
+  const row = Math.floor(month / cols);
+  const cx = margin.left + col * (cellWidth + cellGap.x);
+  const cy = margin.top + row * (cellHeight + cellGap.y);
+
+  const g = svg.append("g")
+      .attr("transform", `translate(${cx + cellMargin.left}, ${cy + cellMargin.top})`);
+
+  // Clip path
+  const clipId = `clip-${month}`;
+  g.append("clipPath").attr("id", clipId)
+    .append("rect")
+      .attr("width", plotWidth).attr("height", plotHeight);
+
+  // Background
+  g.append("rect")
+      .attr("width", plotWidth).attr("height", plotHeight)
+      .attr("fill", "#fff").attr("stroke", "#e0e0e0").attr("stroke-width", 0.5);
+
+  // Light gridlines
+  yScale.ticks(3).forEach(t => {
+    if (t === 0) return;
+    g.append("line")
+        .attr("x1", 0).attr("x2", plotWidth)
+        .attr("y1", yScale(t)).attr("y2", yScale(t))
+        .attr("stroke", "#f0f0f0").attr("stroke-width", 0.5);
+  });
+
+  // Month title
+  svg.append("text")
+      .attr("class", "panel-title")
+      .attr("x", cx + cellMargin.left + plotWidth / 2)
+      .attr("y", cy + 12)
+      .attr("text-anchor", "middle")
+      .text(monthNames[month]);
+
+  const monthData = byMonth.get(month) || [];
+
+  // Draw each year
+  const dataG = g.append("g").attr("clip-path", `url(#${clipId})`);
+  for (const yr of years) {
+    const yrData = monthData.filter(d => d.year === yr).sort((a, b) => a.day - b.day);
+    if (yrData.length === 0) continue;
+
+    dataG.append("path")
+        .datum(yrData)
+        .attr("d", areaGen)
+        .attr("fill", yearColors[yr])
+        .attr("fill-opacity", 0.15);
+
+    dataG.append("path")
+        .datum(yrData)
+        .attr("d", lineGen)
+        .attr("fill", "none")
+        .attr("stroke", yearColors[yr])
+        .attr("stroke-width", 1.2);
+  }
+
+  // Y-axis: only on leftmost column
+  if (col === 0) {
+    const yAxis = d3.axisLeft(yScale).ticks(3).tickSize(-3);
+    g.append("g").attr("class", "axis").call(yAxis)
+      .call(g => g.select(".domain").remove());
+  }
+
+  // X-axis: only on bottom row
+  if (row === rows - 1) {
+    const daysInMonth = new Date(2024, month + 1, 0).getDate();
+    const ticks = [1, 10, 20, daysInMonth];
+    const xAxis = d3.axisBottom(xScale).tickValues(ticks).tickSize(-3)
+        .tickFormat(d3.format("d"));
+    g.append("g").attr("class", "axis")
+        .attr("transform", `translate(0, ${plotHeight})`)
+        .call(xAxis)
+      .call(g => g.select(".domain").remove());
+  }
+
+  // Crosshair line (hidden by default)
+  const crosshair = g.append("line")
+      .attr("class", "crosshair")
+      .attr("y1", 0).attr("y2", plotHeight)
+      .style("display", "none");
+  crosshairs.push(crosshair);
+
+  panels.push({ month, g, cx: cx + cellMargin.left, cy: cy + cellMargin.top });
+}
+
+// --- Tooltip group ---
+const tooltipG = svg.append("g").style("display", "none").attr("pointer-events", "none");
+const tooltipBg = tooltipG.append("rect").attr("class", "tooltip-bg");
+const tooltipTexts = [];
+for (let i = 0; i < 5; i++) {
+  tooltipTexts.push(
+    tooltipG.append("text").attr("class", "tooltip-text").attr("x", 6)
+  );
+}
+
+// --- Interaction overlays ---
+for (const panel of panels) {
+  panel.g.append("rect")
+      .attr("width", plotWidth).attr("height", plotHeight)
+      .attr("fill", "none").attr("pointer-events", "all")
+      .on("pointermove", (event) => {
+        const [mx] = d3.pointer(event);
+        const day = Math.round(xScale.invert(mx));
+        if (day < 1 || day > 31) return;
+        const px = xScale(day);
+
+        // Update all crosshairs
+        crosshairs.forEach(ch => ch.attr("x1", px).attr("x2", px).style("display", null));
+
+        // Build tooltip content
+        const monthData = byMonth.get(panel.month) || [];
+        const lines = [`Day ${day}`];
+        for (const yr of years) {
+          const d = monthData.find(dd => dd.year === yr && dd.day === day);
+          lines.push(`${yr}: ${d ? d.value.toFixed(1) : "\u2014"} kWh`);
+        }
+
+        // Position tooltip near cursor
+        const svgNode = svg.node();
+        const pt = svgNode.createSVGPoint();
+        pt.x = event.clientX;
+        pt.y = event.clientY;
+        const svgPt = pt.matrixTransform(svgNode.getScreenCTM().inverse());
+
+        let tx = svgPt.x + 10;
+        let ty = svgPt.y - 10;
+        const tw = 100;
+        const th = lines.length * 13 + 6;
+        // Keep within viewBox
+        if (tx + tw > totalWidth - 5) tx = svgPt.x - tw - 10;
+        if (ty + th > totalHeight - 5) ty = totalHeight - th - 5;
+        if (ty < 5) ty = 5;
+
+        tooltipG.style("display", null).attr("transform", `translate(${tx}, ${ty})`);
+        tooltipBg.attr("width", tw).attr("height", th);
+
+        lines.forEach((text, i) => {
+          if (i < tooltipTexts.length) {
+            tooltipTexts[i].text(text).attr("y", 12 + i * 13)
+                .attr("font-weight", i === 0 ? 600 : 400)
+                .attr("fill", i > 0 ? yearColors[years[i - 1]] : "#333");
+          }
+        });
+        // Hide extra lines
+        for (let i = lines.length; i < tooltipTexts.length; i++) {
+          tooltipTexts[i].text("");
+        }
+      })
+      .on("pointerleave", () => {
+        crosshairs.forEach(ch => ch.style("display", "none"));
+        tooltipG.style("display", "none");
+      });
+}
+</script>
+</body>
+</html>

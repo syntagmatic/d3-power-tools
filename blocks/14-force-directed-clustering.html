@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Force-Directed Clustering</title>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif; background: #fafafa; }
+  #container { position: relative; width: 960px; height: 700px; margin: 20px auto; }
+  canvas, svg { position: absolute; top: 0; left: 0; }
+  svg { pointer-events: none; }
+  .cluster-label { font-size: 13px; font-weight: 600; fill: #555; text-anchor: middle; }
+  #tooltip {
+    position: absolute; pointer-events: none; display: none;
+    background: rgba(0,0,0,0.8); color: #fff; padding: 5px 9px;
+    border-radius: 4px; font-size: 12px; white-space: nowrap;
+  }
+  h2 { text-align: center; margin: 16px 0 4px; font-size: 16px; color: #333; font-weight: 500; }
+</style>
+</head>
+<body>
+<h2>Force-Directed Network with 7 Clusters (400 nodes, ~600 edges)</h2>
+<div id="container">
+  <canvas></canvas>
+  <svg></svg>
+  <div id="tooltip"></div>
+</div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+const width = 960, height = 700;
+const dpr = devicePixelRatio || 1;
+
+// --- Canvas setup (DPR-aware) ---
+const container = d3.select("#container");
+const canvas = container.select("canvas")
+    .attr("width", width * dpr).attr("height", height * dpr)
+    .style("width", `${width}px`).style("height", `${height}px`)
+    .node();
+const ctx = canvas.getContext("2d");
+ctx.scale(dpr, dpr);
+
+// --- SVG overlay for labels ---
+const svg = container.select("svg")
+    .attr("width", width).attr("height", height);
+
+const tooltip = container.select("#tooltip");
+
+// --- Colors: Tol bright + muted ---
+const clusterColors = [
+  "#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE", "#AA3377", "#BBBBBB"
+];
+
+// --- Data generation ---
+const clusterSizes = [80, 70, 60, 55, 50, 45, 40];
+const numClusters = 7;
+const rng = d3.randomLcg(42);
+const rand = d3.randomUniform.source(rng)(0, 1);
+
+// Arrange cluster centroids in a circle
+const cx = width / 2, cy = height / 2, cRadius = 180;
+const centroids = d3.range(numClusters).map(i => {
+  const angle = (2 * Math.PI * i) / numClusters - Math.PI / 2;
+  return { x: cx + cRadius * Math.cos(angle), y: cy + cRadius * Math.sin(angle) };
+});
+
+// Generate nodes
+const nodes = [];
+let nodeId = 0;
+clusterSizes.forEach((size, cluster) => {
+  for (let i = 0; i < size; i++) {
+    nodes.push({
+      id: nodeId++,
+      cluster,
+      value: Math.floor(rand() * 5) + 1, // 1-5
+    });
+  }
+});
+
+// Generate edges: ~600 total, 80% within-cluster, 20% between-cluster
+const links = [];
+const withinCount = Math.round(600 * 0.8);
+const betweenCount = 600 - withinCount;
+
+// Group node indices by cluster
+const clusterIndices = d3.range(numClusters).map(c =>
+  nodes.filter(n => n.cluster === c).map(n => n.id)
+);
+
+// Within-cluster edges — pick cluster proportional to size
+for (let i = 0; i < withinCount; i++) {
+  const c = Math.floor(rand() * numClusters);
+  const cNodes = clusterIndices[c];
+  if (cNodes.length < 2) continue;
+  const a = cNodes[Math.floor(rand() * cNodes.length)];
+  let b = a;
+  while (b === a) b = cNodes[Math.floor(rand() * cNodes.length)];
+  links.push({ source: a, target: b });
+}
+
+// Between-cluster edges
+for (let i = 0; i < betweenCount; i++) {
+  const c1 = Math.floor(rand() * numClusters);
+  let c2 = c1;
+  while (c2 === c1) c2 = Math.floor(rand() * numClusters);
+  const a = clusterIndices[c1][Math.floor(rand() * clusterIndices[c1].length)];
+  const b = clusterIndices[c2][Math.floor(rand() * clusterIndices[c2].length)];
+  links.push({ source: a, target: b });
+}
+
+// Deduplicate links
+const linkSet = new Set();
+const dedupedLinks = [];
+for (const l of links) {
+  const key = l.source < l.target ? `${l.source}-${l.target}` : `${l.target}-${l.source}`;
+  if (!linkSet.has(key)) { linkSet.add(key); dedupedLinks.push(l); }
+}
+
+// Build adjacency for neighbor lookup
+const neighbors = new Map(nodes.map(n => [n.id, new Set()]));
+for (const l of dedupedLinks) {
+  neighbors.get(typeof l.source === "object" ? l.source.id : l.source)
+    .add(typeof l.target === "object" ? l.target.id : l.target);
+  neighbors.get(typeof l.target === "object" ? l.target.id : l.target)
+    .add(typeof l.source === "object" ? l.source.id : l.source);
+}
+
+// Radius scale
+const rScale = d3.scaleLinear().domain([1, 5]).range([2, 6]);
+
+// --- Force simulation ---
+const simulation = d3.forceSimulation(nodes)
+  .force("link", d3.forceLink(dedupedLinks).id(d => d.id)
+    .distance(l => {
+      const s = typeof l.source === "object" ? l.source : nodes[l.source];
+      const t = typeof l.target === "object" ? l.target : nodes[l.target];
+      return s.cluster === t.cluster ? 30 : 80;
+    }))
+  .force("charge", d3.forceManyBody().strength(-20))
+  .force("x", d3.forceX(d => centroids[d.cluster].x).strength(0.15))
+  .force("y", d3.forceY(d => centroids[d.cluster].y).strength(0.15))
+  .force("collide", d3.forceCollide(d => rScale(d.value) * 2 + 1))
+  .on("tick", draw);
+
+// --- Quadtree for hit detection ---
+let quadtree;
+function rebuildQuadtree() {
+  quadtree = d3.quadtree()
+    .x(d => d.x).y(d => d.y)
+    .addAll(nodes);
+}
+
+// --- Drawing ---
+let hoveredNode = null;
+let highlightedIds = null;
+
+function draw() {
+  ctx.clearRect(0, 0, width, height);
+
+  // Draw edges
+  ctx.lineWidth = 0.5;
+  if (highlightedIds) {
+    // Dim non-highlighted edges
+    ctx.strokeStyle = "rgba(180,180,180,0.05)";
+    ctx.beginPath();
+    for (const l of dedupedLinks) {
+      if (highlightedIds.has(l.source.id) && highlightedIds.has(l.target.id)) continue;
+      ctx.moveTo(l.source.x, l.source.y);
+      ctx.lineTo(l.target.x, l.target.y);
+    }
+    ctx.stroke();
+
+    // Highlighted edges
+    ctx.strokeStyle = "rgba(50,50,50,0.4)";
+    ctx.beginPath();
+    for (const l of dedupedLinks) {
+      if (highlightedIds.has(l.source.id) && highlightedIds.has(l.target.id)) {
+        ctx.moveTo(l.source.x, l.source.y);
+        ctx.lineTo(l.target.x, l.target.y);
+      }
+    }
+    ctx.stroke();
+  } else {
+    ctx.strokeStyle = "rgba(150,150,150,0.15)";
+    ctx.beginPath();
+    for (const l of dedupedLinks) {
+      ctx.moveTo(l.source.x, l.source.y);
+      ctx.lineTo(l.target.x, l.target.y);
+    }
+    ctx.stroke();
+  }
+
+  // Draw nodes batched by cluster
+  const groups = d3.group(nodes, d => d.cluster);
+  for (const [cluster, pts] of groups) {
+    const baseColor = clusterColors[cluster];
+    if (highlightedIds) {
+      // Dimmed nodes
+      ctx.globalAlpha = 0.15;
+      ctx.fillStyle = baseColor;
+      ctx.beginPath();
+      for (const d of pts) {
+        if (highlightedIds.has(d.id)) continue;
+        const r = rScale(d.value);
+        ctx.moveTo(d.x + r, d.y);
+        ctx.arc(d.x, d.y, r, 0, Math.PI * 2);
+      }
+      ctx.fill();
+
+      // Highlighted nodes
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = baseColor;
+      ctx.beginPath();
+      for (const d of pts) {
+        if (!highlightedIds.has(d.id)) continue;
+        const r = rScale(d.value);
+        ctx.moveTo(d.x + r, d.y);
+        ctx.arc(d.x, d.y, r, 0, Math.PI * 2);
+      }
+      ctx.fill();
+    } else {
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = baseColor;
+      ctx.beginPath();
+      for (const d of pts) {
+        const r = rScale(d.value);
+        ctx.moveTo(d.x + r, d.y);
+        ctx.arc(d.x, d.y, r, 0, Math.PI * 2);
+      }
+      ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  // Draw hovered node ring
+  if (hoveredNode) {
+    const r = rScale(hoveredNode.value) + 2;
+    ctx.strokeStyle = "#222";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(hoveredNode.x, hoveredNode.y, r, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  rebuildQuadtree();
+
+  // Update SVG cluster labels to actual centroid averages
+  const clusterCentroids = d3.range(numClusters).map(c => {
+    const pts = nodes.filter(n => n.cluster === c);
+    return {
+      x: d3.mean(pts, d => d.x),
+      y: d3.mean(pts, d => d.y)
+    };
+  });
+  svg.selectAll(".cluster-label")
+    .data(clusterCentroids)
+    .join("text")
+      .attr("class", "cluster-label")
+      .attr("x", d => d.x)
+      .attr("y", d => d.y - 30)
+      .text((d, i) => `Cluster ${i + 1}`);
+}
+
+// --- Interaction: hover with quadtree ---
+d3.select(canvas).on("pointermove", (event) => {
+  const [mx, my] = d3.pointer(event, canvas);
+  const nearest = quadtree ? quadtree.find(mx, my, 20) : null;
+  if (nearest !== hoveredNode) {
+    hoveredNode = nearest;
+    if (nearest) {
+      const nbs = neighbors.get(nearest.id);
+      highlightedIds = new Set([nearest.id, ...nbs]);
+      const degree = nbs.size;
+      tooltip.style("display", "block")
+        .style("left", `${nearest.x + 12}px`)
+        .style("top", `${nearest.y - 8}px`)
+        .text(`Node ${nearest.id} | Cluster ${nearest.cluster + 1} | Degree: ${degree}`);
+    } else {
+      highlightedIds = null;
+      tooltip.style("display", "none");
+    }
+    draw();
+  }
+});
+
+d3.select(canvas).on("pointerleave", () => {
+  hoveredNode = null;
+  highlightedIds = null;
+  tooltip.style("display", "none");
+  draw();
+});
+
+// --- Interaction: drag ---
+const drag = d3.drag()
+  .subject((event) => {
+    const [mx, my] = d3.pointer(event, canvas);
+    return quadtree ? quadtree.find(mx, my, 20) : null;
+  })
+  .on("start", (event) => {
+    if (!event.active) simulation.alphaTarget(0.3).restart();
+    event.subject.fx = event.subject.x;
+    event.subject.fy = event.subject.y;
+  })
+  .on("drag", (event) => {
+    event.subject.fx = event.x;
+    event.subject.fy = event.y;
+  })
+  .on("end", (event) => {
+    if (!event.active) simulation.alphaTarget(0);
+    event.subject.fx = null;
+    event.subject.fy = null;
+  });
+
+d3.select(canvas).call(drag);
+</script>
+</body>
+</html>

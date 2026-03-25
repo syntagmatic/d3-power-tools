@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>File System Explorer — Zoomable Treemap</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: #fafafa; color: #333; }
+  #header { padding: 16px 20px 8px; }
+  #header h1 { font-size: 18px; font-weight: 600; }
+  #header .subtitle { font-size: 13px; color: #666; margin-top: 2px; }
+  #breadcrumb { padding: 4px 20px 8px; font-size: 13px; display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+  #breadcrumb span { cursor: pointer; color: #4477AA; }
+  #breadcrumb span:hover { text-decoration: underline; }
+  #breadcrumb span.current { color: #333; cursor: default; font-weight: 600; }
+  #breadcrumb .sep { color: #999; cursor: default; }
+  #legend { padding: 0 20px 10px; display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; }
+  #legend .item { display: flex; align-items: center; gap: 4px; }
+  #legend .swatch { width: 12px; height: 12px; border-radius: 2px; }
+  svg { display: block; cursor: pointer; }
+  #tooltip {
+    position: absolute; pointer-events: none; display: none;
+    background: rgba(0,0,0,0.85); color: #fff; padding: 8px 12px;
+    border-radius: 4px; font-size: 12px; line-height: 1.4;
+    max-width: 300px; z-index: 10;
+  }
+</style>
+</head>
+<body>
+<div id="header">
+  <h1>File System Explorer</h1>
+  <div class="subtitle" id="totalSize"></div>
+</div>
+<div id="breadcrumb"></div>
+<div id="legend"></div>
+<div id="chart"></div>
+<div id="tooltip"></div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+// --- Tol palettes: Bright (7) + first from Muted to reach 8 ---
+const palette = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377","#BBBBBB","#CC6677"];
+
+// --- Synthetic file-system data ---
+const topDirs = ["Documents","Photos","Code","Music","Videos","Downloads","Projects","Archives"];
+const subDirNames = {
+  Documents: ["Work","Personal","Finance","Taxes","Legal"],
+  Photos: ["Vacation","Family","Pets","Nature","Events","Screenshots"],
+  Code: ["Frontend","Backend","Scripts","Libraries","Tests","Configs"],
+  Music: ["Rock","Jazz","Classical","Electronic"],
+  Videos: ["Movies","Tutorials","Recordings"],
+  Downloads: ["Software","Torrents","Updates","Temp","Archives"],
+  Projects: ["Alpha","Beta","Gamma","Delta","Epsilon","Zeta"],
+  Archives: ["2020","2021","2022","2023"]
+};
+const extensions = {
+  Documents: [".docx",".pdf",".txt",".xlsx",".pptx",".md"],
+  Photos: [".jpg",".png",".raw",".heic",".tiff"],
+  Code: [".js",".ts",".py",".go",".rs",".html",".css",".json"],
+  Music: [".mp3",".flac",".wav",".aac",".ogg"],
+  Videos: [".mp4",".mkv",".avi",".mov",".webm"],
+  Downloads: [".zip",".dmg",".exe",".iso",".tar.gz"],
+  Projects: [".proj",".md",".json",".yml",".toml",".lock"],
+  Archives: [".zip",".tar.gz",".7z",".rar",".bak"]
+};
+const fileNames = ["report","summary","draft","final","notes","data","backup","export","readme","config",
+  "index","main","utils","test","setup","build","deploy","output","input","cache",
+  "log","temp","archive","snapshot","image","photo","track","clip","doc","sheet"];
+
+function seededRandom(seed) {
+  let s = seed;
+  return () => { s = (s * 16807 + 0) % 2147483647; return (s - 1) / 2147483646; };
+}
+const rng = seededRandom(42);
+
+function generateFiles(parentDir, subDir, exts) {
+  const count = 5 + Math.floor(rng() * 11); // 5-15
+  const files = [];
+  for (let i = 0; i < count; i++) {
+    const name = fileNames[Math.floor(rng() * fileNames.length)];
+    const ext = exts[Math.floor(rng() * exts.length)];
+    // Log-distributed size: 1KB to 500MB
+    const logMin = Math.log(1024);           // 1 KB
+    const logMax = Math.log(500 * 1024 * 1024); // 500 MB
+    const size = Math.round(Math.exp(logMin + rng() * (logMax - logMin)));
+    files.push({ name: `${name}${ext}`, size });
+  }
+  return files;
+}
+
+const fsData = {
+  name: "Root",
+  children: topDirs.map(dir => ({
+    name: dir,
+    children: subDirNames[dir].map(sub => ({
+      name: sub,
+      children: generateFiles(dir, sub, extensions[dir]).map(f => ({
+        name: f.name,
+        size: f.size
+      }))
+    }))
+  }))
+};
+
+// --- Format file sizes ---
+function formatSize(bytes) {
+  if (bytes >= 1e9) return d3.format(".1f")(bytes / 1e9) + " GB";
+  if (bytes >= 1e6) return d3.format(".1f")(bytes / 1e6) + " MB";
+  if (bytes >= 1e3) return d3.format(".1f")(bytes / 1e3) + " KB";
+  return bytes + " B";
+}
+
+// --- Build hierarchy ---
+const root = d3.hierarchy(fsData)
+  .sum(d => d.size || 0)
+  .sort((a, b) => b.value - a.value);
+
+const totalBytes = root.value;
+document.getElementById("totalSize").textContent = `Total: ${formatSize(totalBytes)} across ${root.leaves().length} files`;
+
+// --- Color scale: top-level directory ---
+const colorScale = d3.scaleOrdinal()
+  .domain(topDirs)
+  .range(palette);
+
+function topAncestor(d) {
+  let node = d;
+  while (node.depth > 1) node = node.parent;
+  return node;
+}
+
+// --- Legend ---
+const legend = d3.select("#legend");
+topDirs.forEach((dir, i) => {
+  const item = legend.append("div").attr("class", "item");
+  item.append("div").attr("class", "swatch").style("background", palette[i]);
+  item.append("span").text(dir);
+});
+
+// --- Layout ---
+const width = Math.max(800, document.documentElement.clientWidth);
+const height = 600;
+
+const treemap = d3.treemap()
+  .tile(d3.treemapSquarify)
+  .size([width, height])
+  .paddingInner(1)
+  .paddingTop(0)
+  .round(true);
+
+treemap(root);
+
+// --- Scales for zoom ---
+const x = d3.scaleLinear().domain([0, width]).range([0, width]);
+const y = d3.scaleLinear().domain([0, height]).range([0, height]);
+
+// --- SVG ---
+const svg = d3.select("#chart").append("svg")
+  .attr("width", width)
+  .attr("height", height)
+  .attr("viewBox", `0 0 ${width} ${height}`)
+  .style("max-width", "100%");
+
+let currentFocus = root;
+
+// --- Render cells ---
+const cell = svg.selectAll("g")
+  .data(root.descendants().filter(d => d.depth > 0))
+  .join("g")
+    .attr("transform", d => `translate(${x(d.x0)},${y(d.y0)})`);
+
+cell.append("rect")
+  .attr("width", d => Math.max(0, x(d.x1) - x(d.x0)))
+  .attr("height", d => Math.max(0, y(d.y1) - y(d.y0)))
+  .attr("fill", d => {
+    const top = topAncestor(d);
+    return top ? colorScale(top.data.name) : "#ccc";
+  })
+  .attr("fill-opacity", d => d.children ? 0.6 : 0.85)
+  .attr("stroke", "#fff")
+  .attr("stroke-width", 1);
+
+cell.append("clipPath")
+  .attr("id", (d, i) => `clip-${i}`)
+  .append("rect")
+    .attr("width", d => Math.max(0, x(d.x1) - x(d.x0)))
+    .attr("height", d => Math.max(0, y(d.y1) - y(d.y0)));
+
+cell.append("text")
+  .attr("clip-path", (d, i) => `url(#clip-${i})`)
+  .attr("x", 4)
+  .attr("y", 14)
+  .attr("fill", "#000")
+  .attr("fill-opacity", 0.7)
+  .attr("font-size", "11px")
+  .text(d => d.data.name)
+  .attr("opacity", d => {
+    const w = x(d.x1) - x(d.x0);
+    const h = y(d.y1) - y(d.y0);
+    return (w > 40 && h > 40) ? 1 : 0;
+  });
+
+// --- Tooltip ---
+const tooltip = d3.select("#tooltip");
+
+function getPath(d) {
+  return d.ancestors().reverse().map(n => n.data.name).join(" / ");
+}
+
+cell.on("pointerenter", (event, d) => {
+    if (!d.children) {
+      tooltip.style("display", "block")
+        .html(`<strong>${getPath(d)}</strong><br>Size: ${formatSize(d.value)}`);
+    }
+  })
+  .on("pointermove", (event) => {
+    tooltip
+      .style("left", (event.pageX + 12) + "px")
+      .style("top", (event.pageY - 28) + "px");
+  })
+  .on("pointerleave", () => {
+    tooltip.style("display", "none");
+  });
+
+// --- Zoom ---
+function isDescendant(node, ancestor) {
+  let n = node;
+  while (n) {
+    if (n === ancestor) return true;
+    n = n.parent;
+  }
+  return false;
+}
+
+function zoomTo(group) {
+  currentFocus = group;
+  x.domain([group.x0, group.x1]);
+  y.domain([group.y0, group.y1]);
+
+  const t = svg.transition().duration(750);
+
+  cell.transition(t)
+    .attr("transform", d => `translate(${x(d.x0)},${y(d.y0)})`)
+    .attr("opacity", d => isDescendant(d, group) ? 1 : 0)
+    .attr("pointer-events", d => isDescendant(d, group) ? "all" : "none");
+
+  cell.select("rect").transition(t)
+    .attr("width", d => Math.max(0, x(d.x1) - x(d.x0)))
+    .attr("height", d => Math.max(0, y(d.y1) - y(d.y0)));
+
+  cell.select("clipPath rect").transition(t)
+    .attr("width", d => Math.max(0, x(d.x1) - x(d.x0)))
+    .attr("height", d => Math.max(0, y(d.y1) - y(d.y0)));
+
+  cell.select("text").transition(t)
+    .attr("opacity", d => {
+      if (!isDescendant(d, group)) return 0;
+      const w = x(d.x1) - x(d.x0);
+      const h = y(d.y1) - y(d.y0);
+      return (w > 40 && h > 40) ? 1 : 0;
+    });
+
+  updateBreadcrumb();
+}
+
+// --- Click handler ---
+cell.on("click", (event, d) => {
+  event.stopPropagation();
+  if (d.children) {
+    zoomTo(d);
+  }
+  // Leaf clicks handled by tooltip
+});
+
+// --- Breadcrumb ---
+function updateBreadcrumb() {
+  const crumbs = currentFocus.ancestors().reverse();
+  const bc = d3.select("#breadcrumb");
+  bc.html("");
+  crumbs.forEach((node, i) => {
+    if (i > 0) bc.append("span").attr("class", "sep").text(" > ");
+    const span = bc.append("span")
+      .text(node.data.name)
+      .classed("current", i === crumbs.length - 1);
+    if (i < crumbs.length - 1) {
+      span.on("click", () => zoomTo(node));
+    }
+  });
+}
+
+updateBreadcrumb();
+</script>
+</body>
+</html>

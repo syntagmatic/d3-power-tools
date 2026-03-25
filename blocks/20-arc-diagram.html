@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Arc Diagram — Character Co-occurrences</title>
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: system-ui, sans-serif;
+    background: #fafafa;
+    color: #333;
+    overflow-x: hidden;
+  }
+  h1 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    padding: 16px 24px 4px;
+  }
+  #info {
+    padding: 4px 24px 8px;
+    font-size: 0.85rem;
+    color: #666;
+    min-height: 1.4em;
+  }
+  #chart { width: 100%; }
+  .node-label {
+    font-size: 10px;
+    fill: #444;
+    pointer-events: none;
+  }
+  .brush-label {
+    font-size: 12px;
+    fill: #555;
+  }
+</style>
+</head>
+<body>
+<h1>Character Co-occurrence Arc Diagram</h1>
+<div id="info">Hover a character to highlight connections. Brush the axis to filter by chapter range.</div>
+<div id="chart"></div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data ---
+const names = [
+  "Elara","Kael","Miren","Thorne","Lyssa","Darius","Orin","Vesper","Calla","Rowan",
+  "Sable","Fenwick","Isolde","Jasper","Neve","Aldric","Bryn","Corin","Delphine","Egan",
+  "Fiora","Gareth","Hale","Ivor","Juno","Kira","Leander","Mara","Nyx","Oriel"
+];
+
+const rng = d3.randomLcg(42);
+const randInt = (lo, hi) => lo + Math.floor(rng() * (hi - lo + 1));
+
+const characters = names.map((name, i) => ({
+  id: i,
+  name,
+  chapter_first_appearance: randInt(1, 25),
+  importance: randInt(1, 10)
+}));
+
+// Sort by first appearance for stable layout
+characters.sort((a, b) => a.chapter_first_appearance - b.chapter_first_appearance || a.name.localeCompare(b.name));
+// Reassign ids after sort
+characters.forEach((c, i) => c.id = i);
+
+const nameToChar = new Map(characters.map(c => [c.name, c]));
+
+// Generate ~80 edges — characters with closer first appearances get higher weight
+const edges = [];
+const edgeSet = new Set();
+let attempts = 0;
+while (edges.length < 80 && attempts < 500) {
+  attempts++;
+  const i = randInt(0, 29);
+  const j = randInt(0, 29);
+  if (i === j) continue;
+  const key = Math.min(i, j) + "-" + Math.max(i, j);
+  if (edgeSet.has(key)) continue;
+  edgeSet.add(key);
+
+  const chapterDiff = Math.abs(characters[i].chapter_first_appearance - characters[j].chapter_first_appearance);
+  // Closer chapters => higher base weight
+  const baseWeight = Math.max(1, 20 - chapterDiff);
+  const weight = Math.max(1, Math.min(20, randInt(Math.max(1, baseWeight - 5), baseWeight + 3)));
+
+  edges.push({ source: Math.min(i, j), target: Math.max(i, j), weight });
+}
+
+// Build adjacency for hover
+const adjacency = new Map(characters.map(c => [c.id, new Set()]));
+edges.forEach(e => {
+  adjacency.get(e.source).add(e.target);
+  adjacency.get(e.target).add(e.source);
+});
+
+// --- Layout ---
+const margin = { top: 20, right: 40, bottom: 60, left: 40 };
+const width = Math.max(800, window.innerWidth);
+const height = 500;
+const baselineY = height - margin.bottom;
+
+const svg = d3.select("#chart")
+  .append("svg")
+    .attr("width", width)
+    .attr("height", height);
+
+const x = d3.scaleLinear()
+  .domain([1, 25])
+  .range([margin.left + 20, width - margin.right - 20]);
+
+// Tol bright palette for sequential color
+const tolBright = ["#4477AA", "#66CCEE", "#228833", "#CCBB44", "#EE6677", "#AA3377", "#BBBBBB"];
+const colorScale = d3.scaleQuantize()
+  .domain([1, 25])
+  .range(tolBright);
+
+const weightToHeight = d3.scaleLinear()
+  .domain([1, 20])
+  .range([30, baselineY - margin.top - 20]);
+
+const weightToWidth = d3.scaleLinear()
+  .domain([1, 20])
+  .range([1, 3]);
+
+const importanceToRadius = d3.scaleLinear()
+  .domain([1, 10])
+  .range([3, 10]);
+
+// --- Arcs ---
+const arcGroup = svg.append("g").attr("class", "arcs");
+
+const arcPaths = arcGroup.selectAll("path")
+  .data(edges)
+  .join("path")
+    .attr("fill", "none")
+    .attr("stroke", d => colorScale(Math.min(characters[d.source].chapter_first_appearance, characters[d.target].chapter_first_appearance)))
+    .attr("stroke-width", d => weightToWidth(d.weight))
+    .attr("stroke-opacity", 0.4)
+    .attr("d", d => {
+      const x1 = x(characters[d.source].chapter_first_appearance);
+      const x2 = x(characters[d.target].chapter_first_appearance);
+      // Semicircular arc above baseline; height proportional to weight
+      const arcH = weightToHeight(d.weight);
+      const mx = (x1 + x2) / 2;
+      const dx = Math.abs(x2 - x1) / 2;
+      // Use a quadratic bezier for the arc shape
+      return `M ${x1},${baselineY} Q ${mx},${baselineY - arcH} ${x2},${baselineY}`;
+    });
+
+// --- Nodes ---
+const nodeGroup = svg.append("g").attr("class", "nodes");
+
+const nodes = nodeGroup.selectAll("circle")
+  .data(characters)
+  .join("circle")
+    .attr("cx", d => x(d.chapter_first_appearance))
+    .attr("cy", baselineY)
+    .attr("r", d => importanceToRadius(d.importance))
+    .attr("fill", d => colorScale(d.chapter_first_appearance))
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 1.5)
+    .style("cursor", "pointer");
+
+// --- Labels for importance > 7 ---
+const labelGroup = svg.append("g").attr("class", "labels");
+
+labelGroup.selectAll("text")
+  .data(characters.filter(d => d.importance > 7))
+  .join("text")
+    .attr("class", "node-label")
+    .attr("x", d => x(d.chapter_first_appearance))
+    .attr("y", baselineY + 18)
+    .attr("text-anchor", "middle")
+    .text(d => d.name);
+
+// --- Axis ---
+const axisG = svg.append("g")
+  .attr("transform", `translate(0,${baselineY})`)
+  .call(d3.axisBottom(x)
+    .ticks(25)
+    .tickFormat(d => `Ch ${d}`)
+    .tickSizeOuter(0))
+  .call(g => g.select(".domain").attr("stroke", "#aaa"))
+  .call(g => g.selectAll(".tick text").attr("font-size", 9).attr("fill", "#888"))
+  .call(g => g.selectAll(".tick line").attr("stroke", "#ccc"));
+
+// --- Brush ---
+const brushLabel = svg.append("text")
+  .attr("class", "brush-label")
+  .attr("x", margin.left + 20)
+  .attr("y", 16)
+  .text("");
+
+const brush = d3.brushX()
+  .extent([[margin.left, baselineY + 2], [width - margin.right, baselineY + 30]])
+  .on("brush end", brushed);
+
+svg.append("g")
+  .attr("class", "brush")
+  .call(brush);
+
+function brushed(event) {
+  const sel = event.selection;
+  if (!sel) {
+    // Reset
+    arcPaths.attr("stroke-opacity", 0.4).attr("display", null);
+    nodes.attr("opacity", 1);
+    brushLabel.text("");
+    return;
+  }
+  const [x0, x1] = sel;
+  const ch0 = Math.round(x.invert(x0));
+  const ch1 = Math.round(x.invert(x1));
+
+  let connectionCount = 0;
+  arcPaths
+    .attr("display", d => {
+      const inRange = characters[d.source].chapter_first_appearance >= ch0
+        && characters[d.source].chapter_first_appearance <= ch1
+        && characters[d.target].chapter_first_appearance >= ch0
+        && characters[d.target].chapter_first_appearance <= ch1;
+      if (inRange) connectionCount++;
+      return inRange ? null : "none";
+    })
+    .attr("stroke-opacity", 0.4);
+
+  nodes.attr("opacity", d =>
+    d.chapter_first_appearance >= ch0 && d.chapter_first_appearance <= ch1 ? 1 : 0.15
+  );
+
+  brushLabel.text(`Chapters ${ch0}–${ch1}: ${connectionCount} connections`);
+}
+
+// --- Hover interaction ---
+const tooltip = svg.append("g").attr("class", "tooltip").style("pointer-events", "none");
+const tooltipBg = tooltip.append("rect").attr("fill", "white").attr("stroke", "#ccc").attr("rx", 4).attr("opacity", 0);
+const tooltipText = tooltip.append("text").attr("font-size", 12).attr("fill", "#333").attr("dy", "0.35em");
+
+nodes
+  .on("pointerenter", (event, d) => {
+    const connected = adjacency.get(d.id);
+    const degree = connected.size;
+
+    // Highlight connected arcs
+    arcPaths
+      .attr("stroke-opacity", e =>
+        (e.source === d.id || e.target === d.id) ? 0.85 : 0.05
+      )
+      .attr("stroke-width", e =>
+        (e.source === d.id || e.target === d.id) ? weightToWidth(e.weight) + 0.5 : weightToWidth(e.weight)
+      );
+
+    // Highlight connected nodes
+    nodes.attr("opacity", n =>
+      n.id === d.id || connected.has(n.id) ? 1 : 0.2
+    );
+
+    // Show tooltip
+    const label = `${d.name} — ${degree} connection${degree !== 1 ? "s" : ""}`;
+    tooltipText.text(label);
+    const bbox = tooltipText.node().getBBox();
+    const tx = x(d.chapter_first_appearance);
+    const ty = baselineY - importanceToRadius(d.importance) - 16;
+    tooltipBg
+      .attr("x", -bbox.width / 2 - 6)
+      .attr("y", -bbox.height / 2 - 4)
+      .attr("width", bbox.width + 12)
+      .attr("height", bbox.height + 8)
+      .attr("opacity", 1);
+    tooltipText.attr("text-anchor", "middle").attr("x", 0);
+    tooltip.attr("transform", `translate(${tx},${ty})`);
+  })
+  .on("pointerleave", () => {
+    arcPaths.attr("stroke-opacity", 0.4).attr("stroke-width", d => weightToWidth(d.weight));
+    nodes.attr("opacity", 1);
+    tooltipBg.attr("opacity", 0);
+    tooltipText.text("");
+  });
+
+</script>
+</body>
+</html>

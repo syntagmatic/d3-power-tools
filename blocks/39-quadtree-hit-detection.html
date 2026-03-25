@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Quadtree Hit Detection — 5,000 Particles</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; }
+  body { font-family: system-ui, sans-serif; background: #fafafa; color: #333; }
+  #container { position: relative; width: 100%; height: 600px; }
+  canvas, svg { position: absolute; top: 0; left: 0; }
+  svg { pointer-events: none; }
+  #controls {
+    position: absolute; top: 10px; left: 10px; z-index: 10;
+    background: rgba(255,255,255,0.9); border-radius: 6px; padding: 8px 12px;
+    font-size: 13px; display: flex; gap: 16px; align-items: center;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.12);
+  }
+  #controls label { cursor: pointer; user-select: none; }
+  #fps {
+    position: absolute; top: 10px; right: 10px; z-index: 10;
+    background: rgba(255,255,255,0.9); border-radius: 6px; padding: 6px 10px;
+    font-size: 12px; font-variant-numeric: tabular-nums;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.12);
+  }
+  #tooltip {
+    position: absolute; z-index: 10; pointer-events: none;
+    background: rgba(0,0,0,0.8); color: #fff; border-radius: 4px;
+    padding: 4px 8px; font-size: 12px; white-space: nowrap;
+    display: none;
+  }
+</style>
+</head>
+<body>
+<div id="container">
+  <div id="controls">
+    <span>5,000 points</span>
+    <label><input type="checkbox" id="voronoi-toggle"> Voronoi overlay</label>
+  </div>
+  <div id="fps"></div>
+  <div id="tooltip"></div>
+</div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(function() {
+  const container = document.getElementById("container");
+  const width = container.clientWidth;
+  const height = 600;
+  const dpr = devicePixelRatio || 1;
+  const N = 5000;
+  const K = 10; // nearest neighbors to highlight
+  const categories = d3.range(8);
+
+  // Tol qualitative palette (8 colors)
+  const tolColors = ["#4477AA","#66CCEE","#228833","#CCBB44","#EE6677","#AA3377","#BBBBBB","#332288"];
+  const colorScale = d => tolColors[d];
+
+  // Generate data
+  const rng = d3.randomLcg(42);
+  const randX = d3.randomUniform.source(rng)(0, width);
+  const randY = d3.randomUniform.source(rng)(0, height);
+  const randCat = d3.randomInt.source(rng)(0, 8);
+  const randSize = d3.randomUniform.source(rng)(1, 4);
+
+  const data = d3.range(N).map(i => ({
+    id: i,
+    x: randX(),
+    y: randY(),
+    category: randCat(),
+    size: randSize()
+  }));
+
+  // Canvas setup
+  const canvas = d3.select(container).append("canvas")
+    .attr("width", width * dpr).attr("height", height * dpr)
+    .style("width", `${width}px`).style("height", `${height}px`)
+    .node();
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  // SVG overlay for Voronoi + zoom receiver
+  const svg = d3.select(container).append("svg")
+    .attr("width", width).attr("height", height)
+    .style("pointer-events", "all");
+
+  // Voronoi group (hidden by default)
+  const voronoiGroup = svg.append("g").attr("class", "voronoi").style("display", "none");
+
+  // Scales (identity initially, zoom will modify)
+  let xScale = d3.scaleLinear().domain([0, width]).range([0, width]);
+  let yScale = d3.scaleLinear().domain([0, height]).range([0, height]);
+
+  // Quadtree
+  let quadtree = d3.quadtree()
+    .x(d => xScale(d.x)).y(d => yScale(d.y))
+    .addAll(data);
+
+  // State
+  let currentTransform = d3.zoomIdentity;
+  let nearestPoints = [];
+  let mousePos = null;
+  let showVoronoi = false;
+
+  // FPS tracking
+  let frameCount = 0, lastFpsTime = performance.now(), fpsValue = 0;
+  const fpsEl = document.getElementById("fps");
+  const tooltipEl = document.getElementById("tooltip");
+
+  // Group data by category for batched rendering
+  const grouped = d3.group(data, d => d.category);
+
+  function rebuildQuadtree() {
+    quadtree = d3.quadtree()
+      .x(d => xScale(d.x)).y(d => yScale(d.y))
+      .addAll(data);
+  }
+
+  function findNearestK(qx, qy, k) {
+    // Collect candidates by expanding search radius
+    const results = [];
+    const visited = new Set();
+    // Use quadtree.visit for efficient radius search, expanding until we have k
+    let searchRadius = 50;
+    while (results.length < k && searchRadius < Math.max(width, height) * 2) {
+      results.length = 0;
+      visited.clear();
+      const r2 = searchRadius * searchRadius;
+      quadtree.visit((node, x0, y0, x1, y1) => {
+        if (x0 > qx + searchRadius || x1 < qx - searchRadius ||
+            y0 > qy + searchRadius || y1 < qy - searchRadius) return true;
+        if (!node.length) {
+          let d = node;
+          do {
+            const px = xScale(d.data.x), py = yScale(d.data.y);
+            const dx = px - qx, dy = py - qy;
+            const dist2 = dx * dx + dy * dy;
+            if (dist2 <= r2 && !visited.has(d.data.id)) {
+              visited.add(d.data.id);
+              results.push({ data: d.data, dist: Math.sqrt(dist2) });
+            }
+          } while (d = d.next);
+        }
+      });
+      searchRadius *= 2;
+    }
+    results.sort((a, b) => a.dist - b.dist);
+    return results.slice(0, k);
+  }
+
+  function draw() {
+    ctx.save();
+    ctx.clearRect(0, 0, width, height);
+
+    const k = currentTransform.k;
+    const nearestSet = new Set(nearestPoints.map(p => p.data.id));
+
+    // Draw all points batched by category
+    for (const [cat, points] of grouped) {
+      ctx.fillStyle = colorScale(cat);
+      ctx.globalAlpha = 0.4;
+      ctx.beginPath();
+      for (const d of points) {
+        if (nearestSet.has(d.id)) continue; // draw highlighted ones separately
+        const px = xScale(d.x), py = yScale(d.y);
+        const r = d.size * Math.min(k, 3);
+        ctx.moveTo(px + r, py);
+        ctx.arc(px, py, r, 0, Math.PI * 2);
+      }
+      ctx.fill();
+    }
+
+    // Draw nearest highlighted points
+    if (nearestPoints.length > 0 && mousePos) {
+      // Lines from cursor to nearest
+      ctx.strokeStyle = "rgba(0,0,0,0.25)";
+      ctx.lineWidth = 1;
+      ctx.globalAlpha = 1;
+      ctx.beginPath();
+      for (const p of nearestPoints) {
+        const px = xScale(p.data.x), py = yScale(p.data.y);
+        ctx.moveTo(mousePos[0], mousePos[1]);
+        ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+
+      // Glow pass (larger, low opacity)
+      for (const p of nearestPoints) {
+        const d = p.data;
+        const px = xScale(d.x), py = yScale(d.y);
+        const r = d.size * Math.min(k, 3);
+        ctx.fillStyle = colorScale(d.category);
+        ctx.globalAlpha = 0.1;
+        ctx.beginPath();
+        ctx.arc(px, py, r + 6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Full opacity pass
+      for (const p of nearestPoints) {
+        const d = p.data;
+        const px = xScale(d.x), py = yScale(d.y);
+        const r = d.size * Math.min(k, 3);
+        ctx.fillStyle = colorScale(d.category);
+        ctx.globalAlpha = 1;
+        ctx.beginPath();
+        ctx.arc(px, py, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Labels at high zoom
+      if (k > 4) {
+        ctx.fillStyle = "#333";
+        ctx.globalAlpha = 1;
+        ctx.font = "11px system-ui";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        for (const p of nearestPoints) {
+          const d = p.data;
+          const px = xScale(d.x), py = yScale(d.y);
+          const r = d.size * Math.min(k, 3);
+          ctx.fillText(`#${d.id} (cat ${d.category})`, px + r + 4, py);
+        }
+      }
+    }
+
+    ctx.restore();
+
+    // FPS
+    frameCount++;
+    const now = performance.now();
+    if (now - lastFpsTime >= 500) {
+      fpsValue = Math.round(frameCount / ((now - lastFpsTime) / 1000));
+      frameCount = 0;
+      lastFpsTime = now;
+      fpsEl.textContent = `${fpsValue} FPS | 5,000 points`;
+    }
+  }
+
+  // Dirty-flag rendering
+  let dirty = true;
+  function markDirty() {
+    if (!dirty) { dirty = true; requestAnimationFrame(render); }
+  }
+  function render() {
+    dirty = false;
+    draw();
+  }
+  requestAnimationFrame(render);
+
+  // Pointer interaction
+  svg.on("pointermove", function(event) {
+    const [mx, my] = d3.pointer(event);
+    mousePos = [mx, my];
+    nearestPoints = findNearestK(mx, my, K);
+    if (nearestPoints.length > 0) {
+      const p = nearestPoints[0];
+      tooltipEl.style.display = "block";
+      tooltipEl.style.left = `${mx + 14}px`;
+      tooltipEl.style.top = `${my - 10}px`;
+      tooltipEl.textContent = `Nearest: cat ${p.data.category}, distance: ${p.dist.toFixed(1)}px`;
+    } else {
+      tooltipEl.style.display = "none";
+    }
+    markDirty();
+  });
+
+  svg.on("pointerleave", function() {
+    mousePos = null;
+    nearestPoints = [];
+    tooltipEl.style.display = "none";
+    markDirty();
+  });
+
+  // Zoom
+  const zoom = d3.zoom()
+    .scaleExtent([0.5, 50])
+    .on("zoom", ({ transform }) => {
+      currentTransform = transform;
+      xScale = transform.rescaleX(d3.scaleLinear().domain([0, width]).range([0, width]));
+      yScale = transform.rescaleY(d3.scaleLinear().domain([0, height]).range([0, height]));
+      rebuildQuadtree();
+      if (mousePos) {
+        nearestPoints = findNearestK(mousePos[0], mousePos[1], K);
+      }
+      if (showVoronoi) drawVoronoi();
+      markDirty();
+    });
+
+  svg.call(zoom);
+
+  // Voronoi overlay
+  function drawVoronoi() {
+    voronoiGroup.selectAll("path").remove();
+    const points = data.map(d => [xScale(d.x), yScale(d.y)]);
+    const delaunay = d3.Delaunay.from(points);
+    const voronoi = delaunay.voronoi([0, 0, width, height]);
+    voronoiGroup.append("path")
+      .attr("d", voronoi.render())
+      .attr("fill", "none")
+      .attr("stroke", "gray")
+      .attr("stroke-opacity", 0.2)
+      .attr("stroke-width", 0.5);
+  }
+
+  document.getElementById("voronoi-toggle").addEventListener("change", function() {
+    showVoronoi = this.checked;
+    voronoiGroup.style("display", showVoronoi ? null : "none");
+    if (showVoronoi) drawVoronoi();
+  });
+
+  // Initial FPS display
+  fpsEl.textContent = `-- FPS | 5,000 points`;
+})();
+</script>
+</body>
+</html>

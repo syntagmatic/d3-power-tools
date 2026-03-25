@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>2D Density Contour Heatmap</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #fafafa; font-family: system-ui, sans-serif; }
+  #container { position: relative; width: 100vw; height: 600px; }
+  canvas, svg { position: absolute; top: 0; left: 0; }
+  .contour-fill { stroke: #444; stroke-width: 0.5px; }
+  .brush .selection { fill: steelblue; fill-opacity: 0.15; stroke: steelblue; stroke-width: 1px; }
+  .axis text { font-size: 11px; }
+  .axis-label { font-size: 13px; font-weight: 500; }
+  .legend-title { font-size: 11px; font-weight: 500; }
+  .legend-tick { font-size: 10px; }
+  .hint { position: absolute; bottom: 2px; left: 50%; transform: translateX(-50%);
+    font-size: 10px; color: #aaa; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="container">
+  <div class="hint">Brush to zoom &middot; Double-click to reset</div>
+</div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Layout ---
+const margin = { top: 20, right: 100, bottom: 50, left: 55 };
+const containerEl = document.getElementById("container");
+const fullWidth = containerEl.clientWidth;
+const fullHeight = 600;
+const width = fullWidth - margin.left - margin.right;
+const height = fullHeight - margin.top - margin.bottom;
+
+// --- Seeded RNG (Box-Muller) ---
+const lcg = d3.randomLcg(42);
+function randn() {
+  let u, v, s;
+  do { u = lcg() * 2 - 1; v = lcg() * 2 - 1; s = u * u + v * v; } while (s >= 1 || s === 0);
+  const mul = Math.sqrt(-2 * Math.log(s) / s);
+  return u * mul;
+}
+
+// Bivariate normal: mean [mx,my], Cholesky decomposition of covariance
+function bivarNormal(n, mx, my, sx, sy, rho) {
+  const points = [];
+  for (let i = 0; i < n; i++) {
+    const z1 = randn(), z2 = randn();
+    const x = mx + sx * z1;
+    const y = my + sy * (rho * z1 + Math.sqrt(1 - rho * rho) * z2);
+    points.push({ x, y, cluster: null });
+  }
+  return points;
+}
+
+// --- Generate data ---
+const clusters = [
+  { mx: 0.3, my: 0.4, sx: 0.08, sy: 0.10, rho: 0.3, n: 4000, color: "#2196F3" },
+  { mx: 0.7, my: 0.7, sx: 0.06, sy: 0.07, rho: -0.4, n: 2500, color: "#E91E63" },
+  { mx: 0.2, my: 0.8, sx: 0.05, sy: 0.04, rho: 0.1, n: 1500, color: "#4CAF50" },
+];
+
+const data = [];
+clusters.forEach((c, ci) => {
+  const pts = bivarNormal(c.n, c.mx, c.my, c.sx, c.sy, c.rho);
+  pts.forEach(p => { p.cluster = ci; data.push(p); });
+});
+
+// --- Scales (full data extent) ---
+const xExtent = d3.extent(data, d => d.x);
+const yExtent = d3.extent(data, d => d.y);
+const pad = 0.02;
+
+const xDomain0 = [xExtent[0] - pad, xExtent[1] + pad];
+const yDomain0 = [yExtent[0] - pad, yExtent[1] + pad];
+
+let xScale = d3.scaleLinear().domain(xDomain0).range([0, width]);
+let yScale = d3.scaleLinear().domain(yDomain0).range([height, 0]);
+
+const clusterColors = clusters.map(c => c.color);
+
+// --- Canvas layer (points) ---
+const dpr = devicePixelRatio || 1;
+const canvas = d3.select("#container").append("canvas")
+    .attr("width", fullWidth * dpr).attr("height", fullHeight * dpr)
+    .style("width", `${fullWidth}px`).style("height", `${fullHeight}px`)
+    .node();
+const ctx = canvas.getContext("2d");
+ctx.scale(dpr, dpr);
+
+// --- SVG layer (contours, axes, brush) ---
+const svg = d3.select("#container").append("svg")
+    .attr("width", fullWidth).attr("height", fullHeight)
+    .style("pointer-events", "all");
+
+const g = svg.append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+// Clip path for content area
+svg.append("defs").append("clipPath").attr("id", "clip")
+  .append("rect").attr("width", width).attr("height", height);
+
+const contourGroup = g.append("g").attr("clip-path", "url(#clip)");
+const axisGroupX = g.append("g").attr("class", "axis").attr("transform", `translate(0,${height})`);
+const axisGroupY = g.append("g").attr("class", "axis");
+
+// Axis labels
+g.append("text").attr("class", "axis-label")
+    .attr("x", width / 2).attr("y", height + 40)
+    .attr("text-anchor", "middle").text("Feature 1");
+g.append("text").attr("class", "axis-label")
+    .attr("transform", "rotate(-90)")
+    .attr("x", -height / 2).attr("y", -40)
+    .attr("text-anchor", "middle").text("Feature 2");
+
+// --- Density color scale ---
+const densityColor = d3.scaleSequential(d3.interpolateRdBu).domain([1, 0]);
+
+// --- Legend ---
+const legendWidth = 12, legendHeight = 150;
+const legendX = fullWidth - margin.right + 25;
+const legendY = margin.top + 30;
+
+const legendScale = d3.scaleLinear().domain([0, 1]).range([legendHeight, 0]);
+const legendAxis = d3.axisRight(legendScale).ticks(5).tickFormat(d3.format(".0%"));
+
+// Gradient
+const defs = svg.select("defs");
+const grad = defs.append("linearGradient").attr("id", "density-grad")
+    .attr("x1", "0%").attr("y1", "100%").attr("x2", "0%").attr("y2", "0%");
+const nStops = 10;
+for (let i = 0; i <= nStops; i++) {
+  const t = i / nStops;
+  grad.append("stop").attr("offset", `${t * 100}%`).attr("stop-color", densityColor(t));
+}
+
+const legendG = svg.append("g").attr("transform", `translate(${legendX},${legendY})`);
+legendG.append("text").attr("class", "legend-title")
+    .attr("x", legendWidth / 2).attr("y", -10).attr("text-anchor", "middle").text("Density");
+legendG.append("rect")
+    .attr("width", legendWidth).attr("height", legendHeight)
+    .style("fill", "url(#density-grad)").style("stroke", "#999").style("stroke-width", 0.5);
+legendG.append("g").attr("transform", `translate(${legendWidth},0)`).call(legendAxis)
+  .selectAll("text").attr("class", "legend-tick");
+
+// --- Draw functions ---
+function drawPoints() {
+  ctx.clearRect(0, 0, fullWidth, fullHeight);
+  ctx.save();
+  ctx.translate(margin.left, margin.top);
+  // Clip to chart area
+  ctx.beginPath();
+  ctx.rect(0, 0, width, height);
+  ctx.clip();
+
+  // Batch by cluster for fewer state changes
+  for (let ci = 0; ci < clusters.length; ci++) {
+    ctx.fillStyle = clusterColors[ci];
+    ctx.globalAlpha = 0.15;
+    ctx.beginPath();
+    for (const d of data) {
+      if (d.cluster !== ci) continue;
+      const px = xScale(d.x), py = yScale(d.y);
+      ctx.moveTo(px + 1.5, py);
+      ctx.arc(px, py, 1.5, 0, Math.PI * 2);
+    }
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawContours() {
+  // Compute contour density in current view
+  const contourGen = d3.contourDensity()
+      .x(d => xScale(d.x))
+      .y(d => yScale(d.y))
+      .size([width, height])
+      .bandwidth(20)
+      .thresholds(10);
+
+  const contours = contourGen(data);
+  const maxVal = d3.max(contours, c => c.value) || 1;
+  const colorScale = d3.scaleSequential(d3.interpolateRdBu)
+      .domain([maxVal, 0]);
+
+  contourGroup.selectAll("path").remove();
+  contourGroup.selectAll("path")
+    .data(contours)
+    .join("path")
+      .attr("class", "contour-fill")
+      .attr("d", d3.geoPath())
+      .attr("fill", d => colorScale(d.value))
+      .attr("fill-opacity", 0.3);
+}
+
+function drawAxes() {
+  axisGroupX.call(d3.axisBottom(xScale).ticks(8));
+  axisGroupY.call(d3.axisLeft(yScale).ticks(8));
+}
+
+function renderAll() {
+  drawPoints();
+  drawContours();
+  drawAxes();
+}
+
+// --- Brush to zoom ---
+const brush = d3.brush()
+    .extent([[0, 0], [width, height]])
+    .on("end", brushed);
+
+const brushGroup = g.append("g").attr("class", "brush").call(brush);
+
+function brushed(event) {
+  if (!event.selection) return;
+  const [[x0, y0], [x1, y1]] = event.selection;
+
+  // Convert pixel selection to data domain
+  const newXDomain = [xScale.invert(x0), xScale.invert(x1)];
+  const newYDomain = [yScale.invert(y1), yScale.invert(y0)]; // inverted y
+
+  // Clear brush before transitioning
+  brushGroup.call(brush.move, null);
+
+  // Animate scales
+  const xInterp = d3.interpolate(xScale.domain(), newXDomain);
+  const yInterp = d3.interpolate(yScale.domain(), newYDomain);
+
+  const t = d3.timer((elapsed) => {
+    const progress = Math.min(1, d3.easeCubicInOut(elapsed / 750));
+    xScale.domain(xInterp(progress));
+    yScale.domain(yInterp(progress));
+    drawPoints();
+    drawAxes();
+    if (progress >= 1) {
+      t.stop();
+      drawContours(); // recompute contours at final zoom
+    }
+  });
+}
+
+// Double-click to reset
+svg.on("dblclick", () => {
+  const xInterp = d3.interpolate(xScale.domain(), xDomain0);
+  const yInterp = d3.interpolate(yScale.domain(), yDomain0);
+
+  const t = d3.timer((elapsed) => {
+    const progress = Math.min(1, d3.easeCubicInOut(elapsed / 750));
+    xScale.domain(xInterp(progress));
+    yScale.domain(yInterp(progress));
+    drawPoints();
+    drawAxes();
+    if (progress >= 1) {
+      t.stop();
+      drawContours();
+    }
+  });
+});
+
+// --- Initial render ---
+renderAll();
+</script>
+</body>
+</html>

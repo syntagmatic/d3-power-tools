@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Energy Flow — Sankey Diagram</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #fafafa; font-family: system-ui, sans-serif; }
+  svg { display: block; width: 100%; height: auto; }
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: rgba(255,255,255,0.95);
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 13px;
+    line-height: 1.4;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .node-rect { cursor: grab; }
+  .node-rect:active { cursor: grabbing; }
+  .total-label { font-size: 15px; fill: #555; }
+</style>
+</head>
+<body>
+<div class="tooltip" id="tooltip"></div>
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3-sankey@0.12.3/dist/d3-sankey.min.js"></script>
+<script>
+(() => {
+  // --- Dimensions ---
+  const width = 960, height = 500;
+  const margin = { top: 40, right: 170, bottom: 10, left: 120 };
+
+  // --- Tol bright palette for 5 stages ---
+  const stageColors = [
+    "#4477AA", // Sources
+    "#EE6677", // Generation
+    "#228833", // Grid
+    "#CCBB44", // Sectors
+    "#AA3377", // End Use
+  ];
+  const lossColor = "#CC3311";
+
+  // Stage assignments
+  const stageMap = {
+    "Coal": 0, "Natural Gas": 0, "Nuclear": 0, "Solar": 0, "Wind": 0, "Hydro": 0,
+    "Thermal": 1, "Renewable": 1,
+    "Transmission": 2, "Distribution": 2,
+    "Transmission Loss": 2, "Distribution Loss": 2,
+    "Residential": 3, "Commercial": 3, "Industrial": 3, "Transport Sector": 3,
+    "Heating": 4, "Cooling": 4, "Lighting": 4, "Motors": 4, "Electronics": 4, "Transport Use": 4,
+  };
+
+  const lossNodes = new Set(["Transmission Loss", "Distribution Loss"]);
+
+  // --- Data ---
+  const nodeNames = Object.keys(stageMap);
+  const nodes = nodeNames.map(name => ({ name }));
+  const idx = name => nodeNames.indexOf(name);
+
+  const links = [
+    // Sources → Generation
+    { source: idx("Coal"), target: idx("Thermal"), value: 200 },
+    { source: idx("Natural Gas"), target: idx("Thermal"), value: 180 },
+    { source: idx("Nuclear"), target: idx("Thermal"), value: 120 },
+    { source: idx("Solar"), target: idx("Renewable"), value: 100 },
+    { source: idx("Wind"), target: idx("Renewable"), value: 90 },
+    { source: idx("Hydro"), target: idx("Renewable"), value: 80 },
+    // Not all nuclear is thermal in reality, but simplifying
+    { source: idx("Solar"), target: idx("Thermal"), value: 10 },
+    { source: idx("Nuclear"), target: idx("Renewable"), value: 10 },
+
+    // Generation → Grid
+    { source: idx("Thermal"), target: idx("Transmission"), value: 350 },
+    { source: idx("Thermal"), target: idx("Distribution"), value: 150 },
+    { source: idx("Renewable"), target: idx("Transmission"), value: 180 },
+    { source: idx("Renewable"), target: idx("Distribution"), value: 90 },
+
+    // Grid losses
+    { source: idx("Transmission"), target: idx("Transmission Loss"), value: 25 },
+    { source: idx("Distribution"), target: idx("Distribution Loss"), value: 15 },
+
+    // Grid → Sectors
+    { source: idx("Transmission"), target: idx("Industrial"), value: 200 },
+    { source: idx("Transmission"), target: idx("Transport Sector"), value: 120 },
+    { source: idx("Transmission"), target: idx("Commercial"), value: 100 },
+    { source: idx("Transmission"), target: idx("Residential"), value: 85 },
+    { source: idx("Distribution"), target: idx("Residential"), value: 100 },
+    { source: idx("Distribution"), target: idx("Commercial"), value: 70 },
+    { source: idx("Distribution"), target: idx("Industrial"), value: 35 },
+    { source: idx("Distribution"), target: idx("Transport Sector"), value: 20 },
+
+    // Sectors → End Use
+    { source: idx("Residential"), target: idx("Heating"), value: 75 },
+    { source: idx("Residential"), target: idx("Cooling"), value: 40 },
+    { source: idx("Residential"), target: idx("Lighting"), value: 30 },
+    { source: idx("Residential"), target: idx("Electronics"), value: 40 },
+    { source: idx("Commercial"), target: idx("Lighting"), value: 55 },
+    { source: idx("Commercial"), target: idx("Cooling"), value: 50 },
+    { source: idx("Commercial"), target: idx("Heating"), value: 35 },
+    { source: idx("Commercial"), target: idx("Electronics"), value: 30 },
+    { source: idx("Industrial"), target: idx("Motors"), value: 130 },
+    { source: idx("Industrial"), target: idx("Heating"), value: 70 },
+    { source: idx("Industrial"), target: idx("Lighting"), value: 20 },
+    { source: idx("Industrial"), target: idx("Electronics"), value: 15 },
+    { source: idx("Transport Sector"), target: idx("Transport Use"), value: 120 },
+    { source: idx("Transport Sector"), target: idx("Motors"), value: 20 },
+  ];
+
+  const totalEnergy = d3.sum(links.filter(l => stageMap[nodeNames[l.source]] === 0), l => l.value);
+
+  // --- Sankey layout ---
+  const sankey = d3.sankey()
+    .nodeId(d => d.index)
+    .nodeWidth(16)
+    .nodePadding(12)
+    .nodeSort(null)
+    .extent([[margin.left, margin.top], [width - margin.right, height - margin.bottom]]);
+
+  const graph = sankey({
+    nodes: nodes.map(d => ({ ...d })),
+    links: links.map(d => ({ ...d })),
+  });
+
+  // --- SVG ---
+  const svg = d3.select("body").append("svg")
+    .attr("viewBox", `0 0 ${width} ${height}`)
+    .attr("preserveAspectRatio", "xMidYMid meet");
+
+  // Gradient definitions
+  const defs = svg.append("defs");
+
+  graph.links.forEach((link, i) => {
+    const srcColor = lossNodes.has(link.target.name) ? lossColor : stageColors[stageMap[link.source.name]];
+    const tgtColor = lossNodes.has(link.target.name) ? lossColor : stageColors[stageMap[link.target.name]];
+    const grad = defs.append("linearGradient")
+      .attr("id", `lg-${i}`)
+      .attr("gradientUnits", "userSpaceOnUse")
+      .attr("x1", link.source.x1)
+      .attr("x2", link.target.x0);
+    grad.append("stop").attr("offset", "0%").attr("stop-color", srcColor);
+    grad.append("stop").attr("offset", "100%").attr("stop-color", tgtColor);
+  });
+
+  // --- Links ---
+  const linkGroup = svg.append("g").attr("fill", "none");
+
+  const linkPaths = linkGroup.selectAll("path")
+    .data(graph.links)
+    .join("path")
+      .attr("d", d3.sankeyLinkHorizontal())
+      .attr("stroke", (d, i) => `url(#lg-${i})`)
+      .attr("stroke-width", d => Math.max(1, d.width))
+      .attr("stroke-opacity", 0.4)
+      .style("mix-blend-mode", "multiply");
+
+  // --- Nodes ---
+  const nodeGroup = svg.append("g");
+  const tooltip = d3.select("#tooltip");
+
+  const nodeRects = nodeGroup.selectAll("rect")
+    .data(graph.nodes)
+    .join("rect")
+      .attr("class", "node-rect")
+      .attr("x", d => d.x0)
+      .attr("y", d => d.y0)
+      .attr("width", d => d.x1 - d.x0)
+      .attr("height", d => Math.max(1, d.y1 - d.y0))
+      .attr("fill", d => lossNodes.has(d.name) ? lossColor : stageColors[stageMap[d.name]])
+      .attr("stroke", "#333")
+      .attr("stroke-width", 0.5);
+
+  // --- Node labels ---
+  const labelGroup = svg.append("g")
+    .style("font-size", "11px")
+    .style("font-family", "system-ui, sans-serif");
+
+  labelGroup.selectAll("text")
+    .data(graph.nodes)
+    .join("text")
+      .attr("x", d => stageMap[d.name] === 0 ? d.x0 - 6 : d.x1 + 6)
+      .attr("y", d => (d.y0 + d.y1) / 2)
+      .attr("dy", "0.35em")
+      .attr("text-anchor", d => stageMap[d.name] === 0 ? "end" : "start")
+      .attr("fill", d => lossNodes.has(d.name) ? lossColor : "#333")
+      .attr("font-weight", d => lossNodes.has(d.name) ? 600 : 400)
+      .text(d => {
+        const val = d.value;
+        return lossNodes.has(d.name)
+          ? `${d.name}: ${val} units`
+          : `${d.name} (${val})`;
+      });
+
+  // --- Total energy annotation ---
+  svg.append("text")
+    .attr("class", "total-label")
+    .attr("x", width / 2)
+    .attr("y", 18)
+    .attr("text-anchor", "middle")
+    .attr("font-weight", 600)
+    .text(`Total Energy Input: ${totalEnergy} units`);
+
+  // --- Drag ---
+  nodeRects.call(d3.drag()
+    .subject(d => d)
+    .on("start", function () { d3.select(this).raise(); })
+    .on("drag", function (event, d) {
+      const dy = event.dy;
+      d.y0 = Math.max(margin.top, Math.min(height - margin.bottom - (d.y1 - d.y0), d.y0 + dy));
+      d.y1 = d.y0 + (d3.select(this).datum().y1 - d3.select(this).datum().y0) || d.y1 - d.y0 + d.y0;
+      // Recompute y1 from height
+      const h = parseFloat(d3.select(this).attr("height"));
+      d.y1 = d.y0 + h;
+      d3.select(this).attr("y", d.y0);
+      sankey.update(graph);
+      linkPaths.attr("d", d3.sankeyLinkHorizontal());
+      // Update label
+      labelGroup.selectAll("text")
+        .attr("y", dd => (dd.y0 + dd.y1) / 2);
+    }));
+
+  // --- Hover: highlight connected links ---
+  nodeRects
+    .on("pointerenter", (event, d) => {
+      const connected = new Set();
+      graph.links.forEach((l, i) => {
+        if (l.source === d || l.target === d) connected.add(i);
+      });
+      linkPaths.attr("stroke-opacity", (l, i) => connected.has(i) ? 0.8 : 0.1);
+    })
+    .on("pointerleave", () => {
+      linkPaths.attr("stroke-opacity", 0.4);
+    });
+
+  // --- Link tooltip ---
+  linkPaths
+    .on("pointerenter", function (event, d) {
+      const pct = ((d.value / totalEnergy) * 100).toFixed(1);
+      tooltip.html(`<strong>${d.source.name} &rarr; ${d.target.name}</strong><br>${d.value} units (${pct}%)`)
+        .style("opacity", 1);
+      d3.select(this).attr("stroke-opacity", 0.8);
+    })
+    .on("pointermove", (event) => {
+      const ttNode = tooltip.node();
+      const ttW = ttNode.offsetWidth;
+      const x = Math.min(event.pageX + 14, window.innerWidth + window.scrollX - ttW - 8);
+      const y = Math.max(event.pageY - 40, 8);
+      tooltip.style("left", `${x}px`).style("top", `${y}px`);
+    })
+    .on("pointerleave", function () {
+      tooltip.style("opacity", 0);
+      d3.select(this).attr("stroke-opacity", 0.4);
+    });
+
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Adjacency Matrix with Reorderable Rows & Columns</title>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif; background: #fafafa; }
+  #controls { padding: 12px 20px; display: flex; gap: 8px; align-items: center; }
+  #controls label { font-size: 13px; font-weight: 600; color: #555; margin-right: 4px; }
+  button { padding: 5px 14px; border: 1px solid #aaa; border-radius: 4px;
+           background: #fff; cursor: pointer; font-size: 12px; }
+  button:hover { background: #eee; }
+  button.active { background: #4477AA; color: #fff; border-color: #4477AA; }
+  #tooltip {
+    position: absolute; pointer-events: none; background: rgba(0,0,0,0.82);
+    color: #fff; padding: 5px 9px; border-radius: 4px; font-size: 11px;
+    white-space: nowrap; opacity: 0; transition: opacity 0.15s;
+  }
+  .row-label, .col-label { font-size: 10px; fill: #333; cursor: default; }
+  .legend-title { font-size: 11px; font-weight: 600; fill: #555; }
+  .legend-label { font-size: 10px; fill: #555; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <label>Order:</label>
+  <button class="active" data-order="name">By Name</button>
+  <button data-order="degree">By Degree</button>
+  <button data-order="community">By Community</button>
+</div>
+<div id="tooltip"></div>
+<svg id="chart"></svg>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+// --- Data generation ---
+const communityLabels = ["A","B","C","D","E"];
+const nodes = [];
+communityLabels.forEach((c, ci) => {
+  for (let i = 1; i <= 7; i++) {
+    nodes.push({ id: `${c}${i}`, community: ci, name: `${c}${i}` });
+  }
+});
+const n = nodes.length; // 35
+
+// Seeded random for reproducibility
+let seed = 42;
+const rand = () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
+
+const edges = [];
+const edgeSet = new Set();
+const addEdge = (i, j, w) => {
+  const key = i < j ? `${i}-${j}` : `${j}-${i}`;
+  if (i === j || edgeSet.has(key)) return false;
+  edgeSet.add(key);
+  edges.push({ source: i, target: j, weight: w });
+  return true;
+};
+
+// Dense within-community (~60% of possible pairs)
+for (let ci = 0; ci < 5; ci++) {
+  const start = ci * 7;
+  for (let a = start; a < start + 7; a++) {
+    for (let b = a + 1; b < start + 7; b++) {
+      if (rand() < 0.6) addEdge(a, b, Math.ceil(rand() * 5));
+    }
+  }
+}
+// Sparse between communities (~3% of possible pairs)
+for (let ci = 0; ci < 5; ci++) {
+  for (let cj = ci + 1; cj < 5; cj++) {
+    for (let a = ci * 7; a < ci * 7 + 7; a++) {
+      for (let b = cj * 7; b < cj * 7 + 7; b++) {
+        if (rand() < 0.03) addEdge(a, b, Math.ceil(rand() * 3));
+      }
+    }
+  }
+}
+// Ensure ~200 edges — top up if needed
+while (edges.length < 195) {
+  const a = Math.floor(rand() * n), b = Math.floor(rand() * n);
+  if (a !== b) addEdge(a, b, Math.ceil(rand() * 5));
+}
+
+// Build adjacency map
+const adj = new Map();
+edges.forEach(e => {
+  adj.set(`${e.source}-${e.target}`, e.weight);
+  adj.set(`${e.target}-${e.source}`, e.weight);
+});
+
+// Compute degree
+nodes.forEach((nd, i) => {
+  nd.degree = edges.filter(e => e.source === i || e.target === i).length;
+  nd.index = i;
+});
+
+// --- Layout ---
+const matrixSize = 500;
+const cellSize = matrixSize / n;
+const margin = { top: 70, right: 180, bottom: 20, left: 70 };
+const totalW = margin.left + matrixSize + margin.right;
+const totalH = margin.top + matrixSize + margin.bottom + 80; // extra for legends
+
+const tolBright = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE"];
+const communityColor = d3.scaleOrdinal().domain([0,1,2,3,4]).range(tolBright);
+
+// Weight color scale — sequential blue, 0 = white
+const weightColor = d3.scaleSequential(d3.interpolateBlues).domain([0, 5]);
+
+const svg = d3.select("#chart")
+    .attr("width", totalW)
+    .attr("height", totalH);
+
+const tooltip = d3.select("#tooltip");
+
+// --- Order functions ---
+const orders = {
+  name: d3.range(n).sort((a, b) => d3.ascending(nodes[a].name, nodes[b].name)),
+  degree: d3.range(n).sort((a, b) => d3.descending(nodes[a].degree, nodes[b].degree) || d3.ascending(nodes[a].name, nodes[b].name)),
+  community: d3.range(n).sort((a, b) => d3.ascending(nodes[a].community, nodes[b].community) || d3.ascending(nodes[a].name, nodes[b].name))
+};
+
+// position scale: maps node index → visual position
+let currentOrder = orders.name;
+const pos = new Map(); // nodeIndex → visualRow/Col
+const updatePos = () => { currentOrder.forEach((nodeIdx, visualIdx) => pos.set(nodeIdx, visualIdx)); };
+updatePos();
+
+const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+// --- Row highlight backgrounds ---
+const rowHighlights = g.append("g").attr("class", "row-highlights");
+const colHighlights = g.append("g").attr("class", "col-highlights");
+
+// --- Build cells ---
+const cellData = [];
+for (let i = 0; i < n; i++) {
+  for (let j = 0; j < n; j++) {
+    const w = i === j ? -1 : (adj.get(`${i}-${j}`) || 0);
+    cellData.push({ row: i, col: j, weight: w });
+  }
+}
+
+const cellsG = g.append("g").attr("class", "cells");
+const cells = cellsG.selectAll("rect")
+  .data(cellData, d => `${d.row}-${d.col}`)
+  .join("rect")
+    .attr("x", d => pos.get(d.col) * cellSize)
+    .attr("y", d => pos.get(d.row) * cellSize)
+    .attr("width", cellSize - 0.5)
+    .attr("height", cellSize - 0.5)
+    .attr("fill", d => d.weight === -1 ? "#FEFBE9" : d.weight === 0 ? "#fff" : weightColor(d.weight))
+    .attr("stroke", "#eee")
+    .attr("stroke-width", 0.3)
+    .style("cursor", d => d.weight > 0 ? "pointer" : "default");
+
+// --- Row labels ---
+const rowLabels = g.append("g").attr("class", "row-labels")
+  .selectAll("text")
+  .data(nodes, d => d.id)
+  .join("text")
+    .attr("class", "row-label")
+    .attr("x", -4)
+    .attr("y", d => pos.get(d.index) * cellSize + cellSize / 2)
+    .attr("dy", "0.35em")
+    .attr("text-anchor", "end")
+    .text(d => d.name);
+
+// --- Column labels ---
+const colLabels = g.append("g").attr("class", "col-labels")
+  .selectAll("text")
+  .data(nodes, d => d.id)
+  .join("text")
+    .attr("class", "col-label")
+    .attr("x", 0)
+    .attr("y", 0)
+    .attr("transform", d => `translate(${pos.get(d.index) * cellSize + cellSize / 2},-4) rotate(-65)`)
+    .attr("text-anchor", "start")
+    .text(d => d.name);
+
+// --- Side bar chart (degree) ---
+const barX = matrixSize + 20;
+const barMaxW = 80;
+const barScale = d3.scaleLinear()
+    .domain([0, d3.max(nodes, d => d.degree)])
+    .range([0, barMaxW]);
+
+const barsG = g.append("g").attr("class", "degree-bars");
+const bars = barsG.selectAll("rect")
+  .data(nodes, d => d.id)
+  .join("rect")
+    .attr("x", barX)
+    .attr("y", d => pos.get(d.index) * cellSize + 1)
+    .attr("width", d => barScale(d.degree))
+    .attr("height", cellSize - 2)
+    .attr("fill", d => communityColor(d.community))
+    .attr("rx", 1);
+
+const barLabelsG = g.append("g").attr("class", "degree-labels");
+const barLabels = barLabelsG.selectAll("text")
+  .data(nodes, d => d.id)
+  .join("text")
+    .attr("x", d => barX + barScale(d.degree) + 3)
+    .attr("y", d => pos.get(d.index) * cellSize + cellSize / 2)
+    .attr("dy", "0.35em")
+    .attr("font-size", 9)
+    .attr("fill", "#666")
+    .text(d => d.degree);
+
+// Bar chart title
+g.append("text")
+    .attr("x", barX + barMaxW / 2)
+    .attr("y", -50)
+    .attr("text-anchor", "middle")
+    .attr("font-size", 11)
+    .attr("font-weight", 600)
+    .attr("fill", "#555")
+    .text("Degree");
+
+// --- Hover interactions ---
+let highlightRow = null, highlightCol = null;
+
+const rowHighRect = rowHighlights.append("rect")
+    .attr("width", matrixSize).attr("height", cellSize)
+    .attr("fill", "#000").attr("opacity", 0).style("pointer-events", "none");
+const colHighRect = colHighlights.append("rect")
+    .attr("width", cellSize).attr("height", matrixSize)
+    .attr("fill", "#000").attr("opacity", 0).style("pointer-events", "none");
+
+cellsG.on("pointerenter", function(event) {
+  const [mx, my] = d3.pointer(event, g.node());
+  // Find which visual row/col
+  const vc = Math.floor(mx / cellSize);
+  const vr = Math.floor(my / cellSize);
+  if (vc < 0 || vc >= n || vr < 0 || vr >= n) return;
+
+  // Find node indices
+  const rowIdx = currentOrder[vr];
+  const colIdx = currentOrder[vc];
+  if (rowIdx === undefined || colIdx === undefined) return;
+
+  highlightRow = vr;
+  highlightCol = vc;
+
+  rowHighRect.attr("y", vr * cellSize).attr("opacity", 0.05);
+  colHighRect.attr("x", vc * cellSize).attr("opacity", 0.05);
+
+  const w = rowIdx === colIdx ? null : (adj.get(`${rowIdx}-${colIdx}`) || 0);
+  if (w !== null && w > 0) {
+    tooltip.style("opacity", 1)
+        .html(`${nodes[rowIdx].name} → ${nodes[colIdx].name}: weight ${w}`)
+        .style("left", (event.pageX + 12) + "px")
+        .style("top", (event.pageY - 20) + "px");
+  } else if (w === 0) {
+    tooltip.style("opacity", 1)
+        .html(`${nodes[rowIdx].name} → ${nodes[colIdx].name}: no edge`)
+        .style("left", (event.pageX + 12) + "px")
+        .style("top", (event.pageY - 20) + "px");
+  } else {
+    tooltip.style("opacity", 0);
+  }
+});
+
+cellsG.on("pointermove", function(event) {
+  const [mx, my] = d3.pointer(event, g.node());
+  const vc = Math.floor(mx / cellSize);
+  const vr = Math.floor(my / cellSize);
+  if (vc < 0 || vc >= n || vr < 0 || vr >= n) {
+    rowHighRect.attr("opacity", 0);
+    colHighRect.attr("opacity", 0);
+    tooltip.style("opacity", 0);
+    return;
+  }
+
+  if (vr !== highlightRow || vc !== highlightCol) {
+    highlightRow = vr;
+    highlightCol = vc;
+    rowHighRect.attr("y", vr * cellSize).attr("opacity", 0.05);
+    colHighRect.attr("x", vc * cellSize).attr("opacity", 0.05);
+
+    const rowIdx = currentOrder[vr];
+    const colIdx = currentOrder[vc];
+    const w = rowIdx === colIdx ? null : (adj.get(`${rowIdx}-${colIdx}`) || 0);
+    if (w !== null && w > 0) {
+      tooltip.style("opacity", 1)
+          .html(`${nodes[rowIdx].name} → ${nodes[colIdx].name}: weight ${w}`);
+    } else if (w === 0) {
+      tooltip.style("opacity", 1)
+          .html(`${nodes[rowIdx].name} → ${nodes[colIdx].name}: no edge`);
+    } else {
+      tooltip.style("opacity", 0);
+    }
+  }
+  tooltip.style("left", (event.pageX + 12) + "px")
+      .style("top", (event.pageY - 20) + "px");
+});
+
+cellsG.on("pointerleave", function() {
+  rowHighRect.attr("opacity", 0);
+  colHighRect.attr("opacity", 0);
+  tooltip.style("opacity", 0);
+});
+
+// --- Reorder ---
+function reorder(orderKey) {
+  currentOrder = orders[orderKey];
+  updatePos();
+
+  const t = d3.transition().duration(750).ease(d3.easeCubicOut);
+
+  cells.transition(t)
+      .attr("x", d => pos.get(d.col) * cellSize)
+      .attr("y", d => pos.get(d.row) * cellSize);
+
+  rowLabels.transition(t)
+      .attr("y", d => pos.get(d.index) * cellSize + cellSize / 2);
+
+  colLabels.transition(t)
+      .attr("transform", d => `translate(${pos.get(d.index) * cellSize + cellSize / 2},-4) rotate(-65)`);
+
+  bars.transition(t)
+      .attr("y", d => pos.get(d.index) * cellSize + 1);
+
+  barLabels.transition(t)
+      .attr("y", d => pos.get(d.index) * cellSize + cellSize / 2);
+}
+
+d3.selectAll("#controls button").on("click", function() {
+  d3.selectAll("#controls button").classed("active", false);
+  d3.select(this).classed("active", true);
+  reorder(this.dataset.order);
+});
+
+// --- Legends ---
+const legendG = svg.append("g")
+    .attr("transform", `translate(${margin.left}, ${margin.top + matrixSize + 20})`);
+
+// Weight legend
+legendG.append("text").attr("class", "legend-title").attr("x", 0).attr("y", 0).text("Edge Weight");
+const wLegendW = 150, wLegendH = 12;
+const defs = svg.append("defs");
+const grad = defs.append("linearGradient").attr("id", "wgrad");
+grad.append("stop").attr("offset", "0%").attr("stop-color", weightColor(0));
+grad.append("stop").attr("offset", "20%").attr("stop-color", weightColor(1));
+grad.append("stop").attr("offset", "100%").attr("stop-color", weightColor(5));
+legendG.append("rect").attr("x", 0).attr("y", 8).attr("width", wLegendW).attr("height", wLegendH)
+    .attr("fill", "url(#wgrad)").attr("stroke", "#ccc");
+[0, 1, 2, 3, 4, 5].forEach(v => {
+  legendG.append("text").attr("class", "legend-label")
+      .attr("x", v / 5 * wLegendW).attr("y", 34).attr("text-anchor", "middle").text(v);
+});
+
+// Community legend
+const commLegendG = legendG.append("g").attr("transform", `translate(${wLegendW + 60}, 0)`);
+commLegendG.append("text").attr("class", "legend-title").attr("x", 0).attr("y", 0).text("Community");
+communityLabels.forEach((c, i) => {
+  const x = i * 50;
+  commLegendG.append("rect").attr("x", x).attr("y", 8).attr("width", 14).attr("height", 12)
+      .attr("fill", communityColor(i)).attr("rx", 2);
+  commLegendG.append("text").attr("class", "legend-label")
+      .attr("x", x + 18).attr("y", 18).attr("dy", "0.1em").text(c);
+});
+
+// Diagonal legend
+const diagLegendG = legendG.append("g").attr("transform", `translate(${wLegendW + 60 + 5 * 50 + 20}, 0)`);
+diagLegendG.append("rect").attr("x", 0).attr("y", 8).attr("width", 14).attr("height", 12)
+    .attr("fill", "#FEFBE9").attr("stroke", "#ccc").attr("rx", 2);
+diagLegendG.append("text").attr("class", "legend-label").attr("x", 18).attr("y", 18).attr("dy", "0.1em").text("Diagonal");
+</script>
+</body>
+</html>

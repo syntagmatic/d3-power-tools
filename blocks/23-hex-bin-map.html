@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hex-Binned US Population Density</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #fafafa; }
+  #container { position: relative; width: 100%; max-width: 960px; margin: 0 auto; }
+  canvas, svg { position: absolute; top: 0; left: 0; }
+  svg { pointer-events: none; }
+  .controls {
+    padding: 12px 16px;
+    display: flex; align-items: center; gap: 12px;
+    font-size: 13px; color: #555;
+  }
+  .controls label { display: flex; align-items: center; gap: 6px; }
+  .controls input[type="range"] { width: 120px; }
+  #tooltip {
+    position: absolute; pointer-events: none;
+    background: rgba(0,0,0,0.8); color: #fff;
+    padding: 6px 10px; border-radius: 4px;
+    font-size: 12px; line-height: 1.4;
+    white-space: nowrap; display: none;
+  }
+</style>
+</head>
+<body>
+
+<div class="controls">
+  <label>Hex radius: <input type="range" id="radiusSlider" min="4" max="16" value="8" step="1">
+  <span id="radiusValue">8</span>px</label>
+</div>
+<div id="container">
+  <canvas id="hexCanvas"></canvas>
+  <svg id="overlay"></svg>
+  <div id="tooltip"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3-hexbin@0.2.2/build/d3-hexbin.min.js"></script>
+<script>
+(function() {
+  const width = 960, height = 600;
+  const dpr = devicePixelRatio || 1;
+
+  // --- Setup layers ---
+  const container = d3.select("#container")
+    .style("height", `${height}px`);
+
+  const canvas = document.getElementById("hexCanvas");
+  canvas.width = width * dpr;
+  canvas.height = height * dpr;
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  const svg = d3.select("#overlay")
+    .attr("width", width).attr("height", height)
+    .attr("viewBox", `0 0 ${width} ${height}`);
+
+  const tooltip = d3.select("#tooltip");
+
+  // --- Projection ---
+  const projection = d3.geoAlbersUsa()
+    .scale(1280)
+    .translate([width / 2, height / 2]);
+
+  const path = d3.geoPath(projection);
+
+  // --- Simplified US outline (continental) ---
+  // Approximate boundary as a single polygon in [lon, lat]
+  const usBoundary = {
+    type: "Feature",
+    geometry: {
+      type: "Polygon",
+      coordinates: [[
+        [-124.7, 48.4], [-123.0, 48.5], [-122.8, 48.0], [-122.4, 47.6],
+        [-124.6, 46.3], [-124.1, 43.0], [-124.5, 40.0], [-122.4, 37.8],
+        [-120.5, 34.5], [-117.2, 32.5], [-114.6, 32.7], [-111.1, 31.3],
+        [-108.2, 31.8], [-106.5, 31.8], [-104.0, 30.0], [-103.0, 28.9],
+        [-99.2, 26.4], [-97.1, 25.9], [-97.0, 27.8], [-94.7, 29.4],
+        [-91.2, 29.0], [-89.5, 28.8], [-88.8, 29.5], [-85.3, 29.7],
+        [-84.0, 30.1], [-82.0, 25.0], [-80.0, 25.0], [-80.5, 30.5],
+        [-81.5, 31.0], [-80.5, 32.0], [-78.5, 33.9], [-75.5, 35.2],
+        [-75.0, 38.0], [-74.0, 39.0], [-73.7, 40.7], [-72.0, 41.0],
+        [-71.0, 41.5], [-70.0, 41.7], [-69.9, 43.5], [-67.0, 45.0],
+        [-67.0, 47.3], [-69.0, 47.4], [-71.0, 45.0], [-75.0, 45.0],
+        [-76.8, 44.0], [-79.0, 43.2], [-82.5, 41.7], [-83.0, 42.0],
+        [-82.4, 43.0], [-82.5, 45.0], [-84.0, 46.0], [-84.8, 46.8],
+        [-88.0, 48.0], [-89.5, 48.0], [-92.0, 46.7], [-92.5, 48.6],
+        [-95.0, 49.0], [-104.0, 49.0], [-116.0, 49.0], [-124.7, 48.4]
+      ]]
+    }
+  };
+
+  svg.append("path")
+    .datum(usBoundary)
+    .attr("d", path)
+    .attr("fill", "none")
+    .attr("stroke", "#999")
+    .attr("stroke-width", 1);
+
+  // --- Generate synthetic data ---
+  const cities = [
+    { lon: -74.0, lat: 40.7, weight: 3000 },   // NYC
+    { lon: -118.2, lat: 34.1, weight: 2500 },   // LA
+    { lon: -87.6, lat: 41.9, weight: 2000 },    // Chicago
+    { lon: -95.4, lat: 29.8, weight: 1500 },    // Houston
+    { lon: -112.1, lat: 33.4, weight: 1000 },   // Phoenix
+    { lon: -122.4, lat: 37.8, weight: 900 },    // San Francisco
+    { lon: -75.2, lat: 40.0, weight: 800 },     // Philadelphia
+    { lon: -96.8, lat: 32.8, weight: 750 },     // Dallas
+    { lon: -77.0, lat: 38.9, weight: 700 },     // DC
+    { lon: -93.3, lat: 44.9, weight: 600 },     // Minneapolis
+    { lon: -84.4, lat: 33.7, weight: 550 },     // Atlanta
+    { lon: -122.3, lat: 47.6, weight: 500 },    // Seattle
+    { lon: -104.9, lat: 39.7, weight: 450 },    // Denver
+    { lon: -71.1, lat: 42.4, weight: 400 },     // Boston
+    { lon: -90.2, lat: 38.6, weight: 350 },     // St. Louis
+  ];
+
+  // Box-Muller transform for normal distribution
+  const randNormal = (mu, sigma) => {
+    const u1 = Math.random(), u2 = Math.random();
+    return mu + sigma * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  };
+
+  const totalWeight = d3.sum(cities, d => d.weight);
+  const points = [];
+  const rng = d3.randomLcg(42); // seeded for reproducibility
+
+  // Use seeded random for Box-Muller
+  const seededNormal = (mu, sigma) => {
+    const u1 = rng(), u2 = rng();
+    return mu + sigma * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  };
+
+  for (const city of cities) {
+    const n = Math.round((city.weight / totalWeight) * 15000);
+    const sigma = 1.2 + rng() * 0.8; // 1.2-2.0 degrees
+    for (let i = 0; i < n; i++) {
+      const lon = seededNormal(city.lon, sigma);
+      const lat = seededNormal(city.lat, sigma * 0.7);
+      const projected = projection([lon, lat]);
+      if (projected) {
+        points.push({ lon, lat, x: projected[0], y: projected[1], city: city });
+      }
+    }
+  }
+
+  // --- City name lookup for tooltip ---
+  const cityNames = [
+    "New York", "Los Angeles", "Chicago", "Houston", "Phoenix",
+    "San Francisco", "Philadelphia", "Dallas", "Washington DC",
+    "Minneapolis", "Atlanta", "Seattle", "Denver", "Boston", "St. Louis"
+  ];
+
+  // --- Hexbin and rendering ---
+  let hexRadius = 8;
+
+  function render() {
+    const hexbin = d3.hexbin()
+      .x(d => d.x).y(d => d.y)
+      .radius(hexRadius)
+      .extent([[0, 0], [width, height]]);
+
+    const bins = hexbin(points);
+    const maxCount = d3.max(bins, d => d.length) || 1;
+
+    const color = d3.scaleSequential([0, maxCount], d3.interpolateOranges);
+
+    // Clear and draw hexagons on canvas
+    ctx.clearRect(0, 0, width, height);
+
+    // Draw hexagons - batch by rounding color to reduce state changes
+    for (const bin of bins) {
+      if (bin.length === 0) continue;
+      ctx.beginPath();
+      drawHexagon(ctx, bin.x, bin.y, hexRadius);
+      ctx.fillStyle = color(bin.length);
+      ctx.fill();
+    }
+
+    // Draw legend
+    drawLegend(ctx, color, maxCount);
+
+    // Store bins for hover
+    currentBins = bins;
+    currentHexbin = hexbin;
+    currentColor = color;
+    currentMaxCount = maxCount;
+  }
+
+  function drawHexagon(ctx, cx, cy, r) {
+    // Pointy-top hexagon matching d3-hexbin layout
+    for (let i = 0; i < 6; i++) {
+      const angle = (Math.PI / 3) * i - Math.PI / 6;
+      const hx = cx + r * Math.cos(angle);
+      const hy = cy + r * Math.sin(angle);
+      if (i === 0) ctx.moveTo(hx, hy);
+      else ctx.lineTo(hx, hy);
+    }
+    ctx.closePath();
+  }
+
+  function drawLegend(ctx, color, maxCount) {
+    const lw = 200, lh = 14, lx = width - lw - 30, ly = height - 50;
+
+    ctx.save();
+    ctx.font = "11px system-ui";
+    ctx.fillStyle = "#555";
+    ctx.fillText("Points per hex", lx, ly - 6);
+
+    // Color ramp
+    for (let i = 0; i < lw; i++) {
+      ctx.fillStyle = color((i / lw) * maxCount);
+      ctx.fillRect(lx + i, ly, 1, lh);
+    }
+
+    // Border
+    ctx.strokeStyle = "#ccc";
+    ctx.lineWidth = 0.5;
+    ctx.strokeRect(lx, ly, lw, lh);
+
+    // Labels
+    ctx.fillStyle = "#555";
+    ctx.textAlign = "start";
+    ctx.fillText("0", lx, ly + lh + 14);
+    ctx.textAlign = "end";
+    ctx.fillText(String(maxCount), lx + lw, ly + lh + 14);
+    ctx.restore();
+  }
+
+  let currentBins = [], currentHexbin = null, currentColor = null, currentMaxCount = 0;
+
+  render();
+
+  // --- Hover interaction ---
+  canvas.addEventListener("pointermove", (event) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = event.clientX - rect.left;
+    const my = event.clientY - rect.top;
+
+    // Find closest hex bin
+    let closest = null, closestDist = Infinity;
+    for (const bin of currentBins) {
+      const dx = bin.x - mx, dy = bin.y - my;
+      const dist = dx * dx + dy * dy;
+      if (dist < closestDist && dist < hexRadius * hexRadius * 3) {
+        closest = bin;
+        closestDist = dist;
+      }
+    }
+
+    if (closest && closest.length > 0) {
+      // Find approximate location by inverting center
+      const lonlat = projection.invert([closest.x, closest.y]);
+      const locStr = lonlat
+        ? `${Math.abs(lonlat[1]).toFixed(1)}\u00b0${lonlat[1] >= 0 ? "N" : "S"}, ${Math.abs(lonlat[0]).toFixed(1)}\u00b0${lonlat[0] >= 0 ? "E" : "W"}`
+        : "";
+
+      tooltip
+        .style("display", "block")
+        .style("left", `${closest.x + 12}px`)
+        .style("top", `${closest.y - 20}px`)
+        .html(`<strong>${closest.length}</strong> points<br>${locStr}`);
+
+      // Re-render with highlight
+      render();
+      ctx.save();
+      ctx.strokeStyle = "#333";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      drawHexagon(ctx, closest.x, closest.y, hexRadius);
+      ctx.stroke();
+      ctx.restore();
+    } else {
+      tooltip.style("display", "none");
+    }
+  });
+
+  canvas.addEventListener("pointerleave", () => {
+    tooltip.style("display", "none");
+    render();
+  });
+
+  // --- Slider control ---
+  const slider = document.getElementById("radiusSlider");
+  const radiusLabel = document.getElementById("radiusValue");
+
+  slider.addEventListener("input", () => {
+    hexRadius = +slider.value;
+    radiusLabel.textContent = hexRadius;
+    tooltip.style("display", "none");
+    render();
+  });
+})();
+</script>
+</body>
+</html>

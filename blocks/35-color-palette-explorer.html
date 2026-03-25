@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Color Palette Explorer</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #fafafa; color: #333; padding: 24px; max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { font-size: 0.85rem; color: #666; margin-bottom: 16px; }
+  h2 { font-size: 0.95rem; font-weight: 600; margin: 20px 0 8px; color: #555; }
+
+  .palette-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+  .palette-btn {
+    padding: 8px 14px; border: 2px solid #ccc; border-radius: 6px;
+    background: #fff; cursor: pointer; font-size: 0.82rem; font-family: system-ui, sans-serif;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+  .palette-btn:hover { border-color: #888; }
+  .palette-btn.active { border-color: #333; background: #eee; font-weight: 600; }
+  .palette-btn .dots { display: flex; gap: 3px; margin-top: 4px; }
+  .palette-btn .dot { width: 12px; height: 12px; border-radius: 50%; }
+
+  .contrast-table { border-collapse: collapse; }
+  .contrast-table td, .contrast-table th {
+    width: 42px; height: 42px; text-align: center; font-size: 0.62rem; font-weight: 600;
+    border: 1px solid #ddd;
+  }
+  .contrast-table th { background: #f0f0f0; padding: 2px; }
+  .contrast-table th .cs { display: inline-block; width: 20px; height: 20px; border-radius: 3px; border: 1px solid #ccc; }
+
+  .cvd-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+  .cvd-label { width: 100px; font-size: 0.78rem; color: #555; text-align: right; flex-shrink: 0; }
+  .cvd-swatch { width: 40px; height: 30px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.1); display: inline-block; }
+
+  svg text { font-family: system-ui, sans-serif; }
+</style>
+</head>
+<body>
+
+<h1>Colorblind-Safe Palette Explorer</h1>
+<p class="subtitle">Compare palettes on a grouped bar chart, check WCAG contrast ratios, and preview CVD simulations.</p>
+
+<div id="chart"></div>
+
+<h2>Palette</h2>
+<div class="palette-buttons" id="buttons"></div>
+
+<h2>WCAG Contrast Matrix</h2>
+<div id="matrix"></div>
+
+<h2>CVD Simulation</h2>
+<div id="cvd"></div>
+
+<script>
+(function() {
+
+// --- Palettes ---
+const palettes = {
+  "Tol Bright":  ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377"],
+  "Tol Vibrant": ["#EE7733","#0077BB","#33BBEE","#EE3377","#CC3311","#009988"],
+  "Tol Muted":   ["#CC6677","#332288","#DDCC77","#117733","#88CCEE","#882255"],
+  "Tol Light":   ["#77AADD","#EE8866","#EEDD88","#FFAABB","#99DDFF","#44BB99"],
+  "Tableau10":   d3.schemeTableau10.slice(0, 6),
+  "Category10":  d3.schemeCategory10.slice(0, 6),
+};
+
+// --- Deterministic synthetic data: 5 groups x 6 categories ---
+const groups = ["A", "B", "C", "D", "E"];
+const categories = ["Cat 1", "Cat 2", "Cat 3", "Cat 4", "Cat 5", "Cat 6"];
+
+// Simple seeded PRNG
+let seed = 42;
+function rand() { seed = (seed * 16807) % 2147483647; return seed / 2147483647; }
+
+const data = [];
+for (const g of groups) {
+  for (let ci = 0; ci < categories.length; ci++) {
+    data.push({ group: g, category: categories[ci], catIndex: ci, value: 20 + Math.floor(rand() * 80) });
+  }
+}
+
+// --- Chart ---
+const margin = { top: 24, right: 20, bottom: 30, left: 40 };
+const width = 860, height = 300;
+const innerW = width - margin.left - margin.right;
+const innerH = height - margin.top - margin.bottom;
+
+const svg = d3.select("#chart").append("svg")
+    .attr("width", width).attr("height", height);
+
+const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+const x0 = d3.scaleBand().domain(groups).range([0, innerW]).paddingInner(0.2).paddingOuter(0.1);
+const x1 = d3.scaleBand().domain(categories).range([0, x0.bandwidth()]).padding(0.05);
+const y = d3.scaleLinear().domain([0, 100]).nice().range([innerH, 0]);
+
+g.append("g").attr("transform", `translate(0,${innerH})`)
+  .call(d3.axisBottom(x0).tickSizeOuter(0)).select(".domain").remove();
+g.append("g").call(d3.axisLeft(y).ticks(5)).select(".domain").remove();
+
+let currentPalette = "Tol Bright";
+const colorScale = d3.scaleOrdinal().domain(categories).range(palettes[currentPalette]);
+
+// Draw bars
+const bars = g.selectAll("g.grp")
+  .data(groups)
+  .join("g")
+    .attr("class", "grp")
+    .attr("transform", d => `translate(${x0(d)},0)`)
+  .selectAll("rect")
+  .data(grp => data.filter(d => d.group === grp))
+  .join("rect")
+    .attr("x", d => x1(d.category))
+    .attr("y", d => y(d.value))
+    .attr("width", x1.bandwidth())
+    .attr("height", d => innerH - y(d.value))
+    .attr("rx", 2)
+    .attr("fill", d => colorScale(d.category));
+
+// Legend
+const legend = svg.append("g").attr("transform", `translate(${margin.left},6)`);
+categories.forEach((c, i) => {
+  const lg = legend.append("g").attr("transform", `translate(${i * 100},0)`);
+  lg.append("rect").attr("class", "legend-swatch").attr("width", 10).attr("height", 10)
+    .attr("rx", 2).attr("fill", palettes[currentPalette][i]);
+  lg.append("text").attr("x", 14).attr("y", 9).attr("font-size", "0.7rem").attr("fill", "#555").text(c);
+});
+
+// --- Update ---
+function updateColors(name) {
+  currentPalette = name;
+  const colors = palettes[name];
+  colorScale.range(colors);
+
+  bars.transition().duration(500).attr("fill", d => colorScale(d.category));
+  svg.selectAll(".legend-swatch").each(function(_, i) {
+    d3.select(this).transition().duration(500).attr("fill", colors[i]);
+  });
+
+  d3.selectAll(".palette-btn").classed("active", function() { return this.dataset.name === name; });
+  buildMatrix(colors);
+  buildCVD(colors);
+}
+
+// --- Palette Buttons ---
+const btnContainer = d3.select("#buttons");
+Object.entries(palettes).forEach(([name, colors]) => {
+  const btn = btnContainer.append("button")
+    .attr("class", "palette-btn" + (name === currentPalette ? " active" : ""))
+    .attr("data-name", name)
+    .on("click", () => updateColors(name));
+  btn.append("div").text(name);
+  const dots = btn.append("div").attr("class", "dots");
+  colors.forEach(c => dots.append("div").attr("class", "dot").style("background", c));
+});
+
+// --- WCAG Contrast ---
+function relativeLuminance(hex) {
+  const [r, gv, b] = [1, 3, 5].map(i => {
+    const c = parseInt(hex.slice(i, i + 2), 16) / 255;
+    return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * r + 0.7152 * gv + 0.0722 * b;
+}
+
+function contrastRatio(a, b) {
+  const l1 = relativeLuminance(a), l2 = relativeLuminance(b);
+  return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+}
+
+function buildMatrix(colors) {
+  const container = document.getElementById("matrix");
+  container.innerHTML = "";
+  const n = colors.length;
+  const table = document.createElement("table");
+  table.className = "contrast-table";
+
+  // Header row with color swatches
+  const thead = document.createElement("tr");
+  const corner = document.createElement("th");
+  corner.textContent = "";
+  thead.appendChild(corner);
+  for (let j = 0; j < n; j++) {
+    const th = document.createElement("th");
+    const sp = document.createElement("span");
+    sp.className = "cs";
+    sp.style.backgroundColor = colors[j];
+    th.appendChild(sp);
+    thead.appendChild(th);
+  }
+  table.appendChild(thead);
+
+  // Data rows
+  for (let i = 0; i < n; i++) {
+    const tr = document.createElement("tr");
+    const th = document.createElement("th");
+    const sp = document.createElement("span");
+    sp.className = "cs";
+    sp.style.backgroundColor = colors[i];
+    th.appendChild(sp);
+    tr.appendChild(th);
+
+    for (let j = 0; j < n; j++) {
+      const td = document.createElement("td");
+      if (i === j) {
+        td.style.background = "#f0f0f0";
+        td.textContent = "\u2014";
+        td.style.color = "#aaa";
+      } else {
+        const ratio = contrastRatio(colors[i], colors[j]);
+        td.textContent = ratio.toFixed(1) + ":1";
+        if (ratio >= 4.5) {
+          td.style.color = "#1a7f37";
+          td.style.background = "#dafbe1";
+        } else {
+          td.style.color = "#cf222e";
+          td.style.background = "#ffebe9";
+        }
+      }
+      tr.appendChild(td);
+    }
+    table.appendChild(tr);
+  }
+  container.appendChild(table);
+}
+
+// --- CVD Simulation (Brettel/Vienot matrices, inline) ---
+function linearize(c) {
+  c /= 255;
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+
+function delinearize(c) {
+  c = Math.max(0, Math.min(1, c));
+  return Math.round((c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1 / 2.4) - 0.055) * 255);
+}
+
+const cvdMatrices = {
+  protanopia: [
+    0.152286, 1.052583, -0.204868,
+    0.114503, 0.786281,  0.099216,
+   -0.003882, -0.048116, 1.051998
+  ],
+  deuteranopia: [
+    0.367322, 0.860646, -0.227968,
+    0.280085, 0.672501,  0.047413,
+   -0.011820, 0.042940,  0.968881
+  ],
+  tritanopia: [
+    1.255528, -0.076749, -0.178779,
+   -0.078411,  0.930809,  0.147602,
+    0.004733,  0.691367,  0.303900
+  ]
+};
+
+function simulateCVD(hex, type) {
+  const m = cvdMatrices[type];
+  const r = parseInt(hex.slice(1, 3), 16);
+  const gv = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  const lr = linearize(r), lg = linearize(gv), lb = linearize(b);
+  return `rgb(${delinearize(m[0]*lr + m[1]*lg + m[2]*lb)},${delinearize(m[3]*lr + m[4]*lg + m[5]*lb)},${delinearize(m[6]*lr + m[7]*lg + m[8]*lb)})`;
+}
+
+function buildCVD(colors) {
+  const container = document.getElementById("cvd");
+  container.innerHTML = "";
+  const types = [
+    { label: "Original", type: null },
+    { label: "Protanopia", type: "protanopia" },
+    { label: "Deuteranopia", type: "deuteranopia" },
+    { label: "Tritanopia", type: "tritanopia" },
+  ];
+  for (const { label, type } of types) {
+    const row = document.createElement("div");
+    row.className = "cvd-row";
+    const lbl = document.createElement("div");
+    lbl.className = "cvd-label";
+    lbl.textContent = label;
+    row.appendChild(lbl);
+    for (const hex of colors) {
+      const swatch = document.createElement("div");
+      swatch.className = "cvd-swatch";
+      swatch.style.backgroundColor = type ? simulateCVD(hex, type) : hex;
+      row.appendChild(swatch);
+    }
+    container.appendChild(row);
+  }
+}
+
+// Initial render of matrix and CVD
+buildMatrix(palettes[currentPalette]);
+buildCVD(palettes[currentPalette]);
+
+})();
+</script>
+</body>
+</html>

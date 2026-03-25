@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Annotation Techniques — Stock Price Analysis</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #fafafa; font-family: system-ui, sans-serif; display: flex; justify-content: center; padding: 2rem; }
+  .chart-container { max-width: 800px; width: 100%; }
+  svg text { font-family: system-ui, sans-serif; }
+  .axis text { font-size: 11px; fill: #555; }
+  .axis path, .axis line { stroke: #ccc; }
+  .title { font-size: 16px; font-weight: 600; fill: #222; }
+  .callout-box { fill: white; stroke: #888; stroke-width: 0.75; rx: 3; }
+  .callout-title { font-size: 10px; font-weight: 600; fill: #333; }
+  .callout-text { font-size: 9px; fill: #666; }
+  .leader-line { fill: none; stroke: #888; stroke-width: 0.8; }
+  .callout-dot { fill: #4477AA; stroke: white; stroke-width: 1.5; }
+  .threshold-label { font-size: 10px; font-weight: 500; }
+  .event-line { stroke: #999; stroke-width: 1; stroke-dasharray: 4,3; }
+  .event-diamond { fill: #EE6677; stroke: white; stroke-width: 1; }
+  .event-label { font-size: 8px; fill: #777; }
+  .trend-line { fill: none; stroke: #228833; stroke-width: 1.5; stroke-dasharray: 6,3; }
+  .trend-label { font-size: 9px; fill: #228833; font-weight: 500; }
+  .range-line { stroke: #AA3377; stroke-width: 1.5; }
+  .range-arrow { fill: #AA3377; }
+  .range-label { font-size: 9px; fill: #AA3377; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="chart-container">
+  <svg id="chart"></svg>
+</div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Dimensions ---
+const fullWidth = 800, fullHeight = 450;
+const margin = { top: 45, right: 30, bottom: 40, left: 55 };
+const width = fullWidth - margin.left - margin.right;
+const height = fullHeight - margin.top - margin.bottom;
+
+const svg = d3.select("#chart")
+    .attr("viewBox", `0 0 ${fullWidth} ${fullHeight}`)
+    .attr("preserveAspectRatio", "xMidYMid meet");
+
+const g = svg.append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+// --- Generate synthetic stock data ---
+const rng = d3.randomNormal.source(d3.randomLcg(42))(0, 1);
+const startDate = new Date("2023-01-03");
+const data = [];
+let price = 100;
+
+for (let i = 0; i < 500; i++) {
+  const date = d3.timeDay.offset(startDate, Math.floor(i * 7 / 5)); // skip weekends roughly
+  let drift = 0.0003;
+  let vol = 0.015;
+
+  // Crash: days 140-162 (~22 trading days), dropping ~30%
+  if (i >= 140 && i < 162) {
+    drift = -0.018;
+    vol = 0.025;
+  }
+  // Recovery: days 162-250
+  else if (i >= 162 && i < 250) {
+    drift = 0.003;
+    vol = 0.018;
+  }
+  // Steady climb: days 250+
+  else if (i >= 250) {
+    drift = 0.0008;
+    vol = 0.012;
+  }
+
+  price = price * (1 + drift + vol * rng());
+  price = Math.max(price, 10);
+  data.push({ date, price, day: i });
+}
+
+// --- Scales ---
+const x = d3.scaleTime()
+    .domain(d3.extent(data, d => d.date))
+    .range([0, width]);
+
+const y = d3.scaleLinear()
+    .domain([d3.min(data, d => d.price) * 0.9, d3.max(data, d => d.price) * 1.05])
+    .range([height, 0]);
+
+// --- Threshold bands ---
+const bandLayer = g.append("g").attr("class", "bands");
+
+// Target range band
+bandLayer.append("rect")
+    .attr("x", 0).attr("width", width)
+    .attr("y", y(130)).attr("height", y(120) - y(130))
+    .attr("fill", "#228833").attr("opacity", 0.08);
+
+bandLayer.append("text")
+    .attr("class", "threshold-label")
+    .attr("x", 6).attr("y", y(130) + 13)
+    .attr("fill", "#228833")
+    .text("Target Range ($120–$130)");
+
+// Danger zone band
+bandLayer.append("rect")
+    .attr("x", 0).attr("width", width)
+    .attr("y", y(80)).attr("height", y(70) - y(80))
+    .attr("fill", "#EE6677").attr("opacity", 0.08);
+
+bandLayer.append("text")
+    .attr("class", "threshold-label")
+    .attr("x", 6).attr("y", y(80) + 13)
+    .attr("fill", "#CC3311")
+    .text("Danger Zone ($70–$80)");
+
+// --- Area + Line ---
+const area = d3.area()
+    .x(d => x(d.date))
+    .y0(height)
+    .y1(d => y(d.price))
+    .curve(d3.curveMonotoneX);
+
+const line = d3.line()
+    .x(d => x(d.date))
+    .y(d => y(d.price))
+    .curve(d3.curveMonotoneX);
+
+g.append("path")
+    .datum(data)
+    .attr("fill", "#4477AA")
+    .attr("opacity", 0.1)
+    .attr("d", area);
+
+g.append("path")
+    .datum(data)
+    .attr("fill", "none")
+    .attr("stroke", "#4477AA")
+    .attr("stroke-width", 1.5)
+    .attr("d", line);
+
+// --- Event markers (earnings reports) ---
+const earningsDays = [60, 125, 200, 310, 430];
+const eventLayer = g.append("g").attr("class", "events");
+
+earningsDays.forEach(day => {
+  const d = data[day];
+  if (!d) return;
+  const ex = x(d.date);
+
+  eventLayer.append("line")
+      .attr("class", "event-line")
+      .attr("x1", ex).attr("x2", ex)
+      .attr("y1", 0).attr("y2", height);
+
+  // Diamond marker
+  const diamondSize = 4;
+  eventLayer.append("path")
+      .attr("class", "event-diamond")
+      .attr("d", `M${ex},${-diamondSize} L${ex + diamondSize},0 L${ex},${diamondSize} L${ex - diamondSize},0 Z`)
+      .attr("transform", `translate(0, ${y(d.price)})`);
+
+  // Rotated date label at top
+  const fmt = d3.timeFormat("%b %d");
+  eventLayer.append("text")
+      .attr("class", "event-label")
+      .attr("x", ex).attr("y", -8)
+      .attr("text-anchor", "start")
+      .attr("transform", `rotate(-35, ${ex}, -8)`)
+      .text(fmt(d.date));
+});
+
+// --- Trend line for recovery period (days 162-250) ---
+const recoveryData = data.filter(d => d.day >= 162 && d.day <= 250);
+// Linear regression
+const n = recoveryData.length;
+const meanX = d3.mean(recoveryData, d => d.day);
+const meanY = d3.mean(recoveryData, d => d.price);
+let ssxy = 0, ssxx = 0;
+recoveryData.forEach(d => {
+  ssxy += (d.day - meanX) * (d.price - meanY);
+  ssxx += (d.day - meanX) ** 2;
+});
+const slope = ssxy / ssxx;
+const intercept = meanY - slope * meanX;
+
+const trendStart = recoveryData[0];
+const trendEnd = recoveryData[n - 1];
+const trendLayer = g.append("g");
+
+trendLayer.append("line")
+    .attr("class", "trend-line")
+    .attr("x1", x(trendStart.date))
+    .attr("y1", y(slope * trendStart.day + intercept))
+    .attr("x2", x(trendEnd.date))
+    .attr("y2", y(slope * trendEnd.day + intercept));
+
+const trendMid = recoveryData[Math.floor(n / 2)];
+trendLayer.append("text")
+    .attr("class", "trend-label")
+    .attr("x", x(trendMid.date) + 5)
+    .attr("y", y(slope * trendMid.day + intercept) - 8)
+    .text(`+$${slope.toFixed(2)}/day`);
+
+// --- Range annotation (crash period) ---
+const crashStart = data[140];
+const crashEnd = data[161];
+const rangeY = y(d3.min(data.slice(140, 162), d => d.price)) + 45;
+const rangeLayer = g.append("g");
+
+const rx1 = x(crashStart.date), rx2 = x(crashEnd.date);
+const arrowSize = 5;
+
+// Horizontal line
+rangeLayer.append("line")
+    .attr("class", "range-line")
+    .attr("x1", rx1 + arrowSize).attr("x2", rx2 - arrowSize)
+    .attr("y1", rangeY).attr("y2", rangeY);
+
+// Left arrowhead
+rangeLayer.append("path")
+    .attr("class", "range-arrow")
+    .attr("d", `M${rx1},${rangeY} L${rx1 + arrowSize},${rangeY - arrowSize} L${rx1 + arrowSize},${rangeY + arrowSize} Z`);
+
+// Right arrowhead
+rangeLayer.append("path")
+    .attr("class", "range-arrow")
+    .attr("d", `M${rx2},${rangeY} L${rx2 - arrowSize},${rangeY - arrowSize} L${rx2 - arrowSize},${rangeY + arrowSize} Z`);
+
+// Label
+rangeLayer.append("rect")
+    .attr("x", (rx1 + rx2) / 2 - 50).attr("y", rangeY - 18)
+    .attr("width", 100).attr("height", 14)
+    .attr("fill", "white").attr("opacity", 0.85);
+
+rangeLayer.append("text")
+    .attr("class", "range-label")
+    .attr("x", (rx1 + rx2) / 2).attr("y", rangeY - 7)
+    .attr("text-anchor", "middle")
+    .text("22 trading days");
+
+// --- Callout annotations with force-based label placement ---
+const crashBottom = data.reduce((min, d) =>
+  d.day >= 140 && d.day <= 170 && d.price < min.price ? d : min, data[140]);
+const allTimeHigh = data.reduce((max, d) => d.price > max.price ? d : max, data[0]);
+
+const annotations = [
+  {
+    point: crashStart,
+    title: "Crash begins",
+    text: d3.timeFormat("%b %d, %Y")(crashStart.date),
+    preferDx: -80, preferDy: -60
+  },
+  {
+    point: crashBottom,
+    title: "Crash bottom",
+    text: `$${crashBottom.price.toFixed(2)}`,
+    preferDx: 30, preferDy: 50
+  },
+  {
+    point: allTimeHigh,
+    title: "All-time high",
+    text: `$${allTimeHigh.price.toFixed(2)}`,
+    preferDx: -100, preferDy: -50
+  }
+];
+
+// Estimate label box sizes
+const boxWidth = 95, boxHeight = 30;
+
+// Force simulation nodes for label placement
+const labelNodes = annotations.map(a => ({
+  x: x(a.point.date) + a.preferDx,
+  y: y(a.point.price) + a.preferDy,
+  targetX: x(a.point.date) + a.preferDx,
+  targetY: y(a.point.price) + a.preferDy,
+  annotation: a
+}));
+
+// Rectangular collision force
+function rectCollideForce(w, h, padding = 4) {
+  let nodes;
+  function force(alpha) {
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const a = nodes[i], b = nodes[j];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const overlapX = w + padding - Math.abs(dx);
+        const overlapY = h + padding - Math.abs(dy);
+        if (overlapX > 0 && overlapY > 0) {
+          if (overlapX < overlapY) {
+            const shift = overlapX * alpha * 0.5;
+            a.x -= Math.sign(dx) * shift;
+            b.x += Math.sign(dx) * shift;
+          } else {
+            const shift = overlapY * alpha * 0.5;
+            a.y -= Math.sign(dy) * shift;
+            b.y += Math.sign(dy) * shift;
+          }
+        }
+      }
+    }
+  }
+  force.initialize = (_nodes) => { nodes = _nodes; };
+  return force;
+}
+
+const sim = d3.forceSimulation(labelNodes)
+    .force("x", d3.forceX(d => d.targetX).strength(0.5))
+    .force("y", d3.forceY(d => d.targetY).strength(0.5))
+    .force("collide", rectCollideForce(boxWidth, boxHeight))
+    .velocityDecay(0.6)
+    .stop();
+
+for (let i = 0; i < 120; i++) sim.tick();
+
+// Clamp to chart bounds
+labelNodes.forEach(n => {
+  n.x = Math.max(0, Math.min(width - boxWidth, n.x));
+  n.y = Math.max(0, Math.min(height - boxHeight, n.y));
+});
+
+// Draw callouts
+const calloutLayer = g.append("g").attr("class", "callouts");
+
+labelNodes.forEach(node => {
+  const a = node.annotation;
+  const px = x(a.point.date), py = y(a.point.price);
+  const lx = node.x, ly = node.y;
+
+  // Elbow leader line: from point, horizontal to label x, then vertical to label y
+  const elbowX = lx + boxWidth / 2;
+  calloutLayer.append("path")
+      .attr("class", "leader-line")
+      .attr("d", `M${px},${py} L${elbowX},${py} L${elbowX},${ly + boxHeight / 2}`);
+
+  // Background box
+  calloutLayer.append("rect")
+      .attr("class", "callout-box")
+      .attr("x", lx).attr("y", ly)
+      .attr("width", boxWidth).attr("height", boxHeight);
+
+  // Title
+  calloutLayer.append("text")
+      .attr("class", "callout-title")
+      .attr("x", lx + 5).attr("y", ly + 12)
+      .text(a.title);
+
+  // Subtitle
+  calloutLayer.append("text")
+      .attr("class", "callout-text")
+      .attr("x", lx + 5).attr("y", ly + 24)
+      .text(a.text);
+
+  // Dot on data point
+  calloutLayer.append("circle")
+      .attr("class", "callout-dot")
+      .attr("cx", px).attr("cy", py)
+      .attr("r", 4);
+});
+
+// --- Axes ---
+const xAxis = d3.axisBottom(x)
+    .ticks(d3.timeMonth.every(2))
+    .tickFormat(d3.timeFormat("%b '%y"));
+
+g.append("g")
+    .attr("class", "axis")
+    .attr("transform", `translate(0,${height})`)
+    .call(xAxis);
+
+g.append("g")
+    .attr("class", "axis")
+    .call(d3.axisLeft(y).ticks(8).tickFormat(d => `$${d}`));
+
+// --- Title ---
+svg.append("text")
+    .attr("class", "title")
+    .attr("x", fullWidth / 2)
+    .attr("y", 24)
+    .attr("text-anchor", "middle")
+    .text("Annotation Techniques — Stock Price Analysis");
+
+</script>
+</body>
+</html>

@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Scatterplot with Marginal Strip Plots</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: #fafafa; display: flex; justify-content: center; padding: 40px; }
+  .container { position: relative; }
+  .axis text { font-size: 11px; fill: #555; }
+  .axis path, .axis line { stroke: #ccc; }
+  .axis-label { font-size: 13px; fill: #333; }
+  .regression-line { stroke: #555; stroke-width: 1.5; stroke-dasharray: 6,4; fill: none; }
+  .regression-label { font-size: 11px; fill: #444; }
+  .legend-item text { font-size: 11px; fill: #333; }
+  .box-line { stroke: #555; stroke-width: 1; }
+  .box-rect { fill: none; stroke: #555; stroke-width: 1; }
+  .median-line { stroke: #333; stroke-width: 2; }
+  .selection { fill: rgba(100, 100, 200, 0.1); stroke: rgba(100, 100, 200, 0.4); }
+</style>
+</head>
+<body>
+<div class="container" id="chart"></div>
+<script type="module">
+
+// --- Tol bright palette (first 3) ---
+const tolBright = ["#4477AA", "#EE6677", "#228833"];
+const groupNames = ["Low Risk", "Medium Risk", "High Risk"];
+const colorScale = d3.scaleOrdinal().domain(groupNames).range(tolBright);
+
+// --- Dimensions ---
+const centerW = 500, centerH = 400;
+const topH = 40, rightW = 40;
+const margin = { top: 10 + topH, right: 10 + rightW, bottom: 50, left: 60 };
+const totalW = margin.left + centerW + margin.right;
+const totalH = margin.top + centerH + margin.bottom;
+
+// --- Generate correlated data ---
+const rng = d3.randomLcg(42);
+const randNorm = d3.randomNormal.source(d3.randomLcg(43))(0, 1);
+
+const data = d3.range(250).map(i => {
+  // Correlated bivariate: z1, z2 independent normals, then mix for correlation ~0.55
+  const z1 = randNorm();
+  const z2 = randNorm();
+  const r = 0.55;
+  const z2c = r * z1 + Math.sqrt(1 - r * r) * z2;
+
+  const age = 20 + (z1 + 3) / 6 * 50; // map to ~20-70
+  const chol = 150 + (z2c + 3) / 6 * 150; // map to ~150-300
+
+  // Group correlated with both: higher age+chol -> higher risk
+  const score = (age - 20) / 50 + (chol - 150) / 150 + (rng() - 0.5) * 0.6;
+  const group = score < 0.8 ? "Low Risk" : score < 1.3 ? "Medium Risk" : "High Risk";
+
+  return {
+    age: Math.max(20, Math.min(70, age)),
+    chol: Math.max(150, Math.min(300, chol)),
+    group,
+    index: i
+  };
+});
+
+// --- Scales ---
+const x = d3.scaleLinear().domain([18, 72]).range([0, centerW]).nice();
+const y = d3.scaleLinear().domain([140, 310]).range([centerH, 0]).nice();
+
+// --- SVG ---
+const svg = d3.select("#chart").append("svg")
+    .attr("width", totalW)
+    .attr("height", totalH);
+
+// Center group
+const center = svg.append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+// Top marginal group
+const topMargin = svg.append("g")
+    .attr("transform", `translate(${margin.left},${margin.top - topH})`);
+
+// Right marginal group
+const rightMargin = svg.append("g")
+    .attr("transform", `translate(${margin.left + centerW},${margin.top})`);
+
+// --- Center axes ---
+center.append("g")
+    .attr("class", "axis")
+    .attr("transform", `translate(0,${centerH})`)
+    .call(d3.axisBottom(x).ticks(6));
+
+center.append("g")
+    .attr("class", "axis")
+    .call(d3.axisLeft(y).ticks(6));
+
+// Axis labels
+svg.append("text")
+    .attr("class", "axis-label")
+    .attr("text-anchor", "middle")
+    .attr("x", margin.left + centerW / 2)
+    .attr("y", totalH - 10)
+    .text("Age (years)");
+
+svg.append("text")
+    .attr("class", "axis-label")
+    .attr("text-anchor", "middle")
+    .attr("transform", `translate(16,${margin.top + centerH / 2}) rotate(-90)`)
+    .text("Cholesterol (mg/dL)");
+
+// --- Regression ---
+const n = data.length;
+const meanX = d3.mean(data, d => d.age);
+const meanY = d3.mean(data, d => d.chol);
+const ssXY = d3.sum(data, d => (d.age - meanX) * (d.chol - meanY));
+const ssXX = d3.sum(data, d => (d.age - meanX) ** 2);
+const ssYY = d3.sum(data, d => (d.chol - meanY) ** 2);
+const slope = ssXY / ssXX;
+const intercept = meanY - slope * meanX;
+const rVal = ssXY / Math.sqrt(ssXX * ssYY);
+const r2 = rVal * rVal;
+
+const xDom = x.domain();
+center.append("line")
+    .attr("class", "regression-line")
+    .attr("x1", x(xDom[0]))
+    .attr("y1", y(slope * xDom[0] + intercept))
+    .attr("x2", x(xDom[1]))
+    .attr("y2", y(slope * xDom[1] + intercept));
+
+center.append("text")
+    .attr("class", "regression-label")
+    .attr("x", x(xDom[1]) - 5)
+    .attr("y", y(slope * xDom[1] + intercept) - 8)
+    .attr("text-anchor", "end")
+    .text(`y = ${slope.toFixed(2)}x + ${intercept.toFixed(1)}, R\u00B2 = ${r2.toFixed(2)}`);
+
+// --- Scatter dots ---
+const dots = center.append("g").attr("class", "dots");
+
+dots.selectAll("circle")
+  .data(data)
+  .join("circle")
+    .attr("cx", d => x(d.age))
+    .attr("cy", d => y(d.chol))
+    .attr("r", 4)
+    .attr("fill", d => colorScale(d.group))
+    .attr("opacity", 0.6);
+
+// --- Helper: compute box stats ---
+function boxStats(values) {
+  const sorted = Float64Array.from(values).sort();
+  const q1 = d3.quantile(sorted, 0.25);
+  const med = d3.quantile(sorted, 0.5);
+  const q3 = d3.quantile(sorted, 0.75);
+  const iqr = q3 - q1;
+  const wLo = d3.min(sorted.filter(v => v >= q1 - 1.5 * iqr));
+  const wHi = d3.max(sorted.filter(v => v <= q3 + 1.5 * iqr));
+  return { q1, med, q3, wLo, wHi };
+}
+
+// --- Top marginal strip (x axis) ---
+const topJitterScale = d3.scaleLinear().domain([0, 1]).range([4, topH - 4]);
+const topRng = d3.randomLcg(99);
+
+// Clip for top marginal
+topMargin.append("clipPath").attr("id", "clip-top")
+  .append("rect").attr("width", centerW).attr("height", topH);
+
+const topG = topMargin.append("g").attr("clip-path", "url(#clip-top)");
+
+const topStrips = topG.selectAll("circle")
+  .data(data)
+  .join("circle")
+    .attr("cx", d => x(d.age))
+    .attr("cy", () => topJitterScale(topRng()))
+    .attr("r", 2)
+    .attr("fill", d => colorScale(d.group))
+    .attr("opacity", 0.5);
+
+// Top box plot
+const topBoxG = topMargin.append("g").attr("class", "top-box");
+
+function drawTopBox(subset) {
+  topBoxG.selectAll("*").remove();
+  if (subset.length < 5) return;
+  const s = boxStats(subset.map(d => d.age));
+  // Whisker line
+  topBoxG.append("line").attr("class", "box-line")
+      .attr("x1", x(s.wLo)).attr("x2", x(s.wHi))
+      .attr("y1", topH / 2).attr("y2", topH / 2);
+  // Box rect
+  topBoxG.append("rect").attr("class", "box-rect")
+      .attr("x", x(s.q1)).attr("width", x(s.q3) - x(s.q1))
+      .attr("y", topH / 2 - 8).attr("height", 16)
+      .attr("rx", 1);
+  // Median
+  topBoxG.append("line").attr("class", "median-line")
+      .attr("x1", x(s.med)).attr("x2", x(s.med))
+      .attr("y1", topH / 2 - 8).attr("y2", topH / 2 + 8);
+}
+drawTopBox(data);
+
+// --- Right marginal strip (y axis) ---
+const rightJitterScale = d3.scaleLinear().domain([0, 1]).range([4, rightW - 4]);
+const rightRng = d3.randomLcg(77);
+
+rightMargin.append("clipPath").attr("id", "clip-right")
+  .append("rect").attr("width", rightW).attr("height", centerH);
+
+const rightG = rightMargin.append("g").attr("clip-path", "url(#clip-right)");
+
+const rightStrips = rightG.selectAll("circle")
+  .data(data)
+  .join("circle")
+    .attr("cx", () => rightJitterScale(rightRng()))
+    .attr("cy", d => y(d.chol))
+    .attr("r", 2)
+    .attr("fill", d => colorScale(d.group))
+    .attr("opacity", 0.5);
+
+// Right box plot
+const rightBoxG = rightMargin.append("g").attr("class", "right-box");
+
+function drawRightBox(subset) {
+  rightBoxG.selectAll("*").remove();
+  if (subset.length < 5) return;
+  const s = boxStats(subset.map(d => d.chol));
+  // Whisker line
+  rightBoxG.append("line").attr("class", "box-line")
+      .attr("y1", y(s.wHi)).attr("y2", y(s.wLo))
+      .attr("x1", rightW / 2).attr("x2", rightW / 2);
+  // Box rect
+  rightBoxG.append("rect").attr("class", "box-rect")
+      .attr("x", rightW / 2 - 8).attr("width", 16)
+      .attr("y", y(s.q3)).attr("height", y(s.q1) - y(s.q3))
+      .attr("rx", 1);
+  // Median
+  rightBoxG.append("line").attr("class", "median-line")
+      .attr("x1", rightW / 2 - 8).attr("x2", rightW / 2 + 8)
+      .attr("y1", y(s.med)).attr("y2", y(s.med));
+}
+drawRightBox(data);
+
+// --- Border lines between panels ---
+// Bottom of top marginal
+topMargin.append("line")
+    .attr("x1", 0).attr("x2", centerW)
+    .attr("y1", topH).attr("y2", topH)
+    .attr("stroke", "#ccc").attr("stroke-width", 1);
+// Left of right marginal
+rightMargin.append("line")
+    .attr("x1", 0).attr("x2", 0)
+    .attr("y1", 0).attr("y2", centerH)
+    .attr("stroke", "#ccc").attr("stroke-width", 1);
+
+// --- Legend ---
+const legend = svg.append("g")
+    .attr("transform", `translate(${margin.left + centerW - 120},${margin.top + 12})`);
+
+legend.append("rect")
+    .attr("x", -8).attr("y", -10)
+    .attr("width", 130).attr("height", 72)
+    .attr("fill", "white").attr("opacity", 0.85)
+    .attr("stroke", "#ddd").attr("rx", 3);
+
+groupNames.forEach((g, i) => {
+  const row = legend.append("g").attr("transform", `translate(0,${i * 20})`);
+  row.append("circle").attr("r", 4).attr("cx", 4).attr("cy", 4)
+      .attr("fill", colorScale(g)).attr("opacity", 0.8);
+  row.append("text").attr("class", "legend-item")
+      .attr("x", 14).attr("y", 8).text(g);
+});
+
+// --- Brushing ---
+const brush = d3.brush()
+    .extent([[0, 0], [centerW, centerH]])
+    .on("start brush end", brushed);
+
+center.append("g")
+    .attr("class", "brush")
+    .call(brush);
+
+function brushed({ selection }) {
+  if (!selection) {
+    // Reset all
+    dots.selectAll("circle")
+        .attr("opacity", 0.6)
+        .attr("r", 4);
+    topStrips.attr("opacity", 0.5).attr("r", 2);
+    rightStrips.attr("opacity", 0.5).attr("r", 2);
+    drawTopBox(data);
+    drawRightBox(data);
+    return;
+  }
+
+  const [[x0, y0], [x1, y1]] = selection;
+  const brushed = [];
+
+  dots.selectAll("circle")
+      .each(function(d) {
+        const cx = x(d.age), cy = y(d.chol);
+        const inside = cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1;
+        if (inside) brushed.push(d);
+        d3.select(this)
+            .attr("opacity", inside ? 0.85 : 0.1)
+            .attr("r", inside ? 5 : 3);
+      });
+
+  const brushedSet = new Set(brushed.map(d => d.index));
+
+  // Update marginal strips
+  topStrips
+      .attr("opacity", d => brushedSet.has(d.index) ? 0.7 : 0.08)
+      .attr("r", d => brushedSet.has(d.index) ? 2.5 : 1.5);
+  rightStrips
+      .attr("opacity", d => brushedSet.has(d.index) ? 0.7 : 0.08)
+      .attr("r", d => brushedSet.has(d.index) ? 2.5 : 1.5);
+
+  // Update box plots for brushed subset
+  if (brushed.length >= 5) {
+    drawTopBox(brushed);
+    drawRightBox(brushed);
+  }
+}
+
+</script>
+</body>
+</html>

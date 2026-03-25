@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Minimap Navigator</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #fafafa; padding: 24px; }
+  h1 { font-size: 18px; font-weight: 600; margin-bottom: 4px; color: #222; }
+  #stats { font-size: 13px; color: #555; margin-bottom: 12px; min-height: 1.2em; }
+  .chart-container { position: relative; }
+  canvas { display: block; }
+  .main-wrap { position: relative; width: 100%; height: 400px; }
+  .mini-wrap { position: relative; width: 100%; height: 100px; margin-top: 8px; }
+  .main-wrap canvas, .mini-wrap canvas {
+    position: absolute; top: 0; left: 0;
+  }
+  .main-wrap svg, .mini-wrap svg {
+    position: absolute; top: 0; left: 0; pointer-events: none;
+  }
+  .main-wrap .zoom-layer { pointer-events: all; }
+  .mini-wrap .brush-layer { pointer-events: all; }
+  .brush-layer .selection { fill: #4477AA; fill-opacity: 0.15; stroke: #4477AA; stroke-width: 1.5; }
+</style>
+</head>
+<body>
+<h1>Fractal Random Walk &mdash; 50,000 Points</h1>
+<div id="stats"></div>
+<div class="chart-container">
+  <div class="main-wrap"></div>
+  <div class="mini-wrap"></div>
+</div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(function() {
+  // --- LTTB downsampling ---
+  function lttb(data, threshold) {
+    const n = data.length;
+    if (threshold >= n || threshold < 3) return data;
+    const sampled = [data[0]];
+    const every = (n - 2) / (threshold - 2);
+    let a = 0;
+    for (let i = 0; i < threshold - 2; i++) {
+      let avgX = 0, avgY = 0, start = Math.floor((i + 1) * every) + 1;
+      let end = Math.min(Math.floor((i + 2) * every) + 1, n);
+      const count = end - start;
+      for (let j = start; j < end; j++) { avgX += data[j][0]; avgY += data[j][1]; }
+      avgX /= count; avgY /= count;
+      const rangeStart = Math.floor(i * every) + 1;
+      const rangeEnd = start;
+      let maxArea = -1, maxIdx = rangeStart;
+      for (let j = rangeStart; j < rangeEnd; j++) {
+        const area = Math.abs(
+          (data[a][0] - avgX) * (data[j][1] - data[a][1]) -
+          (data[a][0] - data[j][0]) * (avgY - data[a][1])
+        );
+        if (area > maxArea) { maxArea = area; maxIdx = j; }
+      }
+      sampled.push(data[maxIdx]);
+      a = maxIdx;
+    }
+    sampled.push(data[n - 1]);
+    return sampled;
+  }
+
+  // --- Generate fractal random walk ---
+  const N = 50000;
+  const values = new Float64Array(N);
+  values[0] = 100;
+  let trend = 0, vol = 1;
+  for (let i = 1; i < N; i++) {
+    if (Math.random() < 0.005) trend = (Math.random() - 0.5) * 0.4;
+    if (Math.random() < 0.01) vol = 0.3 + Math.random() * 3;
+    values[i] = values[i - 1] + trend + (Math.random() - 0.5) * vol;
+  }
+  // [index, value] pairs for scales
+  const fullData = Array.from(values, (v, i) => [i, v]);
+
+  // --- Dimensions ---
+  const margin = { top: 16, right: 16, bottom: 28, left: 56 };
+  const containerWidth = Math.min(960, window.innerWidth - 48);
+  const mainH = 400, miniH = 100;
+  const innerW = containerWidth - margin.left - margin.right;
+  const mainInnerH = mainH - margin.top - margin.bottom;
+  const miniMargin = { top: 8, right: 16, bottom: 20, left: 56 };
+  const miniInnerH = miniH - miniMargin.top - miniMargin.bottom;
+
+  // --- Scales ---
+  const xFull = d3.scaleLinear().domain([0, N - 1]).range([margin.left, containerWidth - margin.right]);
+  const yFull = d3.scaleLinear().domain(d3.extent(values)).nice().range([mainH - margin.bottom, margin.top]);
+  const xMini = d3.scaleLinear().domain([0, N - 1]).range([miniMargin.left, containerWidth - miniMargin.right]);
+  const yMini = d3.scaleLinear().domain(d3.extent(values)).nice().range([miniH - miniMargin.bottom, miniMargin.top]);
+
+  const dpr = devicePixelRatio || 1;
+
+  // --- Main chart ---
+  const mainWrap = d3.select(".main-wrap").style("width", containerWidth + "px").style("height", mainH + "px");
+  const mainCanvas = mainWrap.append("canvas")
+    .attr("width", containerWidth * dpr).attr("height", mainH * dpr)
+    .style("width", containerWidth + "px").style("height", mainH + "px").node();
+  const mainCtx = mainCanvas.getContext("2d");
+  mainCtx.scale(dpr, dpr);
+
+  const mainSvg = mainWrap.append("svg")
+    .attr("width", containerWidth).attr("height", mainH)
+    .attr("class", "zoom-layer").style("pointer-events", "all");
+
+  const xAxisG = mainSvg.append("g").attr("transform", `translate(0,${mainH - margin.bottom})`);
+  const yAxisG = mainSvg.append("g").attr("transform", `translate(${margin.left},0)`);
+
+  // --- Minimap ---
+  const miniWrap = d3.select(".mini-wrap").style("width", containerWidth + "px").style("height", miniH + "px");
+  const miniCanvas = miniWrap.append("canvas")
+    .attr("width", containerWidth * dpr).attr("height", miniH * dpr)
+    .style("width", containerWidth + "px").style("height", miniH + "px").node();
+  const miniCtx = miniCanvas.getContext("2d");
+  miniCtx.scale(dpr, dpr);
+
+  const miniSvg = miniWrap.append("svg")
+    .attr("width", containerWidth).attr("height", miniH)
+    .attr("class", "brush-layer").style("pointer-events", "all");
+
+  // Draw minimap background (once, with LTTB)
+  const miniDown = lttb(fullData, 500);
+  function drawMinimap() {
+    miniCtx.clearRect(0, 0, containerWidth, miniH);
+    miniCtx.beginPath();
+    miniCtx.strokeStyle = "#999";
+    miniCtx.lineWidth = 0.5;
+    for (let i = 0; i < miniDown.length; i++) {
+      const x = xMini(miniDown[i][0]), y = yMini(miniDown[i][1]);
+      i === 0 ? miniCtx.moveTo(x, y) : miniCtx.lineTo(x, y);
+    }
+    miniCtx.stroke();
+  }
+  drawMinimap();
+  // Mini axis
+  miniSvg.append("g")
+    .attr("transform", `translate(0,${miniH - miniMargin.bottom})`)
+    .call(d3.axisBottom(xMini).ticks(6).tickFormat(d3.format(",")))
+    .call(g => g.select(".domain").attr("stroke", "#bbb"))
+    .call(g => g.selectAll(".tick line").attr("stroke", "#bbb"))
+    .call(g => g.selectAll(".tick text").attr("fill", "#888").style("font-size", "10px"));
+
+  // --- Brush on minimap ---
+  const defaultStart = N - 1000;
+  const brush = d3.brushX()
+    .extent([[miniMargin.left, miniMargin.top], [containerWidth - miniMargin.right, miniH - miniMargin.bottom]])
+    .on("brush end", brushed);
+
+  const brushG = miniSvg.append("g").call(brush);
+
+  // --- Zoom on main chart ---
+  const zoom = d3.zoom()
+    .scaleExtent([1, N / 50])
+    .translateExtent([[margin.left, 0], [containerWidth - margin.right, mainH]])
+    .extent([[margin.left, margin.top], [containerWidth - margin.right, mainH - margin.bottom]])
+    .on("zoom", zoomed);
+
+  mainSvg.call(zoom);
+
+  let syncing = false;
+
+  function zoomed({ transform, sourceEvent }) {
+    const zx = transform.rescaleX(xFull);
+    const domain = zx.domain();
+    drawMain(domain);
+    updateStats(domain);
+    if (syncing) return;
+    syncing = true;
+    brushG.call(brush.move, [xMini(domain[0]), xMini(domain[1])]);
+    syncing = false;
+  }
+
+  function brushed({ selection, sourceEvent }) {
+    if (!selection) return;
+    if (syncing) return;
+    syncing = true;
+    const [x0, x1] = selection.map(xMini.invert);
+    const rangeW = containerWidth - margin.left - margin.right;
+    const k = (N - 1) / (x1 - x0);
+    const tx = margin.left - xFull(x0) * k / ((containerWidth - margin.left - margin.right) / (xFull.range()[1] - xFull.range()[0]));
+    // Compute transform from domain
+    const s = (xFull.range()[1] - xFull.range()[0]) / (xFull(x1) - xFull(x0));
+    const t = d3.zoomIdentity
+      .translate(xFull.range()[0] - xFull(x0) * s + xFull.range()[0] * (1 - s), 0)
+      .scale(s);
+    // Simpler: use scale/translate math
+    const newK = (xFull.range()[1] - xFull.range()[0]) / (xFull(x1) - xFull(x0));
+    const newTx = xFull.range()[0] - xFull(x0) * newK;
+    const newTransform = d3.zoomIdentity.translate(newTx, 0).scale(newK);
+    mainSvg.call(zoom.transform, newTransform);
+    syncing = false;
+  }
+
+  // --- Draw main chart ---
+  function drawMain(domain) {
+    const [d0, d1] = domain;
+    const i0 = Math.max(0, Math.floor(d0));
+    const i1 = Math.min(N - 1, Math.ceil(d1));
+    const visibleCount = i1 - i0 + 1;
+
+    // Build visible slice
+    const slice = [];
+    for (let i = i0; i <= i1; i++) slice.push([i, values[i]]);
+
+    // LTTB downsample if many points
+    const drawData = visibleCount > 2000 ? lttb(slice, 1500) : slice;
+
+    // Scales for visible domain
+    const xZ = d3.scaleLinear().domain([d0, d1]).range([margin.left, containerWidth - margin.right]);
+    const visExtent = d3.extent(slice, d => d[1]);
+    const yZ = d3.scaleLinear().domain(visExtent).nice().range([mainH - margin.bottom, margin.top]);
+
+    // Clear and draw
+    mainCtx.clearRect(0, 0, containerWidth, mainH);
+    mainCtx.save();
+    mainCtx.beginPath();
+    mainCtx.rect(margin.left, margin.top, innerW, mainInnerH);
+    mainCtx.clip();
+
+    // Line
+    mainCtx.beginPath();
+    mainCtx.strokeStyle = "#4477AA";
+    mainCtx.lineWidth = 1;
+    for (let i = 0; i < drawData.length; i++) {
+      const x = xZ(drawData[i][0]), y = yZ(drawData[i][1]);
+      i === 0 ? mainCtx.moveTo(x, y) : mainCtx.lineTo(x, y);
+    }
+    mainCtx.stroke();
+
+    // High zoom: show dots
+    if (visibleCount < 200) {
+      mainCtx.fillStyle = "#4477AA";
+      mainCtx.beginPath();
+      for (let i = 0; i < slice.length; i++) {
+        const x = xZ(slice[i][0]), y = yZ(slice[i][1]);
+        mainCtx.moveTo(x + 2.5, y);
+        mainCtx.arc(x, y, 2.5, 0, Math.PI * 2);
+      }
+      mainCtx.fill();
+    }
+
+    mainCtx.restore();
+
+    // Axes
+    xAxisG.call(d3.axisBottom(xZ).ticks(8).tickFormat(d3.format(",")))
+      .call(g => g.select(".domain").attr("stroke", "#bbb"))
+      .call(g => g.selectAll(".tick line").attr("stroke", "#ddd"))
+      .call(g => g.selectAll(".tick text").attr("fill", "#666").style("font-size", "11px"));
+    yAxisG.call(d3.axisLeft(yZ).ticks(6))
+      .call(g => g.select(".domain").attr("stroke", "#bbb"))
+      .call(g => g.selectAll(".tick line").attr("stroke", "#ddd"))
+      .call(g => g.selectAll(".tick text").attr("fill", "#666").style("font-size", "11px"));
+  }
+
+  // --- Stats ---
+  const statsEl = document.getElementById("stats");
+  function updateStats(domain) {
+    const [d0, d1] = domain;
+    const i0 = Math.max(0, Math.floor(d0));
+    const i1 = Math.min(N - 1, Math.ceil(d1));
+    let min = Infinity, max = -Infinity, sum = 0;
+    for (let i = i0; i <= i1; i++) {
+      const v = values[i];
+      if (v < min) min = v;
+      if (v > max) max = v;
+      sum += v;
+    }
+    const count = i1 - i0 + 1;
+    const mean = sum / count;
+    statsEl.textContent = `Visible: ${count.toLocaleString()} points | Min: ${min.toFixed(2)} | Max: ${max.toFixed(2)} | Mean: ${mean.toFixed(2)}`;
+  }
+
+  // --- Initial view: last 1000 points ---
+  const initK = (N - 1) / 1000;
+  const initTx = xFull.range()[0] - xFull(defaultStart) * initK;
+  const initTransform = d3.zoomIdentity.translate(initTx, 0).scale(initK);
+  mainSvg.call(zoom.transform, initTransform);
+})();
+</script>
+</body>
+</html>

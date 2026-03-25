@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Radial Dendrogram with Hierarchical Edge Bundling</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: #fafafa; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+  h2 { margin-bottom: 4px; font-size: 18px; color: #333; }
+  .controls { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; font-size: 13px; color: #555; }
+  .controls label { display: flex; align-items: center; gap: 6px; }
+  .controls input[type="range"] { width: 180px; }
+  #container { position: relative; }
+  canvas, svg { position: absolute; top: 0; left: 0; }
+  svg { pointer-events: all; }
+  svg text { font-size: 10px; fill: #333; }
+  svg circle { cursor: pointer; }
+</style>
+</head>
+<body>
+<h2>Radial Dendrogram — Hierarchical Edge Bundling</h2>
+<div class="controls">
+  <label>Bundle tension: <input type="range" id="tension" min="0" max="1" step="0.05" value="0.85">
+    <span id="tension-val">0.85</span>
+  </label>
+</div>
+<div id="container"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Data generation ---
+const moduleNames = ["core", "utils", "api", "renderer", "storage", "auth"];
+const submoduleSuffixes = ["parser", "handler", "manager", "service", "factory", "validator", "adapter", "config"];
+const fileSuffixes = ["index", "types", "helpers", "constants", "main"];
+
+const root = { name: "app", children: [] };
+const allLeaves = [];
+
+moduleNames.forEach(mod => {
+  const numSubs = 4 + Math.floor(Math.random() * 5); // 4-8
+  const module = { name: mod, children: [] };
+  const shuffledSubs = d3.shuffle(submoduleSuffixes.slice()).slice(0, numSubs);
+  shuffledSubs.forEach(sub => {
+    const numFiles = 2 + Math.floor(Math.random() * 4); // 2-5
+    const submodule = { name: sub, children: [] };
+    const shuffledFiles = d3.shuffle(fileSuffixes.slice()).slice(0, numFiles);
+    shuffledFiles.forEach(file => {
+      const leaf = { name: file, imports: [] };
+      submodule.children.push(leaf);
+      allLeaves.push(leaf);
+    });
+    module.children.push(submodule);
+  });
+  root.children.push(module);
+});
+
+// Generate ~80 cross-module dependency edges
+const edges = [];
+let edgeCount = 0;
+while (edgeCount < 80) {
+  const src = allLeaves[Math.floor(Math.random() * allLeaves.length)];
+  const tgt = allLeaves[Math.floor(Math.random() * allLeaves.length)];
+  if (src === tgt) continue;
+  // Ensure cross-module: find their module parents
+  const srcMod = findModule(root, src);
+  const tgtMod = findModule(root, tgt);
+  if (srcMod === tgtMod) continue;
+  // Avoid duplicate edges
+  const key = leafId(src) + "->" + leafId(tgt);
+  if (edges.some(e => leafId(e[0]) + "->" + leafId(e[1]) === key)) continue;
+  edges.push([src, tgt]);
+  edgeCount++;
+}
+
+function findModule(root, leaf) {
+  for (const mod of root.children) {
+    for (const sub of mod.children) {
+      if (sub.children.includes(leaf)) return mod;
+    }
+  }
+  return null;
+}
+
+function leafId(leaf) {
+  for (const mod of root.children) {
+    for (const sub of mod.children) {
+      const idx = sub.children.indexOf(leaf);
+      if (idx >= 0) return `${mod.name}.${sub.name}.${leaf.name}`;
+    }
+  }
+  return leaf.name;
+}
+
+// --- Layout ---
+const diameter = 600;
+const radius = diameter / 2;
+const innerRadius = radius - 120; // leave room for labels
+const size = diameter + 40; // padding
+
+const hierarchy = d3.hierarchy(root);
+const cluster = d3.cluster()
+    .size([2 * Math.PI, innerRadius])
+    .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth);
+
+cluster(hierarchy);
+
+const leaves = hierarchy.leaves();
+
+// Build a map from leaf data object to hierarchy node
+const leafToNode = new Map();
+leaves.forEach(node => leafToNode.set(node.data, node));
+
+// --- LCA path routing ---
+// For each edge, find the path: source -> LCA -> target
+function lcaPath(source, target) {
+  const sourceAncestors = source.ancestors();
+  const targetAncestors = new Set(target.ancestors());
+  // Find LCA
+  let lca = null;
+  for (const a of sourceAncestors) {
+    if (targetAncestors.has(a)) { lca = a; break; }
+  }
+  // Path: source up to LCA, then LCA down to target
+  const up = [];
+  let node = source;
+  while (node !== lca) { up.push(node); node = node.parent; }
+  up.push(lca);
+  const down = [];
+  node = target;
+  while (node !== lca) { down.push(node); node = node.parent; }
+  // Full path: up to LCA + down reversed (excluding LCA to avoid duplicate)
+  return up.concat(down.reverse());
+}
+
+// Convert hierarchy node to radial [x, y]
+function nodeXY(d) {
+  const angle = d.x - Math.PI / 2;
+  return [d.y * Math.cos(angle), d.y * Math.sin(angle)];
+}
+
+// Precompute all edge paths as arrays of [x,y] points
+const edgePaths = edges.map(([srcData, tgtData]) => {
+  const srcNode = leafToNode.get(srcData);
+  const tgtNode = leafToNode.get(tgtData);
+  const path = lcaPath(srcNode, tgtNode);
+  return {
+    source: srcNode,
+    target: tgtNode,
+    points: path.map(nodeXY)
+  };
+});
+
+// --- Canvas setup (DPR-aware) ---
+const container = d3.select("#container")
+    .style("width", `${size}px`)
+    .style("height", `${size}px`);
+
+const dpr = devicePixelRatio;
+const canvas = container.append("canvas")
+    .attr("width", size * dpr)
+    .attr("height", size * dpr)
+    .style("width", `${size}px`)
+    .style("height", `${size}px`)
+    .node();
+
+const ctx = canvas.getContext("2d");
+ctx.scale(dpr, dpr);
+
+// --- SVG overlay for labels and hover targets ---
+const svg = container.append("svg")
+    .attr("width", size)
+    .attr("height", size);
+
+const g = svg.append("g")
+    .attr("transform", `translate(${size / 2},${size / 2})`);
+
+// Draw leaf nodes as small circles (hover targets)
+const nodeGroup = g.selectAll(".leaf")
+  .data(leaves)
+  .join("g")
+    .attr("class", "leaf")
+    .attr("transform", d => {
+      const [x, y] = nodeXY(d);
+      return `translate(${x},${y})`;
+    });
+
+nodeGroup.append("circle")
+    .attr("r", 3)
+    .attr("fill", "#666");
+
+// Labels rotated to follow the circle
+nodeGroup.append("text")
+    .attr("transform", d => {
+      const angle = d.x * 180 / Math.PI;
+      return d.x < Math.PI
+        ? `rotate(${angle - 90}) translate(6,0)`
+        : `rotate(${angle + 90}) translate(-6,0)`;
+    })
+    .attr("text-anchor", d => d.x < Math.PI ? "start" : "end")
+    .attr("dy", "0.35em")
+    .text(d => `${d.parent.data.name}.${d.data.name}`);
+
+// --- Drawing edges on Canvas ---
+let currentTension = 0.85;
+let hoveredNode = null;
+
+function drawEdges() {
+  ctx.clearRect(0, 0, size, size);
+  ctx.save();
+  ctx.translate(size / 2, size / 2);
+
+  const line = d3.line().curve(d3.curveBundle.beta(currentTension));
+
+  edgePaths.forEach(edge => {
+    const isHighlighted = hoveredNode &&
+      (edge.source === hoveredNode || edge.target === hoveredNode);
+    const isFaded = hoveredNode && !isHighlighted;
+
+    ctx.beginPath();
+    line.context(ctx)(edge.points);
+    ctx.strokeStyle = isHighlighted ? "#4477AA" : "#999";
+    ctx.globalAlpha = isHighlighted ? 1.0 : (isFaded ? 0.05 : 0.3);
+    ctx.lineWidth = isHighlighted ? 2 : 1;
+    ctx.stroke();
+  });
+
+  ctx.restore();
+  ctx.globalAlpha = 1.0;
+
+  // Highlight connected nodes
+  if (hoveredNode) {
+    ctx.save();
+    ctx.translate(size / 2, size / 2);
+    const connectedNodes = new Set();
+    connectedNodes.add(hoveredNode);
+    edgePaths.forEach(edge => {
+      if (edge.source === hoveredNode) connectedNodes.add(edge.target);
+      if (edge.target === hoveredNode) connectedNodes.add(edge.source);
+    });
+    connectedNodes.forEach(node => {
+      const [x, y] = nodeXY(node);
+      ctx.beginPath();
+      ctx.arc(x, y, 5, 0, 2 * Math.PI);
+      ctx.fillStyle = "#4477AA";
+      ctx.globalAlpha = 1;
+      ctx.fill();
+    });
+    ctx.restore();
+  }
+}
+
+drawEdges();
+
+// --- Tension slider ---
+const slider = d3.select("#tension");
+const tensionVal = d3.select("#tension-val");
+
+slider.on("input", function() {
+  currentTension = +this.value;
+  tensionVal.text(currentTension.toFixed(2));
+  drawEdges();
+});
+
+// --- Hover interaction ---
+nodeGroup.on("pointerenter", (event, d) => {
+  hoveredNode = d;
+  // Update SVG circles
+  nodeGroup.select("circle")
+      .attr("r", n => {
+        if (n === d) return 5;
+        const connected = edgePaths.some(e =>
+          (e.source === d && e.target === n) || (e.target === d && e.source === n));
+        return connected ? 5 : 3;
+      })
+      .attr("fill", n => {
+        if (n === d) return "#4477AA";
+        const connected = edgePaths.some(e =>
+          (e.source === d && e.target === n) || (e.target === d && e.source === n));
+        return connected ? "#4477AA" : "#ccc";
+      });
+  nodeGroup.select("text")
+      .attr("fill", n => {
+        if (n === d) return "#4477AA";
+        const connected = edgePaths.some(e =>
+          (e.source === d && e.target === n) || (e.target === d && e.source === n));
+        return connected ? "#4477AA" : "#ccc";
+      });
+  drawEdges();
+});
+
+nodeGroup.on("pointerleave", () => {
+  hoveredNode = null;
+  nodeGroup.select("circle").attr("r", 3).attr("fill", "#666");
+  nodeGroup.select("text").attr("fill", "#333");
+  drawEdges();
+});
+</script>
+</body>
+</html>

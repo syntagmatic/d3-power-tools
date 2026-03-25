@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sunburst ↔ Icicle Morph</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px;
+    color: #333;
+  }
+  h1 { font-size: 1.4rem; font-weight: 600; margin-bottom: 8px; }
+  #controls { margin-bottom: 16px; }
+  #toggle-btn {
+    font-family: inherit;
+    font-size: 0.9rem;
+    padding: 8px 20px;
+    border: 2px solid #555;
+    border-radius: 6px;
+    background: #fff;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  #toggle-btn:hover { background: #eee; }
+  #chart-container { position: relative; }
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: rgba(0,0,0,0.82);
+    color: #fff;
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 0.78rem;
+    line-height: 1.4;
+    max-width: 260px;
+    opacity: 0;
+    transition: opacity 0.15s;
+    white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<h1>Sunburst ↔ Icicle Morph</h1>
+<div id="controls">
+  <button id="toggle-btn">Switch to Icicle</button>
+</div>
+<div id="chart-container">
+  <div class="tooltip" id="tooltip"></div>
+</div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Data generation ---
+const departments = ["Engineering", "Marketing", "Finance", "Operations", "Design"];
+const teamNames = {
+  Engineering: ["Frontend", "Backend", "Platform", "Mobile", "DevOps"],
+  Marketing: ["Brand", "Growth", "Content"],
+  Finance: ["Accounting", "FP&A", "Treasury", "Audit"],
+  Operations: ["Supply Chain", "Logistics", "Quality"],
+  Design: ["Product Design", "Research", "Visual Design", "Motion"],
+};
+
+const rng = d3.randomLcg(42);
+const randInt = (lo, hi) => Math.floor(rng() * (hi - lo + 1)) + lo;
+
+const root = { name: "Acme Corp", children: [] };
+for (const dept of departments) {
+  const deptNode = { name: dept, children: [] };
+  for (const team of teamNames[dept]) {
+    const teamNode = { name: team, children: [] };
+    const nMembers = randInt(4, 10);
+    for (let i = 0; i < nMembers; i++) {
+      teamNode.children.push({
+        name: `${team.slice(0, 3)}${i + 1}`,
+        value: randInt(40, 200) * 1000,
+      });
+    }
+    deptNode.children.push(teamNode);
+  }
+  root.children.push(deptNode);
+}
+
+// --- Tol bright palette (5 colors) ---
+const tolBright = ["#4477AA", "#EE6677", "#228833", "#CCBB44", "#AA3377"];
+const deptColor = d3.scaleOrdinal().domain(departments).range(tolBright);
+
+function nodeColor(d) {
+  // Walk to depth-1 ancestor to get department
+  let ancestor = d;
+  while (ancestor.depth > 1) ancestor = ancestor.parent;
+  if (ancestor.depth === 0) return "#888";
+  const base = d3.hsl(deptColor(ancestor.data.name));
+  // Decrease saturation with depth
+  base.s = Math.max(0.15, base.s - (d.depth - 1) * 0.2);
+  base.l = Math.min(0.85, base.l + (d.depth - 1) * 0.1);
+  return base.formatHex();
+}
+
+// --- Layout dimensions ---
+const width = 700;
+const sunburstHeight = 540;
+const icicleHeight = 400;
+const radius = 240;
+
+// --- Build hierarchy ---
+const hierarchy = d3.hierarchy(root)
+    .sum(d => d.value || 0)
+    .sort((a, b) => b.value - a.value);
+
+// --- Compute both layouts ---
+// Sunburst: partition with angular coordinates
+const sunburstPartition = d3.partition()
+    .size([2 * Math.PI, radius]);
+const sunburstRoot = sunburstPartition(hierarchy.copy());
+
+// Icicle: partition with rectangular coordinates
+const iciclePartition = d3.partition()
+    .size([width, icicleHeight])
+    .padding(1);
+const icicleRoot = iciclePartition(hierarchy.copy());
+
+// Map nodes by data reference for correspondence
+// Since we used .copy(), we need to match by path
+function nodePath(n) {
+  const parts = [];
+  let cur = n;
+  while (cur) { parts.unshift(cur.data.name); cur = cur.parent; }
+  return parts.join("/");
+}
+
+const sunburstMap = new Map();
+sunburstRoot.descendants().forEach(n => sunburstMap.set(nodePath(n), n));
+const icicleMap = new Map();
+icicleRoot.descendants().forEach(n => icicleMap.set(nodePath(n), n));
+
+// Combined node list
+const nodes = hierarchy.descendants();
+const nodePaths = nodes.map(nodePath);
+
+// Store both layout coords per node
+const layoutData = nodes.map((n, i) => {
+  const path = nodePaths[i];
+  const sb = sunburstMap.get(path);
+  const ic = icicleMap.get(path);
+  return {
+    node: n,
+    path,
+    // Sunburst params
+    sb_x0: sb.x0, sb_x1: sb.x1, sb_y0: sb.y0, sb_y1: sb.y1,
+    // Icicle params
+    ic_x0: ic.x0, ic_x1: ic.x1, ic_y0: ic.y0, ic_y1: ic.y1,
+    color: nodeColor(n),
+    depth: n.depth,
+  };
+});
+
+// --- SVG setup ---
+let currentView = "sunburst";
+const svgHeight = sunburstHeight;
+const svg = d3.select("#chart-container")
+  .append("svg")
+    .attr("width", width)
+    .attr("height", svgHeight)
+    .attr("viewBox", `0 0 ${width} ${svgHeight}`);
+
+const g = svg.append("g");
+
+// Arc generator for sunburst
+const arc = d3.arc()
+    .startAngle(d => d.startAngle)
+    .endAngle(d => d.endAngle)
+    .innerRadius(d => d.innerRadius)
+    .outerRadius(d => d.outerRadius);
+
+// Position the group for sunburst (centered)
+const cx = width / 2;
+const cy = sunburstHeight / 2;
+
+// Tooltip
+const tooltip = d3.select("#tooltip");
+
+function ancestorPath(n) {
+  const parts = [];
+  let cur = n;
+  while (cur) { parts.unshift(cur.data.name); cur = cur.parent; }
+  return parts.join(" → ");
+}
+
+function formatValue(v) {
+  return "$" + d3.format(",.0f")(v);
+}
+
+// --- Render ---
+// Morph strategy: resample both shapes to N points, align rotation, interpolate arrays.
+// Per shape-morphing skill: parametric is ideal but arc↔rect have different topology,
+// so resampling at 64 pts gives smooth results without the "pinch" artifact.
+
+const N_POINTS = 64; // sample points per shape
+
+function arcPath(sa, ea, ir, or_) {
+  // Returns a path string for an arc centered at 0,0
+  return arc({ startAngle: sa, endAngle: ea, innerRadius: ir, outerRadius: or_ });
+}
+
+function rectPath(x0, y0, x1, y1) {
+  // Simple rect as path
+  return `M${x0},${y0}L${x1},${y0}L${x1},${y1}L${x0},${y1}Z`;
+}
+
+function samplePath(pathStr, n) {
+  const tempPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  tempPath.setAttribute("d", pathStr);
+  const len = tempPath.getTotalLength();
+  if (len === 0) return Array.from({ length: n }, () => [0, 0]);
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const p = tempPath.getPointAtLength((i / n) * len);
+    pts.push([p.x, p.y]);
+  }
+  return pts;
+}
+
+function bestRotation(source, target, n) {
+  // Find rotation offset that minimizes total squared distance
+  let bestDist = Infinity, bestK = 0;
+  for (let k = 0; k < n; k++) {
+    let dist = 0;
+    for (let i = 0; i < n; i++) {
+      const si = (i + k) % n;
+      const dx = source[si][0] - target[i][0];
+      const dy = source[si][1] - target[i][1];
+      dist += dx * dx + dy * dy;
+    }
+    if (dist < bestDist) { bestDist = dist; bestK = k; }
+  }
+  // Rotate source
+  const rotated = [];
+  for (let i = 0; i < n; i++) rotated.push(source[(i + bestK) % n]);
+  return rotated;
+}
+
+function pointsToPath(pts) {
+  return "M" + pts.map(p => p[0].toFixed(2) + "," + p[1].toFixed(2)).join("L") + "Z";
+}
+
+// Precompute sampled points for both layouts
+const sunburstPoints = [];
+const iciclePoints = [];
+
+for (const d of layoutData) {
+  // Sunburst: arc centered at 0,0 (we'll translate the group)
+  const sp = arcPath(d.sb_x0, d.sb_x1, d.sb_y0, d.sb_y1);
+  let sPts = sp ? samplePath(sp, N_POINTS) : Array.from({ length: N_POINTS }, () => [0, 0]);
+
+  // Icicle: rect in absolute coords, but we need to express relative to the group transform
+  // Sunburst group is at (cx, cy). Icicle group should be at (0, 20).
+  // We'll adjust transforms during morph. For points, store in local coords.
+  // Sunburst local: centered at 0,0 → group at (cx, cy)
+  // Icicle local: at (ic_x0 - 0, ic_y0 - 0) → group at (0, 20)
+
+  // Let's keep it simpler: sunburst points are relative to center.
+  // Icicle points are in absolute coords offset so group at (0,0) works with a translate.
+  // We'll handle group translation separately.
+
+  const rp = rectPath(d.ic_x0, d.ic_y0, d.ic_x1, d.ic_y1);
+  let iPts = samplePath(rp, N_POINTS);
+
+  // Align rotation
+  iPts = bestRotation(iPts, sPts, N_POINTS);
+
+  sunburstPoints.push(sPts);
+  iciclePoints.push(iPts);
+}
+
+// --- Initial render (sunburst) ---
+// Group transform: sunburst centered, icicle at top-left with padding
+const sunburstTransform = `translate(${cx},${cy})`;
+const icicleTransform = `translate(0,20)`;
+
+g.attr("transform", sunburstTransform);
+
+const paths = g.selectAll("path")
+  .data(layoutData)
+  .join("path")
+    .attr("d", (d, i) => {
+      const sp = arcPath(d.sb_x0, d.sb_x1, d.sb_y0, d.sb_y1);
+      return sp || "M0,0";
+    })
+    .attr("fill", d => d.color)
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 0.5)
+    .style("cursor", "pointer");
+
+// Filter out root from display
+paths.filter(d => d.depth === 0).attr("fill", "none").attr("stroke", "none");
+
+// --- Labels ---
+const labels = g.selectAll("text")
+  .data(layoutData.filter(d => d.depth > 0))
+  .join("text")
+    .attr("font-size", "9px")
+    .attr("fill", "#222")
+    .attr("pointer-events", "none")
+    .attr("text-anchor", "middle")
+    .attr("dominant-baseline", "central");
+
+function updateSunburstLabels() {
+  labels.each(function(d) {
+    const angle = (d.sb_x0 + d.sb_x1) / 2;
+    const r = (d.sb_y0 + d.sb_y1) / 2;
+    const arcLen = (d.sb_x1 - d.sb_x0) * r;
+    const radialSpan = d.sb_y1 - d.sb_y0;
+
+    if (arcLen < 16 || radialSpan < 12) {
+      d3.select(this).attr("opacity", 0);
+      return;
+    }
+
+    const deg = angle * 180 / Math.PI - 90;
+    const flip = angle > Math.PI;
+    const rotation = flip ? deg + 180 : deg;
+
+    d3.select(this)
+        .attr("opacity", 1)
+        .attr("transform", `rotate(${rotation}) translate(${r},0)${flip ? "" : ""}`)
+        .attr("text-anchor", "middle")
+        .text(d.node.data.name);
+  });
+}
+
+function updateIcicleLabels() {
+  labels.each(function(d) {
+    const w = d.ic_x1 - d.ic_x0;
+    const h = d.ic_y1 - d.ic_y0;
+    const x = (d.ic_x0 + d.ic_x1) / 2;
+    const y = (d.ic_y0 + d.ic_y1) / 2;
+
+    if (w < 30 || h < 12) {
+      d3.select(this).attr("opacity", 0);
+      return;
+    }
+
+    d3.select(this)
+        .attr("opacity", 1)
+        .attr("transform", `translate(${x},${y})`)
+        .attr("text-anchor", "middle")
+        .text(d.node.data.name.length > w / 6 ? d.node.data.name.slice(0, Math.floor(w / 6)) + "…" : d.node.data.name);
+  });
+}
+
+updateSunburstLabels();
+
+// --- Hover interaction ---
+function getAncestors(node) {
+  const anc = [];
+  let cur = node;
+  while (cur) { anc.push(nodePath(cur)); cur = cur.parent; }
+  return new Set(anc);
+}
+
+paths.on("pointerenter", function(event, d) {
+  if (d.depth === 0) return;
+  const ancSet = getAncestors(d.node);
+
+  paths.attr("opacity", dd => ancSet.has(dd.path) ? 1 : 0.3);
+
+  tooltip
+      .style("opacity", 1)
+      .html(`<strong>${ancestorPath(d.node)}</strong><br>${formatValue(d.node.value)}`);
+})
+.on("pointermove", function(event) {
+  const [mx, my] = d3.pointer(event, document.getElementById("chart-container"));
+  tooltip
+      .style("left", (mx + 14) + "px")
+      .style("top", (my - 10) + "px");
+})
+.on("pointerleave", function() {
+  paths.attr("opacity", d => d.depth === 0 ? 0 : 1);
+  tooltip.style("opacity", 0);
+});
+
+// --- Morph ---
+let morphing = false;
+const btn = d3.select("#toggle-btn");
+
+btn.on("click", () => {
+  if (morphing) return;
+  morphing = true;
+
+  const toIcicle = currentView === "sunburst";
+  const duration = 1200;
+
+  // Hide labels during morph
+  labels.transition().duration(200).attr("opacity", 0);
+
+  // Animate group transform
+  g.transition().duration(duration).ease(d3.easeCubicInOut)
+      .attr("transform", toIcicle ? icicleTransform : sunburstTransform);
+
+  // Animate paths via point interpolation
+  paths.transition().duration(duration).ease(d3.easeCubicInOut)
+      .attrTween("d", function(d, i) {
+        const fromPts = toIcicle ? sunburstPoints[i] : iciclePoints[i];
+        const toPts = toIcicle ? iciclePoints[i] : sunburstPoints[i];
+
+        // Create interpolators for each point
+        const interps = fromPts.map((fp, j) => [
+          d3.interpolateNumber(fp[0], toPts[j][0]),
+          d3.interpolateNumber(fp[1], toPts[j][1]),
+        ]);
+
+        return t => {
+          const pts = interps.map(([ix, iy]) => [ix(t), iy(t)]);
+          return pointsToPath(pts);
+        };
+      })
+      .end().then(() => {
+        // After morph completes, snap to exact shapes
+        currentView = toIcicle ? "icicle" : "sunburst";
+        if (currentView === "sunburst") {
+          paths.attr("d", dd => {
+            const sp = arcPath(dd.sb_x0, dd.sb_x1, dd.sb_y0, dd.sb_y1);
+            return sp || "M0,0";
+          });
+          updateSunburstLabels();
+        } else {
+          paths.attr("d", dd => rectPath(dd.ic_x0, dd.ic_y0, dd.ic_x1, dd.ic_y1));
+          updateIcicleLabels();
+        }
+        btn.text(currentView === "sunburst" ? "Switch to Icicle" : "Switch to Sunburst");
+        morphing = false;
+      }).catch(() => { morphing = false; });
+});
+
+</script>
+</body>
+</html>
