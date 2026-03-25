@@ -72,9 +72,19 @@ Claude Code skills for building advanced D3.js visualizations. Each skill encode
 
 **[zoom-and-pan](skills/zoom-and-pan/SKILL.md)** — d3-zoom API, geometric vs semantic zoom, SVG and Canvas zoom, rescaleX/rescaleY axis integration, zoom constraints, minimap, pinch-to-zoom, level-of-detail.
 
-### Composition
+### Meta Skills
+
+Skills for testing, evaluating, and improving other skills.
+
+**[idiomatic-d3](meta/idiomatic-d3/SKILL.md)** — D3 code style and review: method chaining indentation, margin convention, `.join()` data joins with key functions, `selection.call()` composition, reusable chart closure pattern, naming conventions, anti-patterns checklist.
 
 **[cross-skill-composition](meta/cross-skill-composition/SKILL.md)** — Architectural patterns for combining skills: Canvas+SVG+HTML layer stacks, initialization sequencing, state architecture (data/view/interaction), dirty-flag rendering, performance budgets, five composition archetypes (explorer, narrative, dashboard, spatial, morpher), and the resize contract.
+
+**[check-skill](meta/check-skill/SKILL.md)** — Audit a skill for dangling references, broken code examples, and incorrect descriptions.
+
+**[simplify-skill](meta/simplify-skill/SKILL.md)** — Compress and simplify a SKILL.md for clarity and token efficiency.
+
+**[skill-eval](meta/skill-eval/SKILL.md)** — Evaluate skill effectiveness with before/after comparisons and iterative improvement.
 
 ## How It Works
 
