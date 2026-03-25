@@ -20,8 +20,7 @@ container run -it --rm \
 	-v "$PROJECT:/workspace" \
 	-v "$HOME/.claude:/home/node/.claude" \
 	-v "$HOME/.ssh:/home/node/.ssh:ro" \
-	-v "$HOME/.gitconfig:/tmp/.gitconfig:ro" \
-	-e GIT_CONFIG_GLOBAL=/tmp/.gitconfig \
+	-e GIT_CONFIG_GLOBAL=/workspace/.gitconfig \
 	-u node -w /workspace \
 	"$IMAGE" \
 	claude --dangerously-skip-permissions "${@:3}"

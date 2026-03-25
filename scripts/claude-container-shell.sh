@@ -1,3 +1,3 @@
 #!/bin/bash
 set -e
-container exec -it "${1:-claude}" /bin/zsh
+container exec -it -e GIT_CONFIG_GLOBAL=/workspace/.gitconfig "${1:-claude}" /bin/zsh
