@@ -74,7 +74,7 @@ Claude Code skills for building advanced D3.js visualizations. Each skill encode
 
 ### Composition
 
-**[cross-skill-composition](skills/cross-skill-composition/SKILL.md)** — Architectural patterns for combining skills: Canvas+SVG+HTML layer stacks, initialization sequencing, state architecture (data/view/interaction), dirty-flag rendering, performance budgets, five composition archetypes (explorer, narrative, dashboard, spatial, morpher), and the resize contract.
+**[cross-skill-composition](meta/cross-skill-composition/SKILL.md)** — Architectural patterns for combining skills: Canvas+SVG+HTML layer stacks, initialization sequencing, state architecture (data/view/interaction), dirty-flag rendering, performance budgets, five composition archetypes (explorer, narrative, dashboard, spatial, morpher), and the resize contract.
 
 ## How It Works
 

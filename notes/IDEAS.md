@@ -117,7 +117,7 @@
 - [ ] Touch adaptation demo (pointer-type-aware interactions)
 
 ### Cross-skill composition
-- [x] Composition guide — `skills/cross-skill-composition/SKILL.md`: layer stack, init sequence, state architecture, performance budgets, 5 archetypes, resize contract
+- [x] Composition guide — `meta/cross-skill-composition/SKILL.md`: layer stack, init sequence, state architecture, performance budgets, 5 archetypes, resize contract
 - [x] SVG ↔ Canvas decision guide — covered in composition skill: decision matrix, hybrid pattern, Canvas→SVG handoff
 - [ ] Additional archetype examples — narrative (scrollytelling), spatial explorer (map+linked panels)
 
