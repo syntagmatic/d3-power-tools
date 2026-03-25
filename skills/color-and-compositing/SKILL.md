@@ -7,7 +7,7 @@ description: "Color science and compositing for D3.js data visualization: percep
 
 Color in data visualization is an encoding channel, not decoration. Covers **choosing** colors (perceptual spaces, palettes, scale design), **blending** them (compositing, alpha), **communicating** them (legends, accessibility), and **adapting** them (dark mode, wide gamut).
 
-Related: `canvas-rendering` (batching by color), `patterned-fills` (redundant encoding).
+Related: `canvas-rendering` (batching by color), `visual-texture` (redundant encoding).
 
 ## Color Perception
 

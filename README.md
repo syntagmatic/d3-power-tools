@@ -30,7 +30,7 @@ Claude Code skills for building advanced D3.js visualizations. Each skill encode
 
 ### Styling & Color
 
-**[patterned-fills](skills/patterned-fills/SKILL.md)** — SVG pattern fills (hatching, dots, cross-hatch, stipple, diamonds, triangles, zigzag), perceptual distinctiveness ranking, SVG filter textures (feTurbulence, halftone), stroke dash patterns, Canvas pattern atlas, Canvas pattern+color compositing, SVG markers, color+pattern dual encoding for accessible choropleth, animated patterns, print considerations.
+**[visual-texture](skills/visual-texture/SKILL.md)** — SVG pattern fills (hatching, dots, cross-hatch, stipple, diamonds, triangles, zigzag), perceptual distinctiveness ranking, SVG filter textures (feTurbulence, halftone), stroke dash patterns, Canvas pattern atlas, Canvas pattern+color compositing, SVG markers, color+pattern dual encoding for accessible choropleth, animated patterns, print considerations.
 
 **[color-and-compositing](skills/color-and-compositing/SKILL.md)** — Color spaces (Lab, HCL, OKLab), color perception (simultaneous contrast, small-area, Mach bands), scale design principles (sequential lightness, diverging symmetry), Paul Tol colorblind-safe palettes, CVD simulation, Canvas compositing (lighter, multiply, source-in, masking), SVG blending/feColorMatrix, alpha/opacity strategies, dark mode adaptation, wide gamut (P3, oklch), WCAG contrast, color legends (continuous, categorical, bivariate, size).
 

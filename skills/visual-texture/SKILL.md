@@ -1,6 +1,6 @@
 ---
-name: patterned-fills
-description: "SVG pattern fills and stroke styles for D3.js data visualization: hatching (diagonal, cross-hatch, horizontal, vertical), dot grids, stippling, diamonds, triangles, texture fills, SVG filter-based textures (feTurbulence, feDisplacementMap), dashed and dotted strokes, stroke-dasharray patterns, marker-based line decorations, Canvas pattern equivalents, Canvas pattern atlases, and combining patterns with color. Use this skill when the user needs pattern fills for accessibility (redundant encoding beyond color), print-friendly charts, black-and-white visualizations, textured areas (bars, maps, regions), accessible choropleth maps, custom dash patterns, decorated strokes, procedural textures, or any fill/stroke styling beyond solid color. Also covers dynamic pattern generation, pattern legends, and pattern performance."
+name: visual-texture
+description: "Visual texture for D3.js data visualization: SVG pattern fills (hatching, cross-hatch, dots, stipple, diamonds, triangles, zigzag), perceptual distinctiveness ranking, SVG filter textures (feTurbulence, halftone), stroke dash patterns, Canvas pattern equivalents and atlases, pattern+color compositing, markers, color+pattern dual encoding for accessibility. Use this skill when the user needs texture, pattern fills, hatching, stippling, accessible redundant encoding beyond color, print-friendly charts, black-and-white visualizations, textured areas (bars, maps, regions), accessible choropleth maps, custom dash patterns, decorated strokes, procedural textures, or any fill/stroke styling beyond solid color. Also covers dynamic pattern generation, pattern legends, animated patterns, and pattern performance."
 ---
 
 # Patterned Fills and Stroke Styles

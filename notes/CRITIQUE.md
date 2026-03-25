@@ -67,7 +67,7 @@ Full review of all 27 skills, 40 examples, and 145 tests. Ranked by how much eac
 ### Tier 3 — Competent reference
 13. **zoom-and-pan** — Geometric vs semantic distinction, minimap, linked-zoom loop prevention. Solid but mostly API docs.
 14. **network-visualization** — 5 layouts in 532 lines = breadth over depth. Decision table and validation scripts are strong.
-15. **patterned-fills** — Expanded from 262→615 lines. Now includes diamond/triangle/zigzag patterns, perceptual distinctiveness ranking, SVG filter textures (feTurbulence, halftone), Canvas pattern atlas, accessible choropleth patterns, pattern+color compositing. 12 pitfalls. Moved from Tier 4 #25.
+15. **visual-texture** — Expanded from 262→615 lines. Now includes diamond/triangle/zigzag patterns, perceptual distinctiveness ranking, SVG filter textures (feTurbulence, halftone), Canvas pattern atlas, accessible choropleth patterns, pattern+color compositing. 12 pitfalls. Moved from Tier 4 #25.
 16. **hierarchy-layouts** — Good validation helpers, layout-switcher example. "Which layout for which insight" deserves more than a table.
 17. **hierarchy-interaction** — Well-executed standard patterns (zoomable treemap/sunburst/pack). Observable notebook translations.
 18. **linked-views** — Bitmap crossfilter is useful. Core patterns (dispatch, shared selection) are standard.
@@ -86,7 +86,7 @@ Full review of all 27 skills, 40 examples, and 145 tests. Ranked by how much eac
 1. ~~**Cross-skill composition guide**~~ — Done. `cross-skill-composition` skill added.
 2. ~~**Deepen geographic-maps**~~ — Done. 348→1169 lines. Cartograms, flow maps, hex bins, Canvas architecture, LOD, globe versor.
 3. **Voronoi & Delaunay** — Missing interaction infrastructure. Touches parallel-coords, brushing, canvas, force, time-series.
-4. ~~**Consolidate thin skills**~~ — Partially done. patterned-fills deepened to 615 lines (Tier 3), no longer a merge candidate. fallback-table→canvas-accessibility still open.
+4. ~~**Consolidate thin skills**~~ — Partially done. visual-texture deepened to 615 lines (Tier 3), no longer a merge candidate. fallback-table→canvas-accessibility still open.
 5. **Real data examples** — 38/40 examples use synthetic data. Real messy data would ground the collection.
 6. **Live streaming skill** — temporal-time-series covers theory; a working WebSocket example fills a real production gap.
 
