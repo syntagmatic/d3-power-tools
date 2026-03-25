@@ -2,7 +2,7 @@
 
 **[Demo Gallery](https://syntagmatic.github.io/d3-power-tools/)**
 
-Skills that encode how to *see*, not just how to draw. Each one captures the judgment calls that separate a chart that communicates from one that merely renders. The goal is a floor of quality so you can spend attention on the hard parts. See [WHY.md](notes/WHY.md) for the philosophy.
+Skills for building advanced D3.js visualizations. Each one captures the judgment calls that separate a chart that communicates from one that merely renders. See [WHY.md](notes/WHY.md) for the philosophy.
 
 Each skill is a `SKILL.md` file — patterns, code, and pitfalls for a specific visualization domain. Skills load automatically based on what you're building. They produce self-contained HTML files with inline JS/CSS. No build tools, no frameworks — just vanilla JS + D3 v7.
 

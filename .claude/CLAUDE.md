@@ -2,7 +2,7 @@
 
 ## What This Is
 
-Skills that encode how to *see*, not just how to draw. Each one captures the judgment calls — where the tick falls, when to use color vs. position, why this projection — that separate a chart that communicates from one that merely renders. The goal is a floor of quality so you can spend attention on what can't be codified. See [WHY.md](../notes/WHY.md) for the philosophy.
+Skills for building advanced D3.js visualizations. Each one captures the judgment calls — where the tick falls, when to use color vs. position, why this projection — that separate a chart that communicates from one that merely renders. See [WHY.md](../notes/WHY.md) for the philosophy.
 
 Skills work across contexts: Claude Code, Gemini, and eventually as interactive tutorials for humans.
 
