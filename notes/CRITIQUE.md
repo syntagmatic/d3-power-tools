@@ -87,8 +87,27 @@ Full review of all 27 skills, 40 examples, and 145 tests. Ranked by how much eac
 2. ~~**Deepen cartography**~~ — Done. 348→1169 lines. Cartograms, flow maps, hex bins, Canvas architecture, LOD, globe versor.
 3. **Voronoi & Delaunay** — Missing interaction infrastructure. Touches parallel-coords, brushing, canvas, force, time-series.
 4. ~~**Consolidate thin skills**~~ — Partially done. visual-texture deepened to 615 lines (Tier 3), no longer a merge candidate. data-table→canvas-accessibility still open.
-5. **Real data examples** — 38/40 examples use synthetic data. Real messy data would ground the collection.
+5. ~~**Real data examples**~~ — Partially addressed. `blocks/blockbuilder-explorer.html` loads 34K real blocks from the Blockbuilder dataset. Still only 1 of 48 blocks uses real data.
 6. **Live streaming skill** — time-series covers theory; a working WebSocket example fills a real production gap.
+
+### Gaps identified from Blockbuilder data (2026-03-25)
+
+Analysis of 34,196 real D3 blocks from Blockbuilder Search reveals which D3 modules practitioners actually use vs. what the skills cover. See `blocks/blockbuilder-explorer.html` for the interactive analysis.
+
+**Coverage gaps ranked by real-world usage:**
+
+1. **d3-selection** — In 95% of blocks, no dedicated skill. `.join()`, enter/update/exit, nested selections, `.each()`, `.call()`, data key functions are foundational knowledge that every other skill assumes. Currently re-taught piecemeal across skills. A focused selection skill could be "the first skill you read."
+2. **d3-shape** — `d3.line` (8%), `d3.arc` (3.6%), `d3.area`, `d3.pie`, `d3.stack` collectively in ~13% of blocks. No dedicated skill. Partially scattered across `time-series` (line/area), `hierarchy-layouts` (arc/pie), `distributions` (stack). Generators, curves, custom symbols, and the shape API surface deserve consolidation.
+3. **d3-drag** — In 4% of blocks (more than brush or zoom). No dedicated skill. Shows up in force layouts, custom sliders, annotation repositioning, sortable lists. `force` mentions it but general patterns (constrained drag, drag data binding, snap) aren't captured.
+4. **d3-transition** — In 3% of blocks explicitly. `motion` covers animation philosophy but the bread-and-butter `.transition().duration().ease()` patterns, interruption semantics, and named transition collision are buried.
+
+**Module usage vs. skill depth alignment:**
+- d3-geo (8% of blocks) has the deepest skill (1169 lines) — proportionally over-served but the depth is warranted by complexity.
+- d3-force (4.6% of blocks) has good coverage — appropriate.
+- d3-hierarchy (1800 uses) has two skills — appropriate for the interaction complexity.
+- d3-brush (339 uses, 1% of blocks) has its own skill — low usage but high value for exploratory tools.
+
+**V3→V7 migration reality:** ~40% of blocks use v3 API (`d3.scale.linear`, `d3.svg.axis`, `d3.layout.force`). The skills correctly target v7 only, but this means the skills don't help people migrating old blocks — a potential "migration recipes" appendix could address this.
 
 ---
 
@@ -99,6 +118,11 @@ Full review of all 27 skills, 40 examples, and 145 tests. Ranked by how much eac
 - **Canvas Rendering:** Fixed density map clipping, added transparent background.
 - **Edge Bundling:** Added treemap context rectangles, fixed radial labels.
 - Updated SKILL.md files for Canvas, Layouts, and Bundling with these patterns.
+
+### 2026-03-25 — Blockbuilder Explorer & Coverage Analysis
+- **Blockbuilder explorer:** `blocks/blockbuilder-explorer.html` — 4-view linked explorer (timeline, force network, color scatter, block list) of 34K real D3 blocks from Blockbuilder Search Data. Loads blocks-api.json (10MB) + blocks-colors.json (12MB). Exercises linked-views, force, canvas, color, time-series, and data-gathering skills simultaneously.
+- **Coverage gap analysis:** Compared API function usage across 34K blocks against skill coverage. Identified 3 high-priority missing skills: selections (95% of blocks), shapes (13%), drag (4%). Updated IDEAS.md with data-informed prioritization.
+- **First real-data block:** All previous blocks use synthetic data. This is the first to load and explore a real external dataset.
 
 ### 2026-03-21 → 2026-03-23 — Skill Expansion & Infrastructure
 - **3 new skills:** `annotation` (768 lines), `distributions` (855 lines), `small-multiples` (642 lines). All three were high/medium priority items from IDEAS.md.

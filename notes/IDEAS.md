@@ -9,6 +9,11 @@
 - ~~**Zoom & pan**~~ ✅ Built (initial commit, expanded with SVG-overlay-on-Canvas in 5bdc13d)
 - ~~**Temporal & time-series**~~ ✅ Built as `time-series`
 
+### High value — informed by Blockbuilder usage data (34K blocks)
+- **Selections** — In 95% of blocks. `.join()` patterns, enter/update/exit, nested selections, `.each()`, `.call()`, data key functions, selection merging. The foundational skill that all others assume. Currently re-taught piecemeal; deserves to be "the first skill you read."
+- **Shapes** — `d3.line` (8%), `d3.arc` (3.6%), `d3.area`, `d3.pie`, `d3.stack` in ~13% of blocks. Generators, curve factories, custom symbols, radialLine/radialArea. Currently scattered across time-series, hierarchy-layouts, distributions.
+- **Drag & reorder** — 4% of blocks, more than brush or zoom. Constrained drag, drag data binding, snap-to-grid, sortable lists, drag-to-connect. General patterns beyond force-specific drag.
+
 ### Medium value
 - ~~**Statistical charts**~~ ✅ Built (fc08228)
 - **Voronoi & Delaunay** — interactive nearest-neighbor lookup, Voronoi diagrams as tooltip regions, Voronoi treemaps, Delaunay triangulation, clipped Voronoi cells
@@ -32,7 +37,7 @@
 - **Error & uncertainty** — error bars, confidence intervals, gradient uncertainty bands, fan charts, ensemble spaghetti plots, probability density overlays
 - **Stacked area & streamgraph** — stacked area, streamgraph with baseline algorithms (wiggle, silhouette, expand), difference area charts, ThemeRiver, transition between baselines
 - **Clip paths & masks** — reveal animations, viewport clipping, shaped masks, gradient masks, animated clip transitions, sparkline-in-shape patterns
-- **Drag & reorder** — sortable lists, drag-to-reorder axes/rows/columns, drag-to-connect nodes, snap-to-grid, drag constraints, visual feedback during drag
+- ~~**Drag & reorder**~~ — promoted to High Value (Blockbuilder data: 4% of blocks)
 - **Progress & gauges** — radial progress arcs, linear progress bars, goal markers, animated fill, donut gauges, bullet-style gauges (extends sparkcharts bullets)
 - **Histogram & distribution** — binning strategies (`d3.bin` thresholds), overlapping histograms, cumulative distribution, population pyramids, Wilkinson dot plots
 - **Dashboard composition** — CSS grid + D3 coordination, responsive card layout, shared filter controls, coordinated update lifecycle, print-friendly styles
