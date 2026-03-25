@@ -44,6 +44,12 @@ python3 scripts/test-viz.py output.html --out temp/check.png --wait-for "svg"
 
 # Run the test suite
 python3 scripts/test-viz.py --config tests/test.config.json
+
+# Run tests for one skill
+python3 scripts/test-viz.py --config tests/test.config.json --skill annotation
+
+# Run tests for skills with uncommitted changes
+python3 scripts/test-viz.py --config tests/test.config.json --changed
 ```
 
 Examples live in `skills/*/examples/` and double as test fixtures. Add new test cases to `tests/test.config.json` (paths are relative to project root). After building a visualization:

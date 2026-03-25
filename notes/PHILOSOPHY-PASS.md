@@ -6,7 +6,26 @@ Systematically increase the density of insight in every skill by applying the pr
 
 For each skill (working from Tier 4 → Tier 3 → Tier 2, skipping Tier 1):
 
-### Step 1: Read and diagnose
+### Step 1: Research
+
+Before touching the skill, gather outside knowledge. Search the web for:
+- Best practices and common pitfalls for this visualization type (e.g. "parallel coordinates best practices", "when to use box plot vs violin")
+- Perceptual research relevant to the skill (e.g. preattentive features, change blindness, Gestalt principles as they apply)
+- Notable examples and critiques from the D3/Observable community, academic vis papers, or practitioner blogs
+- Anti-patterns: real-world examples where this technique was misused and why it failed
+
+Bring back concrete insights that aren't already in the skill. Don't add citations for their own sake — only add knowledge that changes what you'd build.
+
+### Step 2: Read the examples
+
+Read every example HTML in `skills/<name>/examples/`. For each one:
+- Does it demonstrate a distinct insight, or is it redundant with another example?
+- Does it show the skill at its best, or is it a minimal "it works" demo?
+- Could two similar examples be merged into one that covers both cases?
+
+If examples are redundant or overlapping, combine them into a single file that demonstrates both concepts. Update `tests/test.config.json` to reflect any merged or removed files. Less is more — a few strong examples beat many thin ones.
+
+### Step 3: Read and diagnose the skill
 
 Read the full SKILL.md. Classify every section as one of:
 - **Insight** — encodes judgment, perception, or a failure mode (keep, sharpen)
@@ -16,11 +35,11 @@ Read the full SKILL.md. Classify every section as one of:
 
 Write the diagnosis to stdout before making changes.
 
-### Step 2: Rewrite the opening
+### Step 4: Rewrite the opening
 
 Every skill should open with **why this matters to the viewer** — the perceptual or analytical problem it solves. One or two sentences. Not "Patterns for adding explanatory text" but "A chart without annotation is a chart without an argument."
 
-### Step 3: Add rationales to naked rules
+### Step 5: Add rationales to naked rules
 
 Find rules that say *what* without saying *why*. Add the failure mode or perceptual reason. The format: rule first, then the scar.
 
@@ -36,19 +55,19 @@ varies with shape size: a large rectangle gets sparse hatching while
 a small one gets dense hatching, and the viewer reads density as data.
 ```
 
-### Step 4: Cut API documentation
+### Step 6: Cut API documentation
 
 If a section is just D3 API organized differently, compress it to the minimum needed for context and link to D3 docs. A skill should assume the reader (human or model) can look up `d3.scaleLinear()`. What they can't look up is *when to use log vs symlog* and *why*.
 
-### Step 5: Add "when not to use this" sections
+### Step 7: Add "when not to use this" sections
 
 The hardest judgment call is knowing when a technique is wrong. Each skill should have at least one "don't use this when..." with a concrete reason. This is the kind of insight that's invisible in API docs.
 
-### Step 6: Verify and screenshot
+### Step 8: Verify and screenshot
 
 After editing, run the test suite for that skill's examples to make sure nothing broke:
 ```bash
-python3 scripts/test-viz.py --config tests/test.config.json --filter <skill-name>
+python3 scripts/test-viz.py --config tests/test.config.json --skill <skill-name>
 ```
 
 Screenshot and read the result to verify visual correctness.
@@ -95,15 +114,17 @@ These are already good. Sharpen, don't expand.
 ## Constraints
 
 - **Don't inflate line counts.** Density means insight per line, not more lines. If you add 10 lines of judgment, cut 20 lines of API docs.
+- **Consolidate examples.** If a skill has 2+ examples and they're similar, merge them. Update test.config.json. One rich example beats two thin ones.
 - **Stay D3-focused.** This is d3-power-tools, not a visualization textbook. Every insight should connect to a concrete D3 implementation choice.
 - **Preserve working code.** Don't change code snippets unless they're wrong. The code is the recipe; the prose is the judgment.
 - **Test after every skill.** Run the examples. Screenshot them. Don't break things.
 - **Commit after each skill.** One skill per commit. Message format: `Sharpen <skill-name>: <what changed>`
+- **Log as you go.** Append observations, surprises, cross-skill connections, and open questions to `notes/SHARPENING-LOG.md`. One section per skill. This is the scratchpad for the whole pass — things that don't belong in any single SKILL.md but are worth remembering.
 
 ## Loop Command
 
 ```
-/loop 25m Sharpen one skill per iteration, working through notes/PHILOSOPHY-PASS.md in order. Read the plan first to find which skill is next (check git log for commits matching "Sharpen <name>" to see what's done). Follow all six steps for that skill. Commit when done. Move to the next skill in the next iteration.
+/loop 25m Sharpen one skill per iteration, working through notes/PHILOSOPHY-PASS.md in order. Read the plan first to find which skill is next (check git log for commits matching "Sharpen <name>" to see what's done). Follow all eight steps for that skill: (1) research the web, (2) read and consolidate examples, (3) diagnose the skill, (4) rewrite opening, (5) add rationales, (6) cut API docs, (7) add "when not to", (8) test and screenshot. Commit when done. Move to the next skill in the next iteration.
 ```
 
 ## Done When

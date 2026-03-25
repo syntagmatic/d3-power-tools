@@ -7,8 +7,14 @@ Single file mode:
   python3 scripts/test-viz.py path/to/viz.html --interactions hover,brush --out temp/shot.png
 
 Config mode (runs a test suite):
-  python3 scripts/test-viz.py --config bubble-treemap/tests/test.config.json
-  python3 scripts/test-viz.py --config d3-power-tools/tests/test.config.json
+  python3 scripts/test-viz.py --config tests/test.config.json
+
+Filter by skill:
+  python3 scripts/test-viz.py --config tests/test.config.json --skill annotation
+  python3 scripts/test-viz.py --config tests/test.config.json --skill "annotation,color"
+
+Run only tests for skills with uncommitted changes:
+  python3 scripts/test-viz.py --config tests/test.config.json --changed
 
 Run all configs in the repo:
   python3 scripts/test-viz.py --all
@@ -40,7 +46,9 @@ import argparse
 import http.server
 import json
 import os
+import re
 import socket
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -82,7 +90,7 @@ def find_free_port():
 # Core test logic
 # ---------------------------------------------------------------------------
 
-def run_single_test(pw_browser, test_spec):
+def run_single_test(pw_browser, test_spec, server_url=None, serve_root=None):
     """
     Run checks against one HTML file. Returns a results dict.
 
@@ -95,6 +103,9 @@ def run_single_test(pw_browser, test_spec):
       wait_for    (str) CSS selector
       interactions (list[str])
       setup       (str) JS to evaluate after load, before checks
+
+    If server_url and serve_root are provided, reuses that server instead
+    of starting a per-test server.
     """
     html_path = Path(test_spec["file"]).resolve()
     width = test_spec.get("width", 1200)
@@ -107,11 +118,17 @@ def run_single_test(pw_browser, test_spec):
 
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
 
-    # Serve from the file's directory
-    serve_dir = str(html_path.parent)
-    port = find_free_port()
-    httpd = start_server(serve_dir, port)
-    url = f"http://127.0.0.1:{port}/{html_path.name}"
+    httpd = None
+    if server_url and serve_root:
+        # Reuse shared server — compute relative URL
+        rel = html_path.relative_to(Path(serve_root).resolve())
+        url = f"{server_url}/{rel}"
+    else:
+        # Standalone: start a per-test server
+        serve_dir = str(html_path.parent)
+        port = find_free_port()
+        httpd = start_server(serve_dir, port)
+        url = f"http://127.0.0.1:{port}/{html_path.name}"
 
     results = {
         "file": str(html_path),
@@ -142,7 +159,8 @@ def run_single_test(pw_browser, test_spec):
         check("page_loads", False, str(e))
         page.screenshot(path=out_path)
         page.close()
-        httpd.shutdown()
+        if httpd:
+            httpd.shutdown()
         results["warnings"] = console_warnings[:10] if console_warnings else []
         return results
 
@@ -244,7 +262,8 @@ def run_single_test(pw_browser, test_spec):
         results["warnings"] = console_warnings[:10]
 
     page.close()
-    httpd.shutdown()
+    if httpd:
+        httpd.shutdown()
     return results
 
 
@@ -298,8 +317,36 @@ def _run_interaction_tests(page, interactions, check):
 # Config mode
 # ---------------------------------------------------------------------------
 
-def load_config(config_path):
-    """Load a test.config.json and resolve paths relative to it."""
+def changed_skills():
+    """Detect skills with uncommitted changes (staged + unstaged) via git."""
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD"],
+            capture_output=True, text=True, cwd=REPO_ROOT
+        )
+        # Also include untracked files in skills/
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "skills/"],
+            capture_output=True, text=True, cwd=REPO_ROOT
+        )
+        all_files = result.stdout.strip() + "\n" + untracked.stdout.strip()
+    except FileNotFoundError:
+        return set()
+
+    skills = set()
+    for line in all_files.splitlines():
+        m = re.match(r"skills/([^/]+)/", line)
+        if m:
+            skills.add(m.group(1))
+    return skills
+
+
+def load_config(config_path, skill_filter=None):
+    """Load a test.config.json and resolve paths relative to it.
+
+    skill_filter: optional set of skill names to include. If provided,
+    only tests whose 'skill' field matches are returned.
+    """
     config_path = Path(config_path).resolve()
     with open(config_path) as f:
         config = json.load(f)
@@ -312,6 +359,9 @@ def load_config(config_path):
 
     specs = []
     for i, test in enumerate(config.get("tests", [])):
+        # Filter by skill if requested
+        if skill_filter and test.get("skill") not in skill_filter:
+            continue
         spec = {**defaults, **test}
         spec["file"] = str((root / spec["file"]).resolve())
         label = test.get("name", Path(test["file"]).stem)
@@ -321,7 +371,7 @@ def load_config(config_path):
             spec["interactions"] = [x.strip() for x in spec["interactions"].split(",")]
         specs.append(spec)
 
-    return config.get("name", config_path.parent.name), specs
+    return config.get("name", config_path.parent.name), root, specs
 
 
 def find_all_configs(repo_root):
@@ -400,7 +450,25 @@ def main():
     p.add_argument("--setup", default=None, help="JS to run after page load")
     p.add_argument("--json", action="store_true", help="Output as JSON")
 
+    # Filtering (config mode only)
+    p.add_argument("--skill", default=None,
+                   help="Run only tests for these skills (comma-separated)")
+    p.add_argument("--changed", action="store_true",
+                   help="Run only tests for skills with uncommitted changes")
+
     args = p.parse_args()
+
+    # Build skill filter
+    skill_filter = None
+    if args.skill:
+        skill_filter = {s.strip() for s in args.skill.split(",")}
+    if args.changed:
+        cs = changed_skills()
+        if not cs:
+            print("No changed skills detected.", file=sys.stderr)
+            sys.exit(0)
+        skill_filter = cs if not skill_filter else skill_filter & cs
+        print(f"  Changed skills: {', '.join(sorted(skill_filter))}\n")
 
     all_passed = True
 
@@ -433,9 +501,19 @@ def main():
                 print(f"\n  Screenshot: {result['screenshot']}\n")
 
         elif args.config:
-            # Single config mode
-            name, specs = load_config(args.config)
-            results = [run_single_test(browser, spec) for spec in specs]
+            # Single config mode — shared server
+            name, root, specs = load_config(args.config, skill_filter)
+            if not specs:
+                print("No tests match the filter.", file=sys.stderr)
+                sys.exit(0)
+            port = find_free_port()
+            httpd = start_server(str(root), port)
+            server_url = f"http://127.0.0.1:{port}"
+            results = [
+                run_single_test(browser, spec, server_url=server_url, serve_root=str(root))
+                for spec in specs
+            ]
+            httpd.shutdown()
             all_passed = all(r["passed"] for r in results)
             report_suite(name, results, args.json)
 
@@ -448,8 +526,17 @@ def main():
                 sys.exit(1)
 
             for config_path in configs:
-                name, specs = load_config(config_path)
-                results = [run_single_test(browser, spec) for spec in specs]
+                name, root, specs = load_config(config_path, skill_filter)
+                if not specs:
+                    continue
+                port = find_free_port()
+                httpd = start_server(str(root), port)
+                server_url = f"http://127.0.0.1:{port}"
+                results = [
+                    run_single_test(browser, spec, server_url=server_url, serve_root=str(root))
+                    for spec in specs
+                ]
+                httpd.shutdown()
                 if not all(r["passed"] for r in results):
                     all_passed = False
                 report_suite(name, results, args.json)
