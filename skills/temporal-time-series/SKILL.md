@@ -273,6 +273,66 @@ Only render the visible time range. Use `d3.bisector(d => d.date)` to find start
 
 Store timestamps and values in parallel `Float64Array`s for cache-friendly access. Convert dates with `+d.date` (ms since epoch).
 
+## Overview + Detail
+
+The canonical time-series interaction: a small overview shows the full range, a brush selects a window, and the main chart zooms to that window.
+
+### Architecture
+
+```
+┌─────────────────────────────────────┐
+│           Main Chart (detail)       │  ← xMain domain from brush
+│                                     │
+├─────────────────────────────────────┤
+│  ▓▓▓▓▓░░░░░░░░░░░░░░░  Overview   │  ← brushX selects time range
+└─────────────────────────────────────┘
+```
+
+### Implementation
+
+```js
+const xOverview = d3.scaleUtc(fullExtent, [0, width]);
+const xMain = d3.scaleUtc(fullExtent, [0, width]);
+const yMain = d3.scaleLinear().range([mainHeight, 0]);
+
+// Overview: simplified area or line
+const overviewArea = d3.area()
+    .x(d => xOverview(d.date))
+    .y0(overviewHeight)
+    .y1(d => yOverview(d.value));
+
+overviewG.append("path")
+  .datum(data)
+    .attr("d", overviewArea)
+    .attr("fill", "steelblue")
+    .attr("fill-opacity", 0.15);
+
+// Brush on overview
+const brush = d3.brushX()
+    .extent([[0, 0], [width, overviewHeight]])
+    .on("brush end", brushed);
+
+overviewG.append("g").call(brush);
+
+function brushed(event) {
+  if (!event.selection) return;
+  const [x0, x1] = event.selection.map(xOverview.invert);
+  xMain.domain([x0, x1]);
+
+  // Update main chart axes and paths
+  mainXAxisG.call(d3.axisBottom(xMain));
+  mainLine.attr("d", lineGen);
+}
+```
+
+### Key details
+
+- **Use `scaleUtc` for the overview** even if the main chart uses `scaleTime` — the overview rarely needs DST precision and UTC avoids spring-forward glitches at full-year zoom.
+- **Downsample on brush** — when the user zooms into a narrow window, re-run LTTB on the visible slice to keep point count ≈ `2 × width`.
+- **Animate domain changes** — `xMain.domain(newDomain)` is instant; wrap axis and path updates in a shared transition for smooth zooming.
+- **Programmatic brush.move** — to set the brush from buttons (e.g., "Last 6 months"), call `brushG.transition().call(brush.move, [x0, x1])`. This triggers the `brushed` handler via the transition, so don't also call the update function manually (double render).
+- **Snap to intervals** — in the `end` event, snap the selection to day/week/month boundaries with `interval.floor(start)` and `interval.ceil(end)`, then call `brush.move` with the snapped pixels.
+
 ## Common Pitfalls
 
 **scaleTime domain must be Date objects.** Passing strings or epoch numbers to `scaleTime.domain()` silently produces wrong results.
@@ -280,8 +340,6 @@ Store timestamps and values in parallel `Float64Array`s for cache-friendly acces
 **Brush coordinates in zoomed space.** When combining brush and zoom, the brush operates in pixel coordinates but the scale may be transformed. Use `transform.rescaleX(x).invert()` to convert brush pixels to data coordinates, not `x.invert()`.
 
 **rAF scheduling in real-time charts.** Calling `requestAnimationFrame(redraw)` inside every WebSocket `onmessage` creates redundant frames. Gate with a flag: schedule one rAF, process all pending data in that frame.
-
-**Snap-to-interval for brushes.** Snap brush extents to the nearest day/week/month by converting pixel selection to dates via `xOverview.invert`, applying `interval.floor(start)` and `interval.ceil(end)`, then calling `brush.move` with the snapped pixel positions in the `end` event.
 
 ## References
 

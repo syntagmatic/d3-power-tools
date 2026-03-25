@@ -9,6 +9,27 @@ Patterns for building distribution-visualization charts with D3.js: box plots, v
 
 For axis patterns, see `axes-and-scales`. For animated transitions, see `animated-transitions`. For force-based layouts (bee swarm), see `force-simulation`. For color palettes, see `color-and-compositing`.
 
+## Choosing a Distribution Chart
+
+Pick based on what you need to show:
+
+| Chart | Best When | Shows | Hides |
+|-------|-----------|-------|-------|
+| **Box plot** | Comparing medians and spread across 5+ groups | Median, quartiles, outliers | Shape (bimodal data looks same as unimodal) |
+| **Violin plot** | Distribution shape matters (bimodal, skewed) | Full density shape, symmetry | Individual points, exact values |
+| **Ridgeline** | Comparing many (6+) distributions at a glance | Trend across ordered groups, density overlap | Precise comparison (no shared x baseline within rows) |
+| **Bee swarm** | Individual observations matter, n < 500/group | Every point, gaps, clusters | Performance degrades past ~500 pts/group |
+| **Strip/jitter** | Quick overview, any n | Raw data distribution | Overplots badly past ~200 pts/group without opacity |
+| **Density plot** | Comparing 2–4 overlapping distributions | Smooth shape, overlap regions | Individual values, small-sample artifacts |
+
+**Combining charts** improves insight: violin + inner box shows shape and summary; bee swarm + median line shows individuals and center. Raincloud plots (half-violin + strip + box) give all three.
+
+**When NOT to use:**
+- **Box plots with n < 10** — quartiles are meaningless with tiny samples; show the raw points
+- **Violin plots with n < 30** — KDE smoothing fabricates shape from too few points
+- **Bee swarm with n > 500/group** — force simulation becomes slow; switch to jitter or violin
+- **Ridgeline for unordered categories** — the vertical stacking implies order; use faceted violins instead
+
 ## Kernel Density Estimation (KDE)
 
 KDE smooths raw data into a continuous density curve. Each data point contributes a kernel (usually Gaussian); the density at any point is the sum of all kernels.

@@ -236,6 +236,91 @@ const annotationLayer = svg.append("g").attr("class", "annotation-layer");
 
 Types: `annotationLabel`, `annotationCallout`, `annotationCalloutElbow`, `annotationCalloutCurve`, `annotationCalloutCircle`, `annotationXYThreshold`, `annotationBadge`.
 
+## Tooltip Patterns
+
+### HTML Tooltip with d3.pointer()
+
+HTML tooltips outperform SVG `<title>` — they support rich formatting, auto-wrap, and sit above all chart layers.
+
+```js
+const tooltip = d3.select("body").append("div")
+    .attr("class", "tooltip")
+    .style("position", "absolute")
+    .style("pointer-events", "none")
+    .style("opacity", 0);
+
+selection
+    .on("pointerenter", (event, d) => {
+      tooltip.html(`<strong>${d.name}</strong><br>${d.value}`)
+          .style("opacity", 1);
+    })
+    .on("pointermove", (event) => {
+      const [px, py] = [event.pageX, event.pageY];
+      tooltip.style("left", `${px + 12}px`)
+          .style("top", `${py - 12}px`);
+    })
+    .on("pointerleave", () => {
+      tooltip.style("opacity", 0);
+    });
+```
+
+Use `pointer-events: none` on the tooltip to prevent it from stealing hover from the chart. Use `pageX`/`pageY` for positioning (works even when the chart is inside a scrollable container, unlike `clientX`/`clientY`).
+
+### Edge Clamping
+
+Prevent the tooltip from overflowing the viewport:
+
+```js
+.on("pointermove", (event) => {
+  const ttNode = tooltip.node();
+  const ttW = ttNode.offsetWidth, ttH = ttNode.offsetHeight;
+  const x = Math.min(event.pageX + 12, window.innerWidth + window.scrollX - ttW - 8);
+  const y = Math.max(event.pageY - ttH - 8, window.scrollY + 8);
+  tooltip.style("left", `${x}px`).style("top", `${y}px`);
+})
+```
+
+### Voronoi Tooltip (for scatter / line charts)
+
+When elements are small or dense, attach the tooltip to a Voronoi overlay so the user doesn't need to hover exactly on a point:
+
+```js
+const delaunay = d3.Delaunay.from(data, d => x(d.date), d => y(d.value));
+
+svg.append("rect")
+    .attr("width", width).attr("height", height)
+    .attr("fill", "none")
+    .attr("pointer-events", "all")
+    .on("pointermove", (event) => {
+      const [mx, my] = d3.pointer(event);
+      const i = delaunay.find(mx, my);
+      const d = data[i];
+      // Position tooltip at data point, not mouse
+      tooltip.html(`${d.name}: ${d.value}`)
+          .style("left", `${x(d.date) + margin.left + 12}px`)
+          .style("top", `${y(d.value) + margin.top - 12}px`)
+          .style("opacity", 1);
+    })
+    .on("pointerleave", () => tooltip.style("opacity", 0));
+```
+
+### Tooltip CSS
+
+```css
+.tooltip {
+  background: rgba(26, 26, 46, 0.92);
+  color: #fff;
+  font-size: 0.75rem;
+  padding: 6px 10px;
+  border-radius: 6px;
+  line-height: 1.4;
+  white-space: nowrap;
+  transition: opacity 0.12s ease;
+}
+```
+
+Keep `transition` short (100–150ms) so the tooltip feels responsive. Use `white-space: nowrap` unless content is long; for multi-line tooltips, set a `max-width` and let text wrap.
+
 ## Common Pitfalls
 
 **Labels overflow the chart bounds.** Always clamp label positions to the plot area. With force-based placement, add a bounding box force. With greedy placement, check bounds before accepting.
