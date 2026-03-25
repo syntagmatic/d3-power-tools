@@ -48,17 +48,14 @@ case "$1" in
     git rebase origin/main "$BRANCH"
 
     # Fast-forward main to the rebased tip.
-    # update-ref bypasses the "checked out in another worktree" restriction.
     MAIN_WORKTREE="$(git worktree list --porcelain | awk '/^worktree /{wt=$2} /^branch refs\/heads\/main$/{print wt}')"
     NEW_TIP="$(git rev-parse "$BRANCH")"
-    git update-ref refs/heads/main "$NEW_TIP"
     if [ -n "$MAIN_WORKTREE" ]; then
-      if git -C "$MAIN_WORKTREE" diff --quiet && git -C "$MAIN_WORKTREE" diff --cached --quiet; then
-        git -C "$MAIN_WORKTREE" reset --hard main 2>/dev/null
-      else
-        echo "Warning: main worktree has uncommitted changes, skipping working tree update" >&2
-        echo "  Run: cd $MAIN_WORKTREE && git reset --hard main" >&2
-      fi
+      # merge --ff-only updates ref + index + working tree atomically.
+      # Refuses safely if dirty files conflict with incoming changes.
+      git -C "$MAIN_WORKTREE" merge --ff-only "$BRANCH"
+    else
+      git update-ref refs/heads/main "$NEW_TIP"
     fi
     echo "Rebased $BRANCH onto main (fast-forward to $(git rev-parse --short "$NEW_TIP"))"
     ;;
