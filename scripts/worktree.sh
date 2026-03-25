@@ -53,7 +53,15 @@ case "$1" in
     NEW_TIP="$(git rev-parse "$BRANCH")"
     git update-ref refs/heads/main "$NEW_TIP"
     if [ -n "$MAIN_WORKTREE" ]; then
+      DIRTY=false
+      git -C "$MAIN_WORKTREE" diff --quiet && git -C "$MAIN_WORKTREE" diff --cached --quiet || DIRTY=true
+      if $DIRTY; then
+        git -C "$MAIN_WORKTREE" stash --quiet
+      fi
       git -C "$MAIN_WORKTREE" reset --hard main 2>/dev/null
+      if $DIRTY; then
+        git -C "$MAIN_WORKTREE" stash pop --quiet
+      fi
     fi
     echo "Rebased $BRANCH onto main (fast-forward to $(git rev-parse --short "$NEW_TIP"))"
     ;;
