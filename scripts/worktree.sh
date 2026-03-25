@@ -2,10 +2,11 @@
 # Create a git worktree and optionally launch Claude Code in it.
 #
 # Usage:
-#   ./scripts/worktree.sh <name>          # create worktree + open Claude
+#   ./scripts/worktree.sh <name>              # create worktree + open Claude
 #   ./scripts/worktree.sh <name> --no-claude  # create worktree only
-#   ./scripts/worktree.sh --list          # list active worktrees
-#   ./scripts/worktree.sh --remove <name> # remove a worktree
+#   ./scripts/worktree.sh --merge [<name>]    # rebase session onto main + fast-forward
+#   ./scripts/worktree.sh --list              # list active worktrees
+#   ./scripts/worktree.sh --remove <name>     # remove a worktree
 
 set -e
 
@@ -15,6 +16,7 @@ PREFIX="d3-pt"
 
 usage() {
   echo "Usage: $0 <name> [--no-claude]"
+  echo "       $0 --merge [<name>]"
   echo "       $0 --list"
   echo "       $0 --remove <name>"
   exit 1
@@ -25,6 +27,32 @@ usage() {
 case "$1" in
   --list|-l)
     git worktree list
+    ;;
+  --merge|-m)
+    # Rebase session branch onto main, then fast-forward main (no merge commits).
+    # If <name> is omitted, infers from current branch (session/<name>).
+    if [ -n "$2" ]; then
+      BRANCH="session/$2"
+    else
+      BRANCH="$(git symbolic-ref --short HEAD)"
+      if [[ "$BRANCH" != session/* ]]; then
+        echo "Error: not on a session branch and no name given" >&2
+        exit 1
+      fi
+    fi
+
+    # Rebase onto main (no-op if already up to date)
+    git rebase main "$BRANCH"
+
+    # Fast-forward main to the rebased tip.
+    # update-ref bypasses the "checked out in another worktree" restriction.
+    MAIN_WORKTREE="$(git worktree list --porcelain | awk '/^worktree /{wt=$2} /^branch refs\/heads\/main$/{print wt}')"
+    NEW_TIP="$(git rev-parse "$BRANCH")"
+    git update-ref refs/heads/main "$NEW_TIP"
+    if [ -n "$MAIN_WORKTREE" ]; then
+      git -C "$MAIN_WORKTREE" reset --hard main 2>/dev/null
+    fi
+    echo "Rebased $BRANCH onto main (fast-forward to $(git rev-parse --short "$NEW_TIP"))"
     ;;
   --remove|-r)
     [ -z "$2" ] && usage
