@@ -78,7 +78,7 @@ d3.forceCollide().radius(d => d.r + 2).strength(0.7).iterations(2);
 
 ## Custom Forces
 
-A force is a function called each tick with the current `alpha`. It modifies `d.vx` and `d.vy` — never `d.x`/`d.y` directly (the Verlet integrator does that).
+A force is a function called each tick with the current `alpha`. Usually it modifies `d.vx` and `d.vy` — the Verlet integrator handles `d.x`/`d.y`. The exception is hard boundary clamping, where you set position directly and zero velocity:
 
 ```js
 function forceBoundingBox(x0, y0, x1, y1) {
