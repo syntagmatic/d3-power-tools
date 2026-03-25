@@ -123,6 +123,14 @@
 
 ---
 
+## Evaluator Suite
+
+- [ ] Run the evaluator feedback loop on the remaining 18 skills (see `temp/eval-queue.json` for progress, `notes/PHILOSOPHY-PASS.md` Phase 2 for the process, `meta/skill-eval/` for prompts)
+- [ ] After all 21 skills pass: review `notes/EVALUATION-LOG.md` holistically — which criteria caught real issues? Which always passed trivially? Which skills needed retries?
+- [ ] Tighten or cut criteria that never failed — they're not earning their place
+- [ ] Add new criteria discovered via META observations in the evaluation reports
+- [ ] Decide if the evaluator is worth running on every sharpening pass, or only on major rewrites
+
 ## Test Fixture Ideas
 - [ ] Interruption stress test — rapid-fire random clicks, verify no stuck states
 - [ ] Large data fixtures — 1K, 10K, 100K rows to catch perf regressions
