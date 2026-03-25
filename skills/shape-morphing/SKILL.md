@@ -5,16 +5,21 @@ description: "Morph between shapes in D3.js visualizations. Use this skill when 
 
 # Shape Morphing
 
-Smoothly transition between different shapes in D3 visualizations. Three tiers of approach, from simplest to most general.
+A smooth morph between two shapes tells the viewer "these are the same data, seen differently." When that claim is false — when the source and target represent categorically different things — the animation misleads by implying a continuity that does not exist.
 
-## Strategy
+## Choosing an Approach
 
-Prefer parametric interpolation over path-string manipulation:
+Use the simplest technique that fits. Each tier trades generality for fidelity and performance.
 
-1. **Parametric** — If both shapes can be described by shared numeric parameters (position, size, corner radius, arc angles), interpolate the numbers directly. No path parsing needed, works on both SVG and Canvas.
-2. **Point resampling** — For arbitrary paths (star→circle, icons, map outlines), resample both shapes to equal-length point arrays via `getPointAtLength()`, then lerp the arrays per frame. ~40 lines, no libraries.
+| Approach | When to use | Fidelity | Cost |
+|---|---|---|---|
+| **Parametric** | Both shapes share numeric parameters (cornerRadius, arc angles, position) | Perfect curves, no polygonal artifacts | Cheapest — standard D3 transitions |
+| **Point resampling** | Shapes have different geometry (star→circle, rect→arc wedge) | Smooth at 128 pts, always polygonal | Moderate — O(n^2) rotation alignment once, then array lerps per frame |
+| **Topology-aware** (flubber, d3-interpolate-path) | Shapes with holes, multiple subpaths, or winding-order mismatches | Handles holes and subpaths | Library dependency; heavier than hand-rolled resampling |
 
-Avoid `d3.interpolateString` on SVG path strings — it produces garbage when paths have different command counts. The point resampling approach below is inspired by Noah Veltman's Flubber.
+**Why not just always resample?** Parametric morphs preserve true curves — a circle stays a perfect circle at every frame. Resampled morphs approximate curves as 128-gons, which is visually fine but mathematically imprecise. Parametric also runs on Canvas without path parsing.
+
+**Why not just use flubber?** Flubber handles edge cases (holes, subpaths, winding order) that raw resampling does not. But it is a dependency, and for the common cases — cornerRadius morphs, arc parameter morphs, simple path-to-path — the built-in approaches here are lighter and give you full control.
 
 ## Parametric Morphing
 
@@ -40,11 +45,11 @@ function morphTo(state) {
 }
 ```
 
-On Canvas, the same idea works with `ctx.roundRect(x, y, w, h, cornerRadius)` — when `cornerRadius >= min(w, h) / 2`, it draws a circle.
+On Canvas, `ctx.roundRect(x, y, w, h, cornerRadius)` — when `cornerRadius >= min(w, h) / 2`, it draws a circle.
 
 ### Bar Chart ↔ Pie Chart
 
-Represent both states as arcs so you can interpolate arc parameters directly. Bars become arcs with a very large radius and narrow angle; pie wedges are normal arcs.
+Represent both states as arcs so you can interpolate arc parameters directly. Bars become arcs with equal-width angles and value-driven radius; pie wedges use value-driven angles and constant radius.
 
 ```js
 const arc = d3.arc();
@@ -90,141 +95,41 @@ function morphTo(targetFn) {
 }
 ```
 
-**Important:** Stash transition state on the DOM element (`this`), not the datum (`d`).
-When `.data()` rebinds, D3 replaces each element's datum with the new object — any state
-stored on the old datum is lost, and `d3.interpolate(undefined, next)` will snap instantly
-instead of animating.
+**Stash state on the DOM element (`this`), not the datum (`d`).** When `.data()` rebinds, D3 replaces each element's datum with the new object — any state stored on the old datum is lost, and `d3.interpolate(undefined, next)` snaps instantly instead of animating.
 
 ## Arbitrary Path Morphing via Point Resampling
 
-For shapes that don't share numeric parameters, resample both paths to N evenly-spaced points via `getPointAtLength()`, align the rotation to minimize travel distance, and interpolate the point arrays per frame. See [`scripts/morph-paths.js`](scripts/morph-paths.js) for the full implementation with `resamplePath`, `bestRotation`, `pointsToPath`, and `morphPaths`.
+For shapes that don't share numeric parameters, resample both paths to N evenly-spaced points via `getPointAtLength()`, align the rotation to minimize travel distance, and interpolate the point arrays per frame. See [`scripts/morph-paths.js`](scripts/morph-paths.js) for the full implementation.
 
 ```js
 // Morph a selection of <path> elements to a target shape
 morphPaths(d3.selectAll("path.shape"), starPathStr, { n: 128, duration: 800 });
 ```
 
-The three steps composing `morphPaths`:
-1. **Resample** both paths to N evenly-spaced `[x, y]` points (once, not per frame)
-2. **Rotate** the source points to minimize total squared distance to target — this prevents the "spinning" artifact from misaligned start points
+The three steps:
+1. **Resample** both paths to N evenly-spaced `[x, y]` points (once, not per frame — `getPointAtLength()` is expensive)
+2. **Rotate** the source points to minimize total squared distance to target — prevents the "spinning" artifact from misaligned start points
 3. **Interpolate** the aligned point arrays per frame via `attrTween`
 
-**Tradeoffs:** The output is always a polygon (straight line segments between sample points). At 128 points this is visually smooth for most shapes. For shapes with true curves (circles, arcs), the parametric approach above gives mathematically perfect results. Use point resampling only when the shapes are genuinely different and can't share parameters.
+**Tradeoffs:** The output is always a polygon (straight segments between sample points). At 128 points this is visually smooth for most shapes. For true curves (circles, arcs), parametric gives mathematically perfect results. Use resampling only when the shapes genuinely differ in topology.
 
 ## Cross-Layout Morphing
 
-The hardest morphing problem: transitioning between fundamentally different chart layouts (treemap→pie, bar→radial, scatter→line). Each layout produces shapes with different geometry — rects, circles, arcs — and naive interpolation loses area mid-transition.
+Transitioning between different chart layouts (treemap→pack→pie) where each layout produces shapes with different geometry — rects, circles, arc wedges. Parametric interpolation breaks down here because a rect has 4 corners while an arc wedge has 2 straight edges and a curve; interpolating between their parameters produces a shape that collapses to near-zero area at `t=0.5` — the "pinch" artifact.
 
-### Why Parametric Interpolation Fails Here
+**The fix:** resample all layout shapes to the same point count in the same coordinate space, then lerp the arrays. Each point travels in a straight line to its target, so area is preserved throughout.
 
-The parametric approach (interpolating `rx` to round a rect into a circle, or interpolating arc angles) breaks down when source and target shapes have different topology. A rect has 4 corners; an arc wedge has 2 straight edges and a curve. Interpolating between their parameters produces a shape that collapses to near-zero area at `t=0.5` before re-expanding — the "pinch" artifact.
+The recipe (see `examples/layout-morph.html` for the full working version):
+1. Compute each layout (treemap, pack, pie) to get path strings in absolute coordinates
+2. Resample each shape to N points via a temporary hidden `<path>` element
+3. Align rotations via `bestRotation()` to prevent spinning
+4. Cache the point arrays — the animation loop does zero path parsing, just array lerps
 
-### Point Resampling Preserves Area
+**Sample count:** 48 points is enough for rects, circles, and pie wedges at thumbnail scale. Use 96-128 for larger shapes or complex outlines.
 
-The fix: resample both shapes to the same number of evenly-spaced points, then lerp the point arrays. Each point on the source travels in a straight line to its corresponding point on the target. Area is preserved throughout because no dimension collapses to zero.
+**Absolute coordinates:** All layouts must produce paths in the same coordinate space. Pie arcs are generated relative to their center, so sample them from a translated `<g>` and add the offset back.
 
-```js
-// Resample any shape path to N points, once before animation starts
-const nPts = 48;
-
-function sampleShape(pathEl, n) {
-  const len = pathEl.getTotalLength();
-  return d3.range(n).map(i => {
-    const p = pathEl.getPointAtLength(i / n * len);
-    return [p.x, p.y];
-  });
-}
-
-function pointsToPath(pts) {
-  return "M" + pts.map(p => p[0].toFixed(2) + "," + p[1].toFixed(2)).join("L") + "Z";
-}
-```
-
-### Recipe: Treemap ↔ Pack ↔ Pie
-
-Generate all layout paths in absolute coordinates, sample each to the same point count, then interpolate between the cached point arrays. The animation loop does zero path parsing — just array lerps.
-
-```js
-const nPts = 48;
-const data = {children: d3.range(10).map(i => ({id: i, value: 10 + Math.random() * 90}))};
-const values = data.children.map(d => d.value);
-
-// --- Generate path strings for each layout ---
-
-// Treemap: rounded rects in absolute coords
-const root1 = d3.hierarchy(data).sum(d => d.value);
-d3.treemap().size([width, height]).padding(2)(root1);
-const treemapPaths = root1.leaves().map(d => {
-  // Use a rounded rect path
-  return roundedRectPath(d.x0, d.y0, d.x1 - d.x0, d.y1 - d.y0, 2);
-});
-
-// Pack: circles as SVG path arcs
-const root2 = d3.hierarchy(data).sum(d => d.value);
-d3.pack().size([width, height]).padding(2)(root2);
-const packPaths = root2.leaves().map(d => {
-  const r = d.r;
-  return `M${d.x+r},${d.y}A${r},${r} 0 1,1 ${d.x-r},${d.y}A${r},${r} 0 1,1 ${d.x+r},${d.y}Z`;
-});
-
-// Pie: arc wedges, offset to absolute coords
-const pieR = Math.min(width, height) / 2 - 8;
-const cx = width / 2, cy = height / 2;
-const arcGen = d3.arc().innerRadius(0).outerRadius(pieR);
-const pieSlices = d3.pie().sort(null)(values);
-// Sample pie arcs from a translated <g> to get absolute coords
-const piePts = pieSlices.map(d => {
-  const g = svg.append("g").attr("transform", `translate(${cx},${cy})`);
-  const el = g.append("path").attr("d", arcGen(d));
-  const pts = sampleShape(el.node(), nPts);
-  // Transform to absolute coordinates
-  const absPts = pts.map(p => [p.x + cx, p.y + cy]);
-  g.remove();
-  return absPts;
-});
-
-// --- Sample treemap and pack paths to point arrays ---
-const treemapPts = treemapPaths.map(d => {
-  const tmp = svg.append("path").attr("d", d).style("opacity", 0);
-  const pts = sampleShape(tmp.node(), nPts);
-  tmp.remove();
-  return pts;
-});
-// same for packPts...
-
-// --- Animate between layouts ---
-const layouts = [treemapPts, packPts, piePts];
-const transDur = 2000, holdDur = 2500;
-
-d3.timer(t => {
-  const cycleDur = (transDur + holdDur) * layouts.length;
-  const cycleT = t % cycleDur;
-  const segment = Math.floor(cycleT / (transDur + holdDur));
-  const segT = cycleT - segment * (transDur + holdDur);
-  const p = segT < transDur ? d3.easeCubicInOut(segT / transDur) : 1;
-
-  const from = layouts[segment];
-  const to = layouts[(segment + 1) % layouts.length];
-
-  paths.each(function(d, i) {
-    const interp = from[i].map((fp, j) => [
-      fp[0] + (to[i][j][0] - fp[0]) * p,
-      fp[1] + (to[i][j][1] - fp[1]) * p
-    ]);
-    d3.select(this).attr("d", pointsToPath(interp));
-  });
-});
-```
-
-### Key Details
-
-**Sample count:** 48 points is enough for smooth rects, circles, and pie wedges at thumbnail scale. Use 96–128 for larger shapes or complex outlines.
-
-**Rotation alignment:** When morphing between similar shapes (star→star, circle→circle), use `bestRotation()` from `morph-paths.js` to prevent the spinning artifact. For cross-layout morphs (rect→arc), rotation alignment is less critical because the shapes are already roughly co-located.
-
-**Absolute coordinates:** All layouts must produce paths in the same coordinate space. Pie arcs are generated relative to their center, so sample them from a translated `<g>` element and add the offset back.
-
-**Canvas variant:** On Canvas, skip the path strings entirely. Store the point arrays and draw them as polygons:
+**Canvas variant:** Skip path strings entirely. Store point arrays and draw as polygons:
 
 ```js
 ctx.beginPath();
@@ -236,7 +141,7 @@ ctx.fill();
 
 ## Map Projection Transitions
 
-Interpolate between projection functions — a technique from syntagmatic's projection comparison work. For general geographic map patterns (projections, choropleth, TopoJSON, zoom-to-feature), see the `cartography` skill.
+Interpolate between projection functions by lerping their raw output point-by-point. For general geographic map patterns, see the `cartography` skill.
 
 ```js
 function projectTransition(projA, projB, duration = 1500) {
@@ -245,8 +150,8 @@ function projectTransition(projA, projB, duration = 1500) {
   const timer = d3.timer((elapsed) => {
     const t = Math.min(1, d3.easeCubicInOut(elapsed / duration));
 
-    // Interpolate the raw projection point-by-point, then wrap as a
-    // full projection via d3.geoProjection so .stream works correctly.
+    // Interpolate raw projection output, wrap via d3.geoProjection
+    // so .stream works correctly for path generation.
     const interpolated = d3.geoProjection((lon, lat) => {
       const a = projA([lon * 180 / Math.PI, lat * 180 / Math.PI]);
       const b = projB([lon * 180 / Math.PI, lat * 180 / Math.PI]);
@@ -266,19 +171,30 @@ function projectTransition(projA, projB, duration = 1500) {
 }
 ```
 
+## When Not to Morph
+
+Morphing implies "this is the same thing, changing form." When that is false, the animation misleads.
+
+**Categorically different data.** Morphing a bar chart of revenue into a bar chart of headcount suggests a continuous relationship between them. Use a cut (crossfade or instant swap) instead — the discontinuity correctly signals that the data changed.
+
+**Unrelated geometries with no shared identity.** Morphing one country's outline into another's is eye candy, not communication. There is no meaningful correspondence between the points. Each point on France does not "become" a point on Brazil.
+
+**Layout changes that destroy ordering.** Morphing a sorted bar chart into an unsorted treemap makes every element travel simultaneously in different directions. The viewer cannot track any single element, so the animation communicates nothing. Either maintain sort order across layouts or use staggered transitions so the eye can follow a few elements.
+
+**Encoding changes that reverse meaning.** If bars encode value as height and then morph to a pie where value is encoded as angle, the intermediate state encodes value as neither — it is visual noise. The morph works when the encoding is consistent (bar height → arc radius, both are length).
+
+**Too many elements.** Beyond ~30 shapes morphing simultaneously, the viewer cannot track correspondences. The animation becomes a swarm. Consider morphing a highlighted subset while crossfading the rest.
+
 ## Common Pitfalls
 
-1. **Interpolating path strings directly**: `d3.interpolateString` on SVG paths produces garbage when paths have different commands. Use parametric interpolation (arc parameters, cornerRadius) or point resampling.
-2. **Stashing state on datum instead of element**: When `.data()` rebinds, D3 replaces each element's datum. Stash arc params or morph state on `this` (the DOM element) so it survives rebinding.
+1. **Interpolating path strings directly**: `d3.interpolateString` on SVG paths produces garbage when paths have different commands. Use parametric interpolation or point resampling.
+2. **Stashing state on datum instead of element**: When `.data()` rebinds, D3 replaces each element's datum. Stash arc params on `this` so they survive rebinding.
 3. **Missing rotation alignment**: Without `bestRotation`, point-resampled morphs produce a spinning/collapsing artifact. Always align before interpolating.
-4. **Too few sample points**: Below ~64 points, resampled circles and curves look polygonal. 128 is a safe default.
-5. **Resampling per frame**: `getPointAtLength()` is expensive. Resample once before the transition starts, then interpolate the cached point arrays per frame.
+4. **Resampling per frame**: `getPointAtLength()` is expensive. Resample once, then interpolate cached arrays.
+5. **Too few sample points**: Below ~64 points, resampled circles look polygonal. 128 is a safe default.
 
 ## References
 
-- [flubber](https://github.com/veltman/flubber) — Noah Veltman's library for smooth shape interpolation, handling topology mismatches and winding order
+- [flubber](https://github.com/veltman/flubber) — Noah Veltman's library for smooth shape interpolation, handles topology mismatches and winding order
 - [d3-interpolate-path](https://github.com/pbeshai/d3-interpolate-path) — Peter Beshai's plugin for interpolating SVG paths with mismatched commands
-- [Animated Transitions in Statistical Data Graphics](https://idl.cs.washington.edu/papers/motion/) — Jeffrey Heer & George Robertson's research on shape transition perception (IEEE InfoVis 2007)
-- [D3 Interpolate documentation](https://d3js.org/d3-interpolate) — Mike Bostock's core interpolation module
-- [D3 Geo Projection](https://d3js.org/d3-geo/projection) — API reference for map projection transitions via `d3.geoProjection`
-- [Shape Tweening](https://en.wikipedia.org/wiki/Morphing#Shape_tweening) — overview of morphing techniques from simple interpolation to topology-aware methods
+- [Animated Transitions in Statistical Data Graphics](https://idl.cs.washington.edu/papers/motion/) — Heer & Robertson's research on when transitions help vs. hinder comprehension (IEEE InfoVis 2007)

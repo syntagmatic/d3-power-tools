@@ -3,36 +3,41 @@ name: distributions
 description: "Build statistical distribution charts with D3.js. Use this skill when the user wants box plots, violin plots, ridgeline/joy plots, density plots, bee swarm plots, strip/jitter plots, or QQ plots. Covers kernel density estimation, quartile calculation, outlier detection, grouped/faceted statistical comparisons, and animated transitions between distribution views."
 ---
 
-# Statistical Charts
+# Distribution Charts
 
-Patterns for building distribution-visualization charts with D3.js: box plots, violin plots, ridgeline (joy) plots, density plots, bee swarm plots, strip/jitter plots, and QQ plots.
+Every distribution chart answers one question: what does the data look like? The danger is that some charts answer confidently even when they're lying — a box plot will show clean quartiles for bimodal data that has two peaks and no center.
 
 For axis patterns, see `scales`. For animated transitions, see `motion`. For force-based layouts (bee swarm), see `force`. For color palettes, see `color`.
 
 ## Choosing a Distribution Chart
 
-Pick based on what you need to show:
+The choice is analytical, not aesthetic. Each chart type conceals something:
 
 | Chart | Best When | Shows | Hides |
 |-------|-----------|-------|-------|
-| **Box plot** | Comparing medians and spread across 5+ groups | Median, quartiles, outliers | Shape (bimodal data looks same as unimodal) |
-| **Violin plot** | Distribution shape matters (bimodal, skewed) | Full density shape, symmetry | Individual points, exact values |
-| **Ridgeline** | Comparing many (6+) distributions at a glance | Trend across ordered groups, density overlap | Precise comparison (no shared x baseline within rows) |
-| **Bee swarm** | Individual observations matter, n < 500/group | Every point, gaps, clusters | Performance degrades past ~500 pts/group |
-| **Strip/jitter** | Quick overview, any n | Raw data distribution | Overplots badly past ~200 pts/group without opacity |
-| **Density plot** | Comparing 2–4 overlapping distributions | Smooth shape, overlap regions | Individual values, small-sample artifacts |
+| **Histogram** | Small n (< 50), exploring bin structure | Actual counts, gaps, discreteness | Smoothness is an illusion of bin width |
+| **Box plot** | Comparing medians across 5+ groups | Median, quartiles, outliers | Shape — bimodal data looks identical to unimodal |
+| **Violin plot** | Distribution shape matters (bimodal, skewed) | Full density shape, symmetry | Individual points; KDE fabricates shape from < 30 points |
+| **Ridgeline** | Comparing many (6+) ordered distributions | Trend across groups, density overlap | Precise comparison (rows lack shared y baseline) |
+| **Bee swarm** | Individual observations matter, n < 500/group | Every point, gaps, clusters | Nothing — but force simulation degrades past ~500 pts |
+| **Strip/jitter** | Quick overview, any n | Raw data distribution | Overplots past ~200 pts/group without opacity |
+| **Density plot** | Comparing 2–4 overlapping distributions | Smooth shape, overlap regions | Individual values; bandwidth choice shapes what you see |
+
+**The box plot trap.** Two datasets — one normal, one bimodal with the same median and IQR — produce identical box plots. If you haven't already confirmed unimodality, a box plot will hide the most important feature of your data. Use a violin or overlay raw points to check before committing to box plots.
 
 **Combining charts** improves insight: violin + inner box shows shape and summary; bee swarm + median line shows individuals and center. Raincloud plots (half-violin + strip + box) give all three.
 
 **When NOT to use:**
-- **Box plots with n < 10** — quartiles are meaningless with tiny samples; show the raw points
-- **Violin plots with n < 30** — KDE smoothing fabricates shape from too few points
+- **Box plots with n < 10** — quartiles from tiny samples are noise; just show the raw points
+- **Violin plots with n < 30** — KDE invents smooth curves from sparse data, showing peaks and valleys that don't exist
+- **Density plots for small samples** — use a histogram instead; it shows what you actually observed rather than a smoothed fantasy
 - **Bee swarm with n > 500/group** — force simulation becomes slow; switch to jitter or violin
 - **Ridgeline for unordered categories** — the vertical stacking implies order; use faceted violins instead
+- **Any smoothed chart when the data is discrete** — KDE smears probability across impossible values (e.g., showing density at 3.5 children); use a histogram or bar chart
 
 ## Kernel Density Estimation (KDE)
 
-KDE smooths raw data into a continuous density curve. Each data point contributes a kernel (usually Gaussian); the density at any point is the sum of all kernels.
+KDE smooths raw data into a continuous density curve. The bandwidth parameter is the single most consequential choice — it determines what the viewer sees as "signal" vs "noise."
 
 ```js
 const gaussian = (x) => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
@@ -44,33 +49,32 @@ function kde(kernel, bandwidth, data) {
   ]);
 }
 
-// Evaluate density at evenly-spaced points, extending 3 bandwidths past data extent
+// Extend 3 bandwidths past data extent to avoid edge truncation
 const ticks = d3.ticks(extent[0] - 3 * bandwidth, extent[1] + 3 * bandwidth, 200);
 const density = kde(gaussian, bandwidth, values)(ticks);
 ```
 
-### Bandwidth Selection
+### Bandwidth: A Judgment Call
 
-Bandwidth controls smoothness. Too small = noisy spikes. Too large = over-smoothed, hides features.
+Bandwidth is not a technical parameter — it's an editorial decision about what features to show the viewer.
 
-**Silverman's rule of thumb** — good default for roughly normal data:
+**Too small:** every data point becomes its own peak, fabricating modes that don't exist. The viewer sees structure that is pure noise.
+
+**Too large:** real features merge into a single smooth hump. A bimodal distribution becomes unimodal. The viewer misses the story.
+
+**Silverman's rule** — good default for roughly normal data, robust to outliers:
 
 ```js
 const std = d3.deviation(values);
 const iqr = d3.quantile(sorted, 0.75) - d3.quantile(sorted, 0.25);
-// Use smaller of std and IQR/1.34 to be robust to outliers
+// Use smaller of std and IQR/1.34 to handle outlier-inflated std
 const bandwidth = 0.9 * Math.min(std, iqr / 1.34) * Math.pow(values.length, -0.2);
 ```
 
-**Scott's rule** — simpler, assumes normality:
-```js
-const bandwidth = 1.06 * d3.deviation(values) * Math.pow(values.length, -0.2);
-```
-
-**Manual override guidance:**
-- Bimodal data: use smaller bandwidth to reveal both peaks
-- Very skewed data: consider log-transform before KDE
-- Small samples (n < 30): Silverman produces spiky results, increase by 20-50%
+**When to override the rule:**
+- **Bimodal data:** Silverman assumes one peak, so it over-smooths and merges two modes into one. Halve the bandwidth and check visually.
+- **Very skewed data:** log-transform before KDE, then back-transform the density curve.
+- **Small samples (n < 30):** the rule produces tiny bandwidths that create spiky, misleading curves. Increase by 20-50%, or just use a histogram — it honestly shows what you observed.
 
 ## Descriptive Statistics Helper
 
@@ -126,12 +130,12 @@ boxes.append("polygon").attr("points", points);
 
 ## Whisker Variants
 
-- **1.5xIQR** (Tukey) — most common
-- **Min/Max** — whiskers to data extremes, no outliers shown
-- **Percentile (5th/95th or 2nd/98th)** — fixed percentile endpoints
-- **1 SD / 2 SD** — whiskers at mean +/- standard deviations
+Pick whiskers based on what question the viewer is asking:
 
-Use `Float64Array.from(values).sort()` for large datasets to avoid GC pressure. `d3.quantile` requires sorted input — passing unsorted data gives wrong results with no error.
+- **1.5xIQR (Tukey)** — default choice. Points beyond are flagged as outliers, which is what most audiences expect.
+- **Min/Max** — use when there are no true outliers, or when the audience cares about the full range (e.g., manufacturing tolerances). Hides nothing but also flags nothing.
+- **Percentile (5th/95th)** — use when outlier counts are unreliable (small n) or when you want a consistent definition across groups with different distributions.
+- **1 SD / 2 SD** — use only when the audience thinks in standard deviations (scientific, engineering). Misleading for skewed data since SD is symmetric around the mean.
 
 ## Ridgeline (Joy) Plots
 
@@ -232,39 +236,11 @@ violin.append("path")
   .attr("fill", colorB);
 ```
 
-## QQ Plot: Normal Quantile Approximation
+## QQ Plot
 
-No external library needed — Beasley-Springer-Moro algorithm for the normal inverse CDF:
+QQ plots answer "does my data follow this distribution?" — points on the diagonal mean yes, curvature means no. Heavy tails curve up at right and down at left; skew curves one way throughout.
 
-```js
-function normalQuantile(p) {
-  const a = [-3.969683028665376e1, 2.209460984245205e2,
-    -2.759285104469687e2, 1.383577518672690e2,
-    -3.066479806614716e1, 2.506628277459239e0];
-  const b = [-5.447609879822406e1, 1.615858368580409e2,
-    -1.556989798598866e2, 6.680131188771972e1, -1.328068155288572e1];
-  const c = [-7.784894002430293e-3, -3.223964580411365e-1,
-    -2.400758277161838e0, -2.549732539343734e0,
-    4.374664141464968e0, 2.938163982698783e0];
-  const d = [7.784695709041462e-3, 3.224671290700398e-1,
-    2.445134137142996e0, 3.754408661907416e0];
-  const pLow = 0.02425, pHigh = 1 - pLow;
-  let q;
-  if (p < pLow) {
-    q = Math.sqrt(-2 * Math.log(p));
-    return (((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) /
-           ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1);
-  } else if (p <= pHigh) {
-    q = p - 0.5; const r = q * q;
-    return (((((a[0]*r+a[1])*r+a[2])*r+a[3])*r+a[4])*r+a[5])*q /
-           (((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+1);
-  } else {
-    q = Math.sqrt(-2 * Math.log(1 - p));
-    return -(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) /
-            ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1);
-  }
-}
-```
+Use the Beasley-Springer-Moro rational approximation for `normalQuantile(p)` (the inverse normal CDF) — it's a ~25-line pure math function with no D3 dependency. See any standard implementation.
 
 Plotting position: `p = (i + 0.5) / n` (Hazen formula). Standardize data before comparing: `(v - mean) / sd`.
 
@@ -316,7 +292,11 @@ data.forEach(d => {
 
 ## Density Scale Normalization
 
-Different density scales per group are acceptable (each violin normalized to same max width), but **document the choice**. Shared density scales enable comparison of group sizes. Consider scaling violin width by sample size: `violinScale.range([0, Math.sqrt(d.stats.n) * scaleFactor])`.
+This is a hidden editorial choice that changes what the viewer concludes:
+
+- **Per-group normalization** (each violin same max width): lets the viewer compare shape, but a group with n=10 looks as confident as n=10,000. Use when shape comparison is the point and sample sizes are similar.
+- **Shared density scale**: wider violins mean more data. Use when relative group sizes matter.
+- **Width scaled by sqrt(n)**: `violinScale.range([0, Math.sqrt(d.stats.n) * scaleFactor])` — a compromise that encodes sample size without letting large groups dominate. Good default when group sizes vary by more than 3x.
 
 ## Common Pitfalls
 
@@ -340,9 +320,5 @@ Different density scales per group are acceptable (each violin normalized to sam
 
 ## References
 
-- [Kernel Density Estimation](https://en.wikipedia.org/wiki/Kernel_density_estimation) — theory and bandwidth selection
-- [Silverman's Rule of Thumb](https://en.wikipedia.org/wiki/Kernel_density_estimation#A_rule-of-thumb_bandwidth_estimator)
-- [Bee Swarm Plot](https://observablehq.com/@d3/beeswarm) — force-based bee swarm
-- [Ridgeline Plot](https://observablehq.com/@d3/ridgeline-plot) — joy plot example
-- [QQ Plot Theory](https://en.wikipedia.org/wiki/Q%E2%80%93Q_plot)
-- [Tukey Box Plot](https://en.wikipedia.org/wiki/Box_plot) — whisker rules and outlier definitions
+- Wilke, [Visualizing Distributions](https://clauswilke.com/dataviz/boxplots-violins.html) — when box plots lie and violins help
+- Akin, [KDE Bandwidth Importance](https://aakinshin.net/posts/kde-bw/) — visual consequences of bandwidth choice

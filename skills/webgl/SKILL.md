@@ -5,16 +5,27 @@ description: "High-performance WebGL rendering patterns for D3.js visualizations
 
 # WebGL Rendering with D3
 
-GPU-accelerated rendering for datasets too large for Canvas 2D. D3 handles data, scales, and layouts; WebGL handles the pixels.
+You probably don't need WebGL. Canvas 2D with batched drawing handles 100K points at 60fps on most hardware (see `canvas` skill). WebGL becomes worth its complexity when Canvas genuinely can't keep up — animated 500K+ point clouds, real-time updates to millions of elements, or rendering where per-frame buffer uploads to the GPU are cheaper than per-element Canvas draw calls.
 
-## When to Use WebGL vs. Canvas 2D
+## When WebGL Earns Its Complexity
 
 | Scale | Renderer | Why |
 |-------|----------|-----|
-| < 10K | Canvas 2D | Simpler API, good enough perf |
-| 10K–100K | Canvas 2D with batching | See `canvas` skill |
-| 100K–1M | WebGL | Canvas draw calls become bottleneck |
-| 1M–10M+ | WebGL + instanced rendering | One draw call for millions of shapes |
+| < 50K | Canvas 2D | Simpler API, easy debugging, good enough perf |
+| 50K–500K | Canvas 2D with batching | Tight draw loop + quadtree. See `canvas` skill |
+| 500K+ static | WebGL | Canvas draw calls become the bottleneck — each one crosses the JS→GPU boundary separately, while WebGL uploads all positions in one buffer and draws them in a single call |
+| 500K+ animated | WebGL + instanced rendering | One draw call for millions of shapes. The GPU does per-element work in parallel that Canvas does sequentially |
+| Shaped marks at scale | WebGL instanced | `gl.POINTS` is limited to circles and has GPU-dependent size caps (~64–256px). Instanced quads give you arbitrary shapes |
+
+The cost of WebGL: shader debugging is painful (no breakpoints, cryptic errors), buffer management is manual, and every visualization needs a compile-link-upload cycle that Canvas doesn't. Only pay this cost when you've measured Canvas falling below your frame budget.
+
+## When Not to Use WebGL
+
+- **Under 500K elements** — Canvas 2D handles this fine. Profile before reaching for WebGL.
+- **Complex per-element styling** — gradients, text, dashed lines are trivial in Canvas, painful in shaders.
+- **Accessibility matters** — WebGL is invisible to screen readers. Canvas at least supports `getImageData` for programmatic inspection. Both need a hidden DOM mirror (see `canvas-accessibility`), but WebGL makes it harder.
+- **Quick prototyping** — the boilerplate-to-insight ratio is terrible for exploration. Start with Canvas, port to WebGL only if you hit a wall.
+- **Small multiples** — each WebGL context consumes GPU memory, and browsers limit you to ~8–16 contexts. Use Canvas for trellis layouts; use scissor rects if you must have WebGL.
 
 ## Architecture: D3 + WebGL Hybrid
 
@@ -22,7 +33,7 @@ GPU-accelerated rendering for datasets too large for Canvas 2D. D3 handles data,
 ┌─────────────────────────────────────┐
 │  SVG overlay (pointer-events)        │  ← axes, labels, tooltips, brushes
 │  Canvas: interaction highlight       │  ← hover ring, selection
-│  WebGL canvas (data layer)           │  ← 100K–10M points/shapes
+│  WebGL canvas (data layer)           │  ← 500K–10M points/shapes
 │  Container div (position:relative)   │
 └─────────────────────────────────────┘
 ```
@@ -30,20 +41,22 @@ GPU-accelerated rendering for datasets too large for Canvas 2D. D3 handles data,
 SVG captures pointer events, WebGL has `pointer-events: none`. For DPR-aware canvas/SVG layer setup, see `canvas` skill.
 
 ```js
-const gl = canvas.getContext("webgl2", { antialias: true, premultipliedAlpha: false, alpha: true });
+// Use webgl2 — all modern browsers support it. Gives instanced rendering
+// and VAOs natively, without the extension juggling WebGL1 required.
+const gl = canvas.getContext("webgl2", {
+  antialias: true,
+  premultipliedAlpha: false,  // Avoids color fringing on transparent backgrounds
+  alpha: true
+});
 gl.viewport(0, 0, width * devicePixelRatio, height * devicePixelRatio);
 ```
 
-Use `webgl2` — all modern browsers support it, gives instanced rendering and VAOs without extensions.
+## The Minimal Shader Pair
 
-## Shader Fundamentals
-
-Most data viz needs just: position points, color them.
-
-### Vertex + Fragment shader pair
+Most data viz needs just: position points, color them. This vertex+fragment pair is the starting point for nearly every WebGL D3 visualization.
 
 ```glsl
-// vertex
+// vertex — converts D3 CSS-pixel positions to WebGL clip space
 #version 300 es
 in vec2 a_position;  // CSS pixels, pre-scaled by D3
 in vec4 a_color;     // RGBA [0,1]
@@ -62,7 +75,7 @@ void main() {
 ```
 
 ```glsl
-// fragment — antialiased circle points
+// fragment — antialiased circle via SDF on gl_PointCoord
 #version 300 es
 precision mediump float;
 in vec4 v_color;
@@ -71,30 +84,14 @@ out vec4 fragColor;
 void main() {
   float dist = length(gl_PointCoord - 0.5);
   if (dist > 0.5) discard;
+  // smoothstep gives 1px antialiased edge without MSAA cost
   fragColor = vec4(v_color.rgb, v_color.a * (1.0 - smoothstep(0.4, 0.5, dist)));
 }
 ```
 
-### Compile and link
-
-```js
-function createProgram(gl, vertSrc, fragSrc) {
-  function compile(type, src) {
-    const s = gl.createShader(type);
-    gl.shaderSource(s, src); gl.compileShader(s);
-    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) { console.error(gl.getShaderInfoLog(s)); gl.deleteShader(s); return null; }
-    return s;
-  }
-  const prog = gl.createProgram();
-  gl.attachShader(prog, compile(gl.VERTEX_SHADER, vertSrc));
-  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fragSrc));
-  gl.linkProgram(prog);
-  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { console.error(gl.getProgramInfoLog(prog)); return null; }
-  return prog;
-}
-```
-
 ## Scatter Plot: The Core Pattern
+
+The whole point of WebGL in D3: D3 computes positions with scales, you pack them into typed arrays, upload once, draw in a single GPU call.
 
 ### Step 1: D3 computes positions
 
@@ -117,9 +114,10 @@ for (let i = 0; i < n; i++) {
 }
 ```
 
-### Step 3: Upload and draw — helper to reduce buffer boilerplate
+### Step 3: Upload and draw
 
 ```js
+// Helper — reduces the repetitive bind/upload/attribPointer cycle
 function attribBuffer(gl, program, name, data, size, usage = gl.STATIC_DRAW) {
   const buf = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -130,14 +128,14 @@ function attribBuffer(gl, program, name, data, size, usage = gl.STATIC_DRAW) {
   return buf;
 }
 
-// Setup
+// VAO groups all attribute bindings so draw() doesn't repeat setup
 const vao = gl.createVertexArray();
 gl.bindVertexArray(vao);
 attribBuffer(gl, program, "a_position", positions, 2);
 attribBuffer(gl, program, "a_color", colors, 4);
 attribBuffer(gl, program, "a_size", sizes, 1);
 
-// Draw — one GPU call for all n points
+// One GPU call for all n points
 gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
 gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 gl.useProgram(program); gl.bindVertexArray(vao);
@@ -148,15 +146,13 @@ gl.drawArrays(gl.POINTS, 0, n);
 
 ## Instanced Rendering: Beyond Points
 
-`gl.POINTS` has size limits (~64–256px depending on GPU). For arbitrary shapes, use instanced rendering: define a template quad once, draw it N times.
-
-### Instance vertex shader
+`gl.POINTS` has GPU-dependent size limits (~64–256px) and only draws circles. For arbitrary shapes at scale, instanced rendering defines a template shape once and draws it N times with per-instance position/size/color — still a single draw call.
 
 ```glsl
 #version 300 es
-in vec2 a_quad;     // template: [-0.5, 0.5] unit square
-in vec2 a_offset;   // per-instance: center position
-in vec2 a_scale;    // per-instance: width, height
+in vec2 a_quad;     // template: [-0.5, 0.5] unit square (6 vertices, 2 triangles)
+in vec2 a_offset;   // per-instance: center position from D3 scale
+in vec2 a_scale;    // per-instance: width, height in CSS pixels
 in vec4 a_color;    // per-instance
 uniform vec2 u_resolution;
 out vec4 v_color;
@@ -170,31 +166,31 @@ void main() {
 }
 ```
 
-### Setup — template quad + per-instance attributes
-
 ```js
 const vao = gl.createVertexArray();
 gl.bindVertexArray(vao);
 
-// Template quad (two triangles)
+// Template quad (two triangles) — shared by all instances
 attribBuffer(gl, program, "a_quad", new Float32Array([
   -0.5,-0.5, 0.5,-0.5, 0.5,0.5, -0.5,-0.5, 0.5,0.5, -0.5,0.5
 ]), 2);
 
-// Per-instance attributes — use vertexAttribDivisor(loc, 1) for each
+// Per-instance attributes — divisor(1) tells the GPU to advance
+// these once per instance, not once per vertex
 for (const [name, data, size] of [["a_offset", offsets, 2], ["a_scale", scales, 2], ["a_color", colors, 4]]) {
   const buf = attribBuffer(gl, program, name, data, size, gl.DYNAMIC_DRAW);
-  gl.vertexAttribDivisor(gl.getAttribLocation(program, name), 1); // ← per instance
+  gl.vertexAttribDivisor(gl.getAttribLocation(program, name), 1);
 }
 
 gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, instanceCount);
 ```
 
-### Interleaved buffers — better GPU cache performance
+### Interleaved buffers
 
-Pack all per-instance data into one buffer `[x, y, w, h, r, g, b, a]` (8 floats = 32 bytes stride), use `vertexAttribPointer` with stride/offset.
+When you have many per-instance attributes, packing them into one buffer improves GPU cache locality — the GPU reads one contiguous chunk per instance instead of bouncing between separate buffers.
 
 ```js
+// [x, y, w, h, r, g, b, a] per instance — 8 floats = 32 bytes stride
 const STRIDE = 8, byteStride = STRIDE * 4;
 const buf = gl.createBuffer();
 gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -206,7 +202,7 @@ gl.vertexAttribPointer(colorLoc,  4, gl.FLOAT, false, byteStride, 16);
 
 ## Zoom and Pan
 
-D3 zoom on SVG overlay, pass transform to WebGL as uniforms:
+D3 zoom on SVG overlay, pass transform to WebGL as uniforms. No buffer re-upload needed — the GPU applies the transform in the vertex shader.
 
 ```glsl
 uniform vec2 u_translate;
@@ -219,24 +215,27 @@ d3.zoom().scaleExtent([0.5, 100]).on("zoom", ({ transform }) => {
   gl.useProgram(program);
   gl.uniform2f(gl.getUniformLocation(program, "u_translate"), transform.x, transform.y);
   gl.uniform1f(gl.getUniformLocation(program, "u_scale"), transform.k);
-  draw();
+  draw();  // Just re-render, no data re-upload
 });
 ```
 
 ## Hit Detection
 
-### Quadtree — same as canvas
+### Quadtree — same as Canvas, works up to ~1M points
 
 ```js
 const qt = d3.quadtree().x(d => x(d.x)).y(d => y(d.y)).addAll(data);
 svg.on("pointermove", event => {
   const [mx, my] = d3.pointer(event);
+  // Invert the zoom transform to get data-space coordinates
   const tx = (mx - transform.x) / transform.k, ty = (my - transform.y) / transform.k;
   highlight(qt.find(tx, ty, 20 / transform.k));
 });
 ```
 
-### GPU picking — render unique color IDs to offscreen framebuffer
+### GPU picking — for when quadtree is too slow or shapes overlap
+
+Render each element with a unique color ID to an offscreen framebuffer, then read back the pixel under the pointer. Supports 16M elements via RGB encoding.
 
 ```js
 function setupPickingFB(gl, w, h) {
@@ -247,10 +246,8 @@ function setupPickingFB(gl, w, h) {
   return fb;
 }
 
-// Encode index as RGB (supports 16M elements)
 const indexToColor = i => [((i+1)&0xFF)/255, (((i+1)>>8)&0xFF)/255, (((i+1)>>16)&0xFF)/255, 1.0];
 
-// Read pixel at pointer
 function pick(gl, fb, mx, my, h) {
   gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
   const px = new Uint8Array(4);
@@ -261,20 +258,13 @@ function pick(gl, fb, mx, my, h) {
 }
 ```
 
-Re-render picking buffer on position changes, not every mousemove.
+Re-render the picking buffer when positions change (zoom, filter), not on every mousemove.
 
-## Dynamic Buffer Updates
+## Brush-Linked Filtering
 
-```js
-gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-gl.bufferSubData(gl.ARRAY_BUFFER, 0, newData);  // partial update, same size
-gl.bufferData(gl.ARRAY_BUFFER, newData, gl.DYNAMIC_DRAW);  // full rewrite, size change
-```
-
-### Brush-linked filtering — update visibility attribute instead of rebuilding buffers
+Update a per-element visibility attribute via `bufferSubData` instead of rebuilding the entire buffer. This is what makes WebGL brushing fast — you're uploading one float per element instead of repacking all positions and colors.
 
 ```js
-// Add a per-instance visibility attribute (1.0 = visible, 0.1 = dimmed)
 const visibility = new Float32Array(n).fill(1.0);
 const visBuf = attribBuffer(gl, program, "a_visibility", visibility, 1, gl.DYNAMIC_DRAW);
 
@@ -284,27 +274,27 @@ function onBrush([x0, x1]) {
   gl.bufferSubData(gl.ARRAY_BUFFER, 0, visibility);
   draw();
 }
-// Vertex shader: in float a_visibility; out float v_visibility; ... v_visibility = a_visibility;
+// Vertex shader: v_visibility = a_visibility;
 // Fragment shader: fragColor.a *= v_visibility;
 ```
 
 ## Lines and Polylines
 
-`gl.lineWidth` is capped at 1px on most hardware. For thick lines, use instanced quads rotated along segments:
+`gl.lineWidth` is capped at 1px on most hardware — not a bug, just an abandoned part of the spec. For thick lines, use instanced quads rotated along each segment:
 
 ```glsl
 // Per-instance: a_p0 (start), a_p1 (end), a_color
-// In vertex shader:
+// Vertex shader builds a quad aligned to the segment:
 vec2 dir = a_p1 - a_p0; float len = length(dir);
 vec2 unit = dir / max(len, 0.001), normal = vec2(-unit.y, unit.x);
 vec2 pos = a_p0 + unit * (a_quad.x + 0.5) * len + normal * a_quad.y * u_lineWidth;
 ```
 
-For polylines (N points → N-1 segments), pack consecutive point pairs as instance data.
+For polylines (N points to N-1 segments), pack consecutive point pairs as instance data.
 
 ## Texture Atlases for Glyphs
 
-Draw D3 symbols to a canvas, upload as texture. Sample by per-instance `a_glyphIndex`:
+Render D3 symbol generators to a Canvas, upload as a texture. Each instance samples its glyph by index. Useful when you need shape encoding beyond circles at WebGL scale.
 
 ```js
 function createGlyphAtlas(gl, symbols, size = 32) {
@@ -323,26 +313,14 @@ function createGlyphAtlas(gl, symbols, size = 32) {
 }
 ```
 
-## Cleanup
+## Regl: When Raw GL Isn't Worth It
 
-```js
-function cleanup(gl, { buffers, textures, framebuffers, program }) {
-  buffers.forEach(b => gl.deleteBuffer(b));
-  textures.forEach(t => gl.deleteTexture(t));
-  framebuffers.forEach(f => gl.deleteFramebuffer(f));
-  gl.deleteProgram(program);
-  gl.getExtension("WEBGL_lose_context")?.loseContext();
-}
-```
-
-## Regl: Pragmatic Shortcut
-
-[regl](http://regl.party/) wraps buffer management, shader compilation, and state tracking:
+[regl](http://regl.party/) wraps buffer management, shader compilation, and state tracking in a functional API. It removes the boilerplate without hiding the mental model.
 
 ```js
 const regl = createRegl(glCanvas);
 const drawPoints = regl({
-  vert: `...`, frag: `...`,  // same shaders as above
+  vert: `...`, frag: `...`,
   attributes: { position: regl.prop("positions"), color: regl.prop("colors"), size: regl.prop("sizes") },
   uniforms: { resolution: [width, height] },
   count: regl.prop("count"), primitive: "points",
@@ -351,7 +329,7 @@ const drawPoints = regl({
 drawPoints({ positions, colors, sizes, count: n });
 ```
 
-Use regl when you want WebGL perf without managing raw GL state. Skip for fine-grained framebuffer or compute-like passes.
+Use regl when you want WebGL performance without managing raw GL state. Skip it when you need fine-grained control over framebuffers or multi-pass rendering.
 
 ## Accessibility
 
@@ -359,33 +337,27 @@ WebGL is invisible to assistive technology. See `canvas-accessibility` for hidde
 
 ## Common Pitfalls
 
-1. **Y-axis flip** — WebGL Y-up, CSS/D3 Y-down. Always `clip.y = -clip.y` in vertex shader.
+1. **Y-axis flip** — WebGL is Y-up, CSS/D3 is Y-down. Always `clip.y = -clip.y` in vertex shader. Forgetting this produces upside-down charts that look plausible until you check axis alignment.
 
-2. **Forgetting DPR** — point sizes and line widths must scale by `devicePixelRatio` in shader, or half-size on Retina.
+2. **Forgetting DPR** — point sizes and line widths must scale by `devicePixelRatio` in the shader, or everything renders at half-size on Retina displays. Canvas handles this with `ctx.scale(dpr, dpr)`; in WebGL you do it yourself.
 
-3. **Blending order** — `SRC_ALPHA, ONE_MINUS_SRC_ALPHA` requires back-to-front for correct transparency. Usually doesn't matter with uniform alpha.
+3. **Blending order** — `SRC_ALPHA, ONE_MINUS_SRC_ALPHA` requires back-to-front draw order for correct transparency. In practice, uniform alpha across all points means the order doesn't matter visually.
 
-4. **`gl.POINTS` size limit** — varies by GPU (64–255). Use instanced quads for large shapes.
-
-5. **Context loss** — GPU reset or too many contexts. Handle:
+4. **Context loss** — GPU reset or tab backgrounding can destroy your context. Without handlers, the visualization silently goes blank:
    ```js
    canvas.addEventListener("webglcontextlost", e => e.preventDefault());
    canvas.addEventListener("webglcontextrestored", () => reinitialize());
    ```
 
-6. **Too many contexts** — browsers limit to ~8–16. One per viz, not per layer. Use scissor rects for multiple views.
+5. **Too many contexts** — browsers limit WebGL contexts to ~8–16 total. One per visualization, never per layer. For small multiples, use scissor rects within a single context.
 
-7. **Premultiplied alpha mismatch** — set `premultipliedAlpha: false` in `getContext` options.
+6. **Buffer upload stalls** — `bufferSubData` can block if the GPU is still reading the buffer. For animated data, double-buffer: alternate between two GPU buffers so you're never writing to one the GPU is reading.
 
-8. **Buffer upload during animation** — `bufferSubData` can stall if GPU is still reading. Double-buffer: alternate between two GPU buffers.
-
-9. **Integer attribute precision** — floats lose precision above 2^24. Use texture lookups or encode IDs across multiple components.
+7. **Float precision for IDs** — 32-bit floats lose integer precision above 2^24 (~16M). For element indexing beyond that, encode IDs across multiple components or use texture lookups.
 
 ## References
 
 - [WebGL Fundamentals](https://webglfundamentals.org/) — Gregg Tavares
 - [regl](https://github.com/regl-project/regl) — Mikola Lysenko's functional WebGL wrapper
-- [deck.gl](https://deck.gl/) — Uber's WebGL viz framework
-- [WebGL2 Spec](https://registry.khronos.org/webgl/specs/latest/2.0/)
-- [The Book of Shaders](https://thebookofshaders.com/) — Patricio Gonzalez Vivo & Jen Lowe
+- [deck.gl](https://deck.gl/) — Uber's WebGL viz framework (good for seeing patterns, overkill as a dependency)
 - [Instanced Rendering tutorial](https://webgl2fundamentals.org/webgl/lessons/webgl-instanced-drawing.html)

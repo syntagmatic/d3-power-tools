@@ -1,50 +1,23 @@
 ---
 name: time-series
-description: "Build time-series visualizations with D3.js. Use this skill when the user wants line charts over time, horizon charts, swimlane/event timelines, Gantt charts, cycle plots, real-time streaming charts, brushed time selection, or multi-series spaghetti plots. Covers d3.scaleTime/scaleUtc, time parsing/formatting, DST handling, gap detection, downsampling (LTTB), Canvas rendering for large time series, overview+detail, and crosshair tooltips."
+description: "Build time-series visualizations with D3.js. Use this skill when the user wants line charts over time, horizon charts, swimlane/event timelines, Gantt charts, cycle plots, real-time streaming charts, brushed time selection, or multi-series spaghetti plots. Covers d3.scaleTime/scaleUtc, DST handling, gap detection, downsampling (LTTB), Canvas rendering for large time series, overview+detail, and crosshair tooltips."
 ---
 
 # Temporal Time Series
 
-Patterns for building time-series visualizations with D3.js v7+.
+Time is the one axis viewers think they understand — until DST eats an hour, a weekend gap implies a crash, or 100K points turn a line chart into a solid rectangle. These patterns handle the cases where naive date-to-pixel mapping breaks.
 
 For axis customization and tick formatting, see `scales`. For brush mechanics, see `brushing`. For zoom integration, see `navigation`. For Canvas performance patterns, see `canvas`. For animated transitions, see `motion`. For callout annotations on time series, see `annotation`.
 
-## DST and Timezone Pitfalls
+## scaleTime vs scaleUtc
 
-### scaleTime vs scaleUtc
+`d3.scaleUtc` is the safe default. Use `d3.scaleTime` only when you need local-timezone axis labels (e.g., "9 AM" in the user's timezone for a work-hours dashboard).
 
-`d3.scaleTime` interprets domain values in the browser's local timezone. `d3.scaleUtc` interprets them in UTC. Use `scaleUtc` when the data has explicit UTC timestamps or when DST jumps would distort the axis.
-
-DST creates days with 23 or 25 hours. `d3.scaleTime` handles this via the Date API — the visual gap between 1 AM and 3 AM on a spring-forward day is half the normal two-hour span. On fall-back days, 1:00-1:59 AM occurs twice — timestamps in this range plot on top of each other with `scaleTime`. Use `scaleUtc` for sub-hourly data near DST boundaries.
+Why it matters: DST creates days with 23 or 25 hours. With `scaleTime`, the visual gap between 1 AM and 3 AM on a spring-forward day is half the normal two-hour span — the chart lies about duration. On fall-back days, 1:00-1:59 AM occurs twice and timestamps in that range plot on top of each other. For sub-hourly data near DST boundaries, `scaleUtc` is the only correct choice.
 
 When computing durations, use millisecond math (`(end - start) / 3.6e6`) which is DST-safe.
 
-### Date Constructor Timezone Trap
-
-```js
-new Date("2024-03-15");          // UTC midnight (date-only = UTC)
-new Date("2024-03-15T00:00");    // LOCAL midnight (datetime without Z = local)
-new Date("2024-03-15T00:00:00Z"); // UTC midnight (explicit Z)
-```
-
-This inconsistency is the #1 source of off-by-one-day bugs. Always use `d3.timeParse` or `d3.utcParse` for data loading.
-
 ## Gap Detection and Handling
-
-### Detecting Gaps in Irregular Data
-
-```js
-function detectGaps(data, maxGapMs) {
-  const gaps = [];
-  for (let i = 1; i < data.length; i++) {
-    const dt = data[i].date - data[i - 1].date;
-    if (dt > maxGapMs) {
-      gaps.push({ start: data[i - 1].date, end: data[i].date, index: i });
-    }
-  }
-  return gaps;
-}
-```
 
 ### Breaking Lines at Gaps
 
@@ -63,15 +36,15 @@ function insertGapSentinels(data, maxGapMs) {
 }
 ```
 
-Without `.defined(d => d.value != null)`, the line generator draws to (0, 0) for null values, creating spikes to the origin.
+Without `.defined(d => d.value != null)`, the line generator draws to (0, 0) for null values, creating spikes to the origin — a bug that looks like a real data crash.
 
 ### Weekend/Holiday Gaps in Financial Data
 
-Use `d3.scaleBand` on trading days only for evenly spaced axes, or `scaleTime` with `.defined(isWeekday)` to break the line at weekends.
+A continuous time axis shows weekends as flat gaps, making every Monday look like a plateau. Two fixes: `d3.scaleBand` on trading days only for evenly spaced axes, or `scaleTime` with `.defined(isWeekday)` to break the line at weekends. Band scales are more honest — they don't imply data exists where it doesn't.
 
 ## Horizon Charts
 
-Layer a time-series area chart into colored bands, encoding magnitude by color intensity and sign by hue. Fits many series into small vertical space.
+Horizon charts fold an area chart into colored bands: magnitude maps to color intensity, sign maps to hue. They fit 10-50 series into the vertical space of one line chart while preserving trend comparison.
 
 ```js
 function horizonChart(svg, data, { x, bands = 4, height, colorPos = "steelblue", colorNeg = "tomato" }) {
@@ -103,15 +76,17 @@ function horizonChart(svg, data, { x, bands = 4, height, colorPos = "steelblue",
 }
 ```
 
-Beyond 4 bands, differences between adjacent bands become hard to distinguish. Stick to 3-4 bands for most use cases.
+### Band count matters
 
-## Overlapping Event Stacking (Swimlanes)
+Heer, Kong, and Agrawala (CHI 2009) found that 2-band horizon charts match standard line chart accuracy once viewers learn to read them, but accuracy degrades beyond 4 bands because adjacent color-intensity steps become indistinguishable. Stick to 2 bands for general audiences, 3-4 for expert dashboards with trained users.
 
-When events in the same lane overlap, stack them into sub-rows. Sort by start time, then greedily assign each event to the first sub-row whose last event ends before this one starts. Track per-row end times in an array; if no row fits, create a new one. Set `event.row` for y-offset within the lane.
+### When not to use horizon charts
+
+Horizon charts require learning — untrained viewers misread band boundaries as data features. Don't use them for one-off presentations to general audiences. If you have fewer than 5 series, small multiples of standard line charts are clearer. If precise value reading matters more than trend comparison, use a standard chart with a tooltip.
 
 ## Cycle Plots
 
-Decompose a time series by recurring period (day-of-week, hour-of-day, month) to reveal seasonality. Each panel shows all observations for one cycle position.
+Cycle plots decompose a time series by recurring period (day-of-week, month, hour) to answer: "Is Tuesday always slow, or was last Tuesday unusual?" Each panel shows all observations for one cycle position, with a mean line for the seasonal norm. Standard line charts bury this signal in the overall trend.
 
 ```js
 const byDay = d3.group(data, d => d.date.getDay());
@@ -129,7 +104,7 @@ dayNames.forEach((name, dayIdx) => {
     .attr("d", d3.line().x((d, i) => xLocal(i)).y(d => y(d.value)))
     .attr("fill", "none").attr("stroke", "steelblue").attr("stroke-width", 1.5);
 
-  // Mean line for this day-of-week
+  // Mean line highlights the seasonal norm
   const mean = d3.mean(dayData, d => d.value);
   panel.append("line")
     .attr("x1", 0).attr("x2", panelWidth)
@@ -138,11 +113,19 @@ dayNames.forEach((name, dayIdx) => {
 });
 ```
 
+### When not to use cycle plots
+
+Cycle plots assume a meaningful recurring period exists. If there's no seasonality, the panels show noise and the mean lines mislead. Test for seasonality first — if `d3.mean` per cycle position shows no variance across positions, a cycle plot adds nothing.
+
+## Overlapping Event Stacking (Swimlanes)
+
+When events in the same lane overlap, stack them into sub-rows. Sort by start time, then greedily assign each event to the first sub-row whose last event ends before this one starts. Track per-row end times in an array; if no row fits, create a new one. Set `event.row` for y-offset within the lane.
+
 ## Real-Time / Streaming
 
 ### Circular Buffer
 
-Avoid `Array.shift()` (O(n)) for high-frequency data:
+Avoid `Array.shift()` (O(n)) for high-frequency data — it copies the entire array on every tick:
 
 ```js
 class CircularBuffer {
@@ -169,7 +152,7 @@ class CircularBuffer {
 
 ### requestAnimationFrame Gating
 
-When data arrives faster than the screen refreshes, batch updates:
+When data arrives faster than the screen refreshes (e.g., 100 Hz sensor data), batch updates. Without gating, each WebSocket `onmessage` schedules a redundant `requestAnimationFrame`, and you render the same frame dozens of times:
 
 ```js
 let pendingData = [];
@@ -190,13 +173,17 @@ function flush() {
 
 ### Memory Leak Prevention
 
-1. **Bound your data** — use `CircularBuffer` or trim after each append, never unbounded `push()`
-2. **Cancel on teardown** — `cancelAnimationFrame(rafId)`, `ws.close()`, `ro.disconnect()`
-3. **Avoid stale closures** — don't capture growing arrays in long-lived callbacks; reference the buffer directly
+1. **Bound your data** — use `CircularBuffer` or trim after each append. Unbounded `push()` in a streaming chart is a memory leak on a timer.
+2. **Cancel on teardown** — `cancelAnimationFrame(rafId)`, `ws.close()`, `ro.disconnect()`. A streaming chart that outlives its DOM element keeps rendering to nowhere.
+3. **Avoid stale closures** — don't capture growing arrays in long-lived callbacks; reference the buffer directly.
+
+### When not to use real-time rendering
+
+If data arrives slower than 1 Hz, skip the streaming architecture entirely. Just re-render on each data point — the complexity of circular buffers and rAF gating buys nothing at human-readable update rates.
 
 ## Voronoi-Based Nearest-Series Detection
 
-For dense multi-series charts, hit-testing individual lines is unreliable. Use a Delaunay overlay to find the nearest point across all series:
+For dense multi-series charts, hit-testing individual lines is unreliable — a 1.5px stroke is nearly impossible to hover. Use a Delaunay overlay to find the nearest point across all series:
 
 ```js
 const allPoints = series.flatMap(([key, values]) =>
@@ -214,7 +201,9 @@ svg.on("pointermove", (event) => {
 
 ## LTTB Downsampling (Largest Triangle Three Buckets)
 
-Reduce point count while preserving visual shape. LTTB keeps perceptually important peaks and valleys:
+LTTB solves a specific problem: reducing point count while preserving visual shape. It keeps perceptually important peaks and valleys by maximizing triangle area between consecutive selected points.
+
+**The core tradeoff:** LTTB preserves what the chart looks like but not what the data says. It distorts frequency content, shifts peak locations slightly, and can't be used for statistical analysis on the downsampled result. This is fine — LTTB is a rendering optimization, not a data transformation.
 
 ```js
 function lttb(data, threshold) {
@@ -259,25 +248,23 @@ function lttb(data, threshold) {
 const downsampled = lttb(data, Math.min(data.length, width * 2));
 ```
 
-Downsample each series independently — using the same sample indices across series distorts individual series shapes.
+Downsample each series independently — using the same sample indices across series distorts individual series shapes because peaks in different series occur at different times.
 
 ### Min-Max Bucketing
 
-Simpler than LTTB: for each pixel column, keep min and max values. Loop over data, bucket by `Math.floor(x(d.date))`, track min/max per bucket, then flatten to `[min, max, min, max, ...]`. Produces at most `2 * pixelWidth` points.
+Simpler and faster than LTTB: for each pixel column, keep min and max values. Produces at most `2 * pixelWidth` points. Use min-max when you need speed over shape fidelity (e.g., a 10M-point overview pane), and LTTB when the downsampled line needs to look like the original (e.g., the detail view).
 
 ### Virtual Windowing
 
-Only render the visible time range. Use `d3.bisector(d => d.date)` to find start/end indices within sorted data, slice, then downsample. Combine with zoom: on each `zoom` event, call `getVisibleData` with the rescaled domain, then `lttb(visible, width * 2)` before drawing.
+Only render the visible time range. Use `d3.bisector(d => d.date)` to find start/end indices within sorted data, slice, then downsample. On each `zoom` event, call `getVisibleData` with the rescaled domain, then `lttb(visible, width * 2)` before drawing. This makes zoom-to-detail feel instant even on million-point datasets.
 
 ### TypedArray for Time-Series Data
 
-Store timestamps and values in parallel `Float64Array`s for cache-friendly access. Convert dates with `+d.date` (ms since epoch).
+Store timestamps and values in parallel `Float64Array`s for cache-friendly access. Convert dates with `+d.date` (ms since epoch). This matters at 100K+ points — typed arrays iterate 3-5x faster than arrays of objects due to memory layout.
 
 ## Overview + Detail
 
 The canonical time-series interaction: a small overview shows the full range, a brush selects a window, and the main chart zooms to that window.
-
-### Architecture
 
 ```
 ┌─────────────────────────────────────┐
@@ -295,7 +282,6 @@ const xOverview = d3.scaleUtc(fullExtent, [0, width]);
 const xMain = d3.scaleUtc(fullExtent, [0, width]);
 const yMain = d3.scaleLinear().range([mainHeight, 0]);
 
-// Overview: simplified area or line
 const overviewArea = d3.area()
     .x(d => xOverview(d.date))
     .y0(overviewHeight)
@@ -307,7 +293,6 @@ overviewG.append("path")
     .attr("fill", "steelblue")
     .attr("fill-opacity", 0.15);
 
-// Brush on overview
 const brush = d3.brushX()
     .extent([[0, 0], [width, overviewHeight]])
     .on("brush end", brushed);
@@ -318,8 +303,6 @@ function brushed(event) {
   if (!event.selection) return;
   const [x0, x1] = event.selection.map(xOverview.invert);
   xMain.domain([x0, x1]);
-
-  // Update main chart axes and paths
   mainXAxisG.call(d3.axisBottom(xMain));
   mainLine.attr("d", lineGen);
 }
@@ -328,21 +311,19 @@ function brushed(event) {
 ### Key details
 
 - **Use `scaleUtc` for the overview** even if the main chart uses `scaleTime` — the overview rarely needs DST precision and UTC avoids spring-forward glitches at full-year zoom.
-- **Downsample on brush** — when the user zooms into a narrow window, re-run LTTB on the visible slice to keep point count ≈ `2 × width`.
+- **Downsample on brush** — when the user zooms into a narrow window, re-run LTTB on the visible slice to keep point count near `2 * width`.
 - **Animate domain changes** — `xMain.domain(newDomain)` is instant; wrap axis and path updates in a shared transition for smooth zooming.
-- **Programmatic brush.move** — to set the brush from buttons (e.g., "Last 6 months"), call `brushG.transition().call(brush.move, [x0, x1])`. This triggers the `brushed` handler via the transition, so don't also call the update function manually (double render).
+- **Programmatic brush.move** — to set the brush from buttons (e.g., "Last 6 months"), call `brushG.transition().call(brush.move, [x0, x1])`. This triggers the `brushed` handler via the transition, so don't also call the update function manually or you get a double render.
 - **Snap to intervals** — in the `end` event, snap the selection to day/week/month boundaries with `interval.floor(start)` and `interval.ceil(end)`, then call `brush.move` with the snapped pixels.
 
 ## Common Pitfalls
 
-**scaleTime domain must be Date objects.** Passing strings or epoch numbers to `scaleTime.domain()` silently produces wrong results.
+**scaleTime domain must be Date objects.** Passing strings or epoch numbers to `scaleTime.domain()` silently produces wrong results — the scale treats them as generic continuous values and the axis renders nonsense labels.
 
 **Brush coordinates in zoomed space.** When combining brush and zoom, the brush operates in pixel coordinates but the scale may be transformed. Use `transform.rescaleX(x).invert()` to convert brush pixels to data coordinates, not `x.invert()`.
 
-**rAF scheduling in real-time charts.** Calling `requestAnimationFrame(redraw)` inside every WebSocket `onmessage` creates redundant frames. Gate with a flag: schedule one rAF, process all pending data in that frame.
-
 ## References
 
+- [Sizing the Horizon (Heer et al., CHI 2009)](https://idl.cs.washington.edu/files/2009-TimeSeries-CHI.pdf) — perceptual study of horizon chart band count and chart size
 - [LTTB Algorithm](https://skemman.is/bitstream/1946/15343/3/SS_MSthesis.pdf) — Steinarsson's downsampling thesis
-- [Horizon Chart](https://observablehq.com/@d3/horizon-chart) — D3 horizon chart example
 - [Focus + Context via Brushing](https://observablehq.com/@d3/focus-context) — canonical overview+detail pattern

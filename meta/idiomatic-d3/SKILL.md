@@ -5,9 +5,9 @@ description: "D3.js idiomatic style patterns and code review guidance. Use this 
 
 # Idiomatic D3
 
-D3 has strong conventions that emerged from Mike Bostock's Observable notebooks and the library's functional design. Idiomatic D3 code is recognizable by its chaining style, data-driven joins, and use of D3's own abstractions over manual DOM work. This skill codifies those conventions for code review and authoring.
+D3 code that follows the library's conventions is code that other D3 developers can read, debug, and extend. Break these conventions and you lose the visual structure that makes chains parseable, the data binding that makes updates correct, and the composition patterns that keep charts maintainable. Every rule here explains what goes wrong when you ignore it — and when ignoring it is the right call.
 
-Related skills: `scales` (axis generators via `.call()`), `motion` (`.join()` with enter/update/exit callbacks), `data-gathering` (accessor patterns for loading/cleaning), `cross-skill-composition` (structural patterns for multi-layer apps).
+Related skills: `motion` (`.join()` with enter/update/exit callbacks), `data-gathering` (accessor patterns), `cross-skill-composition` (structural patterns for multi-layer apps).
 
 ## Method Chaining & Indentation
 
@@ -31,17 +31,9 @@ g.selectAll("rect")                                 // new selection → 2-space
     .attr("fill", "steelblue");
 ```
 
-### Which Methods Return What
+**What breaks without it:** flat indentation hides which `.attr()` calls apply to which element. In a chain that appends a `<g>`, calls an axis, then styles tick labels, flat indent makes it look like everything targets the same node. A reviewer can't spot misplaced attributes without tracing every method's return type.
 
-| Returns **new** selection | Returns **same** selection |
-|--------------------------|---------------------------|
-| `.append()`, `.insert()` | `.attr()`, `.style()`, `.classed()` |
-| `.select()` | `.text()`, `.html()`, `.property()` |
-| `.selectAll()` | `.on()`, `.each()`, `.call()` |
-| `.data()` | `.datum()`, `.sort()`, `.order()` |
-| `.join()`, `.enter()` | `.raise()`, `.lower()` |
-| `.filter()`, `.merge()` | `.interrupt()` |
-| `.transition()` | `.delay()`, `.duration()`, `.ease()` |
+**The quick rule:** `.append()`, `.select()`, `.selectAll()`, `.data()`, `.join()`, `.enter()`, `.filter()`, `.merge()`, and `.transition()` return a new selection — indent 2. Everything else (`.attr()`, `.style()`, `.on()`, `.call()`, `.each()`, `.text()`, `.classed()`) returns the same selection — indent 4.
 
 When a chain mixes both, the indentation staircase reveals exactly which `.attr()` calls apply to which element:
 
@@ -53,13 +45,12 @@ svg.append("g")
     .attr("font-size", 12);
 ```
 
+**When to break it:** in very short chains (2-3 methods), flat indent is fine — `d3.select("#tip").style("opacity", 1)`. The convention pays off when chains exceed 4-5 lines or mix selection contexts. Also break it when your team uses a formatter (Prettier) that enforces a different style — consistency within a project beats adherence to D3 convention.
+
 ## Margin Convention
 
-The standard layout pattern — shields all drawing code from edge math:
-
 ```js
-const width = 928;
-const height = 500;
+const width = 928, height = 500;
 const margin = {top: 20, right: 30, bottom: 30, left: 40};
 
 const svg = d3.create("svg")
@@ -69,15 +60,13 @@ const g = svg.append("g")
     .attr("transform", `translate(${margin.left},${margin.top})`);
 ```
 
-Inner drawing area: `width - margin.left - margin.right` by `height - margin.top - margin.bottom`. Scales use the inner dimensions for their range; axes render at the margin edges. `width` and `height` are outer (total SVG) dimensions.
+`width` and `height` are outer SVG dimensions. Inner drawing area: `width - margin.left - margin.right` by `height - margin.top - margin.bottom`. Scales use inner dimensions for range; axes render at margin edges.
 
-### viewBox vs Fixed Dimensions
+**What breaks without it:** ad-hoc padding numbers (`x + 40`, `height - 25`) scatter throughout the code. When axis labels change size or you add a title, you hunt for every magic number. The margin object centralizes that and makes the relationship between outer size and drawing area explicit.
 
-Prefer `viewBox` for responsive charts — the SVG scales to its container. Use explicit `width`/`height` attributes only when you need pixel-precise control (Canvas overlay alignment, fixed-size exports).
+**When to break it:** `viewBox` with percentage-based container sizing handles most responsive needs. But when a Canvas overlay must align pixel-for-pixel with SVG axes, use explicit `width`/`height` attributes on the SVG instead of `viewBox` — the browser's `viewBox` scaling can introduce sub-pixel misalignment.
 
-## Data Joins
-
-### Key Functions for Object Constancy
+## Data Joins & Key Functions
 
 Always provide a key function when data can reorder, filter, or update:
 
@@ -89,11 +78,13 @@ svg.selectAll("circle")
     .attr("cy", d => y(d.value));
 ```
 
-Without a key, D3 joins by index — sorting or filtering data causes elements to silently represent the wrong datum. Transitions become meaningless because elements morph into unrelated values instead of tracking their data.
+**What breaks without a key:** D3 joins by index. Sort the data and every element silently represents a different datum — the third bar now shows the fifth row's value, but nothing visually signals the swap. Transitions are worse: bars morph into unrelated values, and the viewer infers a relationship that doesn't exist. This is visual corruption that's invisible in code review and nearly impossible to catch without animation testing.
 
-### Modern .join()
+**When to skip the key:** static charts that render once and never update. If you call `.data().join()` exactly once and never re-render, index-based join is harmless and avoids the need for a unique identifier in your data.
 
-Simple form — handles enter, updates in place, removes exit:
+### .join() — simple and full form
+
+Simple form handles enter, updates in place, removes exit:
 
 ```js
 g.selectAll("rect")
@@ -105,7 +96,7 @@ g.selectAll("rect")
     .attr("width", x.bandwidth());
 ```
 
-Full form — customize enter/update/exit for transitions:
+Full form for animated transitions:
 
 ```js
 g.selectAll("rect")
@@ -130,32 +121,19 @@ g.selectAll("rect")
   );
 ```
 
-The old `.enter().append()...merge()...exit().remove()` pattern is equivalent but more verbose. Use `.join()` unless you have a specific reason not to.
+**When to use the old `.enter().append()...merge()` pattern:** almost never. `.join()` is shorter and handles all three phases. The only case is legacy codebases where `.merge()` is already established and consistency matters more than modernization.
 
-## selection.call() for Reuse
+## selection.call() for Composition
 
-`.call(fn)` invokes `fn(selection, ...args)` and returns the selection — the chain continues. This is D3's primary composition mechanism. Axes, brushes, zoom, and drag all work this way.
-
-### Extracting Custom Components
-
-When you repeat the same configuration:
+`.call(fn)` invokes `fn(selection, ...args)` and returns the original selection. This is D3's primary composition mechanism — axes, brushes, zoom, and drag all work through it.
 
 ```js
-// Before — duplicated
-svg.append("g")
-    .attr("transform", `translate(0,${height - margin.bottom})`)
-  .call(d3.axisBottom(x))
-  .call(g => g.select(".domain").remove())
-  .call(g => g.selectAll(".tick line").clone()
-      .attr("y2", -(height - margin.top - margin.bottom))
-      .attr("stroke-opacity", 0.1));
-
-// After — extracted
-function grid(g, scale, height) {
+// Extract repeated axis customization into a reusable function
+function grid(g, scale, innerHeight) {
   g.call(d3.axisBottom(scale))
     .call(g => g.select(".domain").remove())
     .call(g => g.selectAll(".tick line").clone()
-        .attr("y2", -height)
+        .attr("y2", -innerHeight)
         .attr("stroke-opacity", 0.1));
 }
 
@@ -164,67 +142,31 @@ svg.append("g")
     .call(g => grid(g, x, height - margin.top - margin.bottom));
 ```
 
-### Chaining Through .call()
+**What breaks without it:** copy-pasted `.attr()` blocks for the same axis styling across multiple charts. When the styling changes, you update one and miss the others. `.call()` makes the configuration a named, testable function.
 
-`.call()` returns the **original selection**, not the function's return value. You can chain after it:
+**Key subtlety:** `.call()` returns the **original selection**, not the function's return value. You can chain after it — `.call(d3.axisLeft(y)).attr("font-family", "sans-serif")` applies the font to the axis `<g>`, not to something the axis function returned.
 
-```js
-svg.append("g")
-    .attr("transform", `translate(${margin.left},0)`)
-    .call(d3.axisLeft(y))
-    .call(g => g.select(".domain").remove())
-    .attr("font-family", "sans-serif");   // still applies to the g
-```
+**When to skip it:** single-use configuration that won't be repeated. Wrapping three `.attr()` calls in a named function for a one-off chart adds indirection without reuse benefit.
 
 ## Scales as Functions
 
-Scales are functions. This is the key insight — they're not configuration objects, they're callable mappings from data domain to visual range:
+Scales are callable mappings, not configuration objects. The pattern `d => scale(d.field)` composes an accessor with a scale and appears everywhere in D3:
 
 ```js
-const x = d3.scaleLinear([0, 100], [margin.left, width - margin.right]);
-x(50);  // → midpoint pixel value
-```
-
-### Constructor Shorthand
-
-D3 v7 accepts `(domain, range)` directly — no chained `.domain().range()`:
-
-```js
-// Preferred
 const x = d3.scaleUtc(d3.extent(data, d => d.date), [margin.left, width - margin.right]);
 
-// Also fine — needed when building incrementally
-const x = d3.scaleUtc().domain(d3.extent(data, d => d.date)).range([margin.left, width - margin.right]);
-```
-
-### Accessor Composition
-
-The pattern `d => scale(d.field)` composes an accessor with a scale. It appears everywhere:
-
-```js
 .attr("cx", d => x(d.date))
 .attr("cy", d => y(d.value))
 .attr("fill", d => color(d.category))
 ```
 
-### Accessors in D3 Utilities
+**What breaks when you inline arithmetic instead:** `.attr("cx", d => d.date * pixelsPerDay + margin.left)` embeds the domain-to-range mapping at every call site. Change the scale (log, time, band) and you rewrite every attribute. With a scale function, you change one line.
 
-Prefer the accessor argument over `.map()`:
-
-```js
-// Idiomatic
-d3.max(data, d => d.value)
-d3.extent(data, d => d.date)
-d3.sum(data, d => d.revenue)
-d3.group(data, d => d.category)
-
-// Avoid — creates an intermediate array
-d3.max(data.map(d => d.value))
-```
+Prefer accessor arguments over `.map()` in D3 utilities — `d3.max(data, d => d.value)` avoids creating an intermediate array that `d3.max(data.map(d => d.value))` would allocate.
 
 ## The Reusable Chart Pattern
 
-Bostock's closure-with-getter-setters — use for shared components or charts instantiated multiple times. Skip for one-off visualizations.
+Bostock's closure-with-getter-setters — use for shared components or charts instantiated multiple times:
 
 ```js
 function barChart() {
@@ -265,27 +207,25 @@ const myChart = barChart().width(800).x(d => d.label);
 d3.select("#viz").datum(data).call(myChart);
 ```
 
-When to skip: one-off charts, prototypes, Observable notebooks. Inline code with clear variable names is perfectly idiomatic for single-use visualizations. Don't over-abstract.
+**What breaks when you over-apply it:** the closure pattern hides state, makes debugging harder (you can't inspect `width` from the console), and the getter-setter boilerplate doubles the code size. For a chart used exactly once, it's pure overhead. Worse, it creates a false sense of reusability — the chart's internal layout assumptions often break when you change the data shape.
+
+**When to use it:** components rendered in multiple places with different data or dimensions (small multiples, dashboard widgets). When to skip: one-off charts, prototypes, exploratory notebooks. Inline code with clear variable names is perfectly idiomatic for single-use visualizations.
 
 ## Naming Conventions
 
-| Variable | Convention | Notes |
-|----------|-----------|-------|
-| `d` | Current datum | Callback signature: `(d, i, nodes)` |
-| `i` | Index within group | Second callback parameter |
-| `x`, `y` | Positional scales | `const x = d3.scaleLinear(...)` |
-| `color` | Color scale | Not `colorScale`, `c`, or `fill` |
-| `r` | Radius scale | Bubble/circle charts |
-| `svg` | Root SVG selection | The outermost SVG element |
-| `g` | Inner group | The margin-translated drawing group |
-| `data` | The dataset | After loading and preparation |
-| `margin` | Margin object | `{top, right, bottom, left}` — CSS property order |
-| `width`, `height` | Outer SVG dimensions | Inner = subtract margins |
-| `line`, `area`, `arc` | Shape generators | Named by the shape they produce |
-| `t` | Transition | `const t = svg.transition().duration(750)` |
-| `path` | Path generator | `const path = d3.geoPath(projection)` |
+D3 has strong naming conventions. Breaking them doesn't cause bugs, but it causes confusion — a reviewer who sees `colorScale` instead of `color` wastes time checking whether it's something custom.
 
-Avoid Hungarian notation (`strName`, `arrData`), `Chart` suffixes on functions, and single-letter variables beyond the conventions above.
+| Variable | Convention | Why this name |
+|----------|-----------|---------------|
+| `d`, `i` | Datum, index | Universal in D3 callbacks — `(d, i, nodes)` |
+| `x`, `y` | Positional scales | Short because they appear in every `.attr()` call |
+| `color` | Color scale | Not `colorScale` — scales are functions, the name says what it maps *to* |
+| `svg`, `g` | Root SVG, inner group | `g` is the margin-translated drawing area |
+| `t` | Transition | `const t = svg.transition().duration(750)` |
+| `line`, `area`, `arc` | Shape generators | Named by output shape, not by input data |
+| `path` | Geo path generator | `const path = d3.geoPath(projection)` |
+
+**When to break it:** when a chart has multiple scales on the same axis (e.g., dual-y), `y1` and `y2` are clearer than trying to make both `y`. Similarly, `xBand` vs `xLinear` when you have overlapping scale types for the same dimension.
 
 ## Event Handling
 
@@ -297,133 +237,58 @@ Avoid Hungarian notation (`strName`, `arrData`), `Chart` suffixes on functions, 
   d3.select(this).attr("fill", "orange");
 })
 
-// Arrow function — this is lexical (probably undefined or window)
-// Use event.currentTarget instead
+// Arrow function — this is lexical, use event.currentTarget
 .on("mouseover", (event, d) => {
   d3.select(event.currentTarget).attr("fill", "orange");
 })
 ```
 
-Both forms are idiomatic. Arrow functions are fine as long as you use `event.currentTarget` instead of `this`. Pick one style per project and be consistent.
+**What breaks:** `d3.select(this)` inside an arrow function selects `window` or `undefined`, not the element. The highlight applies to nothing (silent failure) or throws. This is the single most common D3 bug in code written by developers coming from modern JS where arrow functions are the default.
+
+Both forms are idiomatic. Pick one per project. Arrow functions with `event.currentTarget` are slightly more explicit about what gets selected.
 
 ### Namespaced Events
-
-Prevent handler collision when multiple behaviors listen to the same event:
 
 ```js
 selection
   .on("click.highlight", highlightFn)
   .on("click.tooltip", tooltipFn);
-
-// Remove only the highlight handler
-selection.on("click.highlight", null);
 ```
 
-### Pointer Coordinates
-
-```js
-const [px, py] = d3.pointer(event);           // relative to event.currentTarget
-const [px, py] = d3.pointer(event, svg.node()); // relative to specific element
-```
-
-## Import Patterns
-
-### Standalone HTML
-
-```html
-<script type="module">
-import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
-// all of d3 in one import — fine for standalone files
-</script>
-```
-
-### Bundled Applications
-
-```js
-import {select, selectAll, scaleLinear, axisBottom, line, csv} from "d3";
-```
-
-Named imports from `d3` tree-shake with modern bundlers. Importing from submodules (`d3-selection`, `d3-scale`) is unnecessary — the `d3` package re-exports everything.
-
-### Observable Notebooks
-
-`d3` is a built-in global — no import needed. For specific versions: `d3 = require("d3@7")`.
-
-## Modern JS in D3 Context
-
-**`const` over `let`** — scales, selections, generators, and dimensions are assigned once. Use `let` only for state that truly mutates (e.g., a current filter value).
-
-**`async/await` for data loading:**
-
-```js
-const data = await d3.csv("data.csv", d => ({
-  date: new Date(d.date),
-  value: +d.value
-}));
-```
-
-**`Promise.all` for multiple files:**
-
-```js
-const [cities, borders] = await Promise.all([
-  d3.csv("cities.csv", d3.autoType),
-  d3.json("borders.geojson")
-]);
-```
-
-**Template literals** for transforms and paths — never concatenate strings:
-
-```js
-.attr("transform", `translate(${margin.left},${margin.top})`)
-```
-
-**Nullish coalescing** for defaults: `d.value ?? 0`. Prefer over `|| 0` which also catches `0` and `""`.
-
-## Code Review Checklist
-
-Quick-scan reference for reviewing D3 code:
-
-| Check | Idiomatic | Flag |
-|-------|-----------|------|
-| Indentation | 2-space new selection, 4-space same | Flat or inconsistent indent |
-| Data join | `.join()` with key function | Manual enter/exit/merge, missing keys |
-| Margins | `{top, right, bottom, left}` object | Ad-hoc padding, magic pixel numbers |
-| Scales | Constructor shorthand, accessors | Inline arithmetic for positioning |
-| Axes | `.call(d3.axisBottom(x))` | Manual tick rendering in SVG |
-| Reuse | `.call(fn)` for repeated config | Copy-pasted `.attr()` blocks |
-| Events | `event.currentTarget` or regular `function` | Arrow fn + `d3.select(this)` |
-| Data loading | `async/await`, explicit row accessor | Nested `.then()`, `autoType` in production |
-| Transitions | `.join()` callbacks, shared `t` | Unnamed transitions that collide |
-| DOM access | D3 selections throughout | `document.getElementById`, jQuery, `innerHTML` |
+**What breaks without namespaces:** `.on("click", tooltipFn)` silently replaces the highlight handler. D3 allows only one handler per event type per element unless you namespace. With zoom + brush + custom click all on the same element, namespaces prevent handlers from clobbering each other.
 
 ## Common Pitfalls
 
-1. **`d3.select(this)` inside arrow functions.** Arrow functions don't bind `this` to the DOM element — you get `undefined` or `window`. Use `event.currentTarget` or a regular `function`.
+1. **Manual for-loops instead of selections.** `data.forEach(d => svg.append("rect")...)` bypasses D3's data join — no exit handling, no transitions, no key-based identity. The chart renders once and can never update. Use `.selectAll().data().join()`. **Exception:** Canvas rendering, where there's no DOM to join against and a loop over data is the correct pattern.
 
-2. **Missing key function on data joins.** Without `.data(data, d => d.id)`, D3 joins by index. Sorting, filtering, or streaming data causes elements to silently represent the wrong datum — visual corruption that's invisible in code review.
+2. **Mixing framework DOM with D3 DOM.** React/Vue manage their own DOM tree. If D3 also mutates those elements, they fight — React re-renders and wipes D3's changes, or D3 appends elements React doesn't know about. Let D3 own a `<svg>` ref and nothing above it, or use D3 only for math (scales, generators, layouts) and let the framework render. **Exception:** using D3 for pure computation (scales, shapes, layouts) with framework rendering is clean — the conflict is only in DOM mutation.
 
-3. **Breaking chains to store unused selections.** `const bars = g.selectAll("rect")...` is fine when you need the reference later. But storing every intermediate selection obscures the data flow. Chain when the result is used once.
+3. **Breaking chains to store unused selections.** `const bars = g.selectAll("rect")...` is fine when you need the reference later (for transitions, event handlers). But storing every intermediate selection breaks the visual flow of the chain and obscures which operations depend on each other. Chain when the result is used once; name it when referenced again.
 
-4. **Manual for-loops instead of selections.** `data.forEach(d => svg.append("rect")...)` bypasses D3's data join — no exit handling, no transitions, no key-based identity. Use `.selectAll().data().join()`.
+4. **Overusing `.each()` when chained `.attr()` suffices.** `.each(function(d) { d3.select(this).attr("x", ...).attr("y", ...); })` is a verbose rewrite of `.attr("x", ...).attr("y", ...)`. Reserve `.each()` for side effects (updating an external data structure) or when you need to compute multiple local variables per element that share an expensive intermediate value.
 
-5. **Mixing framework DOM with D3 DOM.** React/Vue manage their own DOM tree. If D3 also mutates those elements, they fight. Let D3 own a `<svg>` ref and nothing above it, or use D3 only for math (scales, generators, layouts) and let the framework render.
+5. **Forgetting `.transition()` returns a transition, not a selection.** You can't `.on("click", ...)` on a transition — the handler silently doesn't attach. Attach event handlers before `.transition()`, or store the selection reference separately. This is especially subtle when a chain starts with a selection and then calls `.transition()` partway through — everything after that line is on the transition, not the selection.
 
-6. **Overusing `.each()` when chained `.attr()` suffices.** `.each(function(d) { d3.select(this).attr("x", ...).attr("y", ...); })` is a verbose rewrite of `.attr("x", ...).attr("y", ...)`. Reserve `.each()` for side effects or when you need multiple local variables per element.
+6. **Using `.enter().append()...merge()` when `.join()` works.** The old general update pattern is four lines where `.join()` is one. `.join()` handles enter, update, and exit in a single call. Use the old pattern only for compatibility with D3 v4/v5 codebases that predate `.join()`.
 
-7. **Flat indentation hiding selection context.** When every line is indented the same, you can't tell which `.attr()` calls apply to which element. The 2/4-space convention makes context switches visible — it's the first thing to fix in unclear D3 code.
+## Code Review Checklist
 
-8. **Over-abstracting one-off charts.** The reusable chart pattern adds real complexity. For a single visualization that nobody will instantiate twice, inline code with clear variable names beats a closure with getter-setters.
-
-9. **Using `.enter().append()...merge()` when `.join()` works.** The old general update pattern is four lines where `.join()` is one. Use `.join()` unless you need behavior that its callbacks can't express (extremely rare in practice).
-
-10. **Forgetting that `.transition()` returns a transition, not a selection.** You can't `.on("click", ...)` on a transition. Attach event handlers before `.transition()`, or store the selection reference separately.
+| Check | Idiomatic | Flag | What breaks |
+|-------|-----------|------|-------------|
+| Indentation | 2-space new, 4-space same | Flat indent | Can't tell which attrs apply to which element |
+| Data join | `.join()` + key function | Missing keys | Silent data-element mismatch on update |
+| Margins | `{top, right, bottom, left}` | Magic numbers | Layout breaks when axes or labels change |
+| Scales | Scale functions in `.attr()` | Inline arithmetic | Can't change scale type without rewriting attrs |
+| Axes | `.call(d3.axisBottom(x))` | Manual ticks | Lose automatic tick formatting, transition |
+| Reuse | `.call(fn)` for repeated config | Copy-pasted blocks | Styling drifts between copies |
+| Events | `event.currentTarget` or `function` | Arrow fn + `this` | Handler targets wrong element or throws |
+| Transitions | `.join()` callbacks, shared `t` | Unnamed transitions | Transitions on same element cancel each other |
+| DOM | D3 selections throughout | `getElementById`, jQuery | Bypasses data binding, breaks update pattern |
 
 ## References
 
-- [D3 Selection API](https://d3js.org/d3-selection) — `.join()`, `.call()`, `.each()`, method chaining
-- [Towards Reusable Charts](https://bost.ocks.org/mike/chart/) — Bostock's closure pattern
+- [Towards Reusable Charts](https://bost.ocks.org/mike/chart/) — Bostock's closure pattern and its tradeoffs
 - [Thinking with Joins](https://bost.ocks.org/mike/join/) — the core data join philosophy
-- [Object Constancy](https://bost.ocks.org/mike/constancy/) — key functions and visual continuity
-- [Let's Make a Bar Chart](https://observablehq.com/@d3/lets-make-a-bar-chart) — canonical D3 example
+- [Object Constancy](https://bost.ocks.org/mike/constancy/) — key functions and why index-based join breaks
 - [selection.join](https://observablehq.com/@d3/selection-join) — the modern data join pattern
-- [Observable Plot](https://observablehq.com/plot/) — higher-level API when D3 is overkill
+- [Observable Plot](https://observablehq.com/plot/) — when D3 is overkill and a higher-level API is the right call

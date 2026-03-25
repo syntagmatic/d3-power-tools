@@ -5,41 +5,47 @@ description: "Making D3.js visualizations responsive and adaptive. Use this skil
 
 # Responsive Charts
 
-The core principle: **observe the container, re-render the chart**. CSS handles layout; D3 handles drawing.
+A chart built for 960px becomes unreadable at 320px — not because the data changed, but because tick labels overlap, legends occlude data, and 14px text shrinks to 7px. Responsive D3 means adapting the *design decisions* (tick count, margin, layout) to the available space, not just scaling pixels.
 
-Related skills: `scales` (tick formatting), `canvas` (DPI, layers), `small-multiples` (responsive reflow).
+Related skills: `axes-and-scales` (tick formatting at narrow widths), `canvas` (DPI, layers), `small-multiples` (responsive reflow).
 
-## ResizeObserver: Avoiding Infinite Loops
+## viewBox vs Redraw: When Scaling Breaks
 
-The most common bug: chart render changes the container's size, triggering the observer again. **Fix:** observe a wrapper div that doesn't change size with chart content.
+| | viewBox (scale) | Redraw-on-resize |
+|---|---|---|
+| Text | Shrinks proportionally — 14px becomes 7px at half width | Stays readable at every size |
+| Tick count | Fixed — crowds at narrow, wastes space at wide | Adapts via `scale.ticks(width / 80)` |
+| Layout | Fixed — legend pinned to right even at 320px | Can reflow: legend moves below chart |
+| Interaction targets | Shrink with chart — hard to tap on mobile | Stay at usable sizes |
+| Cost | Zero — browser handles it | Re-renders on every resize |
 
-```html
-<div id="chart-wrapper" style="width: 100%; height: 400px; overflow: hidden;">
-  <div id="chart-inner"></div>
-</div>
-```
+**Use viewBox** only for decorative/iconic graphics where text doesn't matter. **Use redraw-on-resize** for any chart with axes, labels, or interaction. Most D3 charts need redraw.
+
+## Don't Use Responsive Redraw When...
+
+- **The chart is a static export** (PNG/PDF generation). Fix dimensions, skip the observer.
+- **The container never resizes** (fixed-size dashboard cell with no breakpoints). Add unnecessary complexity for zero benefit.
+- **You're inside a scrollytelling step** with a fixed viewport. The chart dimensions are locked to the step; resize the outer container instead.
+
+## ResizeObserver: The One Bug Everyone Hits
+
+Chart render changes container height, observer fires, chart re-renders, observer fires again — infinite loop. Fix: observe a wrapper whose size is set by CSS, not by chart content.
 
 ```js
-ro.observe(document.getElementById("chart-wrapper")); // fixed-size wrapper
-// render into chart-inner — its content can't change wrapper's size
+// Wrapper has explicit height from CSS — chart content can't change it
+const wrapper = document.getElementById("chart-wrapper");
+const ro = new ResizeObserver(([entry]) => {
+  const { width, height } = entry.contentRect;
+  if (width > 0) render(width, height);
+});
+ro.observe(wrapper);
 ```
 
-Alternatively, use `position: absolute` on the SVG so it doesn't affect container layout.
+Set the wrapper with `overflow: hidden` so the SVG/Canvas inside can't push its boundaries.
 
-## viewBox vs Redraw-on-Resize
+## Margins That Respond to Content
 
-| | viewBox | Redraw-on-resize |
-|---|---|---|
-| Text | Scales with chart (gets tiny on mobile) | Stays readable at any size |
-| Tick count | Fixed (may crowd or sparse) | Adapts to available space |
-| Layout | Fixed (legend always on right) | Can reflow (legend moves below) |
-| Performance | Excellent (no reflow cost) | Re-renders on every resize |
-
-**Use redraw-on-resize** for any chart with text, axes, or interactive elements.
-
-## Data-Driven Left Margin
-
-Measure the widest tick label to avoid clipping:
+Hard-coded margins clip labels at narrow widths and waste space at wide ones. Measure the widest tick label:
 
 ```js
 function getLeftMargin(yScale, format) {
@@ -51,81 +57,141 @@ function getLeftMargin(yScale, format) {
     return w;
   });
   temp.remove();
-  return Math.ceil(maxW) + 12;
+  return Math.ceil(maxW) + 12; // 12px padding from axis line
 }
 ```
 
-## Brush Extent Remapping
-
-When the chart resizes while a brush is active, the brush extent is in old pixel coordinates. Remap it:
+For the bottom margin, rotate labels at narrow widths and increase margin to match:
 
 ```js
-if (width >= 600) {
-  g.append("g").call(d3.brushX().extent([[0,0],[w,h]]).on("brush end", brushed));
-} else {
-  // Range slider fallback on narrow screens
-  d3.select("#chart").append("input").attr("type", "range")
-    .attr("min", 0).attr("max", 100).style("width", "100%")
-    .on("input", (e) => filterData(+e.target.value));
+const rotate = width < 500;
+const margin = { bottom: rotate ? 60 : 30 };
+xAxis.selectAll("text")
+  .attr("transform", rotate ? "rotate(-45)" : null)
+  .style("text-anchor", rotate ? "end" : "middle");
+```
+
+## Tick Density by Width
+
+Too many ticks at 320px crowd and overlap. Too few at 1920px waste the axis. Tie tick count to available pixels:
+
+```js
+// ~80px per tick is readable for most numeric labels
+xAxis.call(d3.axisBottom(x).ticks(Math.max(2, Math.floor(innerWidth / 80))));
+
+// For time axes, D3's multi-scale time format handles density well,
+// but you still need to cap the count
+xAxis.call(d3.axisBottom(x).ticks(Math.min(width / 100, 12)));
+```
+
+For categorical axes that don't fit, filter to every Nth label:
+
+```js
+xAxis.selectAll(".tick text")
+  .style("display", (d, i) => i % Math.ceil(categories.length / (width / 60)) ? "none" : null);
+```
+
+## Brush and Interaction at Small Sizes
+
+A d3.brushX selection is stored in pixel coordinates. After resize, those pixels map to different data values. Convert to data domain before resize, restore after:
+
+```js
+let brushedDomain = null; // store in data space, not pixels
+
+function brushed(event) {
+  if (!event.selection) return;
+  brushedDomain = event.selection.map(xScale.invert);
+}
+
+function render(width) {
+  // ... rebuild scales with new width ...
+  if (brushedDomain) {
+    const px = brushedDomain.map(xScale); // domain → new pixels
+    brushGroup.call(brush.move, px);
+  }
 }
 ```
 
-## Canvas DPI Handling
+On screens narrower than ~400px, brush handles are hard to grab. Fall back to an HTML range input:
 
-### The most common Canvas bug
+```js
+if (width < 400) {
+  brushGroup.style("display", "none");
+  d3.select("#range-fallback").style("display", null)
+    .on("input", e => filterByValue(+e.target.value));
+} else {
+  brushGroup.style("display", null);
+  d3.select("#range-fallback").style("display", "none");
+}
+```
+
+## Canvas DPI
+
+Forgetting any of the three steps — backing store size, CSS size, context scale — produces blurry Canvas on retina displays.
 
 ```js
 function setupCanvas(container, width, height) {
   const dpr = devicePixelRatio || 1;
   const canvas = document.createElement("canvas");
-  canvas.width = Math.round(width * dpr);   // backing store at physical pixels
+  canvas.width = Math.round(width * dpr);   // physical pixels
   canvas.height = Math.round(height * dpr);
-  canvas.style.width = `${width}px`;        // CSS at logical pixels
+  canvas.style.width = `${width}px`;        // CSS pixels
   canvas.style.height = `${height}px`;
   const ctx = canvas.getContext("2d");
-  ctx.scale(dpr, dpr);                      // draw in CSS pixel coordinates
+  ctx.scale(dpr, dpr);                      // draw in CSS coordinates
   container.appendChild(canvas);
   return ctx;
 }
 ```
 
-### Resizing Canvas resets all context state
+Setting `canvas.width` or `canvas.height` resets *all* context state (transforms, styles, clip). Re-apply `ctx.scale(dpr, dpr)` after every resize.
 
-Changing `canvas.width` or `canvas.height` resets transforms, styles, everything. **Must re-apply `ctx.scale(dpr, dpr)` and all custom state after every resize.**
-
-### Detecting DPR changes (window dragged between displays)
+Detect DPR changes (user drags window between monitors):
 
 ```js
 matchMedia(`(resolution: ${devicePixelRatio}dppx)`)
   .addEventListener("change", () => resizeAndRedraw(), { once: true });
 ```
 
-## Iframe Embedding with postMessage
+## Mobile Address Bar Resize
 
-**Inside iframe (chart.html):**
+On mobile browsers, the address bar showing/hiding fires a resize event that changes height but not width. Since most charts only depend on width, skip the redraw:
 
 ```js
-function render(width) {
-  const height = Math.round(width * 0.5);
-  // ... render chart
-  window.parent.postMessage({ type: "chart-resize", height, id: "my-chart" }, "*");
-}
-const ro = new ResizeObserver(([e]) => {
-  if (e.contentRect.width > 0) render(e.contentRect.width);
+let lastWidth = 0;
+const ro = new ResizeObserver(([entry]) => {
+  const w = entry.contentRect.width;
+  if (Math.abs(w - lastWidth) < 1) return; // height-only change, skip
+  lastWidth = w;
+  debouncedRender(w, entry.contentRect.height);
 });
-ro.observe(document.body);
 ```
 
-**Host page:**
+## Iframe Embedding
+
+Chart inside iframe reports its needed height to the host page so the iframe can size itself:
 
 ```js
+// Inside iframe
+function render(width) {
+  const height = Math.round(width * 0.5);
+  // ... render ...
+  window.parent.postMessage({ type: "chart-resize", height }, "*");
+}
+new ResizeObserver(([e]) => {
+  if (e.contentRect.width > 0) render(e.contentRect.width);
+}).observe(document.body);
+```
+
+```js
+// Host page
 window.addEventListener("message", (e) => {
-  if (e.data.type === "chart-resize" && e.data.id === "my-chart")
+  if (e.data.type === "chart-resize")
     document.getElementById("chart-iframe").style.height = `${e.data.height}px`;
 });
 ```
 
-Sandbox: requires `allow-scripts`. Add `allow-same-origin` if the chart loads data from the same domain.
+Sandbox requires `allow-scripts`. Add `allow-same-origin` if the chart fetches data from the host domain.
 
 ## Print Styles
 
@@ -135,19 +201,17 @@ Sandbox: requires `allow-scripts`. Add `allow-same-origin` if the chart loads da
   .tooltip, .controls, .brush, .zoom-buttons, button, input, select {
     display: none !important;
   }
-  #chart {
-    width: 100% !important; max-width: none !important;
-    break-inside: avoid; page-break-inside: avoid;
-  }
+  #chart { width: 100% !important; break-inside: avoid; }
 }
 ```
 
-Canvas prints poorly. Convert to image before print:
+Canvas prints as a blank rectangle in some browsers. Convert to image before print:
 
 ```js
 window.addEventListener("beforeprint", () => {
-  const img = document.createElement("img");
-  img.src = canvas.toDataURL("image/png"); img.style.width = "100%";
+  const img = new Image();
+  img.src = canvas.toDataURL("image/png");
+  img.style.width = "100%";
   img.classList.add("print-fallback");
   canvas.parentNode.insertBefore(img, canvas);
   canvas.style.display = "none";
@@ -158,51 +222,17 @@ window.addEventListener("afterprint", () => {
 });
 ```
 
-## Architecture: The Render Function Pattern
-
-All chart logic in a single function that takes dimensions. For charts with expensive data processing, separate prep from rendering:
-
-```js
-const processed = processData(rawData); // compute once
-function render(width, height) { drawChart(processed, width, height); } // cheap on resize
-```
-
-## Performance
-
-**Debounce vs throttle.** Debounce (render at final size) is almost always right. Throttle (render during resize) only for live-preview in resizable panels.
-
-**Layout thrashing.** Batch DOM reads before writes. Interleaving `clientWidth` reads with style writes forces synchronous layout recalculation.
-
-**Mobile address bar resize.** Address bar show/hide triggers resize with height change but no width change. Skip if width hasn't changed:
-
-```js
-let lastWidth = 0;
-const ro = new ResizeObserver(([entry]) => {
-  const w = entry.contentRect.width;
-  if (Math.abs(w - lastWidth) < 1) return;
-  lastWidth = w;
-  debouncedRender(w, entry.contentRect.height);
-});
-```
-
 ## Common Pitfalls
 
-**ResizeObserver loop error.** Chart render changes container height, observer fires again. Fix: observe a fixed-size wrapper, render inside a child element.
+**SVG `width="100%"` without viewBox.** Browser gives it a default 150px height. Always set explicit height or use viewBox.
 
-**Canvas blurriness on retina.** Must set `canvas.width = w * dpr`, `canvas.height = h * dpr`, then `ctx.scale(dpr, dpr)`. CSS dimensions stay at `w`/`h`. Forgetting any of these three steps produces blurry output.
+**Hidden tabs/panels.** `getBoundingClientRect()` returns zero for `display: none` elements. Defer chart init until the tab is visible (IntersectionObserver or tab-switch event).
 
-**Text doesn't scale with viewBox.** 14px text at 960px becomes 7px at 480px. Use redraw-on-resize for text-heavy charts.
+**Transitions interrupted by resize.** A running `d3.transition` gets cancelled when you re-binddata and re-render. Either skip transitions during resize (`if (resizing) duration = 0`) or let the transition finish before applying the new size.
 
-**SVG `width="100%"` without viewBox.** Collapses to 150px tall (browser default). Always set explicit height or use viewBox.
-
-**Hidden tabs/panels.** `getBoundingClientRect()` returns zero for `display: none` elements. Defer rendering until visible using IntersectionObserver.
-
-**Transition interruption on resize.** Active D3 transitions get interrupted by re-render. Skip transitions during resize or cancel them explicitly.
-
-**Forgetting cleanup.** ResizeObserver, event listeners, and setTimeout handles leak when charts are removed. Always provide a destroy function.
+**Forgetting cleanup.** ResizeObserver, matchMedia listeners, and requestAnimationFrame handles leak when the chart DOM is removed. Provide a `destroy()` function that disconnects them.
 
 ## References
 
-- [High-DPI Canvas](https://web.dev/articles/canvas-hidipi) — crisp Canvas on retina displays
-- [postMessage API](https://developer.mozilla.org/en-US/docs/Web/API/Window/postMessage) — iframe communication
-- [Interaction Media Features](https://developer.mozilla.org/en-US/docs/Web/CSS/@media/hover) — hover and pointer capability queries
+- [High-DPI Canvas](https://web.dev/articles/canvas-hidipi)
+- [Responsive charts (webkid)](https://webkid.io/blog/responsive-chart-usability-d3/) — practical D3 responsive patterns

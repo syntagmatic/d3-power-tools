@@ -1,21 +1,45 @@
 ---
 name: data-table
-description: "Build accessible data tables as fallback views for D3.js visualizations. Use this skill when the user needs a table alternative to a chart, sortable/filterable data tables, chart↔table toggle, linked highlighting between table rows and chart elements, virtual scrolling for large datasets, CSV export, sticky headers, or any pattern where tabular data complements or replaces a visualization."
+description: "Build accessible data tables as companions or alternatives to D3.js visualizations. Use this skill when the user needs a table alternative to a chart, sortable/filterable data tables, chart↔table toggle, linked highlighting between table rows and chart elements, virtual scrolling for large datasets, or any pattern where tabular data complements or replaces a visualization."
 ---
 
-# Fallback Data Table for D3 Visualizations
+# Data Tables for D3 Visualizations
 
-Build data tables that serve as accessible alternatives to D3 visualizations — sortable, filterable, linkable to charts, and scalable to large datasets. Tables aren't a lesser view; for many tasks (lookup, comparison, export) they're superior to charts.
+Charts show patterns; tables show values. When the viewer's task is looking up a specific number, comparing exact figures across rows, or exporting data, a table outperforms any chart. Build tables as first-class views alongside D3 visualizations, not as accessibility afterthoughts.
 
-## When to Use
+## Table vs. Chart: When the Table Wins
 
-- **Accessibility** — screen reader users may prefer structured tabular data over spatial visualization
-- **Data lookup** — users need specific values, not patterns
-- **Export** — users want to download or copy the data
-- **Mobile** — complex charts degrade on small screens; tables scroll naturally
-- **Complementary view** — table and chart side-by-side, linked by hover/selection
+Use a table — not a chart — when:
 
-## Architecture
+- **Exact value lookup** — the viewer needs specific numbers (revenue for Q3, a patient's lab result), not trends. Charts encode values as position/length, which the eye decodes at ~10% precision; tables give the exact figure.
+- **Small n** — fewer than ~20 data points with 3+ attributes. A chart of 8 rows wastes space; a table is denser and scannable.
+- **Mixed units** — columns show dollars, percentages, counts, and dates side-by-side. No single y-axis can handle that; a table handles it naturally.
+- **Comparison across attributes** — the viewer reads across a row to compare one entity's properties. Charts require multiple encodings or facets for this.
+- **Mobile** — complex charts degrade on small screens; tables scroll naturally and work at any width with horizontal scroll.
+
+Offer **both views** (toggle or side-by-side) when different viewers need different tasks — analysts want the numbers, executives want the shape.
+
+## When Not to Use This
+
+Don't build a table when the viewer needs to see **distribution shape**, **trends over time**, or **spatial patterns** — those tasks require visual encoding. A 500-row table of time-series data is less useful than a line chart. If the dataset has one or two numeric columns and the task is "which is biggest?", a bar chart communicates faster than scanning a column of numbers.
+
+## Number Formatting and Alignment
+
+Poor alignment is the most common table design failure. Numbers that aren't right-aligned are impossible to compare by scanning.
+
+```css
+/* Right-align numeric columns; tabular-nums makes digits equal-width so decimals line up */
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+/* Align headers with their data */
+th.num { text-align: right; }
+```
+
+Formatting rules driven by `d3.format`:
+- **Consistent precision** — all values in a column get the same decimal places. `d3.format(',.1f')` not a mix of `3.1` and `3.14159`.
+- **Units in the header, not every cell** — write `GDP ($M)` in `<th>`, format cells as `1,234` not `$1,234M` repeated 50 times. Exception: currency symbols aid scanning in financial tables.
+- **Group separators for large numbers** — `d3.format(',')` turns `1234567` into `1,234,567`. Without separators, the eye can't distinguish thousands from millions at a glance.
+
+## Architecture: Chart ↔ Table Toggle
 
 ```
 ┌──────────────────────────────────┐
@@ -31,7 +55,7 @@ Build data tables that serve as accessible alternatives to D3 visualizations —
 └──────────────────────────────────┘
 ```
 
-Table and chart are sibling containers. Toggle hides one and shows the other via `display`/`aria-hidden`. Both bind the same data array so filter/selection state is shared. Use `aria-pressed` on the toggle button.
+Table and chart are sibling containers. Toggle hides one and shows the other via `display`/`aria-hidden`. Both bind the same data array so filter/selection state is shared. Use `aria-pressed` on the toggle button so screen readers announce the active view.
 
 ## Column Specification
 
@@ -44,7 +68,7 @@ const columns = [
 ];
 ```
 
-`type` drives sort comparators and text alignment (right-align numbers, use `font-variant-numeric: tabular-nums`). `format` is optional.
+`type` drives two things: sort comparator (lexicographic vs. numeric) and cell alignment (right for numbers). Keep format functions pure — they're called every re-render.
 
 ## D3 Nested Join Pattern
 
@@ -61,22 +85,20 @@ rows.selectAll('td')
     .text(d => d);
 ```
 
-The **outer join uses a key function** (`d => d.id`) for stable identity during filter/sort. The **inner cell join must NOT have a key function** — cells always map 1:1 to columns by index. Adding a key to the cell join causes bugs when formatted values collide.
+The **outer join uses a key function** (`d => d.id`) for stable DOM identity during filter/sort — without it, D3 reuses `<tr>` elements by index, causing flash-of-wrong-content during transitions. The **inner cell join must NOT have a key function** — cells always map 1:1 to columns by index. Adding a key to the cell join causes bugs when formatted values collide (e.g., two cells both showing "1,234").
 
 ## Sortable Columns
 
-Click header → sort ascending, click again → descending. Key details:
+Click header to sort ascending, click again for descending. Key details:
 
 - Use `d3.ascending`/`d3.descending` as comparators
-- Set `aria-sort` attribute on the active `<th>` (`"ascending"`, `"descending"`, or `"none"` on inactive headers)
-- Make headers `tabindex="0"` and handle Enter/Space for keyboard activation
-- Show indicators via CSS pseudo-elements: `th.sort-asc::after { content: ' ▲'; }`
-
-**Gotcha**: `Array.sort()` mutates in place. If the chart reads the same array, sort order will change there too. Either sort a copy (`[...data].sort(...)`) or accept shared sort order.
+- Set `aria-sort` on the active `<th>` (`"ascending"`, `"descending"`, `"none"` on others) — screen readers announce sort state
+- Make headers `tabindex="0"`, handle Enter/Space — keyboard users can't click
+- **Sort a copy**: `[...data].sort(...)`. `Array.sort()` mutates in place — if the chart reads the same array, its order silently changes too.
 
 ## Linked Highlighting
 
-Hover/select in chart → highlight table row, and vice versa. Use a shared state object:
+Hover/select in chart highlights the table row, and vice versa. Use a shared state object:
 
 ```js
 const state = {
@@ -93,67 +115,39 @@ const state = {
 };
 ```
 
-Both views wire events to `state.onHover()`/`state.onSelect()` and subscribe via `state.onChange()` to update their rendering.
-
 Table side: `.classed('hovered', d => d.id === state.hoveredId)` on `<tr>` elements.
 
-Chart side: re-render with highlight/fade based on state.
-
-**Scroll-to-row**: when the chart highlights a point, call `row.scrollIntoView({ block: 'nearest' })` on the corresponding `<tr>`. Only do this on click/selection — doing it on hover fights the user's own scrolling.
+**Scroll-to-row**: call `row.scrollIntoView({ block: 'nearest' })` on selection only — doing it on hover fights the user's own scrolling and creates a jarring experience.
 
 ## Filtering
 
-Global text search: filter across all columns with `String(val).toLowerCase().includes(query)`. Show a status `div[aria-live="polite"]` with "Showing N of M rows". For per-column filters, add a second `<tr>` in `<thead>` with `<input>` or `<select>` per column.
+Global text search filters across all columns with `String(val).toLowerCase().includes(query)`. Announce results via `div[aria-live="polite"]` showing "Showing N of M rows" — without this, screen reader users filter blindly and don't know if anything matched.
 
 ## Virtual Scrolling (10K+ rows)
 
-Render only visible rows + buffer. Key pattern:
+Without virtualization, 50K+ DOM nodes cause visible scroll lag. Render only visible rows:
 
-1. Wrap table in a container with `max-height` and `overflow-y: auto`
-2. Use a spacer element (`height: data.length * rowHeight`) to size the scrollbar
+1. Container with `max-height` and `overflow-y: auto`
+2. Spacer element (`height: data.length * rowHeight`) to size the scrollbar correctly
 3. On scroll, compute `startIdx`/`endIdx` from `scrollTop` and `clientHeight`
 4. Slice data, join visible rows, offset `<tbody>` with `translateY(startIdx * rowHeight)`
-5. Set `aria-rowcount` on `<table>` and `aria-rowindex` on each visible `<tr>`
-6. Debounced live region announces scroll position for screen readers
+5. Set `aria-rowcount` on `<table>` and `aria-rowindex` on each visible `<tr>` — screen readers need the logical row position, not the DOM position
 
-**Gotcha**: after sorting, re-call `renderVisible()` — data order changed but scroll position didn't.
-
-## Sticky Headers
-
-Pure CSS — no JS needed:
-
-```css
-.table-container { max-height: 500px; overflow-y: auto; }
-thead th { position: sticky; top: 0; background: #fff; z-index: 1; }
-```
-
-**Gotcha**: `position: sticky` breaks with `border-collapse: collapse` in some browsers. Use `border-collapse: separate; border-spacing: 0;` instead, with `border-bottom` on cells.
-
-## CSV Export
-
-Create a Blob from column headers + formatted rows, generate an Object URL, trigger download via a temporary `<a>` element. Quote strings containing commas/quotes with RFC 4180 escaping (`"` → `""`).
-
-## Responsive Patterns
-
-- **Horizontal scroll**: wrap in `overflow-x: auto` container. Freeze first column with `position: sticky; left: 0`.
-- **Column priority**: tag columns with `data-priority` attributes, hide low-priority columns via `@media` queries.
+**Gotcha**: after sorting, re-call `renderVisible()`. Data order changed but scroll position didn't — the user sees stale rows until the next scroll event.
 
 ## Common Pitfalls
 
-1. **Sorting mutates shared array** — sort a copy if chart shouldn't reorder.
-2. **No key on cell join** — inner `selectAll('td').data(...)` uses index matching. Adding a key causes bugs when formatted values collide.
-3. **Format functions must be pure** — called every re-render. No side effects.
-4. **Virtual scroll + sort** — must re-render visible rows after sorting.
-5. **`scrollIntoView` on hover** — debounce or restrict to click/selection only.
-6. **Missing key on row join** — `d => d.id` on the outer row join is critical for stable DOM during filter/sort.
-7. **10K+ rows without virtualization** — 50K+ DOM nodes will lag. Virtualize or paginate above ~5K rows.
-8. **Sticky + border-collapse** — use `border-collapse: separate; border-spacing: 0` instead.
+1. **No key on row join** — `d => d.id` on the outer join is critical. Without it, sort/filter causes DOM reuse by index and rows show wrong data momentarily.
+2. **Key on cell join** — inner `selectAll('td').data(...)` must use index matching. A key function causes collisions when two cells format to the same string.
+3. **Left-aligned numbers** — numbers without `text-align: right` and `tabular-nums` are unreadable for comparison. The eye needs the ones/tens/hundreds columns to line up vertically.
+4. **Inconsistent decimal places** — mixing `3.1` and `3.14` in one column makes scanning impossible. Set one `d3.format` per column.
+5. **`scrollIntoView` on hover** — restrict to click/selection. On hover it fights the user's scrolling.
+6. **Sticky + border-collapse** — `position: sticky` breaks with `border-collapse: collapse`. Use `border-collapse: separate; border-spacing: 0` with `border-bottom` on cells.
+7. **Missing `aria-live` on filter results** — screen reader users type a filter query and hear nothing. The polite live region must announce the count.
 
 ## References
 
-- [Sortable Table — D3 Observable](https://observablehq.com/@d3/sortable-table) — Mike Bostock's canonical sortable table in D3
-- [WAI-ARIA Table Role](https://www.w3.org/TR/wai-aria-1.2/#table) — ARIA semantics for data tables
+- [Sortable Table — D3 Observable](https://observablehq.com/@d3/sortable-table) — Bostock's canonical sortable table
+- [Ten Guidelines for Better Tables](https://www.cambridge.org/core/journals/journal-of-benefit-cost-analysis/article/abs/ten-guidelines-for-better-tables/74C6FD9FEB12038A52A95B9FBCA05A12) — Schwabish on alignment, units, and whitespace
 - [WAI-ARIA Grid Pattern](https://www.w3.org/WAI/ARIA/apg/patterns/grid/) — interactive tables with cell-level keyboard navigation
-- [Show the Data](https://apreshill.github.io/data-vis-labs-2018/slides/06-slides_tables.html) — Alison Hill on when tables beat charts
-- [Clustergrammer](https://maayanlab.github.io/clustergrammer/) — Avi Ma'ayan Lab's interactive heatmap/table hybrid for exploring high-dimensional data
-- [Ten Guidelines for Better Tables](https://www.darkhorseanalytics.com/blog/clear-off-the-table) — Jon Schwabish's widely cited design guidelines for data tables
+- [Web Typography: Tables](https://alistapart.com/article/web-typography-tables/) — Richard Rutter on tabular-nums and alignment

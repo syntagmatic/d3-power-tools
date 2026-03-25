@@ -5,26 +5,48 @@ description: "D3.js hierarchy layout computation and rendering: treemaps, sunbur
 
 # Hierarchy Layouts
 
-Patterns for computing and rendering D3 hierarchy layouts. For interactive patterns (expand/collapse, zoomable drill-down), see `hierarchy-interaction`.
+Every dataset with a parent column is a tree, but not every tree needs the same picture. The layout you choose determines which question the viewer can answer at a glance — leaf sizes, nesting depth, grouping, or topology — and these are not interchangeable. For interactive patterns (expand/collapse, zoomable drill-down), see `hierarchy-interaction`.
+
+## Choosing a Layout
+
+Pick the layout that answers the viewer's actual question:
+
+| Layout | Emphasizes | Viewer question | Perceptual channel |
+|--------|-----------|-----------------|-------------------|
+| **Treemap** | Leaf sizes | "Where is the budget going?" | Rectangle area — accurate size comparison |
+| **Sunburst** | Depth + proportion | "How does this break down level by level?" | Arc angle — outer rings get *more* space at deeper levels |
+| **Icicle** | Depth + proportion | Same as sunburst, but comparison-friendly | Rectangle width — easier to compare than arc angle |
+| **Pack** | Grouping + containment | "Which cluster does this belong to?" | Enclosure — Gestalt makes groups pop, but wastes ~30% of space |
+| **Tree** | Topology + paths | "How is A connected to B?" | Position — the only layout that shows edges |
+| **Cluster** | Topology, leaves aligned | "How do endpoints compare?" | Same as tree, but all leaves at one depth |
+
+**Decision shortcuts:**
+- If the viewer needs to compare sizes: **treemap**. Rectangles beat arcs and circles for area judgment.
+- If the viewer needs to see all levels at once: **sunburst** or **icicle**. Treemaps crush inner nodes as depth increases.
+- If the viewer needs to trace parent-child paths: **tree** or **cluster**. Space-filling layouts hide topology.
+- If grouping matters more than exact sizes: **pack**. The circles-within-circles metaphor communicates containment instantly, even though circle area is harder to compare than rectangle area.
+- If the hierarchy is wide and shallow (2-3 levels): **treemap**. Nearly perfect data-ink ratio.
+- If the hierarchy is narrow and deep (5+ levels): **sunburst** or **icicle**, because treemap cells for deep leaves become unreadably thin.
+
+## When Not to Use Hierarchy Layouts
+
+- **Flat data with no nesting.** A bar chart or dot plot is simpler and more accurate. Adding hierarchy for decoration wastes the viewer's effort.
+- **Comparing exact values.** Position along a common scale (bar chart) beats area judgment (treemap) beats angle judgment (sunburst). If the question is "is A bigger than B by 10%?", use a bar chart.
+- **Too many leaves (>500) without interaction.** A static treemap with 500 unlabeled slivers is a texture, not a visualization. Either add zoom/drill-down (see `hierarchy-interaction`) or aggregate small nodes into "Other."
+- **No meaningful size variable.** If all leaves are the same size, treemap and sunburst degenerate into uniform grids. Use `.count()` deliberately, or switch to tree/cluster where equal leaves are expected.
 
 ## Data Validation
 
-`d3.stratify()` throws unhelpful errors on bad input. Common issues: duplicate IDs, orphaned nodes (parent references nonexistent ID), cycles, multiple roots, no root.
+`d3.stratify()` throws unhelpful errors on bad input (duplicate IDs, orphaned nodes, cycles, multiple roots). Validate before calling it: index all IDs in a Set, check parent references, detect cycles with DFS (gray/black coloring). See [`scripts/validate-hierarchy.js`](scripts/validate-hierarchy.js) for `validateHierarchy()` / `cleanHierarchy()`.
 
-**Strategy:** Validate before `d3.stratify()`. Index all IDs in a Set, check parent references. Detect cycles with DFS (gray/black coloring). Recover: deduplicate (keep first), break cycles by detaching back-edge node, graft orphans and extra roots onto synthetic `__root__`.
+## `.sum()` vs `.count()`
 
-See [`scripts/validate-hierarchy.js`](scripts/validate-hierarchy.js) for `validateHierarchy()` / `cleanHierarchy()`.
+Space-filling layouts (treemap, pack, partition) require `.value` on every node. Two ways to set it:
 
-## `.sum()` vs `.count()` — Critical Distinction
+- **`.sum(accessor)`** — rolls up leaf values. Accessor receives `.data`, not the node. Internal nodes get sum of descendants. If accessor returns a value for internal nodes, it gets *added* to the children's sum — it doesn't replace it. To size only by leaves: `root.sum(d => d.children ? 0 : d.value)`.
+- **`.count()`** — sets value to number of leaves. Equal-area cells regardless of data.
 
-Space-filling layouts (treemap, pack, partition) need `.value` on every node.
-
-- **`.sum(accessor)`** — rolls up leaf values. Accessor gets `.data`, not the node. Internal nodes get sum of descendants.
-- **`.count()`** — sets value to number of leaves. Equal-area leaves regardless of data.
-
-**Gotcha:** `.sum()` visits bottom-up. If accessor returns value for internal nodes, those values are *added* to children's sum — they don't replace it. To size only by leaves: `root.sum(d => d.children ? 0 : d.value)`.
-
-**Gotcha:** Sort after `.sum()` since sort callbacks often use `.value`.
+**Always `.sum()` before `.sort()`** — sort callbacks use `.value`, which isn't set until `.sum()` runs.
 
 ## Tiling Strategy Tradeoffs
 
@@ -35,7 +57,6 @@ treemap.tile(d3.treemapBinary);        // balanced binary split
 treemap.tile(d3.treemapSliceDice);     // alternates by depth
 ```
 
-The WHY:
 - **Squarify**: best for static — minimizes aspect ratios, cells are readable. But node order is NOT preserved across data updates (jumpy animations).
 - **Resquarify**: same aspect ratios as squarify but preserves node order — **essential for animated treemaps**. Use whenever you transition between data states.
 - **Binary**: balanced splits, moderate aspect ratios, stable ordering. Good middle ground.
@@ -43,21 +64,21 @@ The WHY:
 
 ## Coordinate System Semantics
 
-Each layout uses `.x`/`.y` differently — this is a major source of confusion:
+Each layout uses `.x`/`.y` differently — this is a major source of bugs:
 
-**`d3.tree()` / `d3.cluster()`**: `.size([crossAxis, mainAxis])`. For horizontal tree: `.size([height, width])`, then `d.y` = horizontal, `d.x` = vertical. Confusing but intentional — mathematical convention.
+**`d3.tree()` / `d3.cluster()`**: `.size([crossAxis, mainAxis])`. For horizontal tree: `.size([height, width])`, then `d.y` = horizontal position, `d.x` = vertical. Counterintuitive but intentional — mathematical convention where x is the "breadth" axis.
 
-**Radial tree/cluster**: `.size([2 * Math.PI, radius])`. `d.x` = angle (radians), `d.y` = radius. Convert: `x = d.y * Math.cos(d.x - π/2)`, `y = d.y * Math.sin(d.x - π/2)`. The `-π/2` rotates so angle 0 points up.
+**Radial tree/cluster**: `.size([2 * Math.PI, radius])`. `d.x` = angle (radians), `d.y` = radius. Convert: `x = d.y * Math.cos(d.x - π/2)`, `y = d.y * Math.sin(d.x - π/2)`. The `-π/2` rotates so angle 0 points up instead of right.
 
 **Space-filling layouts** (treemap, partition): `d.x0, d.y0, d.x1, d.y1` — rectangle bounds.
 
 **Pack**: `d.x, d.y, d.r` — center and radius.
 
-**Partition for sunburst**: `x` maps to angle, `y` to radius. Apply `d3.scaleSqrt` to radial dimension so outer rings don't dominate visually.
+**Partition for sunburst**: `x` maps to angle, `y` to radius. Apply `d3.scaleSqrt` to the radial dimension — without it, outer rings dominate visually because area grows with r-squared.
 
-## Radial Label Transform
+## Radial Labels
 
-Labels in radial layouts need rotation and flipping to stay readable:
+Labels in radial layouts need rotation and flipping. Without flipping, labels on the left half render upside-down:
 
 ```js
 node.append("text")
@@ -70,9 +91,7 @@ node.append("text")
   .attr("text-anchor", d => d.x < Math.PI ? "start" : "end");
 ```
 
-### Sunburst Arc Label Visibility
-
-Calculate based on available arc length:
+For sunburst arcs, hide labels when the arc is too short to read — otherwise they pile up at the center:
 ```js
 const arcLength = (d.x1 - d.x0) * (d.y0 + d.y1) / 2;
 label.attr("opacity", arcLength > 40 ? 1 : 0);
@@ -97,34 +116,21 @@ path.transition(t).attrTween("transform", (d) => (time) => {
 
 ## Link Generators
 
-| Generator | Use | Accessors |
-|-----------|-----|-----------|
-| `d3.linkHorizontal()` | Horizontal tree | `.x(d => d.y).y(d => d.x)` |
-| `d3.linkVertical()` | Vertical tree | `.x(d => d.x).y(d => d.y)` |
-| `d3.linkRadial()` | Radial tree/cluster | `.angle(d => d.x).radius(d => d.y)` |
+For node-link layouts, swap `.x`/`.y` accessors to match coordinate semantics: `d3.linkHorizontal().x(d => d.y).y(d => d.x)` for horizontal trees (because `d.y` is the horizontal axis). Use `d3.linkRadial().angle(d => d.x).radius(d => d.y)` for radial layouts.
 
 ## Common Pitfalls
 
-1. **Forgetting `.sum()` or `.count()`.** Treemap, pack, partition require `.value`. Without it, all cells have zero area — layout runs but nothing visible.
+1. **Treemap `paddingTop` without labels.** Reserves space for group labels at the top of each cell. If you're not rendering labels there, it wastes space and creates a visual gap the viewer will try to interpret.
 
-2. **`.sum()` accessor gets `.data`, not the node.** Write `d => d.value`, not `d => d.data.value`.
+2. **Pack labels overlapping.** Pack layout doesn't guarantee label space — circles can be any size. Show labels only above a radius threshold, clip text to the circle, or label on hover.
 
-3. **Sorting before `.sum()`.** Sort callbacks use `node.value`, not set until `.sum()`. Always `.sum()` first.
+3. **Sunburst root fills center.** Partition allocates the full innermost ring to root, which carries no information. Filter it out: `.filter(d => d.depth > 0)`, or render as a small center circle for zoom-out navigation.
 
-4. **Tree/cluster `size` convention.** `[crossAxis, mainAxis]` — `.size([height, width])` for horizontal. Then `d.y` = horizontal, `d.x` = vertical.
-
-5. **Radial `-π/2` rotation.** Without it, angle 0 points right instead of up.
-
-6. **Treemap `paddingTop` without labels.** Reserves space for group labels. Wasted if not rendering labels there.
-
-7. **Pack labels overlapping.** Pack doesn't guarantee label space. Show only for certain depth ranges, clip to circle, or label on hover.
-
-8. **Partition root fills center.** In sunburst, filter out root: `.filter(d => d.depth > 0)`, or render as small center circle for zoom-out nav.
-
-9. **`d3.stratify` root parent ID.** Root must have null/empty parent. If CSV root has empty string: `.parentId(d => d.parent || null)`.
+4. **Squarify for animated data.** Squarify reorders nodes to minimize aspect ratios, so cells jump to new positions when data changes. Switch to `treemapResquarify` for any treemap that transitions between data states.
 
 ## References
 
 - [D3 Hierarchy](https://d3js.org/d3-hierarchy)
 - [Squarified Treemaps](https://www.win.tue.nl/~vanwijk/stm.pdf) — Bruls, Huizing & van Wijk (EuroVis 2000)
 - [Treemaps for space-constrained visualization](http://www.cs.umd.edu/hcil/treemap-history/) — Shneiderman (1991)
+- [Visualization of large hierarchical data by circle packing](https://dl.acm.org/doi/10.1145/1124772.1124851) — Wang et al. (CHI 2006)

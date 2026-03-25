@@ -5,11 +5,9 @@ description: "Hierarchical edge bundling for D3.js: visualize connections betwee
 
 # Hierarchical Edge Bundling
 
-Patterns for visualizing connections between nodes in a hierarchy by routing edges through the tree structure. Reduces visual clutter by bundling edges that share common ancestors, revealing high-level connection patterns between groups.
+A network of 500 edges between leaf nodes is unreadable as straight lines — a hairball. Edge bundling routes each connection through the tree structure so edges that share ancestry merge into visible rivers, revealing group-level traffic patterns that individual edges never could.
 
-The canonical reference is Danny Holten's 2006 paper. D3's implementation uses `d3.cluster` for radial leaf placement and `d3.curveBundle` for tension-controlled bundling through LCA paths.
-
-For hierarchy construction and layout details, see the `hierarchy-layouts` skill. For canvas performance patterns, see `canvas`. For advanced highlight/selection patterns, see `brushing`.
+The tradeoff is real: bundling trades edge-level accuracy for group-level pattern. A tightly bundled diagram tells you "these two clusters are heavily connected" but not "which specific leaf connects to which." That tradeoff is controlled by a single parameter — beta — and getting it right is the central judgment call.
 
 ## Core Concept
 
@@ -21,31 +19,32 @@ Three ingredients:
 
 Edges between leaves in the same subtree bundle tightly; edges between distant subtrees fan out through higher ancestors.
 
+## Beta: The Judgment Call
+
+`d3.curveBundle.beta(β)` controls how tightly edges follow the tree structure:
+
+- **β = 1** — straight lines between endpoints. Maximum edge clarity, maximum clutter.
+- **β = 0.15** (tension 0.85) — tight bundling. Good default for showing group-level flow.
+- **β = 0** — curves follow tree edges exactly. Maximum bundling, maximum ambiguity.
+
+**The perceptual trap:** CHI 2025 research (Wallinger et al.) confirms that tight bundling creates *false connections* — viewers follow merged bundles and perceive adjacencies that don't exist in the data. When two bundles merge and split, viewers read the split point as a path in the graph. They do this even while reporting the diagram feels "ambiguous."
+
+**Practical guidance:**
+- Start at β = 0.15 (tension 0.85) for the overview. This bundles enough to show group patterns without merging unrelated clusters.
+- If distinct clusters' bundles merge into a single river, *reduce* tension (raise β toward 0.3–0.5) until they separate. The visual merge is a lie — those paths don't share structure.
+- Add a tension slider so viewers can unbundle on demand. This turns bundling from a fixed editorial choice into an interactive lens.
+- For presentations (no interaction), err toward less bundling. The viewer can't unbundle to check.
+
+```js
+const line = d3.lineRadial()
+  .curve(d3.curveBundle.beta(0.15))
+  .radius(d => d.y)
+  .angle(d => d.x);
+```
+
 ## Data Preparation
 
 Two inputs: a hierarchy and a connection list referencing leaf IDs.
-
-```js
-// Hierarchy — flat with parent references
-const nodes = [
-  { id: "root", parent: "" },
-  { id: "vis", parent: "root" },
-  { id: "vis.chart", parent: "vis" },
-  { id: "vis.bindAxis", parent: "vis" },
-  { id: "data", parent: "root" },
-  { id: "data.loader", parent: "data" },
-];
-
-// Connections between leaves
-const connections = [
-  { source: "vis.chart", target: "data.loader" },
-  { source: "vis.bindAxis", target: "vis.chart" },
-];
-```
-
-### Computing LCA Paths
-
-`node.path(target)` returns every node from source up to the LCA and back down to target. This array becomes the control points for the bundled curve.
 
 ```js
 const root = d3.stratify()
@@ -54,74 +53,45 @@ const root = d3.stratify()
 
 const nodesById = new Map(root.descendants().map(d => [d.data.id, d]));
 
+// node.path(target) returns [source, ..ancestors.., LCA, ..ancestors.., target]
 const links = connections.map(c => {
   const source = nodesById.get(c.source);
   const target = nodesById.get(c.target);
   return source && target ? source.path(target) : null;
 }).filter(Boolean);
-// Each link: [leaf1, parent1, grandparent, parent2, leaf2]
 ```
 
-**Gotcha:** If source/target IDs don't match hierarchy nodes, you get silent nulls. Always filter and log mismatches during development.
+**Gotcha:** If source/target IDs don't match hierarchy node IDs, `nodesById.get()` returns undefined and the edge silently disappears. Always log mismatches during development — `"vis.chart"` vs `"root.vis.chart"` is a common one.
 
 ## Radial Layout
 
-The classic presentation places leaves around a circle using `d3.cluster` with radial coordinates. See `hierarchy-layouts` for radial coordinate details and label flipping.
+Use `d3.cluster` (not `d3.tree`) — it places all leaves at the same radius, forming the ring. `d3.tree` spreads leaves at varying depths, breaking the circular structure.
 
 ```js
-const radius = Math.min(width, height) / 2;
-
 const cluster = d3.cluster()
   .size([2 * Math.PI, radius - 140])
   .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth);
+```
 
-cluster(root);
+The `.separation()` function matters: without `/ a.depth`, deeper levels get disproportionate angular space, crowding shallow groups. See `hierarchy-layouts` for radial coordinate details and label flipping.
 
-const g = svg.append("g")
-  .attr("transform", `translate(${width / 2},${height / 2})`);
+Only render leaves — internal nodes are invisible routing waypoints:
 
-// Only render leaves — internal nodes are invisible routing waypoints
+```js
 const nodeSelection = g.selectAll("g.node")
   .data(root.leaves())
   .join("g")
     .attr("class", "node")
-    .attr("transform", d => {
-      const angle = d.x * 180 / Math.PI - 90;
-      return `rotate(${angle}) translate(${d.y},0)`;
-    });
-
-nodeSelection.append("circle").attr("r", 3);
-nodeSelection.append("text")
-  .attr("dy", "0.31em")
-  .attr("x", d => d.x < Math.PI ? 6 : -6)
-  .attr("text-anchor", d => d.x < Math.PI ? "start" : "end")
-  .attr("transform", d => d.x >= Math.PI ? "rotate(180)" : null)
-  .text(d => d.data.id.split(".").pop());
+    .attr("transform", d =>
+      `rotate(${d.x * 180 / Math.PI - 90}) translate(${d.y},0)`);
 ```
 
-## Edge Bundling with `d3.curveBundle`
+## Rendering
 
-`d3.curveBundle.beta(β)` is a B-spline variant where the control points are the LCA path nodes.
-
-```js
-const tension = 0.85;  // 0 = straight lines, 1 = maximum bundling
-const beta = 1 - tension;
-
-const line = d3.lineRadial()
-  .curve(d3.curveBundle.beta(beta))
-  .radius(d => d.y)
-  .angle(d => d.x);
-```
-
-**Tension semantics:**
-- `tension = 0` → `beta = 1` → straight lines between endpoints
-- `tension = 0.85` → `beta = 0.15` → tight bundling (good default)
-- `tension = 1` → `beta = 0` → curves follow tree edges exactly
-
-### SVG Rendering
+### SVG (< 200 edges)
 
 ```js
-const linkSelection = g.selectAll("path.link")
+g.selectAll("path.link")
   .data(links)
   .join("path")
     .attr("class", "link")
@@ -131,13 +101,12 @@ const linkSelection = g.selectAll("path.link")
     .attr("d", line);
 ```
 
-### Canvas Rendering
+### Canvas (200+ edges)
 
-For >200 edges, canvas is faster. `.context(ctx)` makes the line generator write `moveTo`/`bezierCurveTo` calls directly onto the canvas context:
+`.context(ctx)` makes the line generator write `moveTo`/`bezierCurveTo` directly onto the canvas context — no intermediate SVG path strings:
 
 ```js
-function drawLinks(ctx, links, tension) {
-  const beta = 1 - tension;
+function drawLinks(ctx, links, beta) {
   const line = d3.line()
     .curve(d3.curveBundle.beta(beta))
     .x(d => d.cx).y(d => d.cy)
@@ -156,22 +125,11 @@ function drawLinks(ctx, links, tension) {
 }
 ```
 
-For Cartesian (non-radial) layouts, use `d3.line` instead of `d3.lineRadial` — same LCA paths, different coordinate accessors.
-
-### Tension Slider
-
-```js
-d3.select("#tension").on("input", function() {
-  const tension = +this.value / 100;
-  line.curve(d3.curveBundle.beta(1 - tension));
-  linkSelection.attr("d", line);  // SVG
-  // Canvas: clear and call drawLinks()
-});
-```
+For Cartesian layouts, use `d3.line` instead of `d3.lineRadial` — same LCA paths, different coordinate accessors.
 
 ## Interaction: Highlighting Connections
 
-An edge connects to a node if either endpoint leaf is a descendant of that node:
+Highlighting is what makes bundling useful for analysis rather than just aesthetics. Without it, the viewer sees group patterns but can't verify specific connections.
 
 ```js
 function getConnectedLinks(node, links) {
@@ -184,83 +142,19 @@ function getConnectedLinks(node, links) {
 }
 ```
 
-### SVG Highlighting
-
-```js
-nodeSelection
-  .on("mouseover", (event, d) => {
-    const connected = getConnectedLinks(d, links);
-    const connectedIds = new Set();
-    connected.forEach(l => {
-      connectedIds.add(l[0].data.id);
-      connectedIds.add(l[l.length - 1].data.id);
-    });
-
-    linkSelection.classed("link--faded", true);
-    nodeSelection.classed("node--faded", true);
-    linkSelection.filter(l => connected.includes(l))
-      .classed("link--faded", false).classed("link--highlighted", true).raise();
-    nodeSelection.filter(n => connectedIds.has(n.data.id))
-      .classed("node--faded", false).classed("node--highlighted", true);
-  })
-  .on("mouseout", () => {
-    linkSelection.classed("link--faded link--highlighted", false);
-    nodeSelection.classed("node--faded node--highlighted", false);
-  });
-```
-
-```css
-.link { stroke: #888; stroke-opacity: 0.3; }
-.link--highlighted { stroke: #e03131; stroke-opacity: 0.8; stroke-width: 1.5; }
-.link--faded { stroke-opacity: 0.05; }
-.node text { fill: #333; font-size: 10px; }
-.node--highlighted text { fill: #e03131; font-weight: 600; }
-.node--faded text { fill-opacity: 0.2; }
-```
-
-For canvas highlighting, render in two passes (faded first, highlighted on top). See `canvas` for batched draw patterns and `brushing` for advanced highlight state management.
-
-## Color by Group
-
-Color nodes and edges by top-level ancestor. See `hierarchy-layouts` for the `groupOf` pattern. For edge bundling, apply to edges by source group:
-
-```js
-link.attr("stroke", d => color(groupOf(d[0])));
-```
-
-## Structural Context
-
-Edge bundling is most effective when the underlying hierarchy is also visible. In Treemaps or Circle Packs, render the structural rectangles or circles behind the nodes and links.
-
-```js
-// Add background rectangles for treemap context
-nodeSelection.append("rect")
-  .attr("class", "bg")
-  .attr("fill", "#555")
-  .attr("fill-opacity", 0.05)
-  .attr("x", d => -d.current_w / 2)
-  .attr("y", d => -d.current_h / 2)
-  .attr("width", d => d.current_w || 0)
-  .attr("height", d => d.current_h || 0);
-```
+Always `.raise()` highlighted links (SVG) or draw highlighted in a second pass (Canvas) — otherwise highlighted edges render behind faded ones and disappear into the gray.
 
 ## Layout Transitions with Bundled Edges
 
-Edge bundling works with any hierarchy layout. The key insight: interpolate node positions in data space (`current_x`/`current_y` on the hierarchy nodes), then re-derive the bundled curves each frame as a downstream effect. The LCA paths never change — only the positions of the nodes they pass through.
-
-### Data-Space Interpolation
-
-Standard D3 transitions interpolate screen-space attributes (SVG `d`, `transform`). For bundled edges, interpolate the data-space coordinates instead and let the line generator recompute paths each frame:
+Edge bundling works with any hierarchy layout. The key insight: interpolate node positions in data space (`current_x`/`current_y` on hierarchy nodes), then re-derive bundled curves each frame. The LCA paths never change — only the positions of the nodes they pass through.
 
 ```js
 function transitionToLayout(layoutFn) {
-  // 1. Snapshot current positions
   root.each(d => { d.source_x = d.current_x; d.source_y = d.current_y; });
 
-  // 2. Compute new layout → target positions
   layoutFn(root);
   root.each(d => {
-    // Convert radial layouts to cartesian
+    // Convert all layouts to common cartesian coordinates
     if (layoutFn === cluster) {
       d.target_x = d.y * Math.cos(d.x - Math.PI / 2);
       d.target_y = d.y * Math.sin(d.x - Math.PI / 2);
@@ -270,71 +164,31 @@ function transitionToLayout(layoutFn) {
     }
   });
 
-  // 3. Interpolate data-space positions, redraw curves each frame
-  const t = svg.transition().duration(1200).ease(d3.easeCubicInOut);
-  t.tween("layout", () => time => {
-    root.each(d => {
-      d.current_x = d.source_x + (d.target_x - d.source_x) * time;
-      d.current_y = d.source_y + (d.target_y - d.source_y) * time;
+  svg.transition().duration(1200).ease(d3.easeCubicInOut)
+    .tween("layout", () => time => {
+      root.each(d => {
+        d.current_x = d.source_x + (d.target_x - d.source_x) * time;
+        d.current_y = d.source_y + (d.target_y - d.source_y) * time;
+      });
+      redrawNodes();
+      redrawLinks();  // bundle curves recomputed from current_x/y
     });
-    redrawNodes();
-    redrawLinks();  // bundle curves recomputed from current_x/y
-  });
 }
 ```
 
-### Cartesian Line Generator
+Internal nodes must have interpolated positions even though they're invisible — their smooth movement is what makes bundled curves deform naturally during the transition.
 
-During transitions (and for non-radial layouts), use `d3.line` with `current_x`/`current_y` instead of `d3.lineRadial`:
+**Why this works:** The bundle curve is a pure function of its control point positions. Since LCA paths depend on tree structure (not layout), interpolating control points smoothly deforms the curves. No path morphing library needed.
 
-```js
-const cartesianLine = d3.line()
-  .curve(d3.curveBundle.beta(1 - tension))
-  .x(d => d.current_x)
-  .y(d => d.current_y);
+## When Not to Use Edge Bundling
 
-function redrawLinks() {
-  linkSelection.attr("d", cartesianLine);
-}
-```
+**When individual connections matter more than group patterns.** If the viewer needs to trace specific edges (e.g., "does module A depend on module B?"), bundling actively hides the answer. Use a force-directed layout with highlight-on-hover, or an adjacency matrix.
 
-### Internal Nodes as Routing Waypoints
+**When the hierarchy is arbitrary or flat.** Bundling quality depends entirely on how well the hierarchy groups related nodes. A two-level hierarchy (root → leaves) produces no meaningful bundling. If your grouping doesn't reflect real structure, the bundles will be meaningless rivers.
 
-Internal nodes must have interpolated positions even though they may not be visible. In the bundle layout, they sit along the radial hierarchy with `r = 0`. In pack or treemap, they occupy their layout-computed position. During transitions, their smooth movement is what makes the bundled curves deform naturally.
+**When most edges are within-group.** Bundling reveals cross-group connections by routing them through ancestors. If 90% of edges stay within the same parent, those short paths barely curve and the diagram adds complexity without insight. A grouped adjacency matrix shows within-group density better.
 
-### Layout-Specific Position Mapping
-
-Each layout produces different coordinate semantics. Convert everything to a common cartesian `target_x`/`target_y`:
-
-```js
-function computeTargets(layout) {
-  root.each(d => {
-    switch (layout) {
-      case "bundle":   // radial: leaves on ring, internals along hierarchy
-      case "cluster":  // radial: d.x = angle, d.y = radius
-        d.target_x = d.y * Math.cos(d.x - Math.PI / 2);
-        d.target_y = d.y * Math.sin(d.x - Math.PI / 2);
-        break;
-      case "tree":     // cartesian: d.x = cross-axis, d.y = main-axis
-        d.target_x = d.y;  // horizontal tree
-        d.target_y = d.x;
-        break;
-      case "pack":     // cartesian: d.x, d.y = circle center
-        d.target_x = d.x - width / 2;
-        d.target_y = d.y - height / 2;
-        break;
-      case "treemap":  // cartesian: d.x0/y0/x1/y1 = rect bounds
-        d.target_x = (d.x0 + d.x1) / 2 - width / 2;
-        d.target_y = (d.y0 + d.y1) / 2 - height / 2;
-        break;
-    }
-  });
-}
-```
-
-### Why This Works
-
-The bundle curve is a pure function of its control point positions. Since LCA paths are fixed (they depend on tree structure, not layout), interpolating the control points smoothly deforms the curves. No path morphing library needed — just move the points, redraw the curves.
+**When you have fewer than ~30 edges.** Straight lines with highlighting are clearer. Bundling solves a clutter problem that doesn't exist at small scale.
 
 ## Performance
 
@@ -347,27 +201,19 @@ The bundle curve is a pure function of its control point positions. Since LCA pa
 
 ## Common Pitfalls
 
-1. **Mismatched IDs between hierarchy and connections.** Source/target must exactly match leaf node IDs. `"vis.chart"` vs `"root.vis.chart"` silently drops edges.
+1. **Mismatched IDs between hierarchy and connections.** Source/target must exactly match leaf node IDs. Silent edge drops are the most common bug.
 
-2. **`d3.cluster` vs `d3.tree`.** Use `d3.cluster` — it places all leaves at the same radius. `d3.tree` spreads leaves at varying depths, breaking the radial ring.
+2. **Beta vs tension confusion.** `d3.curveBundle.beta(β)` where `β = 1 - tension`. High tension = low beta = tight bundling. The naming is backwards from intuition — beta 0 is maximum bundling, not minimum.
 
-3. **Beta vs tension confusion.** `d3.curveBundle.beta(β)` where `β = 1 - tension`. High tension = low beta = tight bundling.
+3. **Labels overlapping at high node counts.** Above ~100 leaves, radial labels collide. Show labels only on hover, increase radius, or filter to every Nth label.
 
-4. **Not calling `.raise()` on highlighted links.** Highlighted links render behind faded ones without it. Always `.raise()` (SVG) or draw highlighted in a second pass (canvas).
+4. **Internal nodes visible as dots.** Only leaves should render. Internal nodes are routing waypoints — filter to `root.leaves()` for the node selection.
 
-5. **Labels overlapping at high node counts.** Above ~100 leaves, radial labels collide. Show labels only on hover, increase radius, or filter to every Nth label.
-
-6. **Internal nodes visible as dots.** Only leaves should render. Internal nodes are routing waypoints. Filter to `root.leaves()` for the node selection.
-
-7. **Missing `.separation()` on radial cluster.** Without `(a, b) => (a.parent === b.parent ? 1 : 2) / a.depth`, deeper levels get too much angular space.
-
-8. **Bundling non-leaf connections.** The classic technique assumes leaf-to-leaf connections. Internal node connections produce short paths with minimal bundling.
+5. **Bundling non-leaf connections.** The technique assumes leaf-to-leaf connections. Internal node connections produce short LCA paths with minimal bundling — they look like straight lines floating in the middle of the diagram.
 
 ## References
 
-- [Hierarchical Edge Bundles: Visualization of Adjacency Relations in Hierarchical Data](https://doi.org/10.1109/TVCG.2006.147) — Danny Holten's original paper introducing the technique (IEEE InfoVis 2006)
+- [Hierarchical Edge Bundles](https://doi.org/10.1109/TVCG.2006.147) — Danny Holten's original paper (IEEE InfoVis 2006)
+- [How Do People Perceive Bundling?](https://dl.acm.org/doi/10.1145/3706598.3713444) — CHI 2025 study on false connections and bundling ambiguity
 - [Hierarchical Edge Bundling](https://observablehq.com/@d3/hierarchical-edge-bundling) — Mike Bostock's canonical D3 implementation
-- [D3 Hierarchy documentation](https://d3js.org/d3-hierarchy) — API reference for `d3.cluster`, `d3.hierarchy`, and tree traversal
-- [D3 Curve Bundle](https://d3js.org/d3-shape/curve#curveBundle) — `d3.curveBundle.beta()` API for controlling bundling tension
-- [Force-Directed Edge Bundling](https://doi.org/10.1111/j.1467-8659.2009.01450.x) — Danny Holten & Jarke van Wijk's follow-up technique that doesn't require hierarchy (EuroVis 2009)
-- [Radial Dendrogram](https://observablehq.com/@d3/radial-dendrogram) — radial cluster layout, the base for bundled edge visualizations
+- [Edge-Path Bundling](https://arxiv.org/abs/2108.05467) — less ambiguous alternative that bundles along graph paths rather than spatial proximity

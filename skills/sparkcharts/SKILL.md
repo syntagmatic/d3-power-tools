@@ -5,16 +5,7 @@ description: "Build inline sparklines and spark charts with D3.js. Use this skil
 
 # Sparkcharts
 
-Compact, word-sized visualizations that embed in text, table cells, and dashboard cards. Edward Tufte's sparkline: "intense, simple, word-sized graphics." Every pixel carries data — no axes, no legends.
-
-```
-<span class="spark">
-  <svg width="80" height="16" viewBox="…">
-    <path d="…" />       ← the sparkline
-    <circle />           ← endpoint dot
-  </svg>
-</span>
-```
+Readers lose context when they have to look away from a number to find its trend. Sparkcharts solve this by embedding the shape of the data — trend, volatility, distribution — right next to the value, inside the text flow. Tufte's "intense, simple, word-sized graphics" with a data-pixel ratio of 1.0: no axes, no legends, no chrome.
 
 ## Sparkline (Line)
 
@@ -42,14 +33,12 @@ svg.append("circle")
 
 ### Curve choice
 
-- `curveMonotoneX` — smooth, preserves monotonicity, best default
-- `curveLinear` — point-to-point, best for discrete/step data
-- `curveStep` — step function, categorical time periods
-- `curveBasis` — very smooth but overshoots, use when trend > individual values
+- `curveMonotoneX` — default. Smooth without overshooting: a monotone segment never creates false peaks, critical at sparkline scale where a single overshoot pixel reads as a real data feature
+- `curveLinear` — point-to-point, best for discrete/step data where interpolation would imply nonexistent intermediate values
+- `curveStep` — categorical time periods (quarters, on/off states) where the value holds until the next change
+- `curveBasis` — very smooth but overshoots extrema. Only when the overall trend matters more than individual values
 
 ## Variants
-
-Each variant replaces the line generator / drawing step above. Scales and SVG setup remain the same.
 
 ### Spark Area
 
@@ -172,7 +161,7 @@ Cell sizing: `white-space: nowrap`, tight padding (`2px 6px`), `line-height: 1`.
 
 ### Shared scales across rows
 
-When sparkcharts in different rows represent the same metric, they **must share a common y-domain** so heights are visually comparable. Without this, a flat distribution filling its own range looks identical to a steep one.
+When sparkcharts in different rows represent the same metric, they **must share a common y-domain** so heights are visually comparable. Without this, every sparkline auto-scales to its own `d3.extent`, and a 1% fluctuation filling its range looks identical to a 40% swing — Tufte's lie factor made invisible by the absence of axes.
 
 ```js
 // Compute shared domain ONCE from all rows before rendering
@@ -204,19 +193,7 @@ The number column anchors the visual. Without it, readers can't tell whether a l
 
 ## Embedding Inline in Text
 
-```html
-<p>Revenue trending upward
-  <span class="spark" data-values="3,5,4,7,6,8,9,11,10,12"></span>
-  reaching $12M.</p>
-```
-
-```js
-d3.selectAll(".spark").each(function() {
-  const data = this.dataset.values.split(",").map(Number);
-  const svg = d3.select(this).append("svg").attr("width", 80).attr("height", 16);
-  // draw sparkline in svg using scales + line generator from above
-});
-```
+Store data in `data-values` attributes, select all `.spark` spans, parse and render. The critical CSS: `vertical-align: middle` aligns the spark with surrounding text, and `margin: 0 2px` gives breathing room without breaking the reading flow.
 
 ```css
 .spark svg { vertical-align: middle; margin: 0 2px; }
@@ -224,10 +201,10 @@ d3.selectAll(".spark").each(function() {
 
 ## Dashboard Cards
 
-Larger sparklines (40–60px tall) in metric cards. Consider adding:
-- A dashed reference line at a meaningful value (budget, target, zero)
-- Min/max dots
-- Endpoint value label
+Larger sparklines (40–60px tall) in metric cards. At this size you have pixels to spare, so add context that word-sized sparklines omit:
+- A dashed reference line at a meaningful value (budget, target, zero) — gives the shape a baseline the reader can judge against
+- Min/max dots — anchors the range without adding an axis
+- Endpoint value label — lets the reader skip the mental lookup to the KPI number
 
 ## Small Multiples Grid
 
@@ -251,7 +228,7 @@ datasets.forEach(({ label, values }) => {
 
 ## Responsive
 
-Use `viewBox` and let CSS control size. `preserveAspectRatio: "none"` stretches to fill container width — fine for sparklines where horizontal trend is the point.
+Use `viewBox` and let CSS control size. `preserveAspectRatio: "none"` stretches to fill container width. This is safe for sparklines (unlike most charts) because the reader cares about trend shape, not precise slope — stretching horizontally changes aspect ratio but preserves the up/down pattern that carries the message.
 
 ```js
 svg.attr("viewBox", `0 0 ${w} ${h}`)
@@ -288,13 +265,33 @@ When data exceeds pixel width (e.g., 1000 points in 80px), downsample first. Lar
 | 200–1000 | Canvas, one per sparkline |
 | 1000+ | Canvas + virtual scroll (only render visible rows) |
 
+## When Sparkcharts Mislead
+
+Sparklines strip away axes and labels, which makes them powerful — and dangerous. The same design that maximizes data density also removes the safeguards that prevent misreading.
+
+1. **Auto-scaled y-axis hides magnitude.** `d3.extent` maps min-to-max into the full pixel height. A stock that moved 1% and one that moved 40% look identical if each fills its own range. Fix: use shared y-domains when sparklines sit side-by-side (see "Shared scales across rows"), or always pair with a number column that anchors magnitude.
+
+2. **Zero-baseline suppresses signal.** The opposite problem: forcing `y.domain([0, max])` on data that varies between 98 and 102 produces a flat line at the top. Tufte noted this tension explicitly — there is no universal answer. Rule of thumb: use zero baseline for quantities where zero is meaningful (counts, revenue). Use `d3.extent` for quantities where relative change matters (temperature, stock price), but then *never* compare heights across sparklines visually.
+
+3. **Aspect ratio distortion.** A sparkline stretched too wide flattens slopes; too narrow exaggerates them. At word-size (roughly 4:1 to 6:1 width:height), most trends read naturally. `preserveAspectRatio: "none"` with CSS width is convenient but can distort perception if the container width varies dramatically — test at both narrow and wide breakpoints.
+
+4. **Missing data reads as continuity.** Without `.defined(d => d != null)`, the line generator connects across gaps, implying data exists where it does not. At sparkline scale, a broken line segment is a stronger and more honest signal than interpolation.
+
+5. **Color without context.** Coloring a sparkline green or red based on endpoint change tells only part of the story — a line that crashed and recovered looks "green." If the shape tells a different story than the color, the color wins (readers process it first).
+
+## When Not to Use Sparkcharts
+
+- **When the reader needs to read precise values.** Sparklines encode trend and shape, not magnitude. If the task is "what was the value in March?", use a proper chart with axes, or a data table.
+- **When you have fewer than ~5 data points.** Below this, a sparkline carries less information than just listing the numbers. The visual overhead is not justified.
+- **When comparing across different units.** Sparklines in a table column work when every row measures the same thing. Mixing temperature, revenue, and percentages in one column of sparklines invites false visual comparisons.
+
 ## Common Pitfalls
 
-1. **Flat-line when all values identical** — `d3.extent` returns `[v, v]`. Fix: pad domain `[v - 1, v + 1]`.
+1. **Flat-line when all values identical** — `d3.extent` returns `[v, v]`, mapping everything to mid-height. Fix: pad domain `[v - 1, v + 1]`.
 2. **Blurry Canvas on retina** — multiply canvas dimensions by `devicePixelRatio`, CSS-size to logical pixels.
-3. **SVG in table cells adds height** — `display: block` on SVG or `line-height: 0` on `<td>`.
-4. **Missing null handling** — use `.defined(d => d != null)` on the line generator to break gaps.
-5. **Too many data points** — 1000 points in 80px means <0.1px each. Downsample with LTTB.
+3. **SVG in table cells adds height** — the SVG's default `display: inline` respects line-height and adds whitespace below. Fix: `display: block` on SVG or `line-height: 0` on `<td>`.
+4. **Missing null handling** — use `.defined(d => d != null)` on the line generator to break gaps instead of connecting across missing data.
+5. **Too many data points** — 1000 points in 80px means <0.1px each, wasting CPU with no visual benefit. Downsample with LTTB.
 
 ## References
 

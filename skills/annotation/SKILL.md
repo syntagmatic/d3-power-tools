@@ -5,13 +5,30 @@ description: "Build annotations, callouts, leader lines, and responsive labels f
 
 # Annotations and Labels
 
-Patterns for adding explanatory text, callouts, leader lines, and labels to D3 visualizations.
+A chart without annotation is a chart without an argument. Annotation converts a picture of data into a claim about the world -- it tells the viewer what to look at, why it matters, and what they might otherwise miss.
 
-For axis labels and tick formatting, see `scales`. For color legends, see `color`. For accessible text alternatives, see `canvas-accessibility`.
+For axis labels and tick formatting, see `axes-and-scales`. For color legends, see `color`. For accessible text alternatives, see `canvas-accessibility`.
+
+## Editorial Judgment: What to Annotate
+
+The hardest part of annotation is not geometry -- it is deciding what deserves a callout. Every annotation competes for attention with the data itself. Over-annotate and the viewer reads your notes instead of the chart. Under-annotate and they leave without the insight you intended.
+
+**Hierarchy of emphasis** (most to least prominent):
+
+1. **Callout annotations** with leader lines -- reserve for the 1-3 claims that justify the chart's existence. These answer "so what?"
+2. **Threshold / reference lines** -- encode context the viewer needs to interpret the data (targets, averages, regulatory limits). These answer "compared to what?"
+3. **Direct labels** on data points -- use when identity matters (named countries, companies, outliers). These answer "which one?"
+4. **Tooltips** -- detail-on-demand for everything else. The viewer chooses what to inspect.
+
+**The 3-annotation rule.** If you have more than 3 callout annotations, you don't have a story -- you have a list. Demote the weaker ones to direct labels or tooltips. The eye can hold one primary and two supporting callouts; beyond that, nothing is emphasized because everything is.
+
+**Annotate the surprising, not the obvious.** A callout on the highest bar in a sorted bar chart wastes ink. A callout on the bar that broke a trend earns its space. Good candidates: inflection points, anomalies, crossovers, first/last in a sequence, values that contradict expectations.
+
+**When not to annotate.** Exploratory dashboards where the user defines their own questions. Annotation imposes the author's narrative; if the viewer's task is open-ended exploration, use tooltips and brushing instead. Also skip annotation when the chart is one panel in a small-multiples grid -- the pattern across panels *is* the insight.
 
 ## Leader Line Geometry
 
-Three connector types — choose based on visual density:
+Three connector types. Straight lines for sparse charts; elbows when the note sits directly above/beside the point; curves when you need to route around nearby data:
 
 ```js
 const straight = (dx, dy) => `M0,0 L${dx},${dy}`;
@@ -26,6 +43,8 @@ When leader lines cross data points, push the bezier control point away from den
 const cpY = dy > 0 ? -avoidanceOffset : avoidanceOffset;
 const path = `M0,0 Q${dx * 0.3},${cpY} ${dx},${dy}`;
 ```
+
+Leader lines should be visually quieter than the data -- thin (0.7-1px), muted color, no arrowheads unless direction matters. If the line is louder than the data, the annotation is fighting the chart.
 
 ## Label Collision Avoidance
 
@@ -71,12 +90,11 @@ Estimate label width: `d.label.length * fontSize * 0.6` (rough but avoids DOM me
 
 ### Greedy Algorithm
 
-Simpler: try 8 candidate positions around each point in priority order, accept the first non-overlapping slot:
+Try 8 candidate positions around each point in priority order, accept the first non-overlapping slot. Faster than force (O(n) vs O(n^2) per tick) but produces worse results for dense plots:
 
 ```js
 function greedyLabels(data, xScale, yScale, { fontSize = 12 } = {}) {
   const placed = [];
-  // 8 candidates: right, upper-right, above, upper-left, left, lower-left, below, lower-right
   const offsets = [
     [10, 0], [10, -10], [0, -14], [-10, -10],
     [-10, 0], [-10, 10], [0, 14], [10, 10],
@@ -99,11 +117,9 @@ function greedyLabels(data, xScale, yScale, { fontSize = 12 } = {}) {
 }
 ```
 
-Faster than force but produces worse results for dense plots.
-
 ### Voronoi-Based Label Placement
 
-Place labels at Voronoi cell centroids — guarantees each label is in the nearest open space:
+Place labels at Voronoi cell centroids -- guarantees each label is in the nearest open space. Works well when points are evenly distributed; degrades when clusters create tiny cells:
 
 ```js
 const delaunay = d3.Delaunay.from(data, d => xScale(d.x), d => yScale(d.y));
@@ -131,7 +147,7 @@ function repositionAnnotations(width, height) {
 }
 ```
 
-Thin labels at breakpoints — show every Nth label on narrow screens:
+Thin labels at breakpoints -- show every Nth label on narrow screens. Prioritize by importance (annotated outliers keep their labels; middle-of-pack points lose theirs first):
 
 ```js
 function updateLabels(width) {
@@ -143,11 +159,9 @@ function updateLabels(width) {
 }
 ```
 
-Scale annotation font size proportionally: `Math.max(10, Math.min(14, baseFontSize * (width / 800)))`.
-
 ## SVG Text Wrapping
 
-SVG has no automatic line wrapping. Split into `<tspan>` elements, measuring with `getComputedTextLength()`:
+SVG has no automatic line wrapping. Split into `<tspan>` elements:
 
 ```js
 function wrapText(textSelection, maxWidth) {
@@ -173,6 +187,8 @@ function wrapText(textSelection, maxWidth) {
 }
 ```
 
+Note: `getComputedTextLength()` returns 0 if the element is not yet in the DOM. Append first, then measure.
+
 ## Canvas Annotations
 
 ### Canvas Callout
@@ -193,24 +209,9 @@ function drawCallout(ctx, { x, y, dx, dy, title, text, color = "#666" }) {
 }
 ```
 
-### Canvas Threshold Line
-
-```js
-function drawThreshold(ctx, { y, width, label, color = "#e15759" }) {
-  ctx.save();
-  ctx.setLineDash([6, 3]);
-  ctx.strokeStyle = color; ctx.lineWidth = 1.5;
-  ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.font = "bold 12px sans-serif"; ctx.fillStyle = color;
-  ctx.textAlign = "end"; ctx.fillText(label, width - 4, y - 6);
-  ctx.restore();
-}
-```
-
 ### Hybrid: Canvas Data + SVG Annotations
 
-Best of both worlds. Canvas layer for data performance, SVG overlay for crisp text and interactivity:
+Canvas for data performance, SVG overlay for crisp annotation text and interactivity. Annotations need subpixel text rendering and easy event binding that Canvas lacks:
 
 ```js
 const canvas = d3.select(container).append("canvas").style("position", "absolute");
@@ -219,34 +220,27 @@ const svg = d3.select(container).append("svg")
   .style("pointer-events", "none"); // clicks pass through to canvas
 ```
 
-### Annotation Layer Ordering
+### Layer Ordering
 
-Keep annotations in a dedicated `<g>` layer above data but below tooltips. SVG renders in document order:
+Keep annotations in a dedicated `<g>` above data but below tooltips. SVG renders in document order:
 
 ```js
 const dataLayer = svg.append("g").attr("class", "data-layer");
-const axisLayer = svg.append("g").attr("class", "axis-layer");
 const annotationLayer = svg.append("g").attr("class", "annotation-layer");
 // Tooltips are HTML divs on top of everything
 ```
 
-## d3-annotation Library
-
-[d3-annotation](https://d3-annotation.susielu.com/) by Susie Lu provides declarative annotations. Good for quick setups; build from scratch when you need full control.
-
-Types: `annotationLabel`, `annotationCallout`, `annotationCalloutElbow`, `annotationCalloutCurve`, `annotationCalloutCircle`, `annotationXYThreshold`, `annotationBadge`.
-
 ## Tooltip Patterns
 
-### HTML Tooltip with d3.pointer()
+Tooltips are detail-on-demand -- they should never duplicate what a callout already says. Use HTML tooltips over SVG `<title>` for rich formatting and viewport-aware positioning.
 
-HTML tooltips outperform SVG `<title>` — they support rich formatting, auto-wrap, and sit above all chart layers.
+### Core Pattern
 
 ```js
 const tooltip = d3.select("body").append("div")
     .attr("class", "tooltip")
     .style("position", "absolute")
-    .style("pointer-events", "none")
+    .style("pointer-events", "none")  // prevents stealing hover
     .style("opacity", 0);
 
 selection
@@ -255,16 +249,11 @@ selection
           .style("opacity", 1);
     })
     .on("pointermove", (event) => {
-      const [px, py] = [event.pageX, event.pageY];
-      tooltip.style("left", `${px + 12}px`)
-          .style("top", `${py - 12}px`);
+      tooltip.style("left", `${event.pageX + 12}px`)  // pageX works in scrollable containers
+          .style("top", `${event.pageY - 12}px`);
     })
-    .on("pointerleave", () => {
-      tooltip.style("opacity", 0);
-    });
+    .on("pointerleave", () => tooltip.style("opacity", 0));
 ```
-
-Use `pointer-events: none` on the tooltip to prevent it from stealing hover from the chart. Use `pageX`/`pageY` for positioning (works even when the chart is inside a scrollable container, unlike `clientX`/`clientY`).
 
 ### Edge Clamping
 
@@ -280,9 +269,9 @@ Prevent the tooltip from overflowing the viewport:
 })
 ```
 
-### Voronoi Tooltip (for scatter / line charts)
+### Voronoi Tooltip
 
-When elements are small or dense, attach the tooltip to a Voronoi overlay so the user doesn't need to hover exactly on a point:
+When elements are small or dense, attach the tooltip to a Voronoi overlay so the user doesn't need to hover exactly on a 3px point. Position at the data point, not the mouse -- this gives the viewer a stable reading target:
 
 ```js
 const delaunay = d3.Delaunay.from(data, d => x(d.date), d => y(d.value));
@@ -295,7 +284,6 @@ svg.append("rect")
       const [mx, my] = d3.pointer(event);
       const i = delaunay.find(mx, my);
       const d = data[i];
-      // Position tooltip at data point, not mouse
       tooltip.html(`${d.name}: ${d.value}`)
           .style("left", `${x(d.date) + margin.left + 12}px`)
           .style("top", `${y(d.value) + margin.top - 12}px`)
@@ -304,30 +292,13 @@ svg.append("rect")
     .on("pointerleave", () => tooltip.style("opacity", 0));
 ```
 
-### Tooltip CSS
-
-```css
-.tooltip {
-  background: rgba(26, 26, 46, 0.92);
-  color: #fff;
-  font-size: 0.75rem;
-  padding: 6px 10px;
-  border-radius: 6px;
-  line-height: 1.4;
-  white-space: nowrap;
-  transition: opacity 0.12s ease;
-}
-```
-
-Keep `transition` short (100–150ms) so the tooltip feels responsive. Use `white-space: nowrap` unless content is long; for multi-line tooltips, set a `max-width` and let text wrap.
-
 ## Common Pitfalls
 
-**Labels overflow the chart bounds.** Always clamp label positions to the plot area. With force-based placement, add a bounding box force. With greedy placement, check bounds before accepting.
+**Too many annotations clutter the chart.** If every point has a callout, none stand out. Research on visual emphasis shows blur/focus is perceived fastest (~830ms), followed by size (~910ms), then color (~1240ms). Callouts work by contrast with unannotated data -- that contrast disappears when everything is annotated. Keep to 3 callouts; use tooltips for the rest.
 
-**Leader lines cross other labels.** Force-based layout naturally minimizes crossings. For manual annotations, route leader lines around obstacles using intermediate waypoints.
+**Labels overflow the chart bounds.** With force-based placement, add a bounding box force. With greedy placement, check bounds before accepting.
 
-**Text not visible on dark backgrounds.** Add a semi-transparent background rect behind annotation text:
+**Text not visible on varied backgrounds.** Add a semi-transparent background rect behind annotation text:
 ```js
 const bbox = textNode.getBBox();
 g.insert("rect", "text")
@@ -336,23 +307,15 @@ g.insert("rect", "text")
   .attr("fill", "white").attr("opacity", 0.85);
 ```
 
-**SVG text doesn't wrap.** No automatic line wrapping. Use the `wrapText` helper above.
-
-**Annotations disappear on resize.** Store annotations in data coordinates and re-compute pixel positions in the resize handler.
-
-**Too many annotations clutter the chart.** Annotate 3-5 key insights, not every data point. Use tooltips for detail-on-demand.
-
-**Annotation z-order wrong.** SVG renders in document order — append annotation `<g>` after data elements. For canvas, draw annotations after data in the render loop.
-
-**getComputedTextLength() returns 0.** Element isn't in the DOM yet. Ensure the element is appended before measuring.
-
-**Canvas text looks blurry.** Scale canvas for retina: `canvas.width = width * dpr; ctx.scale(dpr, dpr)`.
+**Annotations disappear on resize.** Store in data coordinates, re-compute pixel positions in the resize handler.
 
 **Force-based labels oscillate forever.** Increase `velocityDecay` (e.g., 0.6). Pre-compute with `simulation.stop(); simulation.tick(120);` rather than animating.
 
+**Canvas text looks blurry.** Scale canvas for retina: `canvas.width = width * dpr; ctx.scale(dpr, dpr)`.
+
 ## References
 
-- [d3-annotation](https://d3-annotation.susielu.com/) — Susie Lu's annotation library
-- [Automatic Label Placement](https://en.wikipedia.org/wiki/Automatic_label_placement) — computational geometry approaches
-- [D3 Voronoi Labels](https://observablehq.com/@d3/voronoi-labels) — Voronoi-based label placement
-- [Force-Directed Label Placement](https://observablehq.com/@d3/force-directed-labels) — using simulation for labels
+- [d3-annotation](https://d3-annotation.susielu.com/) -- Susie Lu's annotation library
+- [Automatic Label Placement](https://en.wikipedia.org/wiki/Automatic_label_placement) -- computational geometry approaches
+- [D3 Voronoi Labels](https://observablehq.com/@d3/voronoi-labels) -- Voronoi-based label placement
+- [Emphasis Techniques in Visualization](https://pmc.ncbi.nlm.nih.gov/articles/PMC8841630/) -- perceptual research on visual prominence

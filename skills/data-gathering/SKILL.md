@@ -5,15 +5,28 @@ description: "Data loading, parsing, cleaning, reshaping, and transformation for
 
 # Data Preparation
 
-Everything between raw data and bindable arrays. D3 works with plain arrays and objects — the preparation layer delivers arrays whose elements map 1:1 to visual marks, with every field typed and scale-ready.
+Bad data doesn't throw errors — it draws wrong charts. A bar at zero that should be missing, a line that zigzags because dates aren't sorted, a scale that blows out because one row has a sentinel value. Every section here is a visual bug you'll never find by reading code.
 
-## autoType Pitfalls
+## autoType: Convenient Until It Isn't
 
 ```js
 const data = await d3.csv("data.csv", d3.autoType);
 ```
 
-Good for prototyping. Surprises: `"true"`→boolean, `"07030"`→`7030` (loses leading zero), numeric-looking IDs become numbers. **Prefer explicit row accessors for production** — especially data with FIPS codes, ZIP codes, or ID columns.
+Good for prototyping. Three traps in production:
+- `"07030"` becomes `7030` — ZIP codes, FIPS codes, and any leading-zero identifier lose meaning. Your choropleth join silently drops counties.
+- `"true"` becomes `true` — breaks string comparisons and scale domains.
+- `"NA"` stays `"NA"` but `""` becomes `null` — two different representations of missing in one dataset.
+
+**Prefer explicit row accessors.** You choose what's a number, what's a string, what's missing:
+
+```js
+const data = await d3.csv("data.csv", d => ({
+  fips: d.fips,                          // keep as string
+  date: d3.timeParse("%Y-%m-%d")(d.date),
+  value: d.value === "" ? null : +d.value // explicit missing handling
+}));
+```
 
 ## The Many Faces of Missing
 
@@ -25,23 +38,35 @@ Good for prototyping. Surprises: `"true"`→boolean, `"07030"`→`7030` (loses l
 | JSON null | `null` | `0` (!) | `false` |
 | JSON missing key | `undefined` | `NaN` | `false` |
 
-**Guard**: `const safeNum = s => s === "" ? null : +s;`
+The `+"" === 0` row is the single most common D3 data bug. Empty CSV cells become empty strings, `+""` coerces to `0`, and your bar chart shows a data point at zero that should be absent. **Guard**: `const safeNum = s => s === "" ? null : +s;`
 
-Use `isFinite()` over `!isNaN()` — also rejects `Infinity`.
+Use `isFinite()` over `!isNaN()` — it also rejects `Infinity`, which blows out scale domains.
 
-`d3.count(data, d => d.value)` counts only finite numeric values (skips NaN/null/undefined), unlike `.length`.
+Missing values propagate silently through scales: `scaleLinear()(undefined)` returns `NaN`. The element renders at an invisible position — no error, no warning, just a missing mark.
 
-## InternMap vs Map
+## Data Smells
 
-`d3.group`, `d3.rollup`, `d3.index` return `InternMap` with **value equality** — Date and number keys work unlike plain Map. Don't spread to a plain Map — you lose this behavior. InternMap is iterable with `.get()`, `.has()`, `.keys()`, `.values()`, `.entries()`.
+Symptoms in your data that show up as visual bugs. Check these before bindng to marks.
 
-```js
-d3.group(data, d => d.date).get(new Date("2024-03-15")); // works!
-```
+**Unsorted time data.** `d3.line()` connects points in array order. If your dates aren't sorted, the line zigzags backward. Always sort after parsing: `data.sort((a, b) => a.date - b.date)`.
+
+**Duplicate rows.** Duplicates inflate aggregations (a summed bar is too tall) and create stacked marks that look like single marks but have double opacity. Dedup by key before bindin: `d3.groups(data, d => d.id).map(([, v]) => v[0])`.
+
+**Inconsistent categories.** `"US"`, `"U.S."`, and `"United States"` produce three separate bars/slices/groups instead of one. `d3.group` treats them as distinct keys. Normalize in the row accessor.
+
+**Sentinel values.** `-999`, `9999`, or `99.99` for missing blow out your scale domain. One sentinel at `-999` makes all real data cluster in a tiny band at the right of the axis. Filter before computing `d3.extent`.
+
+**BOM in CSV headers.** Files saved from Excel often have a UTF-8 BOM (`\uFEFF`) prepended to the first column name. `d.date` returns `undefined` because the actual key is `"\uFEFFdate"`. Check with: `Object.keys(data[0])[0].charCodeAt(0) === 65279`.
+
+**Mixed numeric formats.** `"1,234"` and `"1234"` in the same column — the comma-formatted value becomes `NaN` under `+x`. Strip before coercing: `+d.value.replace(/,/g, "")`.
+
+**Single-row groups.** A category with one data point still gets a "trend line" or a box plot. One observation is a dot, not a distribution. Filter or flag groups where `v.length < n`.
+
+**`d3.extent` on empty arrays** returns `[undefined, undefined]`, which propagates to `domain([undefined, undefined])` and NaN positions for every element. Guard: `if (!data.length) return;`
 
 ## d3.bin Domain Mismatch
 
-`d3.bin().domain()` **must match** the value accessor's domain. If values range 0–100 but you set `.domain([0, 1])`, most values land outside all bins. Always derive domain from the same accessor:
+`d3.bin().domain()` **must match** the value accessor's range. If values span 0--100 but you set `.domain([0, 1])`, most values fall outside all bins -- silently lost, histogram looks nearly empty. Always derive domain from the same accessor:
 
 ```js
 const bins = d3.bin()
@@ -50,21 +75,13 @@ const bins = d3.bin()
   .value(d => d.age)(data);
 ```
 
-`d3.bin` works directly with typed arrays: `d3.bin().thresholds(40)(new Float64Array(values))`.
+## InternMap: Why Date Keys Work
 
-## Streaming: Circular Buffer
-
-```js
-class CircularBuffer {
-  constructor(cap) { this.data = new Array(cap); this.head = 0; this.size = 0; this.cap = cap; }
-  push(item) { this.data[this.head] = item; this.head = (this.head + 1) % this.cap; if (this.size < this.cap) this.size++; }
-  toArray() { return this.size < this.cap ? this.data.slice(0, this.size) : [...this.data.slice(this.head), ...this.data.slice(0, this.head)]; }
-}
-```
+`d3.group` and `d3.rollup` return `InternMap`, which uses **value equality** -- two `new Date("2024-03-15")` instances match. Plain `Map` uses reference equality, so the same lookup fails. Don't spread to a plain `Map` or convert with `Object.fromEntries` -- you lose this behavior and every `.get()` with a Date key returns `undefined`.
 
 ## Columnar Typed Arrays (>50K rows)
 
-For Canvas/WebGL rendering pipelines:
+For Canvas/WebGL pipelines, columnar layout avoids per-object GC pressure and enables direct GPU upload:
 
 ```js
 const n = data.length;
@@ -73,7 +90,7 @@ const categoryIndex = new Map([...new Set(data.map(d => d.type))].map((c, i) => 
 data.forEach((d, i) => { x[i] = d.longitude; y[i] = d.latitude; cat[i] = categoryIndex.get(d.type); });
 ```
 
-### Pre-Computed Sort Indices
+**Pre-computed sort indices** let you draw back-to-front without re-sorting the typed arrays:
 
 ```js
 const order = d3.range(n);
@@ -82,6 +99,8 @@ for (const i of order) drawPoint(x[i], y[i], cat[i]);
 ```
 
 ## Streaming Large CSV (>50 MB)
+
+Parse incrementally to avoid loading the entire file into memory. Process rows as they arrive:
 
 ```js
 const response = await fetch("huge.csv");
@@ -94,7 +113,7 @@ while (true) {
   if (done) break;
   buffer += decoder.decode(value, { stream: true });
   const lines = buffer.split("\n");
-  buffer = lines.pop();
+  buffer = lines.pop(); // incomplete line stays in buffer
   for (const line of lines) {
     if (!header) { header = d3.csvParseRows(line)[0]; continue; }
     processRow(header, d3.csvParseRows(line)[0]);
@@ -104,28 +123,14 @@ while (true) {
 
 ## Common Pitfalls
 
-1. **CSV values are always strings.** `"3" + "5" === "35"`. Always coerce in the row accessor. Single most common D3 data bug.
+1. **CSV values are always strings.** `"3" + "5" === "35"`. Always coerce in the row accessor, not after.
 
-2. **`+""` is `0`, not `NaN`.** Empty cells → empty strings. `+"" === 0` silently corrupts aggregation. Guard: `d.value === "" ? null : +d.value`.
+2. **`d3.timeParse` returns `null` on format mismatch -- silently.** No error, no warning. A column of nulls produces an empty chart. Always validate: `if (!date) console.warn("Bad date:", raw)`.
 
-3. **`d3.autoType` converts ZIP/FIPS/IDs to numbers.** `"07030"` → `7030`. Use explicit row accessors for leading-zero data.
-
-4. **`d3.timeParse` returns `null` on mismatch — silently.** No error, no warning. Always check: `if (!date) console.warn(...)`.
-
-5. **InternMap ≠ Map.** Don't spread `d3.group` results to plain Map — loses value equality for Date/number keys.
-
-6. **`d3.sort` returns a new array.** Unlike `Array.sort()`, original unchanged. Forgetting the return value is a silent no-op.
-
-7. **`d3.extent` on empty array returns `[undefined, undefined]`.** Propagates to `domain([undefined, undefined])` → NaN positions. Guard: `if (!data.length) return;`.
-
-8. **`d3.bin().domain()` mismatched.** Values outside domain land in no bin — silently lost.
-
-9. **Missing values propagate through scales.** `scaleLinear()(undefined)` → `NaN`. Elements at NaN are invisible, not errored. Clean before binding.
+3. **`d3.sort` returns a new array.** Unlike `Array.sort()`, the original is unchanged. Forgetting the return value is a silent no-op -- your data stays unsorted and the line still zigzags.
 
 ## References
 
-- [d3-array](https://d3js.org/d3-array) — group, rollup, bin, sort, rank, extent, sum, mean, quantile, cumsum, cross
-- [d3-fetch](https://d3js.org/d3-fetch) — csv, tsv, json
-- [d3-dsv](https://d3js.org/d3-dsv) — csvParse, autoType
-- [d3-time-format](https://d3js.org/d3-time-format) — timeParse, utcParse
-- [Tidy Data](https://doi.org/10.18637/jss.v059.i10) — Hadley Wickham (2014)
+- [d3-array](https://d3js.org/d3-array) -- group, rollup, bin, sort, extent, sum, mean
+- [d3-dsv](https://d3js.org/d3-dsv) -- csvParse, autoType
+- [d3-time-format](https://d3js.org/d3-time-format) -- timeParse, utcParse
