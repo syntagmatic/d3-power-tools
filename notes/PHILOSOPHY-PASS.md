@@ -157,6 +157,57 @@ Each agent works in an isolated worktree. One commit per skill after tests pass.
 /loop 25m Sharpen 3 skills in parallel per iteration, working through notes/PHILOSOPHY-PASS.md in order. Read temp/sharpening-queue.json to find which skills are done or in progress. Claim the next 3 unclaimed skills by adding them to in_progress in the queue file. Launch 3 worktree-isolated agents in parallel, one per skill. Each agent follows all eight steps: (1) research the web, (2) read and consolidate examples, (3) diagnose the skill, (4) rewrite opening, (5) add rationales, (6) cut API docs, (7) add "when not to", (8) test and screenshot. Each agent commits when done. After all 3 finish, move them from in_progress to completed in the queue file.
 ```
 
-## Done When
+## Phase 1 Done When
 
-All 21 items are in `completed` in the queue file. Then update CRITIQUE.md with revised tier rankings. Delete `temp/sharpening-queue.json`.
+All 21 items are in `completed` in the sharpening queue. Then move to Phase 2.
+
+---
+
+## Phase 2: Evaluation Feedback Loop
+
+After Phase 1 (sharpening) is complete, run a separate evaluation pass. This uses the GAN-inspired pattern from the Anthropic harness design blog post: a separate evaluator agent judges each skill against concrete criteria, and a generator agent fixes any failures.
+
+### Key principle
+
+The evaluator did NOT write the skill. It has no attachment to the work. This avoids the self-praise trap where generators confidently approve their own mediocre output.
+
+### Artifacts
+
+- **Criteria:** `meta/skill-eval/sharpening-criteria.json` — default criteria (7) + per-skill overrides
+- **Evaluator prompt:** `meta/skill-eval/evaluator-prompt.md` — instructions for the evaluator agent
+- **Retry prompt:** `meta/skill-eval/retry-prompt.md` — instructions for the generator fix agent
+- **Queue:** `temp/eval-queue.json` — tracks pending/in_progress/passed/needs_retry/done_with_issues
+- **Log:** `notes/EVALUATION-LOG.md` — running results
+
+### The loop
+
+For each skill:
+
+1. **Evaluate** — Launch a worktree-isolated evaluator agent with `meta/skill-eval/evaluator-prompt.md`. It reads the SKILL.md, examples, runs tests, and grades against criteria. Produces a structured pass/fail report.
+
+2. **Pass or retry** — If all criteria pass, move to `passed` in the queue. If any fail, move to `needs_retry`.
+
+3. **Fix** — For skills in `needs_retry`, launch a separate worktree-isolated generator agent with `meta/skill-eval/retry-prompt.md` plus the evaluator's report. The generator fixes only the flagged issues and commits.
+
+4. **Re-evaluate** — Run the evaluator again on the fixed skill. Max 2 retry rounds. If it still fails, move to `done_with_issues` and log the remaining gaps.
+
+5. **Log** — Append the evaluator's report to `notes/EVALUATION-LOG.md` after each evaluation.
+
+### Parallelism
+
+Same as Phase 1: 3 skills in parallel via worktree isolation. Use `temp/eval-queue.json` to coordinate.
+
+### Git workflow
+
+Same as Phase 1. Generator fix commits use format: `Fix <skill-name>: address evaluator feedback`
+
+### Loop command
+
+```
+/loop 25m Evaluate 3 skills in parallel per iteration. Read temp/eval-queue.json to find next 3 pending skills. For each: launch a worktree-isolated evaluator agent that reads the SKILL.md, reads the examples, runs the skill's tests, and grades against meta/skill-eval/sharpening-criteria.json using meta/skill-eval/evaluator-prompt.md. The evaluator writes a structured pass/fail report. If all criteria pass, move to "passed" in the queue. If any fail, launch a separate generator agent with the evaluator's report and meta/skill-eval/retry-prompt.md to fix the flagged issues (max 2 retries). Log all results to notes/EVALUATION-LOG.md.
+```
+
+## All Done When
+
+Phase 1: All 21 skills sharpened (complete).
+Phase 2: All 21 skills evaluated. Update CRITIQUE.md with revised tier rankings.
