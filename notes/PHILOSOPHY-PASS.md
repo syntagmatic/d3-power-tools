@@ -122,9 +122,29 @@ Already good. Sharpen, don't expand.
 - **Test after every skill.** Run only that skill's tests. Screenshot them.
 - **Log as you go.** Append observations and cross-skill connections to `notes/SHARPENING-LOG.md`. One section per skill.
 
+## Parallelism
+
+Run 3 skills in parallel using worktree-isolated agents. Use `temp/sharpening-queue.json` to coordinate:
+
+```json
+{
+  "in_progress": ["annotation", "responsive", "small-multiples"],
+  "completed": []
+}
+```
+
+Before starting a skill:
+1. Read `temp/sharpening-queue.json`
+2. Find the next skill from the ordered list that is NOT in `in_progress` or `completed`
+3. Add it to `in_progress` and write the file back
+4. Do the work in a worktree-isolated agent
+5. When the agent finishes and commits, move the skill from `in_progress` to `completed`
+
+If there are no remaining skills, stop.
+
 ## Git Workflow
 
-Work directly on `main`. One commit per skill after tests pass.
+Each agent works in an isolated worktree. One commit per skill after tests pass.
 
 1. Stage only the files you changed for that skill: SKILL.md, any modified/removed example HTMLs, test.config.json if updated, and `notes/SHARPENING-LOG.md`.
 2. Do NOT stage unrelated files, even if they show up in `git status`.
@@ -134,9 +154,9 @@ Work directly on `main`. One commit per skill after tests pass.
 ## Loop Command
 
 ```
-/loop 25m Sharpen one skill per iteration, working through notes/PHILOSOPHY-PASS.md in order. Read the plan first to find which skill is next (check git log for commits matching "Sharpen <name>" to see what's done). Follow all eight steps: (1) research the web, (2) read and consolidate examples, (3) diagnose the skill, (4) rewrite opening, (5) add rationales, (6) cut API docs, (7) add "when not to", (8) test and screenshot. Commit when done. Then move to the next skill on the next iteration.
+/loop 25m Sharpen 3 skills in parallel per iteration, working through notes/PHILOSOPHY-PASS.md in order. Read temp/sharpening-queue.json to find which skills are done or in progress. Claim the next 3 unclaimed skills by adding them to in_progress in the queue file. Launch 3 worktree-isolated agents in parallel, one per skill. Each agent follows all eight steps: (1) research the web, (2) read and consolidate examples, (3) diagnose the skill, (4) rewrite opening, (5) add rationales, (6) cut API docs, (7) add "when not to", (8) test and screenshot. Each agent commits when done. After all 3 finish, move them from in_progress to completed in the queue file.
 ```
 
 ## Done When
 
-All 21 items are committed. Then update CRITIQUE.md with revised tier rankings.
+All 21 items are in `completed` in the queue file. Then update CRITIQUE.md with revised tier rankings. Delete `temp/sharpening-queue.json`.
