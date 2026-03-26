@@ -11,11 +11,16 @@ For brush mechanics and lasso selection, see `brushing`. For scale construction,
 
 ## When Not to Link
 
-Linking views has a real cost: every added view splits attention and forces context-switching. Research on coordinated multiple views (Baldonado et al., "Guidelines for Using Multiple Views in Information Visualization") identifies key traps:
+Linking views has a real cost: every added view splits attention and forces context-switching. Baldonado et al.'s eight guidelines (AVI 2000) distill the tradeoffs. The four that matter most in practice:
 
-- **More than 3-4 linked views demands strong spatial grouping.** Working memory holds ~4 chunks. Beyond that, viewers forget which chart they brushed and lose the thread. If you need 6+ views, group them into 2-3 clusters with clear visual hierarchy — an overview panel and detail panels — so the viewer always knows where to look.
-- **Linking unrelated dimensions confuses more than it reveals.** If brushing price range highlights points on a map with no spatial pattern, the link teaches nothing — it just makes things blink. Every link should answer: "what does this selection look like from that angle?" If the answer is "random noise," drop the link.
-- **Linking everything to everything creates update storms.** Chart A brushes, which updates chart B, which fires a filter change, which updates chart A. The viewer sees a flicker and has no idea what happened. Be explicit about which interactions propagate and which are local-only.
+- **Parsimony** — use the fewest views necessary. Each added view has cognitive cost (working memory holds ~4 chunks — Cowan 2001). Beyond 3-4 simultaneously active views, viewers forget which chart they brushed. If you need 6+ views, group them into 2-3 clusters with clear hierarchy (overview panel + detail panels).
+- **Complementarity** — link views only when different encodings reveal correlations or disparities invisible in any single view. If brushing price range highlights points on a map with no spatial pattern, the link teaches nothing. Every link should answer: "what does this selection look like from that angle?"
+- **Self-evidence** — make the relationships between views visually obvious. If the user can't tell that brushing view A affects view B, the link is useless. Use highlight animation, color flash, or consistent encoding across views (same color scale, same axis orientation).
+- **Attention management** — guide the user's attention to the right view. Render the source chart first, then let linked charts update within 1-2 frames (see Render Queue below). Change blindness is real — users focused on one chart may miss updates in peripheral views.
+
+Two additional traps beyond Baldonado:
+
+- **Linking everything to everything creates update storms.** Chart A brushes, which updates chart B, which fires a filter change, which updates chart A. Be explicit about which interactions propagate and which are local-only.
 - **Small multiples often beat linked views.** When comparing the same measure across categories, small multiples (one chart per category, shared scale) impose lower cognitive load than a linked scatter + bar + table. Use linked views when the dimensions are heterogeneous — spatial + temporal + categorical — not when they're facets of the same thing.
 
 ## Coordination Architecture
@@ -163,6 +168,29 @@ let syncing = false;
 
 **Update storms** happen when multiple dimensions fire filter changes simultaneously (e.g., resetting all brushes). Each change triggers a full re-render of all views. The fix is `requestAnimationFrame` coalescing — batch all state changes into one render pass per frame (see Performance below).
 
+**Ownership hierarchy** (a fourth strategy): designate one view as the sole writer for each piece of shared state. Others read from it but cannot write. This prevents bidirectional update storms structurally — no boolean guards needed. The pattern comes from Observable's `viewof` model but works in plain JS:
+
+```js
+function createOwnedState(owner) {
+  let value;
+  const listeners = new Set();
+  return {
+    get: () => value,
+    set(v, source) {
+      if (source !== owner) return; // only owner can write
+      value = v;
+      for (const fn of listeners) fn(value);
+    },
+    subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
+  };
+}
+// Timeline owns time range; scatter owns point selection
+const timeRange = createOwnedState("timeline");
+const pointSelection = createOwnedState("scatter");
+```
+
+Use this when you have 4+ views and the boolean guard approach becomes brittle. For 2-3 views, the `sourceEvent` check is simpler and sufficient.
+
 ## Scale Domain Strategies
 
 **Fixed domain (stable):** Compute once from the full dataset, never change. Prevents jarring scale jumps during brushing — the viewer's spatial memory of "high values are at the top" stays valid.
@@ -239,10 +267,38 @@ When multiple charts need updating, render the chart the user is interacting wit
 
 **Linking charts with incompatible data granularity.** A scatter plot shows individual rows; a bar chart shows category aggregates. Brushing the bar chart selects a category, but the scatter plot needs row keys. The selection model must translate between granularities — typically by expanding a category selection into its constituent row keys.
 
+## Scaling Cross-Filtering Beyond the Browser
+
+The bitmap index above handles up to ~500K rows in-browser. Beyond that, you need a different architecture. As of March 2026, two approaches dominate:
+
+| Approach | Scale | Where it runs | D3 integration |
+|----------|-------|---------------|----------------|
+| Array.filter + Set | <5K rows | Browser | Direct |
+| Bitmap (above) | 5K-500K | Browser | Direct |
+| crossfilter2 sorted index | <1M | Browser | Drop-in library |
+| Falcon prefetch (CHI 2019) | Millions-billions | Browser + optional DB | Data layer only — feeds D3 charts |
+| Mosaic + DuckDB-WASM | Millions-billions | Browser (WASM) or server | Implement MosaicClient interface |
+
+**Falcon** (Moritz/Howe/Heer) precomputes aggregation cubes for the actively-brushed dimension, achieving 50fps brush updates invariant of dataset size. The cost shifts to a brief pause when switching which view you brush. For Falcon's prefetch pattern and data cube construction, see `brushing`.
+
+**Mosaic** (Heer et al., IEEE TVCG 2024) routes filter predicates as SQL WHERE clauses to DuckDB. Its Coordinator automatically builds data cube indexes for filter groups, making cross-filtering over 10M+ records feasible in the browser via DuckDB-WASM. Custom D3 charts participate by implementing a `MosaicClient` with `query()` (returns SQL) and `queryResult()` (receives filtered data) methods — you keep your D3 rendering code and gain server-backed coordination. Use Mosaic when data exceeds browser memory (>50MB) or when cross-filtering requires aggregation over large datasets.
+
+## When to Use a Framework
+
+Hand-rolling with `d3.dispatch` or the store pattern gives full control but requires wiring every interaction manually. Two frameworks offer meaningful shortcuts:
+
+**Vega-Lite selections** collapse event handling, state management, predicate testing, cross-view propagation, and visual feedback into a few JSON properties. Useful for prototyping a coordination design before investing in D3 implementation — build it in Vega-Lite, verify it works, then re-implement with d3.dispatch if you need custom rendering or Canvas/WebGL performance. The selection model concept maps directly to the `SelectionModel` class above. Limitations: SVG-only (caps at ~10K-50K marks), fixed interaction vocabulary (point and interval, no lasso or custom brushes), and you get Vega's rendering, not yours.
+
+**Observable Plot** (which wraps D3 internally) provides a `selection` interaction option (as of March 2026) that handles brush-to-filter patterns with less boilerplate than raw D3. Worth considering for dashboards with standard chart types, but drops you back to D3 for anything custom.
+
+**Decision rule:** if data fits in memory, you need custom rendering, or your interactions go beyond click/brush/filter, hand-roll with D3. If data exceeds memory, use Mosaic. If you're prototyping coordination logic quickly, Vega-Lite saves time — then migrate to D3 when you hit its limits.
+
 ## References
 
 - [Crossfilter](https://square.github.io/crossfilter/) — fast multidimensional filter library; study its sorted-index approach alongside the bitmap alternative above
 - [d3.parcoords](https://github.com/syntagmatic/parallel-coordinates) — pioneering multi-axis linked brushing
 - [Linking Views](https://www.cs.ubc.ca/~tmm/vadbook/ch13-linkedviews.pdf) — Tamara Munzner's Visualization Analysis & Design, Chapter 13
 - [Dynamic Queries](https://www.cs.umd.edu/~ben/papers/Shneiderman1994Dynamic.pdf) — Shneiderman's direct manipulation filtering (CHI 1994)
-- [Guidelines for Using Multiple Views](https://www.cs.ubc.ca/~tmm/courses/old533/readings/baldonado.pdf) — Baldonado, Woodruff & Kuchinsky (2000); the "diversity" and "parsimony" guidelines for when linking helps vs. hurts
+- [Baldonado et al. (AVI 2000)](https://courses.ischool.berkeley.edu/i247/f05/readings/Baldonado_MultipleViews_AVI00.pdf) — eight guidelines for multiple views; parsimony and self-evidence are the ones most often violated
+- [Mosaic (TVCG 2024)](https://idl.cs.washington.edu/files/2024-Mosaic-TVCG.pdf) — database-backed linked views with DuckDB; see [Mosaic GitHub](https://github.com/uwdata/mosaic)
+- [Falcon (CHI 2019)](https://www.domoritz.de/papers/2019-Falcon-CHI.pdf) — prefetch-based cross-filtering for billion-scale data
