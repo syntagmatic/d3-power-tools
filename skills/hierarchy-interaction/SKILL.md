@@ -7,6 +7,8 @@ description: "Interactive patterns for D3.js hierarchy visualizations: expand/co
 
 Hierarchies get big fast. A 4-level tree with branching factor 5 has 780 nodes — too many to show at once, too connected to split across pages. Interaction lets the viewer control what's visible: collapse hides subtrees they don't need, zoom reveals detail in the subtree they do.
 
+Related: `hierarchy-layouts` · `navigation` · `canvas` · `brushing`
+
 Both require animated transitions. Without animation, the viewer loses the spatial connection between "where I was" and "where I am," and the hierarchy feels like a sequence of unrelated pictures.
 
 ## When Not to Use
