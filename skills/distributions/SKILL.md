@@ -318,6 +318,8 @@ This is a hidden editorial choice that changes what the viewer concludes:
 
 **Overplotting in large datasets.** Beyond ~500 points, individual dots become useless. Switch to density representations (violin, density plot) or use canvas with alpha blending.
 
+**Filtered KDE spikes outside chart bounds.** When recomputing KDE on a brushed subset with the same bandwidth, fewer points produce taller peaks — selecting 5 of 200 points can spike 10x higher than the full dataset. Scale the density by `subset.length / fullGroup.length` so height represents proportion. See the ghost/active pattern in `linked-views`.
+
 ## References
 
 - Wilke, [Visualizing Distributions](https://clauswilke.com/dataviz/boxplots-violins.html) — when box plots lie and violins help

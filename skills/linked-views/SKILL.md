@@ -204,9 +204,22 @@ function scheduleRender() {
 store.subscribe(scheduleRender);
 ```
 
-### Canvas Two-Layer Highlight
+### Ghost/Active Pattern
 
-Maintain background (all data, dimmed) and foreground (selected, vivid) canvas layers. On brush, only repaint the foreground. The background stays static. This cuts render cost roughly in half for the common case of "highlight a subset."
+Show filtered subsets against the full dataset using two layers: a static ghost (all data, dimmed) and a dynamic foreground (filtered subset, vivid). This works for three view types:
+
+**Discrete bins (histograms, bars):** Background bars show total counts in gray. Foreground bars show filtered counts with accent color. Same bin thresholds, same y-scale — only the heights change. See `blocks/05-crossfilter-flight-explorer.html`.
+
+**Continuous densities (KDE, violins, area charts):** Background paths show full-data density in gray. Foreground paths recompute KDE from the filtered subset. **Critical pitfall:** KDE on a small subset with the same bandwidth produces artificially tall peaks — 5 points selected from 200 can spike 10x higher than the full dataset. Fix: scale the density by `subset.length / fullGroup.length` so visual height represents proportion, not raw density. Without this, selecting a few points sends the curve shooting outside the chart bounds.
+
+```js
+const density = kde(gaussian, bandwidth, subsetValues)(ticks);
+const scale = subset.length / fullGroup.length;
+const scaled = density.map(([x, y]) => [x, y * scale]);
+foregroundPath.datum(scaled).attr("d", area);
+```
+
+**Canvas scatter:** Maintain background (all data, dimmed) and foreground (selected, vivid) canvas layers. On brush, only repaint the foreground. The background stays static. This cuts render cost roughly in half.
 
 ### Render Queue
 
