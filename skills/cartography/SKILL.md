@@ -7,7 +7,7 @@ description: "D3.js geographic maps and spatial visualization: projections, chor
 
 D3's geographic stack is its deepest subsystem — spherical math, streaming geometry, topological operations — and production maps require architectural decisions that simple examples don't reveal.
 
-Related: `shape-morphing` (projection transitions), `color` (choropleth color scales, bivariate palettes), `visual-texture` (accessible pattern choropleth), `canvas` (DPR, batching), `canvas-accessibility` (keyboard nav for canvas maps).
+Related: `shape-morphing` (projection transitions), `color` (choropleth color scales, bivariate palettes, dark mode), `visual-texture` (accessible pattern choropleth), `canvas` (DPR, batching), `canvas-accessibility` (keyboard nav for canvas maps), `axes-and-scales` (classification scales for choropleth — quantize, quantile, threshold).
 
 ```
 GeoJSON / TopoJSON ──► topojson.feature() / mesh() / merge() / neighbors()
@@ -95,7 +95,27 @@ ctx.strokeStyle = "#333"; ctx.lineWidth = 1; ctx.stroke();
 | Polar regions | `d3.geoAzimuthalEqualArea()` | Centered on pole |
 | Small country/city | `d3.geoTransverseMercator()` | Minimal distortion in narrow N-S strip |
 
-**When projection choice matters**: choropleth demands equal-area (area distortion misleads). Navigation demands conformal. Equal Earth is the modern default for thematic world maps.
+### The Key Decision: Distortion Property
+
+Before choosing a specific projection, decide what distortion property matters:
+
+- **Equal-area** (mandatory for choropleth, density, hex bins, cartograms) — area distortion directly misleads about magnitude. Use EqualEarth (world), Albers/ConicEqualArea (continent), AzimuthalEqualArea (polar/hemisphere).
+- **Conformal** (navigation, weather, tile basemaps) — preserves local angles/shapes. Mercator is conformal; that's why tiles use it, not because it's good.
+- **Compromise** (reference maps, general-purpose) — minimizes all distortions, maximizes none. NaturalEarth1, Robinson, Winkel3.
+
+For regional maps, geographic extent determines the projection family: E-W elongated → conic, N-S elongated → transverse cylindrical, round extent → azimuthal. This follows Snyder's systematic selection framework — see [Projection Wizard](https://projectionwizard.org/) for an interactive implementation.
+
+**Common regional setups:**
+
+```js
+// Europe (ETRS89-LAEA standard)
+d3.geoConicEqualArea().rotate([-15, 0]).center([0, 52]).parallels([35, 65])
+
+// Contiguous US (USGS standard Albers)
+d3.geoAlbers().rotate([96, 0]).center([0, 38]).parallels([29.5, 45.5])
+```
+
+**Observable Plot note:** Plot's `geo` mark wraps D3's projection stack with automatic `fitSize` and projection-aware coordinates. Useful for quick maps, but the D3 skill teaches the mechanics Plot abstracts away.
 
 ### Rotation
 
@@ -349,6 +369,10 @@ for (const [c, group] of byColor) {
 }
 ```
 
+### Dark Mode Maps
+
+Don't just invert your light-mode color scheme — the "dark-is-more" perceptual bias persists even on dark backgrounds (Schiewe 2024). Design separate schemes: dark gray background (`#1a1a2e`, not pure black), subtle mid-gray borders (`#444`, 0.3-0.5px), off-white labels (`#e0e0e0`) with dark text shadow. Multi-hue sequential schemes (viridis, plasma) outperform single-hue in dark mode because hue provides a second channel beyond lightness. Use `matchMedia("(prefers-color-scheme: dark)")` to detect and respond. See `color` skill for palette selection and contrast guidance.
+
 ## Projection-Based Zoom (Canvas)
 
 Re-project on every zoom instead of transforming a group — avoids stroke scaling:
@@ -452,6 +476,56 @@ const simplified = simplify(presimplify(topology), 0.01);
 
 Lazy-load detailed geometry only when zoom demands it.
 
+## When to Escalate Beyond Pure D3
+
+Pure D3 maps excel at thematic visualization — choropleth, cartograms, flow maps, globes — where the data IS the map. But some requirements push beyond what D3 alone handles well.
+
+### Decision Framework
+
+| Signal | Stay with D3 | Escalate |
+|--------|-------------|----------|
+| Basemap need | Data is the map (choropleth, cartogram) | Need streets/terrain/satellite behind data |
+| Zoom levels | 1-3 fixed views | Continuous 0-22 slippy map |
+| Projection | Non-Mercator required | Web Mercator acceptable |
+| Deployment | Self-contained HTML, no network | Can load external tiles |
+| Interactive features | < 5K SVG, < 100K Canvas | 100K+ need WebGL |
+| Interaction model | Fixed view with hover/click | Pan/zoom "Google Maps" UX |
+
+### Escalation: MapLibre GL JS + D3 Overlay
+
+When you need a tile basemap with D3 data overlaid, use MapLibre for tiles and D3 for data layers. The bridge is a `d3.geoTransform` that delegates to MapLibre's projection (as of March 2026, MapLibre GL JS v4+):
+
+```js
+// MapLibre renders basemap; D3 renders data in synchronized SVG overlay
+const svg = d3.select(map.getCanvasContainer()).append("svg")
+  .style("position", "absolute").style("pointer-events", "none");
+
+function projectPoint(lon, lat) {
+  const p = map.project(new maplibregl.LngLat(lon, lat));
+  this.stream.point(p.x, p.y);
+}
+const path = d3.geoPath().projection(d3.geoTransform({ point: projectPoint }));
+
+// Re-render on every map movement
+function update() { svg.selectAll("path").attr("d", path); }
+map.on("viewreset", update).on("move", update).on("moveend", update);
+```
+
+Set `pointer-events: all` on specific D3 elements that need clicks. The SVG overlay has `pointer-events: none` so map interaction passes through by default.
+
+### Escalation: PMTiles for Serverless Tiles
+
+[PMTiles](https://github.com/protomaps/PMTiles) serves vector or raster tiles from static storage (S3, R2, any CDN) via HTTP range requests — no tile server needed. Regional extracts are practical; a full planet basemap is ~120 GB. Use with MapLibre + D3 overlay for the full stack (as of March 2026).
+
+### Performance Boundaries
+
+| Approach | Max interactive features | Zoom levels | Bundle size |
+|----------|------------------------|-------------|-------------|
+| D3 SVG | ~5K paths | 1-3 | ~50KB |
+| D3 Canvas + quadtree | ~100K-500K points | 1-5 | ~55KB |
+| MapLibre GL JS | ~500K (WebGL) | 0-22 | ~300KB |
+| d3-tile + raster | unlimited (pre-rendered) | 0-19 | ~55KB |
+
 ## Common Pitfalls
 
 1. **Coordinate order.** GeoJSON uses `[longitude, latitude]`, not `[lat, lon]`. Google Maps, Leaflet, and many databases use `[lat, lon]` — always check.
@@ -495,3 +569,7 @@ Lazy-load detailed geometry only when zoom demands it.
 - [versor](https://github.com/Fil/versor) — quaternion rotation for globes
 - [US Atlas](https://github.com/topojson/us-atlas) / [World Atlas](https://github.com/topojson/world-atlas)
 - [Joshua Stevens: Bivariate Choropleth](https://www.joshuastevens.net/cartography/make-a-bivariate-choropleth-map/)
+- [Projection Wizard](https://projectionwizard.org/) — Snyder's systematic projection selection
+- [MapLibre GL JS](https://maplibre.org/projects/gl-js/) — WebGL tile rendering
+- [PMTiles](https://github.com/protomaps/PMTiles) — serverless tile archives
+- [d3-geo-polygon](https://github.com/Fil/d3-geo-polygon) — polyhedral projections

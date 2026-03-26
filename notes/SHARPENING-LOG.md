@@ -448,3 +448,27 @@ Running notes from the philosophy pass. One section per skill — observations, 
 **Key judgment:** The research contained a full d3-scale-chromatic inventory and extensive Crameri map tables. These were compressed into a decision table and brief prose — the skill guides palette *choice*, not palette *enumeration*. The OKLCH section prioritizes the two practical approaches (CSS-native and culori) over conversion math.
 
 **Cross-skill connections:** Classification scales for choropleths cross-referenced to axes-and-scales. APCA thresholds connect to annotation skill's label sizing guidance.
+
+---
+
+## cartography (research expansion)
+
+**Date:** 2026-03-26
+
+**What changed:**
+- Added Snyder's projection selection framework: distortion property decision (equal-area vs conformal vs compromise), geographic extent → projection family mapping, common regional setups (Europe ETRS89-LAEA, contiguous US USGS Albers)
+- Added "When to Escalate Beyond Pure D3" section with decision table (6 signals: basemap need, zoom levels, projection, deployment, feature count, interaction model)
+- Added MapLibre GL JS + D3 overlay integration pattern with geoTransform bridge code
+- Added PMTiles serverless tile guidance
+- Added performance boundaries table (D3 SVG/Canvas/MapLibre/d3-tile)
+- Added dark mode maps paragraph with Schiewe 2024 research on dark-is-more bias, cross-ref to color skill
+- Added Observable Plot geo mark note
+- Added cross-reference to axes-and-scales for classification scales
+- Timestamped version-dependent claims (MapLibre v4+, PMTiles as of March 2026)
+- Added 4 references (Projection Wizard, MapLibre, PMTiles, d3-geo-polygon)
+
+**Line count:** 498 → 575 (+77 lines, +15.5%). Within 10-30% growth target.
+
+**Key judgment:** The research contained full MapLibre+PMTiles+D3 stack code (~80 lines), dark mode theme objects with Canvas rendering code (~50 lines), a projection selection helper function (~40 lines), and Tissot's indicatrix code. These were compressed to: a decision table, one bridge pattern, one paragraph, and prose guidance. The skill guides the *choice* of when to escalate, not how to build a full MapLibre app.
+
+**Cross-skill connections:** Classification scales for choropleths cross-referenced to axes-and-scales (don't duplicate). Dark mode palette guidance cross-referenced to color skill. Performance escalation connects to canvas and webgl skills.
