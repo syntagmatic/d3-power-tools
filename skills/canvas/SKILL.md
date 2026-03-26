@@ -49,7 +49,9 @@ matchMedia(`(resolution: ${devicePixelRatio}dppx)`)
   .addEventListener("change", () => resize());
 ```
 
-Hit detection canvas: create offscreen (never append to DOM), use `willReadFrequently: true` for fast `getImageData` reads.
+Hit detection canvas: create offscreen (never append to DOM), use `willReadFrequently: true` for fast `getImageData` reads. This flag keeps the backing store in CPU memory — cuts read time from ~3ms to ~1ms but **disables GPU acceleration**, adding 35+ms penalty to draws. Only use it on canvases you draw once and read often (color-picking, heatmap generation). Never set it on the main rendering canvas.
+
+Modern Canvas 2D APIs worth knowing: `ctx.roundRect(x, y, w, h, [radii])` for rounded bar charts and card-style nodes (all modern browsers). `ctx.reset()` clears canvas and resets all state in one call — replaces `clearRect` + manual state reset.
 
 ## Quadtree Hit Detection
 
@@ -228,15 +230,35 @@ worker.onmessage = ({ data: { positions } }) => drawPoints(ctx, positions);
 self.postMessage({ positions }, [positions.buffer]);
 ```
 
-### OffscreenCanvas
+### OffscreenCanvas: Off-Main-Thread Rendering
 
-When draw calls themselves are too heavy, move rendering to a worker:
+When the draw loop itself is heavy (100K+ complex shapes), move rendering to a worker so the main thread stays free for DOM events and UI. As of March 2026, `transferControlToOffscreen()` is supported in all modern browsers (Chrome 69+, Firefox 105+, Safari 16.4+).
+
+The D3 challenge: `d3.zoom` and event handlers need the DOM. The worker owns the canvas. Bridge them with messages:
 
 ```js
+// Main thread: transfer canvas, forward zoom transforms
 const offscreen = canvas.transferControlToOffscreen();
-worker.postMessage({ canvas: offscreen }, [offscreen]);
-// Worker now owns the canvas — main thread can't touch it
+const worker = new Worker("render-worker.js");
+worker.postMessage({ canvas: offscreen, dpr: devicePixelRatio }, [offscreen]);
+
+d3.select("svg.overlay").call(d3.zoom().on("zoom", ({ transform }) => {
+  worker.postMessage({ type: "zoom", transform: { x: transform.x, y: transform.y, k: transform.k } });
+}));
+// Keep quadtree on main thread for instant hover — no round-trip latency
 ```
+
+```js
+// render-worker.js: receives canvas, draws on zoom messages
+self.onmessage = ({ data }) => {
+  if (data.canvas) { ctx = data.canvas.getContext("2d"); ctx.scale(data.dpr, data.dpr); return; }
+  if (data.type === "zoom") { /* clear, translate, scale, batch-draw from typed arrays */ }
+};
+```
+
+**When to use**: 50K+ points where interaction jank is visible, or dashboards with multiple heavy canvases (each in its own worker). **Don't use** if you need synchronous `getImageData` hit detection — the main thread can't read a transferred canvas.
+
+Gotchas: after transfer, `getContext()` on the original DOM element throws. DPR changes must be forwarded via message. No `document.fonts` in workers — pre-load fonts or use a text atlas.
 
 ## Zoom and Pan
 
@@ -287,6 +309,50 @@ Combine with zoom: zooming in reduces visible count, automatically increasing de
 
 `ctx.fillText` is slow — each call rasterizes the font. Only label visible/selected items, cap at ~50 labels. For a fixed set of labels rendered many times, pre-render to a text atlas canvas and `drawImage` sub-regions.
 
+## Texture Atlas for Custom Markers
+
+Pre-render each marker shape (circle, triangle, star, icon) into one offscreen canvas, then stamp with `drawImage()` instead of per-element path commands. 3-10x faster for custom markers; smaller gain for plain circles since `arc()` is already optimized.
+
+```js
+function buildMarkerAtlas(categories, colorScale, size = 16) {
+  const dpr = devicePixelRatio, cell = size * dpr;
+  const atlas = new OffscreenCanvas(cell * categories.length, cell);
+  const ctx = atlas.getContext("2d");
+  // Draw each shape into its cell, indexed by category
+  categories.forEach((cat, i) => {
+    ctx.fillStyle = colorScale(cat);
+    ctx.beginPath();
+    drawShape(ctx, i * cell + cell / 2, cell / 2, cell * 0.35, cat);
+    ctx.fill();
+  });
+  return { atlas, cell, cssSize: size };
+}
+// Stamp: ctx.drawImage(atlas, col*cell, 0, cell, cell, x-half, y-half, size, size)
+```
+
+**Use when**: multiple marker shapes (categorical scatter), repeated icons, or expensive effects (shadows, glows — pre-render once). **Don't use** for uniform circles (batched `arc()` is faster) or continuously varying sizes (needs many atlas entries or scaling that re-enables smoothing).
+
+Rebuild the atlas on DPR change. Set `imageSmoothingEnabled = false` for pixel-perfect stamps. For 100K+ points with custom markers, WebGL instanced rendering is the better path — `drawImage` per point can't be batched.
+
+## GPU Escalation: When to Leave Canvas 2D
+
+Canvas 2D is the right default for 1K-500K elements. When batching + culling + LOD can't hold 60fps, escalate:
+
+| Data Scale | First Try | Escalate To | Why |
+|-----------|-----------|-------------|-----|
+| < 50K | Canvas 2D | — | Simple, debuggable, universal |
+| 50K-500K | Canvas 2D + typed arrays + LOD | OffscreenCanvas if UI jank | Frees main thread |
+| 500K-5M | Canvas 2D progressive render | regl / WebGL | GPU instanced draw, one draw call for all points |
+| 5M+ | — | WebGPU | Compute shaders for GPU-side aggregation |
+
+**regl** (~15KB) is the pragmatic middle ground: functional WebGL without the state machine. `regl-scatterplot` handles up to 20M points with D3 scale integration, lasso selection, and zoom. **d3fc** provides D3-idiomatic WebGL series renderers (scatter, line, bar) if you want a higher-level API.
+
+**WebGPU** (as of March 2026: Chrome, Edge, Firefox, Safari 26+; ~70% global support) enables compute shaders for GPU-side binning/density and 10M+ point rendering at 45+ fps. The pattern: D3 scales compute positions into typed arrays, upload to GPU buffers, update a transform uniform on zoom — no data re-upload. API is verbose; only reach for it when WebGL performance is insufficient or you need compute shaders. See `webgl` skill for shader patterns.
+
+**Observable Plot** (as of March 2026) uses Canvas rendering internally for its raster mark and can handle moderate dataset sizes without manual Canvas code — worth considering before hand-rolling a heatmap or density plot.
+
+The escalation rule: **profile first, escalate only when measured performance requires it.** Each step up adds debugging complexity and narrows browser support.
+
 ## Accessibility
 
 Canvas is a black box for screen readers. See `canvas-accessibility` for hidden DOM mirrors, `aria-activedescendant`, keyboard navigation, focus rings. See `data-table` for data table alternatives.
@@ -325,3 +391,6 @@ Canvas is a black box for screen readers. See `canvas-accessibility` for hidden 
 - [Canvas Optimization](https://developer.mozilla.org/en-US/docs/Web/API/Canvas_API/Tutorial/Optimizing_canvas) — MDN performance guide
 - [OffscreenCanvas](https://developer.mozilla.org/en-US/docs/Web/API/OffscreenCanvas) — worker-thread rendering
 - [High-DPI Canvas](https://web.dev/articles/canvas-hidipi) — crisp rendering on Retina/HiDPI
+- [It's always been you, Canvas2D](https://developer.chrome.com/blog/canvas2d) — modern Canvas 2D API additions
+- [regl](https://github.com/regl-project/regl) — functional WebGL wrapper for GPU-accelerated rendering
+- [regl-scatterplot](https://github.com/flekschas/regl-scatterplot) — D3-compatible WebGL scatter for up to 20M points
