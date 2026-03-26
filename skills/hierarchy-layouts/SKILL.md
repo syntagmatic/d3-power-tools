@@ -122,7 +122,11 @@ For node-link layouts, swap `.x`/`.y` accessors to match coordinate semantics: `
 
 1. **Treemap `paddingTop` without labels.** Reserves space for group labels at the top of each cell. If you're not rendering labels there, it wastes space and creates a visual gap the viewer will try to interpret.
 
-2. **Pack labels overlapping.** Pack layout doesn't guarantee label space — circles can be any size. Show labels only above a radius threshold, clip text to the circle, or label on hover.
+2. **Pack and treemap labels overlapping.** These layouts don't guarantee label space — cells and circles can be any size, and parent labels compete with children. Three strategies, from simplest to most robust:
+
+   - **Focus-level only:** Show labels only for the focused node and its direct children. At overview depth-0, only show depth-1 labels. When zoomed into a depth-1 node, show depth-2 labels. Parent labels go at the top of their container; child labels center inside. This eliminates overlap entirely because siblings don't share vertical space. See `blocks/19-circle-packing-zoom.html`.
+   - **Measure and hide:** Approximate text width (`name.length * fontSize * 0.55`) and compare to container width (circle diameter or treemap cell width). Hide labels that don't fit. This handles variable name lengths but still overlaps when siblings are close together.
+   - **Hover labels:** Show labels only on hover/focus. Most scalable but loses the overview — the viewer must probe to discover what things are called. Best combined with one of the above: show fitted labels where they fit, reveal the rest on hover.
 
 3. **Sunburst root fills center.** Partition allocates the full innermost ring to root, which carries no information. Filter it out: `.filter(d => d.depth > 0)`, or render as a small center circle for zoom-out navigation.
 
