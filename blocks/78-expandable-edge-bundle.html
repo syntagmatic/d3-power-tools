@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Expandable Edge Bundle</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #fafafa; color: #333; }
+  #container { position: relative; width: 800px; height: 800px; margin: 0 auto; }
+  canvas, svg { position: absolute; top: 0; left: 0; }
+  .tooltip {
+    position: absolute; pointer-events: none; background: rgba(0,0,0,0.85);
+    color: #fff; padding: 8px 12px; border-radius: 4px; font-size: 12px;
+    display: none; z-index: 10; line-height: 1.4; max-width: 220px;
+  }
+</style>
+</head>
+<body>
+<div id="container">
+  <div class="tooltip" id="tooltip"></div>
+</div>
+<script>
+const TOL = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377"];
+
+const rng = d3.randomLcg(13);
+
+const moduleNames = ["core","ui","data","net","auth","viz"];
+const subModPool = ["input","output","render","parse","store","cache","transform","validate","encode","decode","compress","filter","route","handle","format"];
+
+const flatNodes = [{ id: "root", parent: null }];
+const leafIds = [];
+
+moduleNames.forEach((mod, mi) => {
+  flatNodes.push({ id: mod, parent: "root", module: mi });
+  const nSubs = 3 + Math.floor(rng() * 3);
+  const subs = d3.shuffle(subModPool.slice(), rng).slice(0, nSubs);
+  subs.forEach(sub => {
+    const subId = `${mod}.${sub}`;
+    flatNodes.push({ id: subId, parent: mod, module: mi });
+    const nLeaves = 2 + Math.floor(rng() * 4);
+    for (let i = 0; i < nLeaves; i++) {
+      const leafId = `${subId}.${String.fromCharCode(65 + i)}`;
+      flatNodes.push({ id: leafId, parent: subId, module: mi });
+      leafIds.push(leafId);
+    }
+  });
+});
+
+// ~80 cross-module edges
+const edges = [];
+const edgeSet = new Set();
+while (edges.length < 80) {
+  const s = leafIds[Math.floor(rng() * leafIds.length)];
+  const t = leafIds[Math.floor(rng() * leafIds.length)];
+  if (s === t) continue;
+  const sMod = s.split(".")[0], tMod = t.split(".")[0];
+  if (sMod === tMod && rng() < 0.6) continue;
+  const key = [s, t].sort().join("|");
+  if (edgeSet.has(key)) continue;
+  edgeSet.add(key);
+  edges.push({ source: s, target: t });
+}
+
+// --- Setup ---
+const W = 800, H = 800;
+const cx = W / 2, cy = H / 2;
+const outerRadius = 320;
+const dpr = devicePixelRatio || 1;
+
+const container = document.getElementById("container");
+
+const canvas = d3.select(container).append("canvas")
+  .attr("width", W * dpr).attr("height", H * dpr)
+  .style("width", `${W}px`).style("height", `${H}px`)
+  .node();
+const ctx = canvas.getContext("2d");
+ctx.scale(dpr, dpr);
+
+const svg = d3.select(container).append("svg")
+  .attr("width", W).attr("height", H)
+  .style("font-family", "system-ui, sans-serif");
+
+const gMain = svg.append("g").attr("transform", `translate(${cx},${cy})`);
+const tooltip = d3.select("#tooltip");
+
+// --- Hierarchy ---
+const stratify = d3.stratify().id(d => d.id).parentId(d => d.parent);
+const root = stratify(flatNodes);
+
+const getModule = (d) => {
+  let n = d;
+  while (n.depth > 1) n = n.parent;
+  return moduleNames.indexOf(n.data.id);
+};
+
+let hoveredNode = null;
+
+const recomputeLayout = () => {
+  const cluster = d3.cluster()
+    .size([2 * Math.PI, outerRadius])
+    .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth);
+  cluster(root);
+};
+
+// Walk up to find visible ancestor
+const visibleAncestor = (nodeMap, id) => {
+  let n = nodeMap.get(id);
+  if (!n) return null;
+  while (n.depth > 0) {
+    if (n.parent && n.parent.children && n.parent.children.includes(n)) return n;
+    n = n.parent;
+  }
+  return n;
+};
+
+// Compute links with LCA paths, keyed for hover matching
+const computeLinks = () => {
+  const nodeMap = new Map();
+  root.each(d => nodeMap.set(d.data.id, d));
+
+  const aggMap = new Map();
+  edges.forEach(e => {
+    const src = visibleAncestor(nodeMap, e.source);
+    const tgt = visibleAncestor(nodeMap, e.target);
+    if (!src || !tgt || src === tgt) return;
+    const key = [src.data.id, tgt.data.id].sort().join("|");
+    if (!aggMap.has(key)) {
+      // node.path() gives the LCA route through the tree
+      const path = src.path(tgt);
+      aggMap.set(key, { path, count: 0, key });
+    }
+    aggMap.get(key).count++;
+  });
+  return [...aggMap.values()];
+};
+
+// Use d3.lineRadial + curveBundle for proper bundling
+// .angle(d => d.x) .radius(d => d.y) reads from hierarchy node positions
+const bundleLine = d3.lineRadial()
+  .curve(d3.curveBundle.beta(0.15))
+  .angle(d => d.x)
+  .radius(d => d.y);
+
+const drawEdges = () => {
+  ctx.clearRect(0, 0, W, H);
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  const links = computeLinks();
+
+  // Determine hover highlighting
+  let connectedKeys = null;
+  if (hoveredNode) {
+    const hoverIds = new Set();
+    const walk = (n) => {
+      hoverIds.add(n.data.id);
+      if (n.children) n.children.forEach(walk);
+      if (n._children) n._children.forEach(walk);
+    };
+    walk(hoveredNode);
+
+    connectedKeys = new Set();
+    const nodeMap = new Map();
+    root.each(d => nodeMap.set(d.data.id, d));
+    edges.forEach(e => {
+      if (hoverIds.has(e.source) || hoverIds.has(e.target)) {
+        const src = visibleAncestor(nodeMap, e.source);
+        const tgt = visibleAncestor(nodeMap, e.target);
+        if (src && tgt && src !== tgt) {
+          connectedKeys.add([src.data.id, tgt.data.id].sort().join("|"));
+        }
+      }
+    });
+  }
+
+  // Draw faded edges first, then highlighted on top
+  const faded = [], highlighted = [];
+  links.forEach(l => {
+    if (connectedKeys && connectedKeys.has(l.key)) highlighted.push(l);
+    else faded.push(l);
+  });
+
+  // Create a line generator with canvas context
+  const lineCtx = d3.lineRadial()
+    .curve(d3.curveBundle.beta(0.15))
+    .angle(d => d.x)
+    .radius(d => d.y)
+    .context(ctx);
+
+  faded.forEach(l => {
+    ctx.strokeStyle = connectedKeys ? "rgba(150,150,150,0.05)" : "rgba(120,120,120,0.25)";
+    ctx.lineWidth = Math.max(0.5, Math.sqrt(l.count));
+    ctx.beginPath();
+    lineCtx(l.path);
+    ctx.stroke();
+  });
+
+  highlighted.forEach(l => {
+    ctx.strokeStyle = "rgba(68,119,170,0.8)";
+    ctx.lineWidth = Math.max(1.5, Math.sqrt(l.count) * 1.5);
+    ctx.beginPath();
+    lineCtx(l.path);
+    ctx.stroke();
+  });
+
+  ctx.restore();
+};
+
+const renderNodes = () => {
+  gMain.selectAll("*").remove();
+
+  const allVisible = [];
+  const collectVisible = (node) => {
+    if (node.depth > 0) allVisible.push(node);
+    if (node.children) node.children.forEach(collectVisible);
+  };
+  collectVisible(root);
+
+  const isLeaf = (d) => !d.children && !d._children;
+  const isCollapsed = (d) => !d.children && d._children;
+  const isInternal = (d) => (d.children && d.children.length > 0) || d._children;
+
+  const leaves = allVisible.filter(isLeaf);
+  const internals = allVisible.filter(d => d.depth >= 2 && isInternal(d));
+
+  // Labels for leaves (rotated along circle)
+  const labelG = gMain.append("g");
+
+  leaves.forEach(d => {
+    const siblings = d.parent ? (d.parent.children || []).length : 1;
+    if (siblings > 1 && d.parent.children) {
+      const sibs = d.parent.children;
+      const span = Math.abs(sibs[sibs.length - 1].x - sibs[0].x);
+      const spacing = span / Math.max(1, siblings - 1);
+      const arcSpace = spacing * d.y;
+      const labelLen = d.data.id.split(".").pop().length * 6;
+      if (arcSpace < labelLen * 0.5) return;
+    }
+
+    const angle = d.x * 180 / Math.PI;
+    labelG.append("text")
+      .attr("font-size", "9px")
+      .attr("fill", "#555")
+      .attr("pointer-events", "none")
+      .attr("transform",
+        d.x < Math.PI
+          ? `rotate(${angle - 90}) translate(${d.y + 8},0)`
+          : `rotate(${angle + 90}) translate(${-d.y - 8},0)`)
+      .attr("text-anchor", d.x < Math.PI ? "start" : "end")
+      .text(d.data.id.split(".").pop());
+  });
+
+  // Module labels (depth 1)
+  allVisible.filter(d => d.depth === 1).forEach(d => {
+    const angle = d.x * 180 / Math.PI;
+    labelG.append("text")
+      .attr("font-size", "12px")
+      .attr("font-weight", 700)
+      .attr("fill", d3.color(TOL[getModule(d)]).darker(1))
+      .attr("pointer-events", "none")
+      .attr("transform",
+        d.x < Math.PI
+          ? `rotate(${angle - 90}) translate(${d.y - 15},0)`
+          : `rotate(${angle + 90}) translate(${-(d.y - 15)},0)`)
+      .attr("text-anchor", d.x < Math.PI ? "start" : "end")
+      .text(d.data.id);
+  });
+
+  // Node circles
+  const nodeG = gMain.append("g");
+
+  // Leaf dots
+  const pol = (d) => {
+    const a = d.x - Math.PI / 2;
+    return [d.y * Math.cos(a), d.y * Math.sin(a)];
+  };
+
+  nodeG.selectAll("circle.leaf")
+    .data(leaves, d => d.data.id)
+    .join("circle")
+    .attr("class", "leaf")
+    .attr("cx", d => pol(d)[0])
+    .attr("cy", d => pol(d)[1])
+    .attr("r", 3)
+    .attr("fill", d => TOL[getModule(d)])
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 0.5);
+
+  // Internal node markers
+  const intG = nodeG.selectAll("g.internal")
+    .data(internals, d => d.data.id)
+    .join("g")
+    .attr("class", "internal")
+    .attr("transform", d => {
+      const [px, py] = pol(d);
+      return `translate(${px},${py})`;
+    })
+    .style("cursor", "pointer");
+
+  intG.append("circle")
+    .attr("r", 5)
+    .attr("fill", d => isCollapsed(d) ? d3.color(TOL[getModule(d)]).darker(0.5) : "#fff")
+    .attr("stroke", d => d3.color(TOL[getModule(d)]).darker(0.8))
+    .attr("stroke-width", 1.5);
+
+  intG.filter(isCollapsed)
+    .append("text")
+    .attr("text-anchor", "middle").attr("dy", "0.35em")
+    .attr("font-size", "9px").attr("font-weight", 700)
+    .attr("fill", "#fff").attr("pointer-events", "none")
+    .text("+");
+
+  // Click collapse/expand
+  intG.on("click", (event, d) => {
+    event.stopPropagation();
+    if (d.children) {
+      d._children = d.children;
+      d.children = null;
+    } else if (d._children) {
+      d.children = d._children;
+      d._children = null;
+    }
+    recomputeLayout();
+    renderNodes();
+    drawEdges();
+  });
+
+  // Hit targets for hover on leaves
+  nodeG.selectAll("circle.hit")
+    .data(leaves, d => d.data.id)
+    .join("circle")
+    .attr("class", "hit")
+    .attr("cx", d => pol(d)[0])
+    .attr("cy", d => pol(d)[1])
+    .attr("r", 8)
+    .attr("fill", "transparent")
+    .on("pointerenter", onEnter).on("pointermove", onMove).on("pointerleave", onLeave);
+
+  intG.on("pointerenter", onEnter).on("pointermove", onMove).on("pointerleave", onLeave);
+
+  function onEnter(event, d) {
+    hoveredNode = d;
+    drawEdges();
+    const ids = new Set();
+    const walk = (n) => { ids.add(n.data.id); if (n.children) n.children.forEach(walk); if (n._children) n._children.forEach(walk); };
+    walk(d);
+    const nEdges = edges.filter(e => ids.has(e.source) || ids.has(e.target)).length;
+    tooltip.style("display", "block")
+      .html(`<strong>${d.data.id}</strong><br>Connections: ${nEdges}`);
+  }
+  function onMove(event) {
+    const [mx, my] = d3.pointer(event, container);
+    tooltip.style("left", `${mx + 14}px`).style("top", `${my - 10}px`);
+  }
+  function onLeave() {
+    hoveredNode = null;
+    drawEdges();
+    tooltip.style("display", "none");
+  }
+};
+
+// Initial
+recomputeLayout();
+renderNodes();
+drawEdges();
+</script>
+</body>
+</html>

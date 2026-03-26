@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Diverging Midpoint Heatmap</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px;
+  }
+  h1 { font-size: 18px; font-weight: 600; color: #222; margin-bottom: 4px; }
+  .subtitle { font-size: 13px; color: #666; margin-bottom: 14px; }
+  .tooltip-box {
+    position: fixed; pointer-events: none; background: white; border: 1px solid #ccc;
+    border-radius: 4px; padding: 6px 10px; font-size: 12px; box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+    opacity: 0; transition: opacity 0.05s; z-index: 10;
+  }
+  .tooltip-box .val { font-family: "SF Mono", Monaco, "Cascadia Code", monospace; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>Daily Temperature Departures from Normal (&deg;C)</h1>
+<p class="subtitle">Blue = colder than normal, Red = warmer than normal. Midpoint at 0&deg;C.</p>
+<svg id="chart"></svg>
+<div class="tooltip-box" id="tip"></div>
+
+<script>
+(() => {
+const rng = d3.randomLcg(7777);
+const rnorm = () => { let u = 0, v = 0; while (!u) u = rng(); while (!v) v = rng(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+
+const cities = [
+  { name: "Oslo", minDep: -12, maxDep: 8 },
+  { name: "Phoenix", minDep: -6, maxDep: 14 },
+  { name: "Singapore", minDep: -3, maxDep: 4 },
+];
+
+const monthNames = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const daysInMonth = [31,28,31,30,31,30,31,31,30,31,30,31];
+
+const cityData = cities.map(city => {
+  const days = [];
+  let dayOfYear = 0;
+  for (let m = 0; m < 12; m++) {
+    for (let d = 0; d < daysInMonth[m]; d++) {
+      let dep;
+      const frac = dayOfYear / 365;
+      if (city.name === "Oslo") {
+        const base = -2 + 4 * Math.sin(2 * Math.PI * (frac - 0.05));
+        dep = base + rnorm() * 2.5;
+        if (m === 0 && d >= 12 && d <= 15) dep = -9 - rng() * 3;
+        if (m === 6 && d >= 10 && d <= 16) dep = 5 + rng() * 3;
+      } else if (city.name === "Phoenix") {
+        const base = 2 + 3 * Math.sin(2 * Math.PI * (frac - 0.1));
+        dep = base + rnorm() * 2;
+        if (m >= 5 && m <= 7 && d >= 5 && d <= 12) dep = 8 + rng() * 6;
+      } else {
+        dep = rnorm() * 1.2;
+      }
+      dep = Math.max(city.minDep, Math.min(city.maxDep, dep));
+      days.push({ month: m, dayInMonth: d, dayOfYear, departure: Math.round(dep * 10) / 10 });
+      dayOfYear++;
+    }
+  }
+  return { ...city, days };
+});
+
+// Layout constants
+// Each day-rect: ~15px wide (one per day in month), ~4px tall (stacked vertically within month column)
+// Actually: 12 months across, each month shows days vertically
+// day-rect size: width per day within a month column
+const dayW = 2.5;   // each day-rect width
+const dayH = 4;     // each day-rect height — compact rows
+const monthGap = 5;
+const cityGap = 20;
+const labelW = 72;
+const monthLabelH = 20;
+const topPad = 6;
+
+// Each month column: daysInMonth[m] days wide? No — days are rows within the month column.
+// Month column width = fixed (just one column of rects per month? No, a grid of day-rects)
+// Re-think: "12 columns (Jan-Dec)" means each column = 1 month.
+// "Each cell is a grid of day-rectangles" — within each month-city cell, days are arranged as a vertical list.
+// So each month column is dayW wide, and has up to 31 rows of dayH each.
+// Total width = 12 * dayW + gaps — that's too narrow.
+// Better: each month column shows days as a HORIZONTAL row of rects. Width = daysInMonth * dayW.
+// Height per city row = dayH (just one row of rects per month-city).
+// But that gives height = dayH per city = 4px. Too small.
+//
+// The prompt says "4x15px" — likely width=4, height=15. So each day is a tall narrow rect.
+// 12 months across, each month has up to 31 day-rects side by side = 31 * 4 = 124px per month.
+// Total width = 12 * 124 + gaps ~ 1540px. Let me use 3px width to fit in 960px.
+
+const dW = 2.2;   // day rect width
+const dH = 12;    // day rect height (tall enough to see color)
+const mGap = 3;   // gap between months
+const cGap = 18;  // gap between city rows
+const lW = 66;    // left margin for city names
+const mlH = 18;   // month label height
+
+const maxDays = 31;
+// Each month column width = daysInMonth[m] * dW, but use maxDays for alignment
+const mColW = maxDays * dW;
+const gridW = 12 * mColW + 11 * mGap;
+const rowH = dH; // each city-month cell is just one row of day rects, dH tall
+// Wait — this is a heatmap. Each city has ONE row. Within that row, each month column has days arranged horizontally.
+// So the grid is: 3 rows (cities) x 12 columns (months). Each cell = horizontal strip of colored day-rects.
+
+const chartW = lW + gridW + 80;
+const chartH = 10 + mlH + 3 * dH + 2 * cGap + 80;
+
+// That's very short. Let me reconsider.
+// The prompt says "grid of day-rectangles" per cell — maybe days arranged in a 2D micro-grid?
+// E.g., 7 columns (week days) x ~5 rows (weeks)? Like a calendar?
+// Let me try a week-based calendar layout within each month-city cell.
+
+// Calendar approach: 7 cols x up to 6 rows per month
+const calCellW = 9;
+const calCellH = 9;
+const calGap = 1;
+const calW = 7 * (calCellW + calGap) - calGap; // ~70px per month
+const calH = 6 * (calCellH + calGap) - calGap; // ~59px per month
+const calMonthGap = 6;
+const calCityGap = 24;
+
+const calLabelW = 84;
+const calMlH = 22;
+const calChartW = calLabelW + 12 * (calW + calMonthGap) - calMonthGap + 80;
+const calChartH = 12 + calMlH + 3 * (calH) + 2 * calCityGap + 90;
+
+const svg = d3.select("#chart")
+  .attr("width", Math.min(calChartW, 1100))
+  .attr("height", calChartH)
+  .attr("viewBox", `0 0 ${calChartW} ${calChartH}`);
+
+// Diverging color scale: blue at negative, white at 0, red at positive
+const globalMin = d3.min(cityData, c => d3.min(c.days, d => d.departure));
+const globalMax = d3.max(cityData, c => d3.max(c.days, d => d.departure));
+const color = d3.scaleDiverging()
+  .domain([globalMin, 0, globalMax])
+  .interpolator(t => {
+    if (t <= 0.5) return d3.interpolateRgb("#4477AA", "#f7f7f7")(t * 2);
+    return d3.interpolateRgb("#f7f7f7", "#EE6677")((t - 0.5) * 2);
+  });
+
+const tip = d3.select("#tip");
+const gx = calLabelW;
+const gy = 10 + calMlH;
+
+// Month labels
+monthNames.forEach((m, i) => {
+  const x = gx + i * (calW + calMonthGap) + calW / 2;
+  svg.append("text").attr("x", x).attr("y", gy - 6).attr("text-anchor", "middle")
+    .attr("font-size", 11).attr("fill", "#555").text(m);
+});
+
+// For each city, for each month, lay out days in a calendar-like grid (row = week, col = day-of-week)
+// Since we don't have real dates, just arrange sequentially: col = dayInMonth % 7, row = floor(dayInMonth / 7)
+
+cityData.forEach((city, ci) => {
+  const rowY = gy + ci * (calH + calCityGap);
+
+  svg.append("text").attr("x", calLabelW - 10).attr("y", rowY + calH / 2)
+    .attr("text-anchor", "end").attr("dominant-baseline", "middle")
+    .attr("font-size", 13).attr("font-weight", 600).attr("fill", "#333")
+    .text(city.name);
+
+  const g = svg.append("g").attr("transform", `translate(${gx}, ${rowY})`);
+
+  city.days.forEach(d => {
+    const mx = d.month * (calW + calMonthGap);
+    const col = d.dayInMonth % 7;
+    const row = Math.floor(d.dayInMonth / 7);
+    const x = mx + col * (calCellW + calGap);
+    const y = row * (calCellH + calGap);
+
+    g.append("rect")
+      .attr("x", x).attr("y", y)
+      .attr("width", calCellW).attr("height", calCellH)
+      .attr("fill", color(d.departure))
+      .attr("rx", 1)
+      .style("cursor", "pointer")
+      .on("pointerenter", (event) => {
+        const dateStr = `${monthNames[d.month]} ${d.dayInMonth + 1}`;
+        const label = d.departure > 2 ? "warm" : d.departure < -2 ? "cold" : "near normal";
+        tip.html(`<strong>${city.name}</strong><br>${dateStr}<br><span class="val">${d.departure > 0 ? "+" : ""}${d.departure}&deg;C</span> (${label})`)
+          .style("opacity", 1);
+      })
+      .on("pointermove", (event) => {
+        tip.style("left", (event.clientX + 14) + "px").style("top", (event.clientY - 10) + "px");
+      })
+      .on("pointerleave", () => tip.style("opacity", 0));
+  });
+});
+
+// Annotations
+const annotG = svg.append("g");
+
+// Oslo cold snap: Jan days 12-15 (month=0, dayInMonth 12..15)
+// Position: month 0, row ~1-2, rightish
+const annOsloX = gx + 0 * (calW + calMonthGap) + calW + 8;
+const annOsloY = gy + 0 * (calH + calCityGap) + Math.floor(13 / 7) * (calCellH + calGap) + calCellH / 2;
+annotG.append("line")
+  .attr("x1", annOsloX - 6).attr("y1", annOsloY)
+  .attr("x2", annOsloX + 36).attr("y2", annOsloY - 14)
+  .attr("stroke", "#4477AA").attr("stroke-width", 0.8);
+annotG.append("text").attr("x", annOsloX + 40).attr("y", annOsloY - 12)
+  .attr("font-size", 9).attr("fill", "#4477AA").attr("font-weight", 600)
+  .text("Cold snap: \u221211\u00b0C, 4 days");
+
+// Phoenix heat wave: Jul days 5-12 (month=6)
+const annPhxX = gx + 7 * (calW + calMonthGap) + calW + 8;
+const annPhxY = gy + 1 * (calH + calCityGap) + Math.floor(8 / 7) * (calCellH + calGap) + calCellH / 2;
+annotG.append("line")
+  .attr("x1", annPhxX - 6).attr("y1", annPhxY)
+  .attr("x2", annPhxX + 36).attr("y2", annPhxY + 14)
+  .attr("stroke", "#EE6677").attr("stroke-width", 0.8);
+annotG.append("text").attr("x", annPhxX + 40).attr("y", annPhxY + 18)
+  .attr("font-size", 9).attr("fill", "#EE6677").attr("font-weight", 600)
+  .text("Heat wave: +12\u00b0C, 8 days");
+
+// Singapore bracket
+const sgRowY = gy + 2 * (calH + calCityGap);
+const bracketY = sgRowY + calH + 8;
+const sgLeft = gx;
+const sgRight = gx + 11 * (calW + calMonthGap) + calW;
+annotG.append("line").attr("x1", sgLeft).attr("y1", bracketY).attr("x2", sgRight).attr("y2", bracketY)
+  .attr("stroke", "#888").attr("stroke-width", 1);
+annotG.append("line").attr("x1", sgLeft).attr("y1", bracketY - 3).attr("x2", sgLeft).attr("y2", bracketY + 3)
+  .attr("stroke", "#888").attr("stroke-width", 1);
+annotG.append("line").attr("x1", sgRight).attr("y1", bracketY - 3).attr("x2", sgRight).attr("y2", bracketY + 3)
+  .attr("stroke", "#888").attr("stroke-width", 1);
+annotG.append("text").attr("x", (sgLeft + sgRight) / 2).attr("y", bracketY + 14)
+  .attr("text-anchor", "middle").attr("font-size", 10).attr("fill", "#666").attr("font-weight", 600)
+  .text("Annual range: only 7\u00b0C");
+
+// Color legend
+const legendY = calChartH - 32;
+const legendW = 260;
+const legendX = (calChartW - legendW) / 2;
+const legendG = svg.append("g").attr("transform", `translate(${legendX}, ${legendY})`);
+
+const defs = svg.append("defs");
+const grad = defs.append("linearGradient").attr("id", "div-grad");
+d3.range(0, 1.01, 0.02).forEach(t => {
+  const val = globalMin + t * (globalMax - globalMin);
+  grad.append("stop").attr("offset", `${t * 100}%`).attr("stop-color", color(val));
+});
+legendG.append("rect").attr("width", legendW).attr("height", 12).attr("fill", "url(#div-grad)").attr("rx", 2);
+
+const legendScale = d3.scaleLinear().domain([globalMin, globalMax]).range([0, legendW]);
+legendG.append("g").attr("transform", "translate(0,12)")
+  .call(d3.axisBottom(legendScale).ticks(7).tickFormat(d => (d > 0 ? "+" : "") + d))
+  .call(g => g.select(".domain").remove())
+  .call(g => g.selectAll("text").attr("font-size", 9));
+legendG.append("line").attr("x1", legendScale(0)).attr("x2", legendScale(0))
+  .attr("y1", -3).attr("y2", 15).attr("stroke", "#333").attr("stroke-width", 1.5);
+legendG.append("text").attr("x", legendScale(0)).attr("y", -6).attr("text-anchor", "middle")
+  .attr("font-size", 9).attr("fill", "#333").attr("font-weight", 600).text("0\u00b0C");
+})();
+</script>
+</body>
+</html>

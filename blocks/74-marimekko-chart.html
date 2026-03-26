@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Marimekko Chart — Market Share</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: #fafafa; color: #222; display: flex; justify-content: center; padding: 30px 20px; }
+  .container { width: 860px; }
+  h1 { font-size: 16px; font-weight: 600; margin-bottom: 16px; text-align: center; }
+  .tooltip {
+    position: absolute; pointer-events: none; background: rgba(0,0,0,0.85); color: #fff;
+    padding: 8px 12px; border-radius: 4px; font-size: 12px; line-height: 1.5;
+    opacity: 0; transition: opacity 0.15s;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Market Share — Category Size × Segment Proportion</h1>
+  <div id="chart"></div>
+</div>
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+(() => {
+  const width = 800, height = 500;
+  const margin = { top: 50, right: 20, bottom: 30, left: 50 };
+  const innerW = width - margin.left - margin.right;
+  const innerH = height - margin.top - margin.bottom;
+
+  // Data
+  const categories = [
+    { name: 'Electronics', total: 45, subs: [
+      { name: 'Smartphones', share: 0.38 },
+      { name: 'Laptops', share: 0.28 },
+      { name: 'Wearables', share: 0.20 },
+      { name: 'Audio', share: 0.14 }
+    ]},
+    { name: 'Automotive', total: 38, subs: [
+      { name: 'Electric', share: 0.32 },
+      { name: 'Sedan', share: 0.30 },
+      { name: 'SUV', share: 0.25 },
+      { name: 'Commercial', share: 0.13 }
+    ]},
+    { name: 'Healthcare', total: 28, subs: [
+      { name: 'Pharma', share: 0.40 },
+      { name: 'Devices', share: 0.25 },
+      { name: 'Biotech', share: 0.22 },
+      { name: 'Services', share: 0.13 }
+    ]},
+    { name: 'Energy', total: 22, subs: [
+      { name: 'Renewable', share: 0.35 },
+      { name: 'Oil & Gas', share: 0.30 },
+      { name: 'Nuclear', share: 0.20 },
+      { name: 'Grid', share: 0.15 }
+    ]},
+    { name: 'Retail', total: 17, subs: [
+      { name: 'E-commerce', share: 0.45 },
+      { name: 'Grocery', share: 0.25 },
+      { name: 'Fashion', share: 0.18 },
+      { name: 'Specialty', share: 0.12 }
+    ]}
+  ];
+
+  // Build hierarchy for d3.treemap
+  const hierarchyData = {
+    name: 'root',
+    children: categories.map(cat => ({
+      name: cat.name,
+      total: cat.total,
+      children: cat.subs.map(sub => ({
+        name: sub.name,
+        value: cat.total * sub.share,
+        share: sub.share,
+        category: cat.name,
+        catTotal: cat.total
+      }))
+    }))
+  };
+
+  const root = d3.hierarchy(hierarchyData)
+    .sum(d => d.value || 0)
+    .sort((a, b) => b.value - a.value);
+
+  d3.treemap()
+    .size([innerW, innerH])
+    .tile(d3.treemapSliceDice)
+    .padding(1)
+    .paddingTop(0)
+    (root);
+
+  // OKLCH-inspired palette — 5 hues with lightness variations
+  const hues = [240, 30, 150, 60, 330]; // blue, orange, green, yellow, magenta
+  const catColors = {};
+  categories.forEach((cat, i) => {
+    const hue = hues[i];
+    catColors[cat.name] = cat.subs.map((_, j) => {
+      const L = 0.6 + (j / (cat.subs.length - 1)) * 0.25;
+      return `oklch(${L} 0.12 ${hue})`;
+    });
+  });
+
+  const svg = d3.select('#chart').append('svg')
+    .attr('width', width).attr('height', height)
+    .attr('viewBox', `0 0 ${width} ${height}`);
+
+  const g = svg.append('g').attr('transform', `translate(${margin.left},${margin.top})`);
+
+  const tooltip = d3.select('#tooltip');
+
+  // Render leaf cells
+  const leaves = root.leaves();
+  const cells = g.selectAll('rect.cell')
+    .data(leaves)
+    .join('rect')
+      .attr('class', 'cell')
+      .attr('x', d => d.x0)
+      .attr('y', d => d.y0)
+      .attr('width', d => Math.max(0, d.x1 - d.x0))
+      .attr('height', d => Math.max(0, d.y1 - d.y0))
+      .attr('fill', d => {
+        const cat = d.parent.data.name;
+        const idx = d.parent.children.indexOf(d);
+        return catColors[cat][idx];
+      })
+      .attr('stroke', '#fff')
+      .attr('stroke-width', 1)
+      .style('cursor', 'pointer');
+
+  // Labels inside cells
+  g.selectAll('text.cell-label')
+    .data(leaves)
+    .join('text')
+      .attr('class', 'cell-label')
+      .attr('x', d => (d.x0 + d.x1) / 2)
+      .attr('y', d => (d.y0 + d.y1) / 2)
+      .attr('text-anchor', 'middle')
+      .attr('dominant-baseline', 'central')
+      .attr('font-size', 11)
+      .attr('fill', d => {
+        // dark text on light cells, light text on dark cells
+        const cat = d.parent.data.name;
+        const idx = d.parent.children.indexOf(d);
+        return idx >= 2 ? '#333' : '#fff';
+      })
+      .attr('pointer-events', 'none')
+      .text(d => {
+        const w = d.x1 - d.x0;
+        const h = d.y1 - d.y0;
+        if (w > 40 && h > 20) return d.data.name;
+        return '';
+      });
+
+  // Percentage labels
+  g.selectAll('text.pct-label')
+    .data(leaves)
+    .join('text')
+      .attr('class', 'pct-label')
+      .attr('x', d => (d.x0 + d.x1) / 2)
+      .attr('y', d => (d.y0 + d.y1) / 2 + 14)
+      .attr('text-anchor', 'middle')
+      .attr('font-size', 10)
+      .attr('fill', d => {
+        const idx = d.parent.children.indexOf(d);
+        return idx >= 2 ? '#555' : 'rgba(255,255,255,0.8)';
+      })
+      .attr('pointer-events', 'none')
+      .text(d => {
+        const w = d.x1 - d.x0;
+        const h = d.y1 - d.y0;
+        if (w > 40 && h > 35) return d3.format('.0%')(d.data.share);
+        return '';
+      });
+
+  // Category labels at top
+  const catGroups = root.children;
+  g.selectAll('text.cat-label')
+    .data(catGroups)
+    .join('text')
+      .attr('x', d => (d.x0 + d.x1) / 2)
+      .attr('y', -8)
+      .attr('text-anchor', 'middle')
+      .attr('font-size', 12)
+      .attr('font-weight', 600)
+      .text(d => d.data.name);
+
+  g.selectAll('text.cat-total')
+    .data(catGroups)
+    .join('text')
+      .attr('x', d => (d.x0 + d.x1) / 2)
+      .attr('y', -22)
+      .attr('text-anchor', 'middle')
+      .attr('font-size', 10)
+      .attr('fill', '#666')
+      .text(d => `$${d.data.total}B`);
+
+  // Percentage scale on left
+  const yScale = d3.scaleLinear().domain([0, 100]).range([0, innerH]);
+  const yAxis = d3.axisLeft(yScale).ticks(5).tickFormat(d => d + '%');
+  g.append('g').call(yAxis).selectAll('text').attr('font-size', 11);
+
+  // Hover interaction
+  cells.on('pointerenter', (event, d) => {
+    d3.select(event.currentTarget)
+      .transition().duration(100)
+      .attr('fill', d3.color(d3.select(event.currentTarget).attr('fill')).darker(0.4));
+
+    tooltip.style('opacity', 1)
+      .html(`<strong>${d.data.category}</strong> → ${d.data.name}<br>` +
+            `Value: $${d3.format(',.1f')(d.data.value)}B<br>` +
+            `Share: ${d3.format('.1%')(d.data.share)}`);
+  })
+  .on('pointermove', (event) => {
+    tooltip.style('left', (event.pageX + 14) + 'px')
+      .style('top', (event.pageY - 10) + 'px');
+  })
+  .on('pointerleave', (event, d) => {
+    const cat = d.parent.data.name;
+    const idx = d.parent.children.indexOf(d);
+    d3.select(event.currentTarget)
+      .transition().duration(200)
+      .attr('fill', catColors[cat][idx]);
+    tooltip.style('opacity', 0);
+  });
+})();
+</script>
+</body>
+</html>

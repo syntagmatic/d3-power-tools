@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebGL Edge-Bundled Network</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #16161d; color: #ccc; font-family: system-ui, sans-serif; }
+  #container { position: relative; width: 1200px; height: 800px; margin: 0 auto; }
+  canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
+  svg { position: absolute; top: 0; left: 0; }
+  #controls { position: absolute; top: 12px; left: 20px; z-index: 10;
+    background: rgba(22,22,29,0.9); padding: 8px 16px; border-radius: 6px; font-size: 13px; }
+  #controls label { margin-right: 8px; }
+  #controls input { vertical-align: middle; }
+  #info { position: absolute; bottom: 12px; left: 20px; z-index: 10;
+    background: rgba(22,22,29,0.9); padding: 6px 14px; border-radius: 4px; font-size: 12px; color: #aab; }
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="glCanvas"></canvas>
+  <svg id="overlay"></svg>
+  <div id="controls">
+    <label>Tension: <span id="betaVal">0.85</span></label>
+    <input type="range" id="tensionSlider" min="0" max="100" value="85" style="width:160px;">
+  </div>
+  <div id="info">6 modules, 300 leaves, ~1200 edges</div>
+</div>
+<script>
+(() => {
+  const W = 1200, H = 800;
+  const cx = W / 2, cy = H / 2;
+  const radius = 320;
+  const dpr = window.devicePixelRatio || 1;
+
+  // Seeded RNG
+  const mulberry32 = (a) => () => {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t ^= t + Math.imul(t ^ t >>> 7, 61 | t);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+  const rng = mulberry32(7);
+
+  // --- Generate hierarchy: 6 modules, ~50 leaves each ---
+  const modules = ['core', 'ui', 'data', 'render', 'utils', 'net'];
+  const nodes = [{ id: 'root', parent: '' }];
+
+  modules.forEach(mod => {
+    nodes.push({ id: mod, parent: 'root' });
+    const count = 45 + Math.floor(rng() * 15);
+    for (let i = 0; i < count; i++) {
+      nodes.push({ id: `${mod}.${String(i).padStart(2, '0')}`, parent: mod });
+    }
+  });
+
+  const root = d3.stratify().id(d => d.id).parentId(d => d.parent || null)(nodes);
+
+  // Radial cluster layout
+  const cluster = d3.cluster()
+    .size([2 * Math.PI, radius - 80])
+    .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth);
+  cluster(root);
+
+  const leaves = root.leaves();
+  const nodesById = new Map(root.descendants().map(d => [d.data.id, d]));
+
+  // Generate ~1200 cross-module edges
+  const connections = [];
+  const leafIds = leaves.map(d => d.data.id);
+
+  // Intra-module edges (denser)
+  modules.forEach(mod => {
+    const modLeaves = leafIds.filter(id => id.startsWith(mod + '.'));
+    for (let i = 0; i < modLeaves.length * 2; i++) {
+      const a = modLeaves[Math.floor(rng() * modLeaves.length)];
+      const b = modLeaves[Math.floor(rng() * modLeaves.length)];
+      if (a !== b) connections.push({ source: a, target: b });
+    }
+  });
+
+  // Cross-module edges
+  for (let i = 0; i < 500; i++) {
+    const a = leafIds[Math.floor(rng() * leafIds.length)];
+    let b;
+    do { b = leafIds[Math.floor(rng() * leafIds.length)]; }
+    while (a.split('.')[0] === b.split('.')[0]);
+    connections.push({ source: a, target: b });
+  }
+
+  // Deduplicate
+  const edgeSet = new Set();
+  const uniqueEdges = connections.filter(e => {
+    const key = e.source < e.target ? `${e.source}|${e.target}` : `${e.target}|${e.source}`;
+    if (edgeSet.has(key)) return false;
+    edgeSet.add(key);
+    return true;
+  });
+
+  // LCA paths
+  const lcaPaths = uniqueEdges.map(e => {
+    const s = nodesById.get(e.source);
+    const t = nodesById.get(e.target);
+    return s && t ? s.path(t) : null;
+  }).filter(Boolean);
+
+  // Module colors (Tol bright)
+  const moduleColors = {
+    'core': [0.267, 0.467, 0.667],
+    'ui': [0.933, 0.4, 0.467],
+    'data': [0.133, 0.667, 0.533],
+    'render': [0.933, 0.733, 0.2],
+    'utils': [0.6, 0.4, 0.8],
+    'net': [0.667, 0.533, 0.267]
+  };
+
+  // Convert radial coords to Cartesian
+  const toXY = (node) => {
+    const angle = node.x - Math.PI / 2;
+    return [node.y * Math.cos(angle), node.y * Math.sin(angle)];
+  };
+
+  // --- Tessellate bundled curves ---
+  let beta = 0.15;
+  const SEGS = 16;
+
+  const tessellate = (beta) => {
+    // Build line segments from all LCA paths with d3.curveBundle
+    const allSegments = [];
+    const edgeSourceModule = [];
+
+    for (let ei = 0; ei < lcaPaths.length; ei++) {
+      const path = lcaPaths[ei];
+      // Get control points from path nodes
+      const points = path.map(n => toXY(n));
+
+      // Apply bundle tension (beta = 1 is straight, beta = 0 follows tree)
+      // Interpolate between straight line and tree path
+      const start = points[0];
+      const end = points[points.length - 1];
+      const bundled = points.map((p, i) => {
+        const t = i / (points.length - 1);
+        const straight = [start[0] + (end[0] - start[0]) * t, start[1] + (end[1] - start[1]) * t];
+        return [
+          straight[0] * beta + p[0] * (1 - beta),
+          straight[1] * beta + p[1] * (1 - beta)
+        ];
+      });
+
+      // Resample to SEGS segments using Catmull-Rom-like interpolation
+      const resampled = [];
+      for (let s = 0; s <= SEGS; s++) {
+        const t = s / SEGS;
+        const fi = t * (bundled.length - 1);
+        const lo = Math.floor(fi);
+        const hi = Math.min(lo + 1, bundled.length - 1);
+        const f = fi - lo;
+        resampled.push([
+          bundled[lo][0] * (1 - f) + bundled[hi][0] * f,
+          bundled[lo][1] * (1 - f) + bundled[hi][1] * f
+        ]);
+      }
+
+      // Store segments with alpha tapering
+      const sourceModule = path[0].data.id.split('.')[0];
+      for (let s = 0; s < SEGS; s++) {
+        const t0 = s / SEGS;
+        const t1 = (s + 1) / SEGS;
+        // Taper: 0.1 at endpoints, 0.4 at midpoint
+        const a0 = 0.1 + 0.3 * (1 - Math.abs(t0 * 2 - 1));
+        const a1 = 0.1 + 0.3 * (1 - Math.abs(t1 * 2 - 1));
+
+        allSegments.push(
+          resampled[s][0] + cx, resampled[s][1] + cy, a0,
+          resampled[s + 1][0] + cx, resampled[s + 1][1] + cy, a1
+        );
+        edgeSourceModule.push(ei);
+      }
+    }
+
+    return { segments: new Float32Array(allSegments), edgeIndices: edgeSourceModule };
+  };
+
+  let { segments, edgeIndices } = tessellate(beta);
+  const totalSegs = lcaPaths.length * SEGS;
+
+  // Per-segment visibility (for hover)
+  const visibility = new Float32Array(totalSegs).fill(1.0);
+
+  // --- WebGL ---
+  const canvas = document.getElementById('glCanvas');
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+
+  const gl = canvas.getContext('webgl2', { antialias: true, premultipliedAlpha: false, alpha: true });
+  gl.viewport(0, 0, W * dpr, H * dpr);
+
+  const mkShader = (src, type) => {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+    return s;
+  };
+  const mkProgram = (vSrc, fSrc) => {
+    const p = gl.createProgram();
+    gl.attachShader(p, mkShader(vSrc, gl.VERTEX_SHADER));
+    gl.attachShader(p, mkShader(fSrc, gl.FRAGMENT_SHADER));
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) console.error(gl.getProgramInfoLog(p));
+    return p;
+  };
+
+  // Line shader (renders gl.LINES with per-vertex alpha)
+  const lineProg = mkProgram(
+`#version 300 es
+in vec3 a_posAlpha;
+in float a_visibility;
+uniform vec2 u_resolution;
+out float v_alpha;
+out float v_vis;
+void main() {
+  vec2 clip = (a_posAlpha.xy / u_resolution) * 2.0 - 1.0;
+  clip.y = -clip.y;
+  gl_Position = vec4(clip, 0.0, 1.0);
+  v_alpha = a_posAlpha.z;
+  v_vis = a_visibility;
+}`,
+`#version 300 es
+precision mediump float;
+in float v_alpha;
+in float v_vis;
+uniform vec3 u_color;
+out vec4 fragColor;
+void main() {
+  fragColor = vec4(u_color, v_alpha * v_vis);
+}`
+  );
+
+  // Pack line data: each segment has 2 vertices, each vertex is (x, y, alpha) = 3 floats
+  // segments array: [x0,y0,a0, x1,y1,a1, ...] per segment
+
+  const segBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, segBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, segments, gl.DYNAMIC_DRAW);
+
+  // Visibility: one per segment, but we need one per vertex (2 per segment, same value)
+  const visPerVertex = new Float32Array(totalSegs * 2);
+  for (let i = 0; i < totalSegs; i++) {
+    visPerVertex[i * 2] = visibility[i];
+    visPerVertex[i * 2 + 1] = visibility[i];
+  }
+
+  const visBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, visBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, visPerVertex, gl.DYNAMIC_DRAW);
+
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, segBuf);
+  const paLoc = gl.getAttribLocation(lineProg, 'a_posAlpha');
+  gl.enableVertexAttribArray(paLoc);
+  gl.vertexAttribPointer(paLoc, 3, gl.FLOAT, false, 0, 0);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, visBuf);
+  const vLoc = gl.getAttribLocation(lineProg, 'a_visibility');
+  gl.enableVertexAttribArray(vLoc);
+  gl.vertexAttribPointer(vLoc, 1, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+
+  const drawEdges = (highlightColor) => {
+    gl.clearColor(0.086, 0.086, 0.114, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+    gl.useProgram(lineProg);
+    gl.bindVertexArray(vao);
+    gl.uniform2f(gl.getUniformLocation(lineProg, 'u_resolution'), W, H);
+
+    const c = highlightColor || [0.55, 0.55, 0.6];
+    gl.uniform3fv(gl.getUniformLocation(lineProg, 'u_color'), c);
+    gl.drawArrays(gl.LINES, 0, totalSegs * 2);
+
+    gl.disable(gl.BLEND);
+  };
+
+  // --- SVG overlay: labels and hover targets ---
+  const svg = d3.select('#overlay').attr('width', W).attr('height', H).style('pointer-events', 'all');
+
+  // Title
+  svg.append('text').attr('x', W / 2).attr('y', 24).attr('text-anchor', 'middle')
+    .attr('fill', '#dde').attr('font-size', 16).attr('font-weight', 600)
+    .text('WebGL Edge-Bundled Network \u2014 Radial Dependency Graph');
+
+  const g = svg.append('g').attr('transform', `translate(${cx},${cy})`);
+
+  // Node labels (leaves only)
+  const labelGroup = g.selectAll('g.node')
+    .data(leaves)
+    .join('g')
+    .attr('class', 'node')
+    .attr('transform', d => `rotate(${d.x * 180 / Math.PI - 90}) translate(${d.y + 6},0)`);
+
+  labelGroup.append('text')
+    .attr('dy', '0.31em')
+    .attr('transform', d => d.x < Math.PI ? null : 'rotate(180)')
+    .attr('text-anchor', d => d.x < Math.PI ? 'start' : 'end')
+    .attr('fill', d => {
+      const mod = d.data.id.split('.')[0];
+      const c = moduleColors[mod];
+      return `rgb(${Math.round(c[0]*255)},${Math.round(c[1]*255)},${Math.round(c[2]*255)})`;
+    })
+    .attr('font-size', 7)
+    .attr('opacity', 0.7)
+    .text(d => d.data.id);
+
+  // Invisible hover targets
+  labelGroup.append('circle')
+    .attr('r', 8)
+    .attr('fill', 'transparent')
+    .attr('cursor', 'pointer')
+    .on('pointerenter', (event, d) => highlight(d))
+    .on('pointerleave', () => unhighlight());
+
+  // Node dots
+  g.selectAll('circle.dot')
+    .data(leaves)
+    .join('circle')
+    .attr('class', 'dot')
+    .attr('cx', d => toXY(d)[0])
+    .attr('cy', d => toXY(d)[1])
+    .attr('r', 2.5)
+    .attr('fill', d => {
+      const mod = d.data.id.split('.')[0];
+      const c = moduleColors[mod];
+      return `rgb(${Math.round(c[0]*255)},${Math.round(c[1]*255)},${Math.round(c[2]*255)})`;
+    })
+    .attr('pointer-events', 'none');
+
+  // --- Hover highlight ---
+  const highlight = (node) => {
+    const leafId = node.data.id;
+    // Find connected edges
+    for (let i = 0; i < lcaPaths.length; i++) {
+      const path = lcaPaths[i];
+      const sId = path[0].data.id;
+      const tId = path[path.length - 1].data.id;
+      const connected = sId === leafId || tId === leafId;
+
+      for (let s = 0; s < SEGS; s++) {
+        const si = i * SEGS + s;
+        const v = connected ? 1.0 : 0.03;
+        visibility[si] = v;
+        visPerVertex[si * 2] = v;
+        visPerVertex[si * 2 + 1] = v;
+      }
+    }
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, visBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, visPerVertex);
+    drawEdges([0.267, 0.467, 0.667]);
+
+    // Highlight labels
+    labelGroup.select('text')
+      .attr('opacity', d => {
+        if (d.data.id === leafId) return 1;
+        // Check if connected
+        for (const path of lcaPaths) {
+          const sId = path[0].data.id;
+          const tId = path[path.length - 1].data.id;
+          if ((sId === leafId && tId === d.data.id) || (tId === leafId && sId === d.data.id)) return 1;
+        }
+        return 0.15;
+      })
+      .attr('font-weight', d => d.data.id === leafId ? 700 : 400);
+  };
+
+  const unhighlight = () => {
+    for (let i = 0; i < totalSegs; i++) {
+      visibility[i] = 1.0;
+      visPerVertex[i * 2] = 1.0;
+      visPerVertex[i * 2 + 1] = 1.0;
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, visBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, visPerVertex);
+    drawEdges();
+
+    labelGroup.select('text').attr('opacity', 0.7).attr('font-weight', 400);
+  };
+
+  // --- Tension slider ---
+  const slider = document.getElementById('tensionSlider');
+  const betaLabel = document.getElementById('betaVal');
+  slider.addEventListener('input', () => {
+    const tension = slider.value / 100;
+    beta = 1 - tension;
+    betaLabel.textContent = tension.toFixed(2);
+
+    const result = tessellate(beta);
+    segments = result.segments;
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, segBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, segments);
+
+    unhighlight();
+  });
+
+  // Module legend
+  const legG = svg.append('g').attr('transform', `translate(${W - 120}, 50)`);
+  modules.forEach((mod, i) => {
+    const c = moduleColors[mod];
+    legG.append('rect').attr('x', 0).attr('y', i * 18).attr('width', 10).attr('height', 10).attr('rx', 2)
+      .attr('fill', `rgb(${Math.round(c[0]*255)},${Math.round(c[1]*255)},${Math.round(c[2]*255)})`);
+    legG.append('text').attr('x', 16).attr('y', i * 18 + 9).attr('fill', '#aab').attr('font-size', 11)
+      .text(mod);
+  });
+
+  // Info
+  document.getElementById('info').textContent =
+    `${modules.length} modules, ${leaves.length} leaves, ${uniqueEdges.length} edges`;
+
+  // Initial draw
+  drawEdges();
+
+})();
+</script>
+</body>
+</html>

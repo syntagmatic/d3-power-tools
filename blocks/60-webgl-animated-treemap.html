@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebGL Animated Treemap</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; color: #e0e0e0; font-family: system-ui, sans-serif; }
+  #container { position: relative; width: 1200px; height: 800px; margin: 0 auto; }
+  canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
+  svg { position: absolute; top: 0; left: 0; pointer-events: none; }
+  #controls { position: absolute; top: 10px; left: 20px; z-index: 10;
+    display: flex; gap: 12px; align-items: center; }
+  button { background: #334; color: #dde; border: 1px solid #556; padding: 6px 18px;
+    border-radius: 4px; cursor: pointer; font-size: 13px; transition: background 0.2s; }
+  button:hover { background: #445; }
+  button.active { background: #4477AA; border-color: #6699CC; }
+  #fps { position: absolute; top: 10px; right: 20px; z-index: 10;
+    background: rgba(22,22,29,0.9); padding: 4px 12px; border-radius: 4px;
+    font-size: 12px; color: #8a8; font-variant-numeric: tabular-nums; }
+  #tooltip { position: absolute; display: none; background: rgba(22,22,40,0.95);
+    border: 1px solid #556; padding: 8px 12px; border-radius: 4px; font-size: 12px;
+    pointer-events: none; z-index: 20; color: #dde; max-width: 250px; }
+  #breadcrumb { position: absolute; bottom: 10px; left: 20px; z-index: 10;
+    background: rgba(22,22,29,0.9); padding: 4px 12px; border-radius: 4px; font-size: 12px; color: #aab; }
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="glCanvas"></canvas>
+  <svg id="overlay"></svg>
+  <div id="controls">
+    <button id="btnRevenue" class="active">Revenue</button>
+    <button id="btnHeadcount">Headcount</button>
+  </div>
+  <div id="fps">-- fps</div>
+  <div id="tooltip"></div>
+  <div id="breadcrumb"></div>
+</div>
+<script>
+(() => {
+  const W = 1200, H = 800;
+  const margin = { top: 44, right: 10, bottom: 30, left: 10 };
+  const tw = W - margin.left - margin.right;
+  const th = H - margin.top - margin.bottom;
+  const dpr = window.devicePixelRatio || 1;
+
+  // Seeded RNG
+  const mulberry32 = (a) => () => {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t ^= t + Math.imul(t ^ t >>> 7, 61 | t);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+  const rng = mulberry32(42);
+
+  // --- Generate 3-level hierarchy with ~5000 leaves ---
+  const categories = ['Tech', 'Finance', 'Health', 'Energy', 'Retail', 'Media', 'Transport', 'Food'];
+  // Tol muted palette
+  const catColors = [
+    [0.47, 0.60, 0.76], [0.87, 0.62, 0.52], [0.80, 0.78, 0.47], [0.55, 0.75, 0.54],
+    [0.71, 0.54, 0.67], [0.58, 0.47, 0.38], [0.84, 0.84, 0.47], [0.53, 0.53, 0.53]
+  ];
+
+  const hierarchyData = [{ id: 'root', parent: null, revenue: 0, headcount: 0, cat: -1 }];
+
+  categories.forEach((cat, ci) => {
+    hierarchyData.push({ id: cat, parent: 'root', revenue: 0, headcount: 0, cat: ci });
+    const subCount = 5 + Math.floor(rng() * 6);
+    for (let s = 0; s < subCount; s++) {
+      const subId = `${cat}.${s}`;
+      hierarchyData.push({ id: subId, parent: cat, revenue: 0, headcount: 0, cat: ci });
+      const leafCount = 40 + Math.floor(rng() * 40);
+      for (let l = 0; l < leafCount; l++) {
+        const revenue = 10000 + Math.pow(rng(), 2) * 4990000;
+        const headcount = 5 + Math.pow(rng(), 1.5) * 4995;
+        hierarchyData.push({
+          id: `${subId}.${l}`,
+          parent: subId,
+          revenue: Math.round(revenue),
+          headcount: Math.round(headcount),
+          cat: ci
+        });
+      }
+    }
+  });
+
+  const root = d3.stratify().id(d => d.id).parentId(d => d.parent)(hierarchyData);
+  const leaves = root.leaves();
+  const leafCount = leaves.length;
+
+  // --- Compute TWO treemap layouts ---
+  const treemap = d3.treemap()
+    .size([tw, th])
+    .padding(1)
+    .tile(d3.treemapSquarify)
+    .round(true);
+
+  // Layout A: revenue
+  root.sum(d => d.revenue || 0).sort((a, b) => b.value - a.value);
+  treemap(root);
+  const layoutA = new Float32Array(leafCount * 4);
+  leaves.forEach((d, i) => {
+    layoutA[i * 4] = d.x0; layoutA[i * 4 + 1] = d.y0;
+    layoutA[i * 4 + 2] = d.x1 - d.x0; layoutA[i * 4 + 3] = d.y1 - d.y0;
+  });
+
+  // Layout B: headcount
+  root.sum(d => d.headcount || 0).sort((a, b) => b.value - a.value);
+  treemap(root);
+  const layoutB = new Float32Array(leafCount * 4);
+  leaves.forEach((d, i) => {
+    layoutB[i * 4] = d.x0; layoutB[i * 4 + 1] = d.y0;
+    layoutB[i * 4 + 2] = d.x1 - d.x0; layoutB[i * 4 + 3] = d.y1 - d.y0;
+  });
+
+  // Store data for tooltip
+  const leafData = leaves.map(d => ({
+    id: d.data.id,
+    revenue: d.data.revenue,
+    headcount: d.data.headcount,
+    cat: d.data.cat,
+    path: d.ancestors().reverse().map(a => a.data.id).join(' > ')
+  }));
+
+  // Current positions (interpolated)
+  const current = new Float32Array(leafCount * 4);
+  current.set(layoutA);
+
+  // Colors
+  const colors = new Float32Array(leafCount * 4);
+  leaves.forEach((d, i) => {
+    const c = catColors[d.data.cat];
+    colors[i * 4] = c[0]; colors[i * 4 + 1] = c[1];
+    colors[i * 4 + 2] = c[2]; colors[i * 4 + 3] = 0.92;
+  });
+
+  // --- WebGL ---
+  const canvas = document.getElementById('glCanvas');
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+
+  const gl = canvas.getContext('webgl2', { antialias: true, premultipliedAlpha: false, alpha: true });
+  gl.viewport(0, 0, W * dpr, H * dpr);
+
+  const mkShader = (src, type) => {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+    return s;
+  };
+  const mkProgram = (vSrc, fSrc) => {
+    const p = gl.createProgram();
+    gl.attachShader(p, mkShader(vSrc, gl.VERTEX_SHADER));
+    gl.attachShader(p, mkShader(fSrc, gl.FRAGMENT_SHADER));
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) console.error(gl.getProgramInfoLog(p));
+    return p;
+  };
+
+  // Instanced quad shader: each rect is an instance
+  const prog = mkProgram(
+`#version 300 es
+in vec2 a_quad;
+in vec4 a_rect;
+in vec4 a_color;
+uniform vec2 u_resolution;
+uniform vec2 u_offset;
+out vec4 v_color;
+out vec2 v_localPos;
+out vec2 v_size;
+void main() {
+  vec2 pos = a_rect.xy + a_quad * a_rect.zw + u_offset;
+  vec2 clip = (pos / u_resolution) * 2.0 - 1.0;
+  clip.y = -clip.y;
+  gl_Position = vec4(clip, 0.0, 1.0);
+  v_color = a_color;
+  v_localPos = a_quad * a_rect.zw;
+  v_size = a_rect.zw;
+}`,
+`#version 300 es
+precision mediump float;
+in vec4 v_color;
+in vec2 v_localPos;
+in vec2 v_size;
+out vec4 fragColor;
+void main() {
+  // Border: darken edges
+  float bx = min(v_localPos.x, v_size.x - v_localPos.x);
+  float by = min(v_localPos.y, v_size.y - v_localPos.y);
+  float border = min(bx, by);
+  float borderFactor = smoothstep(0.0, 1.0, border);
+  vec3 borderColor = v_color.rgb * 0.3;
+  vec3 col = mix(borderColor, v_color.rgb, borderFactor);
+  fragColor = vec4(col, v_color.a);
+}`
+  );
+
+  // Quad template (unit square)
+  const quadData = new Float32Array([0,0, 1,0, 0,1, 1,0, 1,1, 0,1]);
+  const quadBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, quadData, gl.STATIC_DRAW);
+
+  // Instance buffers
+  const rectBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, rectBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, current, gl.DYNAMIC_DRAW);
+
+  const colBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, colBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, colors, gl.STATIC_DRAW);
+
+  // VAO
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+
+  // Quad vertices (per-vertex, divisor 0)
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  const qLoc = gl.getAttribLocation(prog, 'a_quad');
+  gl.enableVertexAttribArray(qLoc);
+  gl.vertexAttribPointer(qLoc, 2, gl.FLOAT, false, 0, 0);
+
+  // Per-instance rect (x, y, w, h)
+  gl.bindBuffer(gl.ARRAY_BUFFER, rectBuf);
+  const rLoc = gl.getAttribLocation(prog, 'a_rect');
+  gl.enableVertexAttribArray(rLoc);
+  gl.vertexAttribPointer(rLoc, 4, gl.FLOAT, false, 0, 0);
+  gl.vertexAttribDivisor(rLoc, 1);
+
+  // Per-instance color
+  gl.bindBuffer(gl.ARRAY_BUFFER, colBuf);
+  const cLoc = gl.getAttribLocation(prog, 'a_color');
+  gl.enableVertexAttribArray(cLoc);
+  gl.vertexAttribPointer(cLoc, 4, gl.FLOAT, false, 0, 0);
+  gl.vertexAttribDivisor(cLoc, 1);
+
+  gl.bindVertexArray(null);
+
+  const draw = () => {
+    gl.clearColor(0.102, 0.102, 0.18, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+    gl.useProgram(prog);
+    gl.bindVertexArray(vao);
+    gl.uniform2f(gl.getUniformLocation(prog, 'u_resolution'), W, H);
+    gl.uniform2f(gl.getUniformLocation(prog, 'u_offset'), margin.left, margin.top);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, rectBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, current);
+
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, leafCount);
+    gl.disable(gl.BLEND);
+  };
+
+  // --- Animation ---
+  let animating = false;
+  let animStart = 0;
+  const ANIM_DUR = 800;
+  let fromLayout = layoutA;
+  let toLayout = layoutB;
+  let currentLayout = 'revenue';
+
+  // Cubic in-out easing
+  const cubicInOut = (t) => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+  // FPS counter
+  const fpsEl = document.getElementById('fps');
+  let frameCount = 0;
+  let lastFpsTime = performance.now();
+
+  const animFrame = (now) => {
+    if (!animating) return;
+
+    const elapsed = now - animStart;
+    const t = Math.min(elapsed / ANIM_DUR, 1);
+    const eased = cubicInOut(t);
+
+    // Lerp all rect positions
+    for (let i = 0; i < leafCount * 4; i++) {
+      current[i] = fromLayout[i] + (toLayout[i] - fromLayout[i]) * eased;
+    }
+
+    draw();
+
+    // FPS
+    frameCount++;
+    if (now - lastFpsTime > 500) {
+      const fps = Math.round(frameCount / ((now - lastFpsTime) / 1000));
+      fpsEl.textContent = `${fps} fps`;
+      fpsEl.style.color = fps >= 50 ? '#8a8' : fps >= 30 ? '#aa8' : '#a66';
+      frameCount = 0;
+      lastFpsTime = now;
+    }
+
+    if (t < 1) {
+      requestAnimationFrame(animFrame);
+    } else {
+      animating = false;
+    }
+  };
+
+  const startTransition = (target) => {
+    if (target === currentLayout) return;
+
+    fromLayout = target === 'headcount' ? layoutA : layoutB;
+    toLayout = target === 'headcount' ? layoutB : layoutA;
+    currentLayout = target;
+    animating = true;
+    animStart = performance.now();
+    frameCount = 0;
+    lastFpsTime = performance.now();
+    requestAnimationFrame(animFrame);
+
+    document.getElementById('btnRevenue').classList.toggle('active', target === 'revenue');
+    document.getElementById('btnHeadcount').classList.toggle('active', target === 'headcount');
+  };
+
+  document.getElementById('btnRevenue').addEventListener('click', () => startTransition('revenue'));
+  document.getElementById('btnHeadcount').addEventListener('click', () => startTransition('headcount'));
+
+  // --- Hover tooltip via SVG overlay ---
+  const svgEl = d3.select('#overlay').attr('width', W).attr('height', H);
+  const tooltip = document.getElementById('tooltip');
+  const breadcrumb = document.getElementById('breadcrumb');
+
+  // Transparent rect to capture mouse events
+  svgEl.append('rect')
+    .attr('x', margin.left).attr('y', margin.top)
+    .attr('width', tw).attr('height', th)
+    .attr('fill', 'transparent')
+    .style('pointer-events', 'all')
+    .on('pointermove', (event) => {
+      const [mx, my] = d3.pointer(event);
+      const lx = mx - margin.left;
+      const ly = my - margin.top;
+
+      // Find leaf under pointer (search from back = drawn on top)
+      let found = -1;
+      for (let i = leafCount - 1; i >= 0; i--) {
+        const x = current[i * 4], y = current[i * 4 + 1];
+        const w = current[i * 4 + 2], h = current[i * 4 + 3];
+        if (lx >= x && lx <= x + w && ly >= y && ly <= y + h) {
+          found = i;
+          break;
+        }
+      }
+
+      if (found >= 0) {
+        const d = leafData[found];
+        tooltip.style.display = 'block';
+        tooltip.style.left = (mx + 15) + 'px';
+        tooltip.style.top = (my - 10) + 'px';
+        tooltip.innerHTML = `<strong>${d.id}</strong><br>Revenue: $${d3.format(',.0f')(d.revenue)}<br>Headcount: ${d3.format(',')(d.headcount)}`;
+        breadcrumb.textContent = d.path;
+      } else {
+        tooltip.style.display = 'none';
+        breadcrumb.textContent = '';
+      }
+    })
+    .on('pointerleave', () => {
+      tooltip.style.display = 'none';
+      breadcrumb.textContent = '';
+    });
+
+  // Category legend
+  const legG = svgEl.append('g').attr('transform', `translate(${W - 130}, ${margin.top + 10})`);
+  categories.forEach((cat, i) => {
+    const c = catColors[i];
+    legG.append('rect').attr('x', 0).attr('y', i * 18).attr('width', 12).attr('height', 12).attr('rx', 2)
+      .attr('fill', `rgb(${Math.round(c[0]*255)},${Math.round(c[1]*255)},${Math.round(c[2]*255)})`);
+    legG.append('text').attr('x', 18).attr('y', i * 18 + 10).attr('fill', '#aab').attr('font-size', 11)
+      .text(cat);
+  });
+
+  // Info text
+  svgEl.append('text').attr('x', W / 2).attr('y', margin.top - 6).attr('text-anchor', 'middle')
+    .attr('fill', '#aab').attr('font-size', 12)
+    .text(`${leafCount.toLocaleString()} leaves \u2014 Toggle between Revenue and Headcount layouts`);
+
+  // Initial draw
+  draw();
+  breadcrumb.textContent = `${leafCount.toLocaleString()} leaf nodes across ${categories.length} categories`;
+
+})();
+</script>
+</body>
+</html>

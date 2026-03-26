@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Brush Composition Scatterplots</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #fafafa; font-family: system-ui, sans-serif; }
+  .container { width: 1200px; margin: 10px auto; }
+  .header { display: flex; align-items: center; gap: 16px; padding: 8px 0; flex-wrap: wrap; }
+  .header h2 { font-size: 18px; font-weight: 600; }
+  .counter { font-size: 14px; color: #555; }
+  .mode-toggle { padding: 4px 12px; border: 1px solid #aaa; border-radius: 4px; cursor: pointer;
+    background: #fff; font-size: 13px; font-family: system-ui; }
+  .mode-toggle:hover { background: #eee; }
+  .legend { display: flex; gap: 14px; margin-left: auto; font-size: 13px; }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .legend-swatch { width: 14px; height: 14px; border-radius: 2px; }
+  .grid { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; }
+  .panel { position: relative; }
+  .panel-title { font-size: 12px; font-weight: 600; fill: #333; }
+  .count-badge { font-size: 11px; fill: #fff; }
+  .count-badge-bg { fill: #4477AA; rx: 3; }
+  .crosshair { stroke: #EE6677; stroke-width: 1; stroke-dasharray: 4,3; }
+  .outlier-ring { fill: none; stroke: #EE6677; stroke-width: 2; }
+  .outlier-label { font-size: 10px; fill: #EE6677; font-weight: 700; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h2>Brush Composition Scatterplots</h2>
+    <button class="mode-toggle" id="modeBtn">Mode: Union (OR)</button>
+    <span class="counter" id="counter">No selection</span>
+    <div class="legend" id="legend"></div>
+  </div>
+  <div class="grid" id="grid"></div>
+</div>
+<script>
+(() => {
+  const TOL = ["#4477AA","#EE6677","#228833"];
+  const groups = ["Active","Moderate","Sedentary"];
+  const cols = ["height","weight","age","resting_hr","systolic_bp","cholesterol","fitness_score"];
+  const N = 300;
+
+  // Synthetic data
+  const rng = d3.randomLcg(7);
+  const normal = () => { let u=0,v=0; while(!u) u=rng(); v=rng(); return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v); };
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+  const data = d3.range(N).map(i => {
+    const gi = i % 3;
+    const g = groups[gi];
+    const base = gi === 0 ? [175, 72, 30, 58, 118, 180, 85]
+               : gi === 1 ? [170, 80, 40, 68, 128, 210, 60]
+               :            [168, 90, 45, 78, 138, 240, 40];
+    const row = { id: i, group: g };
+    cols.forEach((c, j) => {
+      row[c] = clamp(base[j] + normal() * [8, 12, 10, 8, 10, 25, 12][j],
+        [140, 45, 18, 40, 90, 120, 10][j], [210, 130, 75, 100, 180, 320, 100][j]);
+    });
+    // correlations
+    row.fitness_score = clamp(100 - (row.resting_hr - 50) * 0.8 + normal() * 8, 10, 100);
+    row.systolic_bp = clamp(row.cholesterol * 0.3 + 50 + normal() * 10, 90, 180);
+    return row;
+  });
+
+  const panels = [
+    { x: "height", y: "weight" },
+    { x: "age", y: "resting_hr" },
+    { x: "fitness_score", y: "systolic_bp" },
+    { x: "cholesterol", y: "fitness_score" },
+    { x: "height", y: "systolic_bp" },
+    { x: "weight", y: "cholesterol" },
+  ];
+
+  let mode = "union"; // "union" | "intersect"
+  const brushSelections = new Map(); // panelIdx -> Set of ids
+
+  // Legend
+  const legendDiv = d3.select("#legend");
+  groups.forEach((g, i) => {
+    const item = legendDiv.append("span").attr("class", "legend-item");
+    item.append("span").attr("class", "legend-swatch").style("background", TOL[i]);
+    item.append("span").text(g);
+  });
+
+  // Mode toggle
+  d3.select("#modeBtn").on("click", () => {
+    mode = mode === "union" ? "intersect" : "union";
+    d3.select("#modeBtn").text(`Mode: ${mode === "union" ? "Union (OR)" : "Intersection (AND)"}`);
+    updateAll();
+  });
+
+  const colorMap = new Map(groups.map((g, i) => [g, TOL[i]]));
+
+  const pW = 300, pH = 250;
+  const m = { top: 24, right: 16, bottom: 32, left: 44 };
+  const pw = pW - m.left - m.right, ph = pH - m.top - m.bottom;
+
+  const gridDiv = d3.select("#grid");
+  const panelData = [];
+
+  panels.forEach((p, pi) => {
+    const svg = gridDiv.append("svg").attr("class", "panel")
+      .attr("width", pW).attr("height", pH);
+    const g = svg.append("g").attr("transform", `translate(${m.left},${m.top})`);
+
+    const sx = d3.scaleLinear().domain(d3.extent(data, d => d[p.x])).nice().range([0, pw]);
+    const sy = d3.scaleLinear().domain(d3.extent(data, d => d[p.y])).nice().range([ph, 0]);
+
+    g.append("g").attr("transform", `translate(0,${ph})`).call(d3.axisBottom(sx).ticks(5));
+    g.append("g").call(d3.axisLeft(sy).ticks(5));
+
+    // Axis labels
+    svg.append("text").attr("x", m.left + pw / 2).attr("y", pH - 4)
+      .attr("text-anchor", "middle").attr("font-size", 11).text(p.x);
+    svg.append("text").attr("transform", `translate(12,${m.top + ph / 2}) rotate(-90)`)
+      .attr("text-anchor", "middle").attr("font-size", 11).text(p.y);
+
+    // Title
+    svg.append("text").attr("class", "panel-title").attr("x", m.left).attr("y", 14)
+      .text(`${p.x} vs ${p.y}`);
+
+    // Points
+    const dots = g.selectAll("circle.dot").data(data).enter().append("circle")
+      .attr("class", "dot")
+      .attr("cx", d => sx(d[p.x])).attr("cy", d => sy(d[p.y]))
+      .attr("r", 4).attr("fill", d => colorMap.get(d.group)).attr("opacity", 0.6);
+
+    // Annotation layer
+    const annoG = g.append("g").attr("class", "anno");
+
+    // Brush
+    const brush = d3.brush()
+      .extent([[0, 0], [pw, ph]])
+      .on("brush end", (event) => {
+        if (!event.sourceEvent) return;
+        if (event.selection) {
+          const [[x0, y0], [x1, y1]] = event.selection;
+          const ids = new Set();
+          data.forEach(d => {
+            const px = sx(d[p.x]), py = sy(d[p.y]);
+            if (px >= x0 && px <= x1 && py >= y0 && py <= y1) ids.add(d.id);
+          });
+          brushSelections.set(pi, ids);
+        } else {
+          brushSelections.delete(pi);
+        }
+        updateAll();
+      });
+
+    g.append("g").attr("class", "brush-g").call(brush);
+
+    panelData.push({ svg, g, dots, sx, sy, p, annoG, brush });
+  });
+
+  // Compute combined selection
+  const getSelected = () => {
+    if (brushSelections.size === 0) return null;
+    const sets = [...brushSelections.values()];
+    if (mode === "union") {
+      const union = new Set();
+      sets.forEach(s => s.forEach(id => union.add(id)));
+      return union;
+    } else {
+      let result = new Set(sets[0]);
+      for (let i = 1; i < sets.length; i++) {
+        const next = new Set();
+        for (const id of result) if (sets[i].has(id)) next.add(id);
+        result = next;
+      }
+      return result;
+    }
+  };
+
+  // Timers for progressive annotations
+  let annoTimers = [];
+
+  const updateAll = () => {
+    // Clear pending annotations
+    annoTimers.forEach(t => t.stop());
+    annoTimers = [];
+
+    const selected = getSelected();
+
+    // Update counter
+    if (!selected) {
+      d3.select("#counter").text("No selection");
+    } else {
+      d3.select("#counter").text(`${selected.size} of ${N} selected`);
+    }
+
+    panelData.forEach((pd) => {
+      pd.dots
+        .attr("opacity", d => !selected || selected.has(d.id) ? 0.6 : 0.1)
+        .attr("r", d => !selected || !selected.has(d.id) ? 4 : 5);
+      pd.annoG.selectAll("*").remove();
+    });
+
+    if (!selected || selected.size === 0) return;
+
+    const selArr = data.filter(d => selected.has(d.id));
+
+    // Stage 1: Count badge (immediate)
+    panelData.forEach((pd) => {
+      const bg = pd.annoG.append("rect").attr("class", "count-badge-bg")
+        .attr("x", pw - 58).attr("y", -18).attr("width", 54).attr("height", 16);
+      pd.annoG.append("text").attr("class", "count-badge")
+        .attr("x", pw - 31).attr("y", -6).attr("text-anchor", "middle")
+        .text(`${selArr.length} sel`);
+    });
+
+    // Stage 2: Mean crosshair (+500ms)
+    const t1 = d3.timeout(() => {
+      panelData.forEach((pd) => {
+        const mx = d3.mean(selArr, d => d[pd.p.x]);
+        const my = d3.mean(selArr, d => d[pd.p.y]);
+        const px = pd.sx(mx), py = pd.sy(my);
+        pd.annoG.append("line").attr("class", "crosshair")
+          .attr("x1", 0).attr("x2", pw).attr("y1", py).attr("y2", py);
+        pd.annoG.append("line").attr("class", "crosshair")
+          .attr("x1", px).attr("x2", px).attr("y1", 0).attr("y2", ph);
+      });
+    }, 500);
+    annoTimers.push(t1);
+
+    // Stage 3: Outlier flags (+1000ms)
+    const t2 = d3.timeout(() => {
+      panelData.forEach((pd) => {
+        const mx = d3.mean(selArr, d => d[pd.p.x]);
+        const my = d3.mean(selArr, d => d[pd.p.y]);
+        const sdx = d3.deviation(selArr, d => d[pd.p.x]) || 1;
+        const sdy = d3.deviation(selArr, d => d[pd.p.y]) || 1;
+
+        selArr.forEach(d => {
+          const zx = Math.abs(d[pd.p.x] - mx) / sdx;
+          const zy = Math.abs(d[pd.p.y] - my) / sdy;
+          if (zx > 2 || zy > 2) {
+            const px = pd.sx(d[pd.p.x]), py = pd.sy(d[pd.p.y]);
+            pd.annoG.append("circle").attr("class", "outlier-ring")
+              .attr("cx", px).attr("cy", py).attr("r", 8);
+            pd.annoG.append("text").attr("class", "outlier-label")
+              .attr("x", px + 10).attr("y", py - 6).text("!");
+          }
+        });
+      });
+    }, 1000);
+    annoTimers.push(t2);
+  };
+})();
+</script>
+</body>
+</html>

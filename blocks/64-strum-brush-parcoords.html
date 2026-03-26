@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Strum Brush Parallel Coordinates</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #fafafa; font-family: system-ui, sans-serif; }
+  .container { width: 1200px; margin: 10px auto; }
+  .header { display: flex; align-items: baseline; gap: 16px; padding: 8px 0; }
+  .header h2 { font-size: 18px; font-weight: 600; }
+  .counter { font-size: 14px; color: #555; }
+  .legend { display: flex; gap: 14px; margin-left: auto; font-size: 13px; }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .legend-swatch { width: 14px; height: 14px; border-radius: 2px; }
+  .parcoords-wrap { position: relative; width: 1200px; height: 350px; }
+  .parcoords-wrap canvas, .parcoords-wrap svg {
+    position: absolute; top: 0; left: 0;
+  }
+  .parcoords-wrap canvas { pointer-events: none; }
+  .parcoords-wrap svg { width: 100%; height: 100%; }
+  .axis text { font-size: 11px; }
+  .axis-label { font-size: 12px; font-weight: 600; text-anchor: middle; }
+  .strum-line { stroke: #EE6677; stroke-width: 2; }
+  .strum-handle { fill: #EE6677; stroke: #fff; stroke-width: 1.5; cursor: pointer; }
+  .scatter-wrap { margin-top: 12px; }
+  .scatter-msg { text-anchor: middle; fill: #999; font-size: 14px; }
+  .hint { font-size: 12px; color: #888; margin-top: 4px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h2>Strum Brush Parallel Coordinates</h2>
+    <span class="counter" id="counter">Selected 2000 of 2,000 (100%)</span>
+    <div class="legend" id="legend"></div>
+  </div>
+  <div class="parcoords-wrap" id="parcoords"></div>
+  <div class="scatter-wrap">
+    <svg id="scatter" width="400" height="300"></svg>
+  </div>
+  <div class="hint">Alt + click-drag between axes to create a strum brush. Click a strum to remove it.</div>
+</div>
+<script>
+(() => {
+  const TOL = ["#4477AA","#EE6677","#228833","#CCBB44"];
+  const types = ["Alpha","Beta","Gamma","Delta"];
+  const dims = ["efficiency","cost","weight","reliability","power","speed","emissions","lifespan"];
+  const N = 2000;
+  const margin = { top: 32, right: 30, bottom: 10, left: 30 };
+  const W = 1200, H = 350;
+  const innerW = W - margin.left - margin.right;
+  const innerH = H - margin.top - margin.bottom;
+
+  // --- Synthetic data with correlations ---
+  const rng = d3.randomLcg(42);
+  const normal = () => { let u=0,v=0; while(!u) u=rng(); v=rng(); return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v); };
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+  const data = d3.range(N).map(i => {
+    const ti = i % 4;
+    const base = [50+ti*8, 40+ti*10, 30+ti*5, 70-ti*5, 60+ti*7, 55+ti*6, 20+ti*8, 80-ti*4];
+    const row = {};
+    row.type = types[ti];
+    dims.forEach((d, j) => {
+      row[d] = clamp(base[j] + normal() * 15, 0, 100);
+    });
+    // correlations
+    row.cost = clamp(row.efficiency * 0.6 + normal() * 12 + 20, 0, 100);
+    row.reliability = clamp(100 - row.emissions * 0.5 + normal() * 10, 0, 100);
+    return row;
+  });
+
+  // --- Scales ---
+  const xScale = d3.scalePoint().domain(dims).range([0, innerW]);
+  const yScales = {};
+  dims.forEach(d => {
+    yScales[d] = d3.scaleLinear().domain(d3.extent(data, r => r[d])).range([innerH, 0]).nice();
+  });
+  const colorMap = new Map(types.map((t, i) => [t, TOL[i]]));
+
+  // --- Canvas setup ---
+  const wrap = d3.select("#parcoords");
+  const dpr = devicePixelRatio || 1;
+  const canvas = wrap.append("canvas")
+    .attr("width", W * dpr).attr("height", H * dpr)
+    .style("width", W + "px").style("height", H + "px").node();
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  // --- SVG overlay ---
+  const svg = wrap.append("svg").attr("viewBox", `0 0 ${W} ${H}`);
+  const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+  // --- Axes ---
+  dims.forEach(d => {
+    const x = xScale(d);
+    const axisG = g.append("g").attr("transform", `translate(${x},0)`);
+    axisG.call(d3.axisLeft(yScales[d]).ticks(6));
+    axisG.append("text").attr("class", "axis-label").attr("y", -14).text(d);
+  });
+
+  // --- Legend ---
+  const legendDiv = d3.select("#legend");
+  types.forEach((t, i) => {
+    const item = legendDiv.append("span").attr("class", "legend-item");
+    item.append("span").attr("class", "legend-swatch").style("background", TOL[i]);
+    item.append("span").text(t);
+  });
+
+  // --- Strum state ---
+  const strums = []; // { x1, y1, x2, y2, dimLeft, dimRight }
+  let selectedSet = new Set(d3.range(N));
+  let activeStrumIdx = -1; // for linked scatter
+
+  // --- Draw polylines ---
+  const drawLines = () => {
+    ctx.clearRect(0, 0, W, H);
+    ctx.save();
+    ctx.translate(margin.left, margin.top);
+
+    // Dimmed lines
+    for (let i = 0; i < N; i++) {
+      if (selectedSet.has(i)) continue;
+      const row = data[i];
+      ctx.beginPath();
+      dims.forEach((d, j) => {
+        const px = xScale(d), py = yScales[d](row[d]);
+        j === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+      });
+      ctx.strokeStyle = colorMap.get(row.type).replace(")", ",0.02)").replace("rgb", "rgba");
+      ctx.lineWidth = 1;
+      ctx.globalAlpha = 1;
+      ctx.stroke();
+    }
+
+    // Selected lines
+    for (const i of selectedSet) {
+      const row = data[i];
+      ctx.beginPath();
+      dims.forEach((d, j) => {
+        const px = xScale(d), py = yScales[d](row[d]);
+        j === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+      });
+      ctx.strokeStyle = colorMap.get(row.type);
+      ctx.globalAlpha = 0.04;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    ctx.restore();
+  };
+
+  // --- Strum intersection test ---
+  const cross2d = (ux, uy, vx, vy) => ux * vy - uy * vx;
+  const segmentsIntersect = (ax, ay, bx, by, cx, cy, dx, dy) => {
+    const d1 = cross2d(dx - cx, dy - cy, ax - cx, ay - cy);
+    const d2 = cross2d(dx - cx, dy - cy, bx - cx, by - cy);
+    const d3v = cross2d(bx - ax, by - ay, cx - ax, cy - ay);
+    const d4 = cross2d(bx - ax, by - ay, dx - ax, dy - ay);
+    if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+        ((d3v > 0 && d4 < 0) || (d3v < 0 && d4 > 0))) return true;
+    return false;
+  };
+
+  const applyStrums = () => {
+    if (strums.length === 0) {
+      selectedSet = new Set(d3.range(N));
+    } else {
+      selectedSet = new Set();
+      for (let i = 0; i < N; i++) {
+        const row = data[i];
+        let pass = true;
+        for (const s of strums) {
+          const li = dims.indexOf(s.dimLeft);
+          const ri = dims.indexOf(s.dimRight);
+          const ax = xScale(s.dimLeft), ay = yScales[s.dimLeft](row[s.dimLeft]);
+          const bx = xScale(s.dimRight), by = yScales[s.dimRight](row[s.dimRight]);
+          if (!segmentsIntersect(ax, ay, bx, by, s.x1, s.y1, s.x2, s.y2)) {
+            pass = false; break;
+          }
+        }
+        if (pass) selectedSet.add(i);
+      }
+    }
+    updateCounter();
+    drawLines();
+    drawStrums();
+    updateScatter();
+  };
+
+  const updateCounter = () => {
+    const n = selectedSet.size;
+    const pct = (n / N * 100).toFixed(0);
+    d3.select("#counter").text(`Selected ${n} of 2,000 (${pct}%)`);
+  };
+
+  // --- Draw strum lines on SVG ---
+  const strumGroup = g.append("g").attr("class", "strums");
+  const drawStrums = () => {
+    const sel = strumGroup.selectAll(".strum-g").data(strums, (d, i) => i);
+    sel.exit().remove();
+    const enter = sel.enter().append("g").attr("class", "strum-g");
+    enter.append("line").attr("class", "strum-line");
+    enter.append("circle").attr("class", "strum-handle").attr("r", 5);
+    enter.append("circle").attr("class", "strum-handle strum-handle-end").attr("r", 5);
+    // clickable background line for removal
+    enter.append("line").attr("class", "strum-click")
+      .attr("stroke", "transparent").attr("stroke-width", 12).attr("cursor", "pointer");
+
+    const merged = enter.merge(sel);
+    merged.select(".strum-line")
+      .attr("x1", d => d.x1).attr("y1", d => d.y1)
+      .attr("x2", d => d.x2).attr("y2", d => d.y2);
+    merged.select(".strum-handle")
+      .attr("cx", d => d.x1).attr("cy", d => d.y1);
+    merged.select(".strum-handle-end")
+      .attr("cx", d => d.x2).attr("cy", d => d.y2);
+    merged.select(".strum-click")
+      .attr("x1", d => d.x1).attr("y1", d => d.y1)
+      .attr("x2", d => d.x2).attr("y2", d => d.y2)
+      .on("click", (event, d) => {
+        event.stopPropagation();
+        const idx = strums.indexOf(d);
+        if (idx >= 0) strums.splice(idx, 1);
+        if (activeStrumIdx >= strums.length) activeStrumIdx = strums.length - 1;
+        applyStrums();
+      });
+  };
+
+  // --- Alt+drag to create strum ---
+  let dragging = false, dragStrum = null;
+  const interactionRect = g.append("rect")
+    .attr("width", innerW).attr("height", innerH)
+    .attr("fill", "none").attr("pointer-events", "all");
+
+  // Find which pair of adjacent axes a point falls between
+  const findAxisPair = (mx) => {
+    for (let i = 0; i < dims.length - 1; i++) {
+      const lx = xScale(dims[i]), rx = xScale(dims[i + 1]);
+      if (mx >= lx - 5 && mx <= rx + 5) return [dims[i], dims[i + 1]];
+    }
+    return null;
+  };
+
+  interactionRect.on("pointerdown", (event) => {
+    if (!event.altKey) return;
+    event.preventDefault();
+    const [mx, my] = d3.pointer(event, g.node());
+    const pair = findAxisPair(mx);
+    if (!pair) return;
+    dragging = true;
+    dragStrum = { x1: mx, y1: my, x2: mx, y2: my, dimLeft: pair[0], dimRight: pair[1] };
+    strums.push(dragStrum);
+    activeStrumIdx = strums.length - 1;
+    drawStrums();
+  });
+
+  d3.select(window).on("pointermove.strum", (event) => {
+    if (!dragging) return;
+    const [mx, my] = d3.pointer(event, g.node());
+    dragStrum.x2 = mx;
+    dragStrum.y2 = my;
+    applyStrums();
+  });
+
+  d3.select(window).on("pointerup.strum", () => {
+    if (!dragging) return;
+    dragging = false;
+    dragStrum = null;
+    applyStrums();
+  });
+
+  // --- Linked Scatterplot ---
+  const scSvg = d3.select("#scatter");
+  const scM = { top: 30, right: 20, bottom: 40, left: 50 };
+  const scW = 400 - scM.left - scM.right;
+  const scH = 300 - scM.top - scM.bottom;
+  const scG = scSvg.append("g").attr("transform", `translate(${scM.left},${scM.top})`);
+  const scXAxis = scG.append("g").attr("transform", `translate(0,${scH})`);
+  const scYAxis = scG.append("g");
+  const scTitle = scSvg.append("text").attr("x", 200).attr("y", 16)
+    .attr("text-anchor", "middle").attr("font-size", 13).attr("font-weight", 600);
+  const scXLabel = scSvg.append("text").attr("x", scM.left + scW / 2).attr("y", 290)
+    .attr("text-anchor", "middle").attr("font-size", 12);
+  const scYLabel = scSvg.append("text").attr("transform", `translate(14,${scM.top + scH / 2}) rotate(-90)`)
+    .attr("text-anchor", "middle").attr("font-size", 12);
+  const msgText = scG.append("text").attr("class", "scatter-msg")
+    .attr("x", scW / 2).attr("y", scH / 2).text("Alt+drag between axes to create a strum");
+
+  const updateScatter = () => {
+    if (strums.length === 0 || activeStrumIdx < 0) {
+      scG.selectAll("circle").remove();
+      scXAxis.selectAll("*").remove();
+      scYAxis.selectAll("*").remove();
+      scTitle.text("");
+      scXLabel.text("");
+      scYLabel.text("");
+      msgText.style("display", null);
+      return;
+    }
+    msgText.style("display", "none");
+    const s = strums[activeStrumIdx];
+    const dx = s.dimLeft, dy = s.dimRight;
+    scTitle.text(`${dx} vs ${dy}`);
+    scXLabel.text(dx);
+    scYLabel.text(dy);
+
+    const sx = d3.scaleLinear().domain(d3.extent(data, r => r[dx])).nice().range([0, scW]);
+    const sy = d3.scaleLinear().domain(d3.extent(data, r => r[dy])).nice().range([scH, 0]);
+    scXAxis.call(d3.axisBottom(sx).ticks(6));
+    scYAxis.call(d3.axisLeft(sy).ticks(6));
+
+    const selData = [...selectedSet].map(i => data[i]);
+    const circles = scG.selectAll("circle").data(selData, (d, i) => i);
+    circles.exit().remove();
+    circles.enter().append("circle")
+      .attr("r", 3)
+      .attr("opacity", 0.6)
+      .merge(circles)
+      .attr("cx", d => sx(d[dx]))
+      .attr("cy", d => sy(d[dy]))
+      .attr("fill", d => colorMap.get(d.type));
+  };
+
+  // Initial draw
+  drawLines();
+  updateScatter();
+  updateCounter();
+})();
+</script>
+</body>
+</html>

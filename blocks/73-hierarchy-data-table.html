@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Expandable Hierarchy Data Table</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: #fafafa; color: #222; padding: 20px; }
+  h1 { font-size: 18px; font-weight: 600; margin-bottom: 6px; }
+  .search-bar { margin-bottom: 10px; }
+  .search-bar input {
+    padding: 6px 10px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; width: 260px;
+  }
+  .count { font-size: 12px; color: #666; margin-left: 12px; }
+  .table-wrap { max-height: 640px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; }
+  table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+  thead th {
+    position: sticky; top: 0; background: #f0f0f0; padding: 6px 10px;
+    border-bottom: 2px solid #ccc; cursor: pointer; user-select: none; white-space: nowrap;
+    font-weight: 600; text-align: left;
+  }
+  thead th.num { text-align: right; }
+  thead th .arrow { font-size: 10px; margin-left: 4px; color: #999; }
+  tbody tr { transition: background 0.15s; }
+  tbody tr:hover { background: #e8f0fe; }
+  tbody tr.even { background: #f7f7f7; }
+  tbody tr.even:hover { background: #e8f0fe; }
+  tbody td { padding: 4px 10px; border-bottom: 1px solid #eee; white-space: nowrap; }
+  tbody td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tbody td.name-cell { cursor: default; }
+  .toggle { display: inline-block; width: 14px; text-align: center; cursor: pointer; color: #666; font-size: 11px; }
+  .folder-name { font-weight: 600; }
+  .file-icon { color: #999; margin-right: 4px; font-size: 11px; }
+  .spark-bar { display: inline-block; height: 10px; border-radius: 1px; }
+</style>
+</head>
+<body>
+<h1>File System Explorer</h1>
+<div class="search-bar">
+  <input type="text" id="search" placeholder="Search by name...">
+  <span class="count" id="count"></span>
+</div>
+<div class="table-wrap">
+  <table id="tree-table">
+    <thead><tr>
+      <th data-col="name" style="min-width:280px">Name <span class="arrow"></span></th>
+      <th data-col="size" class="num">Size <span class="arrow"></span></th>
+      <th data-col="proportion">Proportion <span class="arrow"></span></th>
+      <th data-col="share">Share <span class="arrow"></span></th>
+      <th data-col="files" class="num">Files <span class="arrow"></span></th>
+      <th data-col="modified">Modified <span class="arrow"></span></th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+<div id="live-region" aria-live="polite" style="position:absolute;left:-9999px"></div>
+
+<script>
+(() => {
+  // --- Data generation ---
+  const rng = d3.randomLcg(42);
+  const rand = (a, b) => a + rng() * (b - a);
+  const randInt = (a, b) => Math.floor(rand(a, b + 1));
+  const pick = arr => arr[randInt(0, arr.length - 1)];
+
+  const dirNames = ['src', 'lib', 'docs', 'assets', 'config', 'tests'];
+  const subDirPools = [
+    ['components', 'utils', 'hooks', 'services', 'models', 'api', 'store', 'types'],
+    ['core', 'plugins', 'middleware', 'adapters', 'helpers', 'parsers', 'validators', 'transforms'],
+    ['guides', 'tutorials', 'reference', 'examples', 'changelog'],
+    ['images', 'fonts', 'icons', 'styles', 'templates', 'data'],
+    ['env', 'deploy', 'ci', 'lint', 'build'],
+    ['unit', 'integration', 'e2e', 'fixtures', 'mocks', 'snapshots', 'helpers', 'coverage']
+  ];
+  const exts = ['.ts', '.js', '.json', '.md', '.css', '.yaml', '.html', '.svg', '.png', '.woff2'];
+
+  const rows = [];
+  let id = 0;
+  const rootId = id++;
+  const rootDate = new Date(2024, 5, 15);
+  rows.push({ id: rootId, parentId: null, name: '/', type: 'folder', size_bytes: 0, file_count: 0, modified: rootDate });
+
+  dirNames.forEach((dirName, di) => {
+    const dirId = id++;
+    const dirDate = new Date(2024, randInt(0, 11), randInt(1, 28));
+    rows.push({ id: dirId, parentId: rootId, name: dirName, type: 'folder', size_bytes: 0, file_count: 0, modified: dirDate });
+
+    const pool = subDirPools[di];
+    const nSub = randInt(4, 8);
+    const subs = d3.shuffle(pool.slice()).slice(0, nSub);
+
+    subs.forEach(subName => {
+      const subId = id++;
+      const subDate = new Date(2024, randInt(0, 11), randInt(1, 28));
+      rows.push({ id: subId, parentId: dirId, name: subName, type: 'folder', size_bytes: 0, file_count: 0, modified: subDate });
+
+      const nFiles = randInt(3, 10);
+      for (let f = 0; f < nFiles; f++) {
+        const fId = id++;
+        const ext = pick(exts);
+        const fname = pick(['index', 'main', 'utils', 'config', 'types', 'handler', 'render', 'parse', 'format', 'validate']) +
+                      (f > 0 ? f : '') + ext;
+        const size = Math.round(Math.pow(10, rand(3, 8.7))); // 1KB - 500MB
+        const fDate = new Date(2024, randInt(0, 11), randInt(1, 28));
+        rows.push({ id: fId, parentId: subId, name: fname, type: 'file', size_bytes: size, file_count: 0, modified: fDate });
+      }
+    });
+  });
+
+  // Build hierarchy and compute rollups
+  const stratify = d3.stratify().id(d => d.id).parentId(d => d.parentId);
+  const root = stratify(rows);
+  root.sum(d => d.type === 'file' ? d.size_bytes : 0);
+  root.count(); // sets .value to leaf count, we'll store separately
+  root.each(n => { n.data.file_count = n.copy().count().value; });
+  root.sum(d => d.type === 'file' ? d.size_bytes : 0);
+  root.each(n => { n.data.size_bytes = n.value; });
+
+  // Flatten for table
+  const flatData = [];
+  root.eachBefore(n => {
+    flatData.push({
+      node: n,
+      id: n.data.id,
+      name: n.data.name,
+      type: n.data.type,
+      depth: n.depth,
+      size_bytes: n.data.size_bytes,
+      file_count: n.data.file_count,
+      modified: n.data.modified,
+      parentSize: n.parent ? n.parent.data.size_bytes : n.data.size_bytes,
+      hasChildren: !!n.children
+    });
+  });
+
+  // State
+  const expanded = new Set([rootId]);
+  let sortCol = null;
+  let sortAsc = true;
+  let searchQuery = '';
+
+  const formatSize = bytes => {
+    if (bytes >= 1e9) return d3.format(',.1f')(bytes / 1e9) + ' GB';
+    if (bytes >= 1e6) return d3.format(',.1f')(bytes / 1e6) + ' MB';
+    return d3.format(',.0f')(bytes / 1e3) + ' KB';
+  };
+  const formatDate = d3.timeFormat('%b %d, %Y');
+  const tolBlue = '#4477AA';
+
+  // Filter visible rows
+  const getVisible = () => {
+    let visible = [];
+    const matchSet = new Set();
+
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      flatData.forEach(d => {
+        if (d.name.toLowerCase().includes(q)) {
+          matchSet.add(d.id);
+          // expand ancestors
+          let n = d.node.parent;
+          while (n) { expanded.add(n.data.id); matchSet.add(n.data.id); n = n.parent; }
+        }
+      });
+    }
+
+    const show = (node, depth) => {
+      const d = flatData.find(r => r.id === node.data.id);
+      if (searchQuery && !matchSet.has(d.id)) return;
+      visible.push(d);
+      if (node.children && expanded.has(d.id)) {
+        let kids = [...node.children];
+        if (sortCol) {
+          kids = sortChildren(kids);
+        }
+        kids.sort((a, b) => {
+          const af = a.data.type === 'folder' ? 0 : 1;
+          const bf = b.data.type === 'folder' ? 0 : 1;
+          if (af !== bf) return af - bf;
+          return 0;
+        });
+        if (sortCol) kids = stableSortWithFolderPriority(kids);
+        kids.forEach(c => show(c, depth + 1));
+      }
+    };
+    show(root, 0);
+    return visible;
+  };
+
+  const stableSortWithFolderPriority = kids => {
+    const folders = kids.filter(k => k.data.type === 'folder');
+    const files = kids.filter(k => k.data.type === 'file');
+    const sortFn = getSortFn();
+    folders.sort(sortFn);
+    files.sort(sortFn);
+    return [...folders, ...files];
+  };
+
+  const sortChildren = kids => kids; // handled by stableSortWithFolderPriority
+
+  const getSortFn = () => {
+    if (!sortCol) return () => 0;
+    const dir = sortAsc ? 1 : -1;
+    switch (sortCol) {
+      case 'name': return (a, b) => dir * d3.ascending(a.data.name, b.data.name);
+      case 'size': return (a, b) => dir * d3.ascending(a.data.size_bytes, b.data.size_bytes);
+      case 'files': return (a, b) => dir * d3.ascending(a.data.file_count, b.data.file_count);
+      case 'modified': return (a, b) => dir * d3.ascending(a.data.modified, b.data.modified);
+      default: return () => 0;
+    }
+  };
+
+  const tbody = d3.select('#tree-table tbody');
+  const countEl = d3.select('#count');
+  const liveRegion = d3.select('#live-region');
+
+  const renderTable = () => {
+    const visible = getVisible();
+    countEl.text(`Showing ${visible.length} of ${flatData.length} items`);
+    liveRegion.text(`Showing ${visible.length} of ${flatData.length} items`);
+
+    const rows = tbody.selectAll('tr')
+      .data(visible, d => d.id)
+      .join(
+        enter => enter.append('tr').style('opacity', 0).transition().duration(200).style('opacity', 1).selection(),
+        update => update,
+        exit => exit.transition().duration(150).style('opacity', 0).remove()
+      )
+      .classed('even', (d, i) => i % 2 === 1);
+
+    // Name cell
+    rows.selectAll('td.name-cell').data(d => [d]).join('td')
+      .attr('class', 'name-cell')
+      .style('padding-left', d => (10 + d.depth * 20) + 'px')
+      .html(d => {
+        const toggle = d.hasChildren
+          ? `<span class="toggle" data-id="${d.id}">${expanded.has(d.id) ? '▼' : '▶'}</span> `
+          : '<span style="display:inline-block;width:14px"></span> ';
+        const icon = d.type === 'folder' ? '📁 ' : '';
+        const cls = d.type === 'folder' ? 'folder-name' : '';
+        return `${toggle}${icon}<span class="${cls}">${d.name}</span>`;
+      });
+
+    // Size
+    rows.selectAll('td.size-cell').data(d => [d]).join('td')
+      .attr('class', 'size-cell num')
+      .text(d => formatSize(d.size_bytes));
+
+    // Proportion bar
+    rows.selectAll('td.prop-cell').data(d => [d]).join('td')
+      .attr('class', 'prop-cell')
+      .html(d => {
+        const pct = d.parentSize > 0 ? Math.max(1, (d.size_bytes / d.parentSize) * 100) : 0;
+        return `<span class="spark-bar" style="width:${pct * 0.6}px;background:${tolBlue}"></span>`;
+      });
+
+    // Donut share
+    rows.selectAll('td.share-cell').data(d => [d]).join('td')
+      .attr('class', 'share-cell')
+      .each(function(d) {
+        d3.select(this).selectAll('svg').remove();
+        const pct = d.parentSize > 0 ? d.size_bytes / d.parentSize : 0;
+        const svg = d3.select(this).append('svg').attr('width', 16).attr('height', 16)
+          .style('display', 'block').style('vertical-align', 'middle');
+        const g = svg.append('g').attr('transform', 'translate(8,8)');
+        const arc = d3.arc().innerRadius(4).outerRadius(7);
+        g.append('path').attr('d', arc({ startAngle: 0, endAngle: 2 * Math.PI })).attr('fill', '#e0e0e0');
+        if (pct > 0.001) {
+          g.append('path').attr('d', arc({ startAngle: 0, endAngle: pct * 2 * Math.PI })).attr('fill', tolBlue);
+        }
+      });
+
+    // Files
+    rows.selectAll('td.files-cell').data(d => [d]).join('td')
+      .attr('class', 'files-cell num')
+      .text(d => d.type === 'folder' ? d3.format(',')(d.file_count) : '\u2014');
+
+    // Modified
+    rows.selectAll('td.mod-cell').data(d => [d]).join('td')
+      .attr('class', 'mod-cell')
+      .text(d => formatDate(d.modified));
+  };
+
+  // Toggle expand/collapse
+  tbody.on('click', (event) => {
+    const toggle = event.target.closest('.toggle');
+    if (!toggle) return;
+    const id = +toggle.dataset.id;
+    if (expanded.has(id)) expanded.delete(id);
+    else expanded.add(id);
+    renderTable();
+  });
+
+  // Sort
+  d3.selectAll('thead th').on('click', function() {
+    const col = this.dataset.col;
+    if (!col || col === 'proportion' || col === 'share') return;
+    if (sortCol === col) sortAsc = !sortAsc;
+    else { sortCol = col; sortAsc = true; }
+
+    d3.selectAll('thead th').attr('aria-sort', 'none').selectAll('.arrow').text('');
+    d3.select(this).attr('aria-sort', sortAsc ? 'ascending' : 'descending')
+      .select('.arrow').text(sortAsc ? '▲' : '▼');
+    renderTable();
+  });
+
+  // Search
+  d3.select('#search').on('input', function() {
+    searchQuery = this.value.trim();
+    renderTable();
+  });
+
+  renderTable();
+})();
+</script>
+</body>
+</html>

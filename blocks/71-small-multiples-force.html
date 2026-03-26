@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Small Multiples Force Network</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #fafafa; font-family: system-ui, sans-serif; display: flex; flex-direction: column; align-items: center; }
+  h1 { font-size: 18px; font-weight: 600; margin: 16px 0 4px; }
+  .controls { margin-bottom: 12px; }
+  .controls button {
+    padding: 6px 18px; font-size: 13px; border: 1px solid #aaa; border-radius: 4px;
+    background: white; cursor: pointer; font-family: system-ui;
+  }
+  .controls button:hover { background: #eee; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .panel-label { font-size: 13px; font-weight: 600; fill: #333; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; margin-top: 8px; font-size: 12px; color: #555; }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .legend-swatch { width: 10px; height: 10px; border-radius: 50%; }
+  .legend-line { width: 18px; height: 0; border-top: 2px solid; }
+</style>
+</head>
+<body>
+<h1>Network Evolution &mdash; Small Multiples</h1>
+<div class="controls"><button id="animateBtn">Animate</button></div>
+<div class="grid" id="grid"></div>
+<div class="legend" id="legend"></div>
+<script>
+const TOL5 = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE"];
+const GREEN = "#228833", RED = "#EE6677";
+const months = ["January","February","March","April","May","June"];
+const panelW = 350, panelH = 280;
+const nodeR = 4;
+const rng = d3.randomLcg(12345);
+
+// Generate 60 nodes in 5 groups
+const nodes = d3.range(60).map(i => ({
+  id: i,
+  group: i % 5,
+  x: panelW / 2 + (rng() - 0.5) * 100,
+  y: panelH / 2 + (rng() - 0.5) * 80
+}));
+
+// Base ~80 edges (intra-group biased)
+const baseEdges = [];
+const edgeSet = new Set();
+const addEdge = (s, t) => {
+  const key = s < t ? `${s}-${t}` : `${t}-${s}`;
+  if (!edgeSet.has(key) && s !== t) { edgeSet.add(key); baseEdges.push({ source: s, target: t }); }
+};
+for (let i = 0; i < 60; i++) {
+  // Connect within group
+  for (let j = i + 1; j < 60; j++) {
+    if (nodes[i].group === nodes[j].group && rng() < 0.25) addEdge(i, j);
+    else if (rng() < 0.02) addEdge(i, j);
+  }
+}
+
+// 6 monthly snapshots: add/remove edges
+const snapshots = [];
+let currentEdges = new Set(baseEdges.map(e => `${e.source}-${e.target}`));
+for (let m = 0; m < 6; m++) {
+  const added = new Set(), removed = new Set();
+  if (m > 0) {
+    // Remove 3-6 edges
+    const arr = [...currentEdges];
+    const nRemove = 3 + Math.floor(rng() * 4);
+    for (let r = 0; r < nRemove && arr.length > 10; r++) {
+      const idx = Math.floor(rng() * arr.length);
+      const e = arr.splice(idx, 1)[0];
+      currentEdges.delete(e);
+      removed.add(e);
+    }
+    // Add 5-8 edges
+    const nAdd = 5 + Math.floor(rng() * 4);
+    let attempts = 0;
+    while (added.size < nAdd && attempts < 200) {
+      const s = Math.floor(rng() * 60), t = Math.floor(rng() * 60);
+      const key = s < t ? `${s}-${t}` : `${t}-${s}`;
+      if (s !== t && !currentEdges.has(key)) { currentEdges.add(key); added.add(key); }
+      attempts++;
+    }
+  }
+  const edges = [...currentEdges].map(k => {
+    const [s, t] = k.split("-").map(Number);
+    return { source: s, target: t, key: k };
+  });
+  snapshots.push({ month: months[m], edges, added, removed });
+}
+
+// Run force for January, seed positions
+const runSim = (edgeList, initPositions) => {
+  const simNodes = nodes.map(d => ({
+    ...d,
+    x: initPositions ? initPositions[d.id].x : d.x,
+    y: initPositions ? initPositions[d.id].y : d.y
+  }));
+  const simLinks = edgeList.map(e => ({ source: e.source, target: e.target }));
+  const sim = d3.forceSimulation(simNodes)
+    .force("link", d3.forceLink(simLinks).id(d => d.id).distance(30))
+    .force("charge", d3.forceManyBody().strength(-25))
+    .force("center", d3.forceCenter(panelW / 2, panelH / 2))
+    .force("collide", d3.forceCollide(5))
+    .stop();
+  sim.tick(300);
+  return simNodes;
+};
+
+// Compute positions for all months, seeding from January
+const panelPositions = [];
+let prevPos = null;
+snapshots.forEach((snap, mi) => {
+  const simNodes = runSim(snap.edges, prevPos);
+  const posMap = {};
+  simNodes.forEach(n => { posMap[n.id] = { x: n.x, y: n.y }; });
+  panelPositions.push({ positions: posMap, simNodes });
+  if (mi === 0) prevPos = posMap;
+  else prevPos = posMap;
+});
+
+// Render panels
+const grid = d3.select("#grid");
+
+const panels = snapshots.map((snap, mi) => {
+  const svg = grid.append("svg")
+    .attr("width", panelW).attr("height", panelH)
+    .attr("id", `panel-${mi}`);
+
+  svg.append("rect").attr("width", panelW).attr("height", panelH).attr("fill", "white").attr("rx", 4);
+  svg.append("text").attr("class", "panel-label").attr("x", panelW / 2).attr("y", 18).attr("text-anchor", "middle").text(snap.month);
+
+  const gLinks = svg.append("g");
+  const gNodes = svg.append("g");
+  const pos = panelPositions[mi].positions;
+
+  // Draw edges
+  const linkSel = gLinks.selectAll("line")
+    .data(snap.edges)
+    .join("line")
+      .attr("x1", d => pos[d.source].x).attr("y1", d => pos[d.source].y)
+      .attr("x2", d => pos[d.target].x).attr("y2", d => pos[d.target].y)
+      .attr("stroke", d => snap.added.has(d.key) ? GREEN : "#bbb")
+      .attr("stroke-width", d => snap.added.has(d.key) ? 2 : 1)
+      .attr("stroke-opacity", d => snap.added.has(d.key) ? 0.8 : 0.3);
+
+  // Draw removed edges (dashed)
+  const removedEdges = [...snap.removed].map(k => {
+    const [s, t] = k.split("-").map(Number);
+    return { source: s, target: t, key: k };
+  });
+  gLinks.selectAll("line.removed")
+    .data(removedEdges)
+    .join("line")
+      .attr("class", "removed")
+      .attr("x1", d => pos[d.source].x).attr("y1", d => pos[d.source].y)
+      .attr("x2", d => pos[d.target].x).attr("y2", d => pos[d.target].y)
+      .attr("stroke", RED).attr("stroke-width", 1.5)
+      .attr("stroke-opacity", 0.6).attr("stroke-dasharray", "4,3");
+
+  // Draw nodes
+  const nodeSel = gNodes.selectAll("circle")
+    .data(panelPositions[mi].simNodes)
+    .join("circle")
+      .attr("cx", d => pos[d.id].x).attr("cy", d => pos[d.id].y)
+      .attr("r", nodeR)
+      .attr("fill", d => TOL5[d.group])
+      .attr("stroke", "white").attr("stroke-width", 0.5);
+
+  return { svg, gLinks, gNodes, linkSel, nodeSel };
+});
+
+// Legend
+const legendEl = d3.select("#legend");
+["Group A","Group B","Group C","Group D","Group E"].forEach((name, i) => {
+  const item = legendEl.append("div").attr("class", "legend-item");
+  item.append("div").attr("class", "legend-swatch").style("background", TOL5[i]);
+  item.append("span").text(name);
+});
+[{ label: "New edge", color: GREEN, dash: false },
+ { label: "Removed edge", color: RED, dash: true },
+ { label: "Persistent", color: "#bbb", dash: false }].forEach(({ label, color, dash }) => {
+  const item = legendEl.append("div").attr("class", "legend-item");
+  item.append("div").attr("class", "legend-line")
+    .style("border-color", color)
+    .style("border-style", dash ? "dashed" : "solid");
+  item.append("span").text(label);
+});
+
+// Animate button: morph between panels sequentially
+d3.select("#animateBtn").on("click", () => {
+  let step = 0;
+  const runStep = () => {
+    if (step >= 5) return;
+    const fromIdx = step, toIdx = step + 1;
+    const fromPos = panelPositions[fromIdx].positions;
+    const toPos = panelPositions[toIdx].positions;
+
+    // Animate all panels to show toIdx state
+    panels.forEach((panel, pi) => {
+      if (pi !== 0) return; // animate on first panel for clarity
+    });
+
+    // Animate each panel: interpolate node positions from current to target
+    panels.forEach((panel, pi) => {
+      const targetPos = panelPositions[toIdx].positions;
+      const sourcePos = panelPositions[fromIdx].positions;
+
+      panel.nodeSel.transition().duration(800).ease(d3.easeCubicInOut)
+        .attr("cx", d => targetPos[d.id].x)
+        .attr("cy", d => targetPos[d.id].y);
+
+      panel.linkSel.transition().duration(800).ease(d3.easeCubicInOut)
+        .attr("x1", d => targetPos[d.source].x).attr("y1", d => targetPos[d.source].y)
+        .attr("x2", d => targetPos[d.target].x).attr("y2", d => targetPos[d.target].y)
+        .attr("stroke-opacity", 0.15);
+    });
+
+    step++;
+    setTimeout(runStep, 800 + 400);
+  };
+  runStep();
+});
+</script>
+</body>
+</html>

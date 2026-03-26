@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Classification Choropleth Comparison</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 16px;
+  }
+  h1 { font-size: 18px; font-weight: 600; color: #222; margin-bottom: 4px; }
+  .subtitle { font-size: 13px; color: #666; margin-bottom: 10px; }
+  .controls { margin-bottom: 12px; display: flex; align-items: center; gap: 12px; font-size: 13px; color: #444; }
+  .controls input[type="range"] { width: 140px; }
+  .controls .count { font-family: "SF Mono", Monaco, "Cascadia Code", monospace; font-weight: 600; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; max-width: 1000px; }
+  .panel { position: relative; }
+  .panel-label { font-size: 13px; font-weight: 600; color: #333; text-align: center; margin-bottom: 2px; }
+  .legend-row { display: flex; justify-content: center; gap: 3px; margin-top: 4px; flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 2px; font-size: 10px; color: #555; font-family: "SF Mono", Monaco, "Cascadia Code", monospace; }
+  .legend-swatch { width: 14px; height: 10px; border: 1px solid #ccc; }
+  .tooltip-box {
+    position: fixed; pointer-events: none; background: white; border: 1px solid #ccc;
+    border-radius: 4px; padding: 6px 10px; font-size: 12px; box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+    opacity: 0; transition: opacity 0.05s;
+    z-index: 10;
+  }
+  .tooltip-box .val { font-family: "SF Mono", Monaco, "Cascadia Code", monospace; font-weight: 600; }
+  .histogram-section { margin-top: 12px; text-align: center; }
+  .histogram-label { font-size: 12px; color: #555; margin-bottom: 2px; }
+</style>
+</head>
+<body>
+<h1>How Classification Tells Different Stories &mdash; Same Data, Four Methods</h1>
+<p class="subtitle">Synthetic US median household income by state. Hover to compare across methods.</p>
+<div class="controls">
+  <label>Classes: <span class="count" id="classCount">5</span></label>
+  <input type="range" id="classSlider" min="3" max="7" value="5" step="1">
+</div>
+<div class="grid" id="grid"></div>
+<div class="histogram-section">
+  <div class="histogram-label">Income Distribution &amp; Breakpoints</div>
+  <svg id="histogram"></svg>
+</div>
+<div class="tooltip-box" id="tip"></div>
+
+<script type="module">
+import * as topojson from "https://cdn.jsdelivr.net/npm/topojson-client@3/+esm";
+
+// --- Synthetic data ---
+const stateNames = [
+  "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut","Delaware","Florida","Georgia",
+  "Hawaii","Idaho","Illinois","Indiana","Iowa","Kansas","Kentucky","Louisiana","Maine","Maryland",
+  "Massachusetts","Michigan","Minnesota","Mississippi","Missouri","Montana","Nebraska","Nevada","New Hampshire","New Jersey",
+  "New Mexico","New York","North Carolina","North Dakota","Ohio","Oklahoma","Oregon","Pennsylvania","Rhode Island","South Carolina",
+  "South Dakota","Tennessee","Texas","Utah","Vermont","Virginia","Washington","West Virginia","Wisconsin","Wyoming","District of Columbia"
+];
+const fipsList = [
+  "01","02","04","05","06","08","09","10","12","13",
+  "15","16","17","18","19","20","21","22","23","24",
+  "25","26","27","28","29","30","31","32","33","34",
+  "35","36","37","38","39","40","41","42","44","45",
+  "46","47","48","49","50","51","53","54","55","56","11"
+];
+
+const rng = d3.randomLcg(12345);
+const incomeData = new Map();
+stateNames.forEach((name, i) => {
+  // Right-skewed: most states 50K-70K, a few outliers above 80K
+  const base = 50000 + rng() * 20000;
+  const skew = rng() < 0.15 ? 15000 + rng() * 12000 : rng() * 5000 - 2500;
+  const val = Math.round(Math.max(38000, Math.min(92000, base + skew)));
+  incomeData.set(fipsList[i], { name, fips: fipsList[i], income: val });
+});
+
+const allValues = [...incomeData.values()].map(d => d.income);
+
+// --- Jenks natural breaks ---
+function jenksBreaks(data, k) {
+  const sorted = [...data].sort((a, b) => a - b);
+  const n = sorted.length;
+  if (k >= n) return sorted;
+  const mat1 = Array.from({ length: n + 1 }, () => new Float64Array(k + 1).fill(Infinity));
+  const mat2 = Array.from({ length: n + 1 }, () => new Int32Array(k + 1));
+  for (let i = 1; i <= k; i++) mat1[1][i] = 0;
+  for (let l = 2; l <= n; l++) {
+    let s2 = 0, w = 0, v = 0;
+    for (let m = 1; m <= l; m++) {
+      const i3 = l - m + 1;
+      const val = sorted[i3 - 1];
+      s2 += val * val;
+      w += val;
+      v++;
+      const variance = s2 - (w * w) / v;
+      if (i3 > 1) {
+        for (let j = 2; j <= k; j++) {
+          const test = mat1[i3 - 1][j - 1] + variance;
+          if (test < mat1[l][j]) {
+            mat2[l][j] = i3;
+            mat1[l][j] = test;
+          }
+        }
+      }
+    }
+    mat1[l][1] = s2 - (w * w) / v;
+  }
+  const breaks = [sorted[0]];
+  let kk = k;
+  let idx = n;
+  while (kk >= 2) {
+    breaks.unshift(sorted[mat2[idx][kk] - 1]);
+    idx = mat2[idx][kk] - 1;
+    kk--;
+  }
+  breaks.push(sorted[n - 1]);
+  // Return inner breaks only
+  return breaks;
+}
+
+// --- Color ramp ---
+function makeColors(n) {
+  const interp = d3.interpolateRgbBasis(["#BBCCEE", "#8899BB", "#556688", "#334466", "#222255"]);
+  return d3.range(n).map(i => interp(i / (n - 1)));
+}
+
+// --- Load geometry ---
+const us = await d3.json("https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json");
+const states = topojson.feature(us, us.objects.states).features;
+const stateMesh = topojson.mesh(us, us.objects.states, (a, b) => a !== b);
+
+// Match FIPS
+states.forEach(f => {
+  f.fips = String(f.id).padStart(2, "0");
+  const d = incomeData.get(f.fips);
+  if (d) f.properties.income = d.income;
+});
+
+// --- Panel setup ---
+const panelW = 480, panelH = 280;
+const methods = [
+  { key: "quantile", label: "Quantile (Equal Count)" },
+  { key: "equalInterval", label: "Equal Interval" },
+  { key: "jenks", label: "Natural Breaks (Jenks)" },
+  { key: "manual", label: "Manual Threshold" },
+];
+
+const grid = d3.select("#grid");
+const panels = methods.map(m => {
+  const div = grid.append("div").attr("class", "panel");
+  div.append("div").attr("class", "panel-label").text(m.label);
+  const svg = div.append("svg").attr("width", panelW).attr("height", panelH).attr("viewBox", `0 0 ${panelW} ${panelH}`);
+  const projection = d3.geoAlbersUsa().fitSize([panelW - 20, panelH - 20], topojson.merge(us, us.objects.states.geometries));
+  projection.translate([panelW / 2, panelH / 2]);
+  const path = d3.geoPath(projection);
+  const g = svg.append("g");
+  const paths = g.selectAll("path")
+    .data(states)
+    .join("path")
+    .attr("d", path)
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 0.5)
+    .style("cursor", "pointer");
+  g.append("path").datum(stateMesh).attr("d", path).attr("fill", "none").attr("stroke", "#fff").attr("stroke-width", 0.8);
+  const legendDiv = div.append("div").attr("class", "legend-row");
+  return { ...m, svg, paths, projection, path, legendDiv };
+});
+
+const tip = d3.select("#tip");
+
+// --- Histogram ---
+const histW = 500, histH = 100;
+const histMargin = { top: 8, right: 16, bottom: 24, left: 40 };
+const histSvg = d3.select("#histogram").attr("width", histW).attr("height", histH);
+const histX = d3.scaleLinear().domain([35000, 95000]).range([histMargin.left, histW - histMargin.right]);
+const bins = d3.bin().domain(histX.domain()).thresholds(20)(allValues);
+const histY = d3.scaleLinear().domain([0, d3.max(bins, b => b.length)]).nice().range([histH - histMargin.bottom, histMargin.top]);
+
+histSvg.append("g").attr("transform", `translate(0,${histH - histMargin.bottom})`)
+  .call(d3.axisBottom(histX).ticks(6).tickFormat(d => `$${d / 1000}K`))
+  .call(g => g.select(".domain").attr("stroke", "#aaa"));
+histSvg.selectAll(".bar").data(bins).join("rect")
+  .attr("x", d => histX(d.x0) + 1).attr("width", d => Math.max(0, histX(d.x1) - histX(d.x0) - 2))
+  .attr("y", d => histY(d.length)).attr("height", d => histY(0) - histY(d.length))
+  .attr("fill", "#ccc");
+const breakLinesGroup = histSvg.append("g");
+const breakColors = ["#4477AA", "#EE6677", "#228833", "#AA3377"];
+
+// --- Build scales and update ---
+function buildScales(k) {
+  const colors = makeColors(k);
+  const scaleMap = {};
+
+  // Quantile
+  scaleMap.quantile = d3.scaleQuantile().domain(allValues).range(colors);
+
+  // Equal interval
+  scaleMap.equalInterval = d3.scaleQuantize().domain(d3.extent(allValues)).range(colors);
+
+  // Jenks
+  const jBreaks = jenksBreaks(allValues, k);
+  const jInner = jBreaks.slice(1, -1);
+  scaleMap.jenks = d3.scaleThreshold().domain(jInner).range(colors);
+
+  // Manual: evenly spaced from 45K to 75K (adjusting for k)
+  const manualSpan = 30000;
+  const manualStart = 45000;
+  const step = manualSpan / (k - 1);
+  const manualBreaks = d3.range(1, k).map(i => Math.round(manualStart + (i - 1) * step));
+  // Ensure we don't have too many or too few breaks
+  const mBreaks = manualBreaks.slice(0, k - 1);
+  scaleMap.manual = d3.scaleThreshold().domain(mBreaks).range(colors);
+
+  return { scaleMap, colors, jBreaks };
+}
+
+function getBreakpoints(scaleMap, k) {
+  const bp = {};
+  bp.quantile = scaleMap.quantile.quantiles();
+  const ext = d3.extent(allValues);
+  const step = (ext[1] - ext[0]) / k;
+  bp.equalInterval = d3.range(1, k).map(i => Math.round(ext[0] + step * i));
+  bp.jenks = scaleMap.jenks.domain();
+  bp.manual = scaleMap.manual.domain();
+  return bp;
+}
+
+function classFor(scale, value) {
+  const range = scale.range();
+  const color = scale(value);
+  return range.indexOf(color) + 1;
+}
+
+function updateAll(k) {
+  const { scaleMap, colors } = buildScales(k);
+  const bp = getBreakpoints(scaleMap, k);
+
+  panels.forEach(p => {
+    const scale = scaleMap[p.key];
+    p.paths.transition().duration(500)
+      .attr("fill", d => d.properties.income != null ? scale(d.properties.income) : "#eee");
+
+    // Legend
+    p.legendDiv.html("");
+    const range = scale.range();
+    const breaks = bp[p.key];
+    range.forEach((c, i) => {
+      const lo = i === 0 ? "$" + Math.round(d3.min(allValues) / 1000) + "K" : "$" + Math.round(breaks[i - 1] / 1000) + "K";
+      const hi = i === range.length - 1 ? "$" + Math.round(d3.max(allValues) / 1000) + "K" : "$" + Math.round(breaks[i] / 1000) + "K";
+      const item = p.legendDiv.append("span").attr("class", "legend-item");
+      item.append("span").attr("class", "legend-swatch").style("background", c);
+      item.append("span").text(`${lo}\u2013${hi}`);
+    });
+
+    // Store scale for hover
+    p.scale = scale;
+  });
+
+  // Histogram break lines
+  breakLinesGroup.selectAll("*").remove();
+  methods.forEach((m, mi) => {
+    const bps = bp[m.key];
+    bps.forEach(b => {
+      breakLinesGroup.append("line")
+        .attr("x1", histX(b)).attr("x2", histX(b))
+        .attr("y1", histMargin.top).attr("y2", histH - histMargin.bottom)
+        .attr("stroke", breakColors[mi]).attr("stroke-width", 1.2)
+        .attr("stroke-dasharray", mi > 1 ? "3,2" : "none")
+        .attr("opacity", 0.7);
+    });
+  });
+}
+
+// --- Interaction ---
+let highlighted = null;
+
+panels.forEach(p => {
+  p.paths
+    .on("pointerenter", (event, d) => {
+      if (d.properties.income == null) return;
+      highlighted = d.fips;
+      panels.forEach(pp => {
+        pp.paths.attr("stroke", f => f.fips === highlighted ? "#222" : "#fff")
+          .attr("stroke-width", f => f.fips === highlighted ? 2 : 0.5);
+      });
+      const info = incomeData.get(d.fips);
+      const cls = classFor(p.scale, d.properties.income);
+      tip.html(`<strong>${info.name}</strong><br><span class="val">$${d3.format(",")(info.income)}</span><br>Class ${cls} of ${p.scale.range().length}`)
+        .style("opacity", 1);
+    })
+    .on("pointermove", (event) => {
+      tip.style("left", (event.clientX + 14) + "px").style("top", (event.clientY - 10) + "px");
+    })
+    .on("pointerleave", () => {
+      highlighted = null;
+      panels.forEach(pp => {
+        pp.paths.attr("stroke", "#fff").attr("stroke-width", 0.5);
+      });
+      tip.style("opacity", 0);
+    });
+});
+
+// --- Slider ---
+const slider = document.getElementById("classSlider");
+const countLabel = document.getElementById("classCount");
+slider.addEventListener("input", () => {
+  const k = +slider.value;
+  countLabel.textContent = k;
+  updateAll(k);
+});
+
+updateAll(5);
+</script>
+</body>
+</html>

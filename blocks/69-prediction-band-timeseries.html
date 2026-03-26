@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prediction Band Time Series</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #fafafa; color: #333; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 16px; }
+  h2 { font-size: 18px; font-weight: 600; margin-bottom: 2px; }
+  .subtitle { font-size: 13px; color: #666; margin-bottom: 12px; }
+  .chart-wrapper { position: relative; }
+  svg text { font-family: system-ui, sans-serif; }
+  .controls { display: flex; gap: 12px; margin-top: 12px; }
+  .controls button {
+    padding: 5px 16px; font-size: 13px; border: 1px solid #bbb; border-radius: 4px;
+    background: #fff; cursor: pointer; font-family: system-ui;
+  }
+  .controls button:hover { background: #f0f0f0; }
+  .legend { display: flex; gap: 18px; margin-top: 10px; flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 5px; font-size: 12px; }
+  .legend-line { width: 20px; height: 2px; }
+  .legend-band { width: 16px; height: 10px; border-radius: 2px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h2>Monthly Revenue -- Actual vs Forecast</h2>
+  <p class="subtitle">36 months of revenue with prediction fan chart and step-sequenced annotations.</p>
+  <div class="chart-wrapper" id="chart"></div>
+  <div class="controls">
+    <button id="storyBtn">Tell the Story</button>
+    <button id="resetBtn">Reset</button>
+  </div>
+  <div class="legend" id="legend"></div>
+</div>
+<script>
+(() => {
+  const TOL = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377","#BBBBBB"];
+  const margin = { top: 40, right: 40, bottom: 40, left: 60 };
+  const width = 800;
+  const height = 400;
+  const innerW = width - margin.left - margin.right;
+  const innerH = height - margin.top - margin.bottom;
+
+  // --- Generate data ---
+  const rng = d3.randomLcg(123);
+  const startDate = new Date(Date.UTC(2022, 0, 1));
+  const months = [];
+
+  // 30 actual months: trending $2M -> $3.5M with seasonal noise
+  for (let i = 0; i < 30; i++) {
+    const date = new Date(Date.UTC(2022, i, 1));
+    const trend = 2.0 + (1.5 * i / 29);
+    const seasonal = 0.2 * Math.sin((i / 12) * 2 * Math.PI);
+    const noise = (rng() - 0.5) * 0.3;
+    months.push({ date, value: trend + seasonal + noise, type: "actual" });
+  }
+
+  // 6 prediction months
+  const lastActual = months[months.length - 1].value;
+  for (let i = 0; i < 6; i++) {
+    const date = new Date(Date.UTC(2024, 5 + i, 1));
+    const trend = lastActual + 0.08 * (i + 1);
+    const seasonal = 0.15 * Math.sin(((30 + i) / 12) * 2 * Math.PI);
+    const median = trend + seasonal;
+    const spread = 0.15 + 0.08 * i;
+    months.push({
+      date, value: median, type: "prediction",
+      p50_lo: median - spread * 0.67, p50_hi: median + spread * 0.67,
+      p80_lo: median - spread * 1.28, p80_hi: median + spread * 1.28,
+      p95_lo: median - spread * 1.96, p95_hi: median + spread * 1.96,
+    });
+  }
+
+  const actual = months.filter(d => d.type === "actual");
+  const predicted = months.filter(d => d.type === "prediction");
+  const predictionStart = predicted[0].date;
+
+  // Bridge: last actual + first prediction for continuous bands
+  const bridge = { ...predicted[0], value: actual[actual.length - 1].value };
+  const predWithBridge = [
+    { ...actual[actual.length - 1], ...predicted[0], value: actual[actual.length - 1].value,
+      p50_lo: actual[actual.length - 1].value, p50_hi: actual[actual.length - 1].value,
+      p80_lo: actual[actual.length - 1].value, p80_hi: actual[actual.length - 1].value,
+      p95_lo: actual[actual.length - 1].value, p95_hi: actual[actual.length - 1].value,
+      date: actual[actual.length - 1].date
+    },
+    ...predicted
+  ];
+
+  // Event annotations
+  const annotations = [
+    { date: new Date(Date.UTC(2022, 5, 1)), y: null, label: "Product Launch", type: "event" },
+    { date: new Date(Date.UTC(2023, 2, 1)), y: null, label: "Price Increase", type: "event" },
+    { date: new Date(Date.UTC(2023, 9, 1)), y: null, label: "Competitor Entry", type: "event" },
+    { date: predictionStart, y: null, label: "Prediction Start", type: "divider" },
+  ];
+
+  // --- Scales ---
+  const allValues = months.flatMap(d => {
+    const vals = [d.value];
+    if (d.p95_lo != null) vals.push(d.p95_lo, d.p95_hi);
+    return vals;
+  });
+  const x = d3.scaleUtc()
+    .domain(d3.extent(months, d => d.date))
+    .range([0, innerW]);
+  const y = d3.scaleLinear()
+    .domain([d3.min(allValues) - 0.2, d3.max(allValues) + 0.3])
+    .range([innerH, 0]);
+
+  // --- SVG ---
+  const svg = d3.select("#chart").append("svg")
+    .attr("width", width).attr("height", height)
+    .attr("viewBox", `0 0 ${width} ${height}`);
+
+  const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+  // Axes
+  g.append("g").attr("transform", `translate(0,${innerH})`)
+    .call(d3.axisBottom(x).ticks(d3.utcMonth.every(3)).tickFormat(d3.utcFormat("%b '%y")))
+    .selectAll("text").style("font-size", "11px");
+  g.append("g")
+    .call(d3.axisLeft(y).ticks(6).tickFormat(d => `$${d.toFixed(1)}M`))
+    .selectAll("text").style("font-size", "11px");
+
+  // Y-axis label
+  g.append("text").attr("transform", "rotate(-90)").attr("x", -innerH / 2).attr("y", -45)
+    .attr("text-anchor", "middle").attr("font-size", "12px").attr("fill", "#666").text("Revenue ($M)");
+
+  // --- Prediction bands ---
+  const bandData = [
+    { lo: "p95_lo", hi: "p95_hi", opacity: 0.15 },
+    { lo: "p80_lo", hi: "p80_hi", opacity: 0.25 },
+    { lo: "p50_lo", hi: "p50_hi", opacity: 0.35 },
+  ];
+
+  const bandGroup = g.append("g").attr("class", "bands");
+  bandData.forEach(band => {
+    bandGroup.append("path")
+      .datum(predWithBridge)
+      .attr("d", d3.area()
+        .x(d => x(d.date))
+        .y0(d => y(d[band.lo]))
+        .y1(d => y(d[band.hi]))
+        .curve(d3.curveMonotoneX))
+      .attr("fill", TOL[4])
+      .attr("fill-opacity", band.opacity);
+  });
+
+  // Prediction dashed line
+  bandGroup.append("path")
+    .datum(predWithBridge)
+    .attr("d", d3.line().x(d => x(d.date)).y(d => y(d.value)).curve(d3.curveMonotoneX))
+    .attr("fill", "none").attr("stroke", TOL[4]).attr("stroke-width", 2)
+    .attr("stroke-dasharray", "6,4");
+
+  // --- Actual line ---
+  g.append("path")
+    .datum(actual)
+    .attr("d", d3.line().x(d => x(d.date)).y(d => y(d.value)).curve(d3.curveMonotoneX))
+    .attr("fill", "none").attr("stroke", TOL[0]).attr("stroke-width", 2);
+
+  // Actual dots
+  g.selectAll("circle.actual")
+    .data(actual)
+    .join("circle")
+      .attr("class", "actual")
+      .attr("cx", d => x(d.date)).attr("cy", d => y(d.value))
+      .attr("r", 3).attr("fill", TOL[0]);
+
+  // --- Vertical line at prediction start ---
+  g.append("line")
+    .attr("x1", x(predictionStart)).attr("x2", x(predictionStart))
+    .attr("y1", 0).attr("y2", innerH)
+    .attr("stroke", "#999").attr("stroke-dasharray", "4,3").attr("stroke-width", 1);
+
+  // --- Annotations as data ---
+  // Find y values for event annotations (nearest actual month)
+  annotations.forEach(a => {
+    if (a.y === null) {
+      const nearest = actual.reduce((best, d) =>
+        Math.abs(d.date - a.date) < Math.abs(best.date - a.date) ? d : best);
+      a.y = nearest.value;
+    }
+  });
+
+  const annotGroup = g.append("g").attr("class", "annotations");
+
+  const annotEls = annotGroup.selectAll("g.annotation")
+    .data(annotations)
+    .join("g")
+      .attr("class", "annotation")
+      .style("opacity", 0);
+
+  // Vertical dashed line
+  annotEls.append("line")
+    .attr("x1", d => x(d.date)).attr("x2", d => x(d.date))
+    .attr("y1", 0).attr("y2", innerH)
+    .attr("stroke", d => d.type === "divider" ? "#999" : TOL[5])
+    .attr("stroke-dasharray", "3,3").attr("stroke-width", 1);
+
+  // Diamond marker
+  annotEls.filter(d => d.type === "event").append("path")
+    .attr("d", d3.symbol().type(d3.symbolDiamond).size(60))
+    .attr("transform", d => `translate(${x(d.date)},${y(d.y)})`)
+    .attr("fill", TOL[5]);
+
+  // Leader line from diamond to label
+  annotEls.filter(d => d.type === "event").append("line")
+    .attr("x1", d => x(d.date)).attr("y1", d => y(d.y) - 6)
+    .attr("x2", d => x(d.date)).attr("y2", d => y(d.y) - 30)
+    .attr("stroke", TOL[5]).attr("stroke-width", 0.8);
+
+  // Label background + text
+  annotEls.each(function (d) {
+    const el = d3.select(this);
+    const lx = x(d.date);
+    const ly = d.type === "event" ? y(d.y) - 34 : 10;
+    // Background rect
+    el.append("rect")
+      .attr("x", lx - 2).attr("y", ly - 11)
+      .attr("width", d.label.length * 6.5 + 6).attr("height", 14)
+      .attr("fill", "#fafafa").attr("opacity", 0.9).attr("rx", 2);
+    el.append("text")
+      .attr("x", lx + 2).attr("y", ly)
+      .attr("font-size", "10px").attr("fill", d.type === "divider" ? "#666" : TOL[5])
+      .attr("font-weight", "600").text(d.label);
+  });
+
+  // --- Step-sequenced reveal ---
+  let storyPlaying = false;
+
+  d3.select("#storyBtn").on("click", () => {
+    if (storyPlaying) return;
+    storyPlaying = true;
+    // Hide all first
+    annotEls.style("opacity", 0);
+
+    annotEls.each(function (d, i) {
+      d3.select(this)
+        .transition()
+        .delay(i * 1000)
+        .duration(400)
+        .style("opacity", 1);
+    });
+
+    setTimeout(() => { storyPlaying = false; }, annotations.length * 1000 + 400);
+  });
+
+  d3.select("#resetBtn").on("click", () => {
+    annotEls.interrupt().style("opacity", 0);
+    storyPlaying = false;
+  });
+
+  // --- Legend ---
+  const legendDiv = d3.select("#legend");
+  const items = [
+    { label: "Actual", color: TOL[0], type: "line" },
+    { label: "Prediction (median)", color: TOL[4], type: "dashed" },
+    { label: "50% interval", color: TOL[4], opacity: 0.35, type: "band" },
+    { label: "80% interval", color: TOL[4], opacity: 0.25, type: "band" },
+    { label: "95% interval", color: TOL[4], opacity: 0.15, type: "band" },
+  ];
+  items.forEach(item => {
+    const el = legendDiv.append("div").attr("class", "legend-item");
+    if (item.type === "line") {
+      el.append("div").attr("class", "legend-line").style("background", item.color);
+    } else if (item.type === "dashed") {
+      el.append("svg").attr("width", 20).attr("height", 10)
+        .append("line").attr("x1", 0).attr("x2", 20).attr("y1", 5).attr("y2", 5)
+        .attr("stroke", item.color).attr("stroke-width", 2).attr("stroke-dasharray", "4,3");
+    } else {
+      el.append("div").attr("class", "legend-band")
+        .style("background", item.color).style("opacity", item.opacity);
+    }
+    el.append("span").text(item.label);
+  });
+})();
+</script>
+</body>
+</html>

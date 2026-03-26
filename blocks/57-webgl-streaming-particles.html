@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebGL Streaming Particles</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #0a0a14; font-family: system-ui, sans-serif; color: #ccc; display: flex; flex-direction: column; align-items: center; }
+  h2 { font-size: 16px; font-weight: 600; color: #ddd; margin: 12px 0 6px; }
+  #container { position: relative; width: 1200px; height: 700px; }
+  canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
+  svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+  #controls { position: absolute; bottom: 12px; left: 12px; z-index: 10; display: flex; gap: 16px; align-items: center; font-size: 13px; }
+  #controls label { display: flex; align-items: center; gap: 6px; }
+  #controls input[type=range] { width: 100px; }
+  #controls button { padding: 4px 14px; border: 1px solid #555; border-radius: 4px; background: #222; color: #ccc; cursor: pointer; font-size: 13px; }
+  #stats { position: absolute; top: 8px; right: 12px; z-index: 10; font-size: 12px; color: #aaa; text-align: right; }
+</style>
+</head>
+<body>
+<h2>WebGL Streaming Particles &mdash; Vector Field Flow</h2>
+<div id="container">
+  <canvas id="glCanvas"></canvas>
+  <div id="stats">
+    <div id="fps">FPS: --</div>
+    <div id="pcount">Particles: 100,000</div>
+  </div>
+  <div id="controls">
+    <button id="btnPlay">Pause</button>
+    <label>Particles: <input type="range" id="sliderCount" min="50000" max="200000" step="10000" value="100000"><span id="countVal">100K</span></label>
+    <label>Speed: <input type="range" id="sliderSpeed" min="0.2" max="3" step="0.1" value="1"><span id="speedVal">1.0x</span></label>
+  </div>
+</div>
+<script>
+(() => {
+  const W = 1200, H = 700;
+  const DPR = devicePixelRatio || 1;
+  let particleCount = 100000;
+  let speed = 1.0;
+  let playing = true;
+
+  // Particle positions
+  let positions = new Float32Array(200000 * 2);
+  let velocities = new Float32Array(200000); // magnitude for coloring
+
+  // Seeded init
+  let _s = 99;
+  const rng = () => { _s = (_s * 1664525 + 1013904223) & 0x7fffffff; return _s / 0x7fffffff; };
+  const initParticles = (start, end) => {
+    for (let i = start; i < end; i++) {
+      positions[i * 2] = rng() * W;
+      positions[i * 2 + 1] = rng() * H;
+      velocities[i] = 0;
+    }
+  };
+  initParticles(0, 200000);
+
+  // Vector field: vx = sin(y*3)*cos(x*2)+0.5, vy = cos(x*3)*sin(y*2)-0.3
+  const fieldVx = (x, y) => Math.sin(y * 3) * Math.cos(x * 2) + 0.5;
+  const fieldVy = (x, y) => Math.cos(x * 3) * Math.sin(y * 2) - 0.3;
+
+  // Color palette: dark blue -> cyan -> yellow
+  // #332288 -> #88CCEE -> #DDCC77
+  const colorStops = [
+    [0.2, 0.133, 0.533],  // #332288
+    [0.533, 0.8, 0.933],  // #88CCEE
+    [0.867, 0.8, 0.467],  // #DDCC77
+  ];
+  const lerpColor = (t) => {
+    t = Math.max(0, Math.min(1, t));
+    if (t < 0.5) {
+      const s = t * 2;
+      return [colorStops[0][0] * (1 - s) + colorStops[1][0] * s,
+              colorStops[0][1] * (1 - s) + colorStops[1][1] * s,
+              colorStops[0][2] * (1 - s) + colorStops[1][2] * s];
+    } else {
+      const s = (t - 0.5) * 2;
+      return [colorStops[1][0] * (1 - s) + colorStops[2][0] * s,
+              colorStops[1][1] * (1 - s) + colorStops[2][1] * s,
+              colorStops[1][2] * (1 - s) + colorStops[2][2] * s];
+    }
+  };
+
+  // WebGL setup
+  const container = document.getElementById('container');
+  const glCanvas = document.getElementById('glCanvas');
+  glCanvas.width = W * DPR; glCanvas.height = H * DPR;
+  glCanvas.style.width = W + 'px'; glCanvas.style.height = H + 'px';
+
+  const gl = glCanvas.getContext('webgl2', { antialias: false, premultipliedAlpha: false, alpha: false, preserveDrawingBuffer: true });
+
+  const vsSource = `#version 300 es
+    in vec2 a_position;
+    in vec3 a_color;
+    uniform vec2 u_resolution;
+    uniform float u_dpr;
+    out vec3 v_color;
+    void main() {
+      vec2 clip = (a_position / u_resolution) * 2.0 - 1.0;
+      clip.y = -clip.y;
+      gl_Position = vec4(clip, 0.0, 1.0);
+      gl_PointSize = 1.5 * u_dpr;
+      v_color = a_color;
+    }`;
+  const fsSource = `#version 300 es
+    precision mediump float;
+    in vec3 v_color;
+    out vec4 fragColor;
+    void main() {
+      float dist = length(gl_PointCoord - 0.5);
+      if (dist > 0.5) discard;
+      fragColor = vec4(v_color, 0.85);
+    }`;
+
+  // Trail quad shader (semi-transparent dark overlay)
+  const trailVs = `#version 300 es
+    in vec2 a_pos;
+    void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }`;
+  const trailFs = `#version 300 es
+    precision mediump float;
+    out vec4 fragColor;
+    void main() { fragColor = vec4(0.04, 0.04, 0.08, 0.05); }`;
+
+  const compileShader = (src, type) => {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+    return s;
+  };
+  const linkProgram = (vs, fs) => {
+    const p = gl.createProgram();
+    gl.attachShader(p, compileShader(vs, gl.VERTEX_SHADER));
+    gl.attachShader(p, compileShader(fs, gl.FRAGMENT_SHADER));
+    gl.linkProgram(p);
+    return p;
+  };
+
+  const pointProg = linkProgram(vsSource, fsSource);
+  const trailProg = linkProgram(trailVs, trailFs);
+
+  // Point VAO
+  const pointVao = gl.createVertexArray();
+  gl.bindVertexArray(pointVao);
+
+  const posBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW);
+  const posLoc = gl.getAttribLocation(pointProg, 'a_position');
+  gl.enableVertexAttribArray(posLoc);
+  gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+  const colorBuf = gl.createBuffer();
+  const colorData = new Float32Array(200000 * 3);
+  gl.bindBuffer(gl.ARRAY_BUFFER, colorBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, colorData, gl.DYNAMIC_DRAW);
+  const colLoc = gl.getAttribLocation(pointProg, 'a_color');
+  gl.enableVertexAttribArray(colLoc);
+  gl.vertexAttribPointer(colLoc, 3, gl.FLOAT, false, 0, 0);
+
+  // Trail VAO (fullscreen quad)
+  const trailVao = gl.createVertexArray();
+  gl.bindVertexArray(trailVao);
+  const quadBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, 1,1, -1,-1, 1,1, -1,1]), gl.STATIC_DRAW);
+  const trailPosLoc = gl.getAttribLocation(trailProg, 'a_pos');
+  gl.enableVertexAttribArray(trailPosLoc);
+  gl.vertexAttribPointer(trailPosLoc, 2, gl.FLOAT, false, 0, 0);
+
+  gl.viewport(0, 0, W * DPR, H * DPR);
+
+  // SVG overlay
+  const svg = d3.select('#container').append('svg')
+    .attr('width', W).attr('height', H);
+
+  // Time axis along bottom
+  const timeScale = d3.scaleLinear().domain([0, 60]).range([60, W - 20]);
+  svg.append('g')
+    .attr('transform', `translate(0, ${H - 40})`)
+    .call(d3.axisBottom(timeScale).ticks(12).tickFormat(d => d + 's'))
+    .selectAll('text').attr('fill', '#888');
+  svg.selectAll('.domain, .tick line').attr('stroke', '#444');
+  svg.append('text').attr('x', W / 2).attr('y', H - 6).attr('text-anchor', 'middle').attr('fill', '#777').attr('font-size', 11).text('Elapsed Time (seconds)');
+
+  // Animation
+  let startTime = performance.now();
+  let frameCount = 0;
+  let lastFpsUpdate = startTime;
+  const fpsEl = document.getElementById('fps');
+  const pcountEl = document.getElementById('pcount');
+
+  // Time marker on axis
+  const timeMarker = svg.append('line')
+    .attr('x1', 60).attr('x2', 60).attr('y1', 0).attr('y2', H - 40)
+    .attr('stroke', '#EE6677').attr('stroke-width', 1).attr('stroke-dasharray', '4,4').attr('opacity', 0.6);
+
+  const updateParticles = (dt) => {
+    const scaledDt = dt * speed;
+    const normW = 1 / W, normH = 1 / H;
+    let maxVel = 0;
+    for (let i = 0; i < particleCount; i++) {
+      let px = positions[i * 2], py = positions[i * 2 + 1];
+      const nx = px * normW * Math.PI * 2, ny = py * normH * Math.PI * 2;
+      const vx = fieldVx(nx, ny);
+      const vy = fieldVy(nx, ny);
+      const vel = Math.sqrt(vx * vx + vy * vy);
+      if (vel > maxVel) maxVel = vel;
+      velocities[i] = vel;
+      px += vx * scaledDt * 60;
+      py += vy * scaledDt * 60;
+      // Wrap
+      if (px < 0) px += W; else if (px >= W) px -= W;
+      if (py < 0) py += H; else if (py >= H) py -= H;
+      positions[i * 2] = px;
+      positions[i * 2 + 1] = py;
+    }
+    // Update colors based on velocity
+    const invMax = maxVel > 0 ? 1 / maxVel : 1;
+    for (let i = 0; i < particleCount; i++) {
+      const t = velocities[i] * invMax;
+      const c = lerpColor(t);
+      colorData[i * 3] = c[0]; colorData[i * 3 + 1] = c[1]; colorData[i * 3 + 2] = c[2];
+    }
+  };
+
+  const draw = () => {
+    // Trail: draw dark semi-transparent quad
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(trailProg);
+    gl.bindVertexArray(trailVao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // Points
+    gl.useProgram(pointProg);
+    gl.bindVertexArray(pointVao);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, positions.subarray(0, particleCount * 2));
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, colorBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, colorData.subarray(0, particleCount * 3));
+
+    gl.uniform2f(gl.getUniformLocation(pointProg, 'u_resolution'), W, H);
+    gl.uniform1f(gl.getUniformLocation(pointProg, 'u_dpr'), DPR);
+    gl.drawArrays(gl.POINTS, 0, particleCount);
+  };
+
+  // Clear to dark initially
+  gl.clearColor(0.04, 0.04, 0.08, 1.0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  let lastTime = performance.now();
+  const loop = (now) => {
+    if (playing) {
+      const dt = Math.min((now - lastTime) / 1000, 0.05);
+      lastTime = now;
+      updateParticles(dt);
+      draw();
+
+      // Update time marker
+      const elapsed = ((now - startTime) / 1000) % 60;
+      timeMarker.attr('x1', timeScale(elapsed)).attr('x2', timeScale(elapsed));
+
+      // FPS
+      frameCount++;
+      if (now - lastFpsUpdate > 500) {
+        const fps = frameCount / ((now - lastFpsUpdate) / 1000);
+        fpsEl.textContent = `FPS: ${fps.toFixed(0)}`;
+        frameCount = 0;
+        lastFpsUpdate = now;
+      }
+    } else {
+      lastTime = now;
+    }
+    requestAnimationFrame(loop);
+  };
+  requestAnimationFrame(loop);
+
+  // Controls
+  document.getElementById('btnPlay').addEventListener('click', function() {
+    playing = !playing;
+    this.textContent = playing ? 'Pause' : 'Play';
+  });
+  document.getElementById('sliderCount').addEventListener('input', function() {
+    const newCount = +this.value;
+    if (newCount > particleCount) initParticles(particleCount, newCount);
+    particleCount = newCount;
+    document.getElementById('countVal').textContent = (particleCount / 1000).toFixed(0) + 'K';
+    pcountEl.textContent = `Particles: ${d3.format(',')(particleCount)}`;
+  });
+  document.getElementById('sliderSpeed').addEventListener('input', function() {
+    speed = +this.value;
+    document.getElementById('speedVal').textContent = speed.toFixed(1) + 'x';
+  });
+
+  glCanvas.addEventListener('webglcontextlost', e => e.preventDefault());
+  glCanvas.addEventListener('webglcontextrestored', () => {
+    gl.clearColor(0.04, 0.04, 0.08, 1.0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+  });
+})();
+</script>
+</body>
+</html>

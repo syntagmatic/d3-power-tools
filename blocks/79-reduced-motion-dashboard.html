@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reduced Motion Dashboard</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #fafafa; color: #333; }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition-duration: 0s !important; animation-duration: 0s !important; }
+  }
+  .dashboard { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; padding: 16px; max-width: 1200px; margin: 0 auto; }
+  .panel { background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 12px; }
+  .panel h3 { font-size: 13px; font-weight: 600; margin-bottom: 8px; color: #555; }
+  .controls { display: flex; align-items: center; gap: 16px; padding: 12px 16px; max-width: 1200px; margin: 0 auto; }
+  .controls h2 { font-size: 16px; flex: 1; }
+  .toggle-btn { padding: 6px 14px; border: 1px solid #999; border-radius: 4px; background: #fff; cursor: pointer; font-size: 12px; }
+  .toggle-btn.active { background: #4477AA; color: #fff; border-color: #4477AA; }
+  .reset-btn { padding: 6px 14px; border: 1px solid #999; border-radius: 4px; background: #fff; cursor: pointer; font-size: 12px; }
+  .reset-btn:hover { background: #eee; }
+  .status { font-size: 12px; color: #777; }
+</style>
+</head>
+<body>
+<div class="controls">
+  <h2>Linked Dashboard — Reduced Motion Support</h2>
+  <span class="status" id="status">Motion: enabled</span>
+  <button class="toggle-btn" id="motionToggle">Reduce Motion</button>
+  <button class="reset-btn" id="resetBtn">Reset Filters</button>
+</div>
+<div class="dashboard">
+  <div class="panel"><h3>Revenue by Category</h3><div id="bar"></div></div>
+  <div class="panel"><h3>Revenue Over Time</h3><div id="line"></div></div>
+  <div class="panel"><h3>Satisfaction vs Volume</h3><div id="scatter"></div></div>
+</div>
+<script>
+(() => {
+  const TOL = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377"];
+  const categories = ["Electronics","Clothing","Food","Services","Health","Media"];
+
+  // Synthetic data: 200 records
+  const rng = d3.randomLcg(42);
+  const randN = d3.randomNormal.source(rng)(0, 1);
+  const data = d3.range(200).map(i => {
+    const catIdx = Math.floor(rng() * 6);
+    const cat = categories[catIdx];
+    const monthIdx = Math.floor(rng() * 24);
+    const date = new Date(2023, monthIdx);
+    return {
+      id: i,
+      category: cat,
+      catIdx,
+      revenue: 20 + rng() * 80 + catIdx * 10,
+      date,
+      monthIdx,
+      satisfaction: 2 + rng() * 8,
+      volume: 10 + rng() * 90
+    };
+  });
+
+  // State
+  let reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let selectedCategory = null;
+  let brushedIds = null;
+  const dispatch = d3.dispatch("filter");
+
+  const getDuration = () => reducedMotion ? 0 : 300;
+
+  // Motion toggle
+  const toggleBtn = document.getElementById("motionToggle");
+  const statusEl = document.getElementById("status");
+  const updateMotionUI = () => {
+    toggleBtn.classList.toggle("active", reducedMotion);
+    toggleBtn.textContent = reducedMotion ? "Enable Motion" : "Reduce Motion";
+    statusEl.textContent = `Motion: ${reducedMotion ? "reduced" : "enabled"}`;
+  };
+  updateMotionUI();
+  toggleBtn.addEventListener("click", () => { reducedMotion = !reducedMotion; updateMotionUI(); });
+
+  // Reset
+  document.getElementById("resetBtn").addEventListener("click", () => {
+    selectedCategory = null;
+    brushedIds = null;
+    if (scatterBrush) d3.select("#scatter svg").select(".brush").call(scatterBrush.move, null);
+    dispatch.call("filter");
+  });
+
+  const getFiltered = (excludeSource) => {
+    let filtered = data;
+    if (selectedCategory && excludeSource !== "bar") {
+      filtered = filtered.filter(d => d.category === selectedCategory);
+    }
+    if (brushedIds && excludeSource !== "scatter") {
+      filtered = filtered.filter(d => brushedIds.has(d.id));
+    }
+    return filtered;
+  };
+
+  // Bar chart
+  const barM = { top: 8, right: 12, bottom: 24, left: 40 };
+  const barW = 380 - barM.left - barM.right;
+  const barH = 280 - barM.top - barM.bottom;
+  const barSvg = d3.select("#bar").append("svg")
+    .attr("width", barW + barM.left + barM.right)
+    .attr("height", barH + barM.top + barM.bottom)
+    .append("g").attr("transform", `translate(${barM.left},${barM.top})`);
+
+  const barX = d3.scaleLinear().range([0, barW]);
+  const barY = d3.scaleBand().domain(categories).range([0, barH]).padding(0.15);
+  const barXAxis = barSvg.append("g").attr("transform", `translate(0,${barH})`);
+  const barYAxis = barSvg.append("g");
+  barYAxis.call(d3.axisLeft(barY).tickSize(0)).select(".domain").remove();
+  barYAxis.selectAll("text").style("font-size", "11px");
+
+  const renderBar = () => {
+    const filtered = getFiltered("bar");
+    const rolled = d3.rollup(filtered, v => d3.sum(v, d => d.revenue), d => d.category);
+    const vals = categories.map(c => ({ cat: c, val: rolled.get(c) || 0 }));
+    barX.domain([0, d3.max(vals, d => d.val) * 1.1]);
+    barXAxis.transition().duration(getDuration()).call(d3.axisBottom(barX).ticks(5, "~s"));
+
+    barSvg.selectAll("rect.bar")
+      .data(vals, d => d.cat)
+      .join("rect")
+        .attr("class", "bar")
+        .attr("y", d => barY(d.cat))
+        .attr("height", barY.bandwidth())
+        .attr("fill", d => TOL[categories.indexOf(d.cat)])
+        .attr("stroke", d => d.cat === selectedCategory ? "#333" : "none")
+        .attr("stroke-width", d => d.cat === selectedCategory ? 2 : 0)
+        .attr("opacity", d => !selectedCategory || d.cat === selectedCategory ? 1 : 0.3)
+        .style("cursor", "pointer")
+        .on("click", (e, d) => {
+          selectedCategory = selectedCategory === d.cat ? null : d.cat;
+          dispatch.call("filter");
+        })
+        .on("pointerenter", function(e, d) {
+          if (reducedMotion) {
+            d3.select(this).attr("stroke", "#333").attr("stroke-width", 2);
+          } else {
+            d3.select(this).transition().duration(150).attr("width", barX(d.val) + 4);
+          }
+        })
+        .on("pointerleave", function(e, d) {
+          if (reducedMotion) {
+            d3.select(this).attr("stroke", d.cat === selectedCategory ? "#333" : "none")
+              .attr("stroke-width", d.cat === selectedCategory ? 2 : 0);
+          } else {
+            d3.select(this).transition().duration(150).attr("width", barX(d.val));
+          }
+        })
+      .transition().duration(getDuration())
+        .attr("x", 0)
+        .attr("width", d => barX(d.val));
+  };
+
+  // Line chart
+  const lineM = { top: 8, right: 12, bottom: 24, left: 40 };
+  const lineW = 380 - lineM.left - lineM.right;
+  const lineH = 280 - lineM.top - lineM.bottom;
+  const lineSvg = d3.select("#line").append("svg")
+    .attr("width", lineW + lineM.left + lineM.right)
+    .attr("height", lineH + lineM.top + lineM.bottom)
+    .append("g").attr("transform", `translate(${lineM.left},${lineM.top})`);
+
+  const lineX = d3.scaleTime().range([0, lineW]);
+  const lineY = d3.scaleLinear().range([lineH, 0]);
+  const lineXAxis = lineSvg.append("g").attr("transform", `translate(0,${lineH})`);
+  const lineYAxis = lineSvg.append("g");
+  const linesGroup = lineSvg.append("g");
+  const crosshairGroup = lineSvg.append("g").style("display", "none");
+  const crosshairLine = crosshairGroup.append("line").attr("y1", 0).attr("y2", lineH).attr("stroke", "#999").attr("stroke-dasharray", "3,3");
+  const crosshairDots = crosshairGroup.append("g");
+
+  const renderLine = () => {
+    const filtered = getFiltered("line");
+    const byMonth = d3.rollup(filtered, v => d3.sum(v, d => d.revenue), d => d.category, d => +d.date);
+    const allDates = [...new Set(data.map(d => +d.date))].sort((a, b) => a - b);
+    lineX.domain(d3.extent(allDates.map(d => new Date(d))));
+
+    const series = categories.map(cat => ({
+      cat,
+      values: allDates.map(t => ({ date: new Date(t), val: byMonth.get(cat)?.get(t) || 0 }))
+    }));
+
+    const maxY = d3.max(series, s => d3.max(s.values, v => v.val));
+    lineY.domain([0, maxY * 1.1]);
+
+    lineXAxis.transition().duration(getDuration()).call(d3.axisBottom(lineX).ticks(6).tickFormat(d3.timeFormat("%b '%y")));
+    lineYAxis.transition().duration(getDuration()).call(d3.axisLeft(lineY).ticks(5, "~s"));
+
+    const line = d3.line().x(d => lineX(d.date)).y(d => lineY(d.val)).curve(d3.curveMonotoneX);
+
+    linesGroup.selectAll("path.series")
+      .data(series, d => d.cat)
+      .join("path")
+        .attr("class", "series")
+        .attr("fill", "none")
+        .attr("stroke-width", 2)
+        .attr("stroke", d => TOL[categories.indexOf(d.cat)])
+        .attr("opacity", d => !selectedCategory || d.cat === selectedCategory ? 1 : 0.15)
+      .transition().duration(getDuration())
+        .attr("d", d => line(d.values));
+
+    // Overlay for crosshair
+    lineSvg.selectAll(".overlay-rect").data([0]).join("rect")
+      .attr("class", "overlay-rect")
+      .attr("width", lineW).attr("height", lineH)
+      .attr("fill", "none").attr("pointer-events", "all")
+      .on("pointerenter", () => crosshairGroup.style("display", null))
+      .on("pointerleave", () => crosshairGroup.style("display", "none"))
+      .on("pointermove", function(event) {
+        const [mx] = d3.pointer(event);
+        crosshairLine.attr("x1", mx).attr("x2", mx);
+        const date = lineX.invert(mx);
+        const dotData = series.map(s => {
+          const bisect = d3.bisector(d => d.date).left;
+          const idx = Math.min(bisect(s.values, date), s.values.length - 1);
+          return { cat: s.cat, x: lineX(s.values[idx].date), y: lineY(s.values[idx].val) };
+        });
+        crosshairDots.selectAll("circle")
+          .data(dotData, d => d.cat)
+          .join(
+            enter => {
+              const c = enter.append("circle").attr("r", 0).attr("fill", d => TOL[categories.indexOf(d.cat)]);
+              if (!reducedMotion) c.transition().duration(200).attr("r", 4);
+              else c.attr("r", 4);
+              return c;
+            },
+            update => update
+          )
+          .attr("cx", d => d.x).attr("cy", d => d.y);
+      });
+  };
+
+  // Scatter chart
+  const scatM = { top: 8, right: 12, bottom: 28, left: 40 };
+  const scatW = 380 - scatM.left - scatM.right;
+  const scatH = 280 - scatM.top - scatM.bottom;
+  const scatSvg = d3.select("#scatter").append("svg")
+    .attr("width", scatW + scatM.left + scatM.right)
+    .attr("height", scatH + scatM.top + scatM.bottom)
+    .append("g").attr("transform", `translate(${scatM.left},${scatM.top})`);
+
+  const scatX = d3.scaleLinear().domain(d3.extent(data, d => d.satisfaction)).nice().range([0, scatW]);
+  const scatY = d3.scaleLinear().domain(d3.extent(data, d => d.volume)).nice().range([scatH, 0]);
+  scatSvg.append("g").attr("transform", `translate(0,${scatH})`).call(d3.axisBottom(scatX).ticks(5))
+    .append("text").attr("x", scatW).attr("y", -4).attr("fill", "#555").attr("text-anchor", "end").text("Satisfaction");
+  scatSvg.append("g").call(d3.axisLeft(scatY).ticks(5))
+    .append("text").attr("x", 4).attr("y", 10).attr("fill", "#555").text("Volume");
+
+  let scatterBrush;
+
+  const renderScatter = () => {
+    const filtered = getFiltered("scatter");
+    const filteredSet = new Set(filtered.map(d => d.id));
+
+    scatSvg.selectAll("circle.dot")
+      .data(data, d => d.id)
+      .join("circle")
+        .attr("class", "dot")
+        .attr("cx", d => scatX(d.satisfaction))
+        .attr("cy", d => scatY(d.volume))
+        .attr("r", 4)
+        .attr("fill", d => TOL[d.catIdx])
+      .transition().duration(getDuration())
+        .attr("opacity", d => filteredSet.has(d.id) ? 0.7 : 0.08);
+
+    // Brush
+    if (!scatterBrush) {
+      scatterBrush = d3.brush()
+        .extent([[0, 0], [scatW, scatH]])
+        .on("brush end", (event) => {
+          if (!event.selection) { brushedIds = null; }
+          else {
+            const [[x0, y0], [x1, y1]] = event.selection;
+            brushedIds = new Set(
+              data.filter(d => {
+                const cx = scatX(d.satisfaction), cy = scatY(d.volume);
+                return cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1;
+              }).map(d => d.id)
+            );
+          }
+          dispatch.call("filter");
+        });
+      scatSvg.append("g").attr("class", "brush").call(scatterBrush);
+    }
+  };
+
+  dispatch.on("filter", () => { renderBar(); renderLine(); renderScatter(); });
+  renderBar();
+  renderLine();
+  renderScatter();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Threshold Scale KPI Dashboard</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    color: #222;
+    padding: 24px;
+  }
+  h1 { font-size: 1.3rem; font-weight: 600; margin-bottom: 4px; }
+  .summary { font-size: 0.85rem; color: #555; margin-bottom: 12px; }
+  .controls {
+    display: flex; gap: 32px; align-items: center;
+    margin-bottom: 16px; font-size: 0.82rem;
+  }
+  .controls label { display: flex; align-items: center; gap: 8px; }
+  .controls input[type=range] { width: 120px; }
+  .controls .val { font-variant-numeric: tabular-nums; font-family: "SF Mono", Monaco, "Cascadia Code", monospace; min-width: 32px; }
+  table {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+  }
+  thead th {
+    position: sticky; top: 0; background: #f0f0f0; z-index: 2;
+    padding: 8px 10px; text-align: left; border-bottom: 2px solid #ccc;
+    cursor: pointer; user-select: none; white-space: nowrap;
+  }
+  thead th:hover { background: #e4e4e4; }
+  thead th .arrow { font-size: 10px; margin-left: 4px; color: #888; }
+  tbody tr { transition: transform 300ms ease-out, opacity 200ms; }
+  tbody tr:nth-child(even) { background: #f7f7f7; }
+  tbody tr:nth-child(odd) { background: #fff; }
+  tbody td {
+    padding: 6px 10px; vertical-align: middle;
+    border-bottom: 1px solid #eee;
+  }
+  td.mono {
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    font-variant-numeric: tabular-nums;
+  }
+  td.num { text-align: right; }
+  .status-dot {
+    display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+    transition: background-color 300ms ease-out;
+  }
+  .table-wrap { max-height: 600px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; }
+</style>
+</head>
+<body>
+<h1>Server Health Dashboard</h1>
+<div class="summary" id="summary"></div>
+<div class="controls">
+  <label>Warning threshold:
+    <input type="range" id="warn-slider" min="50" max="90" value="70" step="1">
+    <span class="val" id="warn-val">70%</span>
+  </label>
+  <label>Critical threshold:
+    <input type="range" id="crit-slider" min="60" max="95" value="85" step="1">
+    <span class="val" id="crit-val">85%</span>
+  </label>
+</div>
+<div class="table-wrap">
+  <table id="kpi-table">
+    <thead><tr id="header-row"></tr></thead>
+    <tbody id="table-body"></tbody>
+  </table>
+</div>
+
+<script>
+(() => {
+  const TOL = { green: "#228833", yellow: "#CCBB44", red: "#EE6677" };
+
+  // --- Data generation ---
+  const rng = d3.randomLcg(42);
+  const randNorm = (mu, sigma) => () => mu + d3.randomNormal.source(rng)(0, 1)() * sigma;
+  const randUnif = (lo, hi) => () => lo + rng() * (hi - lo);
+
+  const serverNames = Array.from({ length: 20 }, (_, i) => {
+    const prefix = ["web", "api", "db", "cache", "worker"][i % 5];
+    return `${prefix}-${String(i + 1).padStart(2, "0")}`;
+  });
+
+  const data = serverNames.map(name => {
+    const baseCpu = 30 + rng() * 55;
+    const cpuHistory = Array.from({ length: 30 }, () =>
+      Math.max(5, Math.min(98, baseCpu + (rng() - 0.5) * 30))
+    );
+    const memLimit = [8, 16, 32, 64][Math.floor(rng() * 4)];
+    const memUsed = +(memLimit * (0.3 + rng() * 0.6)).toFixed(1);
+    const uptime = +(95 + rng() * 4.99).toFixed(2);
+    const reqRate = Math.round(50 + rng() * 4950);
+    return {
+      server_name: name,
+      cpu_history: cpuHistory,
+      cpu_current: cpuHistory[cpuHistory.length - 1],
+      mem_used: memUsed,
+      mem_limit: memLimit,
+      uptime_pct: uptime,
+      request_rate: reqRate
+    };
+  });
+
+  let warnThreshold = 70;
+  let critThreshold = 85;
+  let sortKey = "status";
+  let sortAsc = true;
+
+  const statusOf = d => {
+    const cpu = d.cpu_current;
+    if (cpu >= critThreshold) return 2; // critical
+    if (cpu >= warnThreshold) return 1; // warning
+    return 0; // healthy
+  };
+  const statusColor = s => [TOL.green, TOL.yellow, TOL.red][s];
+  const statusLabel = s => ["healthy", "warning", "critical"][s];
+
+  // --- Columns ---
+  const columns = [
+    { key: "server_name", label: "Server", type: "string" },
+    { key: "status", label: "Status", type: "status" },
+    { key: "cpu_spark", label: "CPU (30pt)", type: "spark" },
+    { key: "mem_bullet", label: "Memory", type: "bullet" },
+    { key: "uptime_pct", label: "Uptime %", type: "number", format: v => v.toFixed(2) + "%" },
+    { key: "request_rate", label: "Req/s", type: "number", format: d3.format(",") }
+  ];
+
+  // --- Header ---
+  const headerRow = d3.select("#header-row");
+  columns.forEach(col => {
+    headerRow.append("th")
+      .attr("class", col.type === "number" ? "num" : "")
+      .html(`${col.label}<span class="arrow"></span>`)
+      .on("pointerdown", () => {
+        if (sortKey === col.key) sortAsc = !sortAsc;
+        else { sortKey = col.key; sortAsc = col.key === "status"; }
+        render();
+      });
+  });
+
+  const tbody = d3.select("#table-body");
+
+  // --- Sparkline helper ---
+  const sparkW = 60, sparkH = 20;
+  const drawSparkline = (td, values) => {
+    td.selectAll("svg").remove();
+    const svg = td.append("svg").attr("width", sparkW).attr("height", sparkH);
+    const x = d3.scaleLinear([0, values.length - 1], [1, sparkW - 1]);
+    const y = d3.scaleLinear([0, 100], [sparkH - 1, 1]);
+    const area = d3.area()
+      .x((_, i) => x(i)).y0(sparkH).y1(d => y(d))
+      .curve(d3.curveMonotoneX);
+    const line = d3.line()
+      .x((_, i) => x(i)).y(d => y(d))
+      .curve(d3.curveMonotoneX);
+    svg.append("path").datum(values)
+      .attr("d", area).attr("fill", "#4477AA").attr("opacity", 0.15);
+    svg.append("path").datum(values)
+      .attr("d", line).attr("fill", "none").attr("stroke", "#4477AA").attr("stroke-width", 1.5);
+    const last = values[values.length - 1];
+    svg.append("circle")
+      .attr("cx", x(values.length - 1)).attr("cy", y(last))
+      .attr("r", 2).attr("fill", statusColor(last >= critThreshold ? 2 : last >= warnThreshold ? 1 : 0));
+  };
+
+  // --- Bullet helper ---
+  const bulletW = 80, bulletH = 16;
+  const drawBullet = (td, used, limit) => {
+    td.selectAll("svg").remove();
+    const svg = td.append("svg").attr("width", bulletW).attr("height", bulletH);
+    const x = d3.scaleLinear([0, limit], [0, bulletW]);
+    const pct = used / limit;
+    const color = pct >= 0.85 ? TOL.red : pct >= 0.65 ? TOL.yellow : TOL.green;
+    // background
+    svg.append("rect").attr("width", bulletW).attr("height", bulletH)
+      .attr("fill", "#e0e0e0").attr("rx", 2);
+    // used bar
+    svg.append("rect").attr("width", x(used)).attr("height", bulletH)
+      .attr("fill", color).attr("opacity", 0.8).attr("rx", 2);
+    // 75% target marker
+    const targetX = x(limit * 0.75);
+    svg.append("line")
+      .attr("x1", targetX).attr("x2", targetX)
+      .attr("y1", 2).attr("y2", bulletH - 2)
+      .attr("stroke", "#333").attr("stroke-width", 1.5);
+    // label
+    svg.append("text")
+      .attr("x", bulletW + 4).attr("y", bulletH / 2 + 4)
+      .attr("font-size", 10).attr("fill", "#555")
+      .attr("font-family", "'SF Mono', Monaco, monospace")
+      .text(`${used}/${limit}G`);
+  };
+
+  // --- Sort logic ---
+  const sortData = arr => {
+    const sorted = [...arr];
+    sorted.sort((a, b) => {
+      let va, vb;
+      if (sortKey === "status") { va = statusOf(a); vb = statusOf(b); }
+      else if (sortKey === "server_name") { va = a.server_name; vb = b.server_name; }
+      else if (sortKey === "uptime_pct") { va = a.uptime_pct; vb = b.uptime_pct; }
+      else if (sortKey === "request_rate") { va = a.request_rate; vb = b.request_rate; }
+      else if (sortKey === "mem_bullet") { va = a.mem_used / a.mem_limit; vb = b.mem_used / b.mem_limit; }
+      else if (sortKey === "cpu_spark") { va = a.cpu_current; vb = b.cpu_current; }
+      else { va = 0; vb = 0; }
+      if (va < vb) return sortAsc ? -1 : 1;
+      if (va > vb) return sortAsc ? 1 : -1;
+      return 0;
+    });
+    return sorted;
+  };
+
+  // --- Update arrows ---
+  const updateArrows = () => {
+    headerRow.selectAll("th").each(function(_, i) {
+      const col = columns[i];
+      const arrow = d3.select(this).select(".arrow");
+      if (col.key === sortKey) arrow.text(sortAsc ? " \u25B2" : " \u25BC");
+      else arrow.text("");
+    });
+  };
+
+  // --- Summary ---
+  const updateSummary = () => {
+    const counts = [0, 0, 0];
+    data.forEach(d => counts[statusOf(d)]++);
+    d3.select("#summary").html(
+      `<span style="color:${TOL.red}">${counts[2]} critical</span>, ` +
+      `<span style="color:${TOL.yellow}">${counts[1]} warning</span>, ` +
+      `<span style="color:${TOL.green}">${counts[0]} healthy</span>`
+    );
+  };
+
+  // --- Render ---
+  const render = () => {
+    updateSummary();
+    updateArrows();
+    const sorted = sortData(data);
+
+    const rows = tbody.selectAll("tr")
+      .data(sorted, d => d.server_name)
+      .join(
+        enter => {
+          const tr = enter.append("tr");
+          columns.forEach(col => tr.append("td").attr("class",
+            col.type === "number" ? "num mono" :
+            col.key === "server_name" ? "mono" : ""
+          ));
+          return tr;
+        },
+        update => update,
+        exit => exit.remove()
+      );
+
+    rows.each(function(d) {
+      const cells = d3.select(this).selectAll("td");
+      cells.each(function(_, i) {
+        const td = d3.select(this);
+        const col = columns[i];
+        if (col.key === "server_name") {
+          td.text(d.server_name);
+        } else if (col.key === "status") {
+          const s = statusOf(d);
+          let dot = td.select(".status-dot");
+          if (dot.empty()) dot = td.append("span").attr("class", "status-dot");
+          dot.style("background-color", statusColor(s));
+          let lbl = td.select(".status-label");
+          if (lbl.empty()) lbl = td.append("span").attr("class", "status-label").style("margin-left", "6px").style("font-size", "11px");
+          lbl.text(statusLabel(s));
+        } else if (col.key === "cpu_spark") {
+          drawSparkline(td, d.cpu_history);
+        } else if (col.key === "mem_bullet") {
+          drawBullet(td, d.mem_used, d.mem_limit);
+        } else if (col.type === "number") {
+          td.text(col.format(d[col.key]));
+        }
+      });
+    });
+  };
+
+  // --- Slider handlers ---
+  d3.select("#warn-slider").on("input", function() {
+    warnThreshold = +this.value;
+    if (warnThreshold >= critThreshold) {
+      critThreshold = Math.min(95, warnThreshold + 5);
+      d3.select("#crit-slider").property("value", critThreshold);
+      d3.select("#crit-val").text(critThreshold + "%");
+    }
+    d3.select("#warn-val").text(warnThreshold + "%");
+    render();
+  });
+  d3.select("#crit-slider").on("input", function() {
+    critThreshold = +this.value;
+    if (critThreshold <= warnThreshold) {
+      warnThreshold = Math.max(50, critThreshold - 5);
+      d3.select("#warn-slider").property("value", warnThreshold);
+      d3.select("#warn-val").text(warnThreshold + "%");
+    }
+    d3.select("#crit-val").text(critThreshold + "%");
+    render();
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>

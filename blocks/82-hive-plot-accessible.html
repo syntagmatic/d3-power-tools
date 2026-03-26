@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Accessible Hive Plot</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #fafafa; color: #222; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 1.3rem; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { font-size: 0.85rem; color: #666; margin-bottom: 12px; }
+  .chart-wrap { display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; }
+  .hive-panel { position: relative; flex: 0 0 600px; }
+  .side-panel { flex: 1; min-width: 240px; }
+  .legend-box { margin-bottom: 16px; }
+  .legend-box h3 { font-size: 0.8rem; font-weight: 600; margin-bottom: 6px; }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; margin-bottom: 3px; }
+  .legend-swatch { width: 12px; height: 12px; border-radius: 2px; }
+  .instructions { font-size: 0.78rem; color: #555; line-height: 1.5; background: #f0f0f0; padding: 10px 12px; border-radius: 6px; }
+  .instructions strong { color: #222; }
+  #live-region { position: absolute; left: -9999px; width: 1px; height: 1px; overflow: hidden; }
+  svg text { font-family: system-ui, sans-serif; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Accessible Hive Plot</h1>
+  <p class="subtitle">80 nodes across 3 structural axes — keyboard navigable</p>
+  <div class="chart-wrap">
+    <div class="hive-panel">
+      <svg id="hive" width="600" height="600" tabindex="0" role="application"
+           aria-label="Hive plot with 80 nodes on 3 axes: Sources, Connectors, Sinks. Use arrow keys to navigate.">
+      </svg>
+      <div id="live-region" aria-live="assertive" role="status"></div>
+    </div>
+    <div class="side-panel">
+      <div class="legend-box" id="legend"></div>
+      <div class="instructions">
+        <strong>Keyboard:</strong> Tab to enter the plot. Left/Right to switch axes.
+        Up/Down to move along an axis (sorted by metric). Enter to select and highlight connections.
+        Escape to clear selection.
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+(() => {
+  const COLORS = { source: "#4477AA", connector: "#EE6677", sink: "#228833" };
+  const roles = ["source", "connector", "sink"];
+  const roleLabels = { source: "Sources", connector: "Connectors", sink: "Sinks" };
+
+  // --- Synthetic data ---
+  const rng = d3.randomLcg(42);
+  const rand = d3.randomUniform.source(rng);
+  const randInt = (lo, hi) => Math.floor(rand(lo, hi + 1)());
+
+  const nodes = [];
+  const roleCounts = { source: 30, connector: 25, sink: 25 };
+  let id = 0;
+  for (const role of roles) {
+    for (let i = 0; i < roleCounts[role]; i++) {
+      const prefix = role === "source" ? "S" : role === "connector" ? "C" : "K";
+      nodes.push({
+        id: id++,
+        label: `${prefix}-${String(i + 1).padStart(2, "0")}`,
+        role,
+        metric: +(rand(0, 100)()).toFixed(1),
+        degree: 0
+      });
+    }
+  }
+
+  // Generate ~120 edges: source→connector, connector→sink, some shortcuts (source→sink)
+  const edges = [];
+  const edgeSet = new Set();
+  const addEdge = (s, t) => {
+    const key = `${s}-${t}`;
+    if (s === t || edgeSet.has(key)) return false;
+    edgeSet.add(key);
+    edges.push({ source: s, target: t });
+    nodes[s].degree++;
+    nodes[t].degree++;
+    return true;
+  };
+
+  const sources = nodes.filter(n => n.role === "source");
+  const connectors = nodes.filter(n => n.role === "connector");
+  const sinks = nodes.filter(n => n.role === "sink");
+
+  // source→connector (~50 edges)
+  for (let i = 0; i < 50; i++) {
+    const s = sources[randInt(0, sources.length - 1)];
+    const t = connectors[randInt(0, connectors.length - 1)];
+    addEdge(s.id, t.id);
+  }
+  // connector→sink (~50 edges)
+  for (let i = 0; i < 50; i++) {
+    const s = connectors[randInt(0, connectors.length - 1)];
+    const t = sinks[randInt(0, sinks.length - 1)];
+    addEdge(s.id, t.id);
+  }
+  // shortcuts source→sink (~20 edges)
+  for (let i = 0; i < 20; i++) {
+    const s = sources[randInt(0, sources.length - 1)];
+    const t = sinks[randInt(0, sinks.length - 1)];
+    addEdge(s.id, t.id);
+  }
+
+  // Update degree range
+  nodes.forEach(n => { n.degree = Math.max(n.degree, 2); });
+
+  // --- Layout ---
+  const width = 600, height = 600;
+  const cx = width / 2, cy = height / 2;
+  const rMin = 60, rMax = 260;
+  const angleMap = { source: 0, connector: (2 * Math.PI) / 3, sink: (4 * Math.PI) / 3 };
+  const angleOffset = -Math.PI / 2; // rotate so sources point up
+
+  const rScale = d3.scaleLinear().domain([0, 100]).range([rMin, rMax]);
+
+  // Sort nodes within each axis by metric
+  const axisNodes = {};
+  for (const role of roles) {
+    axisNodes[role] = nodes.filter(n => n.role === role).sort((a, b) => a.metric - b.metric);
+  }
+
+  // Compute node positions
+  const nodePos = new Map();
+  nodes.forEach(n => {
+    const angle = angleMap[n.role] + angleOffset;
+    const r = rScale(n.metric);
+    n.x = cx + r * Math.cos(angle);
+    n.y = cy + r * Math.sin(angle);
+    nodePos.set(n.id, n);
+  });
+
+  // --- SVG rendering ---
+  const svg = d3.select("#hive");
+  const defs = svg.append("defs");
+
+  // Axis lines
+  const axisGroup = svg.append("g").attr("class", "axes");
+  for (const role of roles) {
+    const angle = angleMap[role] + angleOffset;
+    axisGroup.append("line")
+      .attr("x1", cx + rMin * Math.cos(angle))
+      .attr("y1", cy + rMin * Math.sin(angle))
+      .attr("x2", cx + rMax * Math.cos(angle))
+      .attr("y2", cy + rMax * Math.sin(angle))
+      .attr("stroke", "#ccc")
+      .attr("stroke-width", 1.5);
+    // Axis label
+    const lx = cx + (rMax + 20) * Math.cos(angle);
+    const ly = cy + (rMax + 20) * Math.sin(angle);
+    axisGroup.append("text")
+      .attr("x", lx).attr("y", ly)
+      .attr("text-anchor", "middle")
+      .attr("dominant-baseline", "middle")
+      .attr("font-size", 12)
+      .attr("font-weight", 600)
+      .attr("fill", COLORS[role])
+      .text(roleLabels[role]);
+  }
+
+  // Edges
+  const edgeGroup = svg.append("g").attr("class", "edges");
+  const edgeEls = edgeGroup.selectAll("path")
+    .data(edges)
+    .join("path")
+    .attr("d", d => {
+      const s = nodePos.get(d.source);
+      const t = nodePos.get(d.target);
+      // Quadratic bezier through an offset control point
+      const midX = (s.x + t.x) / 2;
+      const midY = (s.y + t.y) / 2;
+      // Offset control point toward center
+      const cpx = midX * 0.6 + cx * 0.4;
+      const cpy = midY * 0.6 + cy * 0.4;
+      return `M${s.x},${s.y} Q${cpx},${cpy} ${t.x},${t.y}`;
+    })
+    .attr("fill", "none")
+    .attr("stroke", "#999")
+    .attr("stroke-opacity", 0.3)
+    .attr("stroke-width", 1);
+
+  // Nodes
+  const nodeGroup = svg.append("g").attr("class", "nodes");
+  const nodeEls = nodeGroup.selectAll("circle")
+    .data(nodes)
+    .join("circle")
+    .attr("cx", d => d.x)
+    .attr("cy", d => d.y)
+    .attr("r", 5)
+    .attr("fill", d => COLORS[d.role])
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 1)
+    .attr("cursor", "pointer");
+
+  // Focus ring group (drawn on top)
+  const focusGroup = svg.append("g").attr("class", "focus-ring");
+
+  // --- State ---
+  const state = {
+    focusedAxisIdx: 0,
+    focusedNodeIdx: 0,
+    selectedId: null
+  };
+
+  const liveRegion = document.getElementById("live-region");
+
+  const announce = (node, extra) => {
+    const parts = [
+      node.label,
+      `${roleLabels[node.role]} axis`,
+      `metric ${node.metric}`,
+      `${node.degree} connections`
+    ];
+    if (extra) parts.push(extra);
+    liveRegion.textContent = parts.join(", ");
+  };
+
+  const getFocusedNode = () => {
+    const role = roles[state.focusedAxisIdx];
+    const arr = axisNodes[role];
+    return arr[Math.min(state.focusedNodeIdx, arr.length - 1)];
+  };
+
+  const getNeighbors = (nodeId) => {
+    const ids = new Set();
+    edges.forEach(e => {
+      if (e.source === nodeId) ids.add(e.target);
+      if (e.target === nodeId) ids.add(e.source);
+    });
+    return ids;
+  };
+
+  const renderFocus = () => {
+    focusGroup.selectAll("*").remove();
+    const node = getFocusedNode();
+    if (!node) return;
+
+    // Focus ring: white inner + blue outer dashed
+    focusGroup.append("circle")
+      .attr("cx", node.x).attr("cy", node.y).attr("r", 9)
+      .attr("fill", "none").attr("stroke", "#fff").attr("stroke-width", 3);
+    focusGroup.append("circle")
+      .attr("cx", node.x).attr("cy", node.y).attr("r", 9)
+      .attr("fill", "none").attr("stroke", "#000").attr("stroke-width", 2)
+      .attr("stroke-dasharray", "4,3");
+  };
+
+  const renderSelection = () => {
+    const selId = state.selectedId;
+    if (selId == null) {
+      nodeEls.attr("opacity", 1).attr("r", 5);
+      edgeEls.attr("stroke-opacity", 0.3).attr("stroke", "#999").attr("stroke-width", 1);
+      return;
+    }
+    const neighbors = getNeighbors(selId);
+    nodeEls
+      .attr("opacity", d => d.id === selId || neighbors.has(d.id) ? 1 : 0.15)
+      .attr("r", d => d.id === selId ? 7 : neighbors.has(d.id) ? 6 : 5);
+    edgeEls
+      .attr("stroke-opacity", d => d.source === selId || d.target === selId ? 0.8 : 0.05)
+      .attr("stroke", d => d.source === selId || d.target === selId ? "#4477AA" : "#999")
+      .attr("stroke-width", d => d.source === selId || d.target === selId ? 2 : 1);
+  };
+
+  const updateView = (shouldAnnounce = true) => {
+    renderFocus();
+    if (shouldAnnounce) announce(getFocusedNode());
+  };
+
+  // --- Keyboard ---
+  const svgEl = document.getElementById("hive");
+  svgEl.addEventListener("keydown", e => {
+    const role = roles[state.focusedAxisIdx];
+    const arr = axisNodes[role];
+
+    switch (e.key) {
+      case "ArrowLeft": {
+        state.focusedAxisIdx = (state.focusedAxisIdx - 1 + 3) % 3;
+        const newArr = axisNodes[roles[state.focusedAxisIdx]];
+        state.focusedNodeIdx = Math.min(state.focusedNodeIdx, newArr.length - 1);
+        updateView();
+        break;
+      }
+      case "ArrowRight": {
+        state.focusedAxisIdx = (state.focusedAxisIdx + 1) % 3;
+        const newArr = axisNodes[roles[state.focusedAxisIdx]];
+        state.focusedNodeIdx = Math.min(state.focusedNodeIdx, newArr.length - 1);
+        updateView();
+        break;
+      }
+      case "ArrowUp": {
+        if (state.focusedNodeIdx < arr.length - 1) {
+          state.focusedNodeIdx++;
+          updateView();
+        }
+        break;
+      }
+      case "ArrowDown": {
+        if (state.focusedNodeIdx > 0) {
+          state.focusedNodeIdx--;
+          updateView();
+        }
+        break;
+      }
+      case "Enter":
+      case " ": {
+        const node = getFocusedNode();
+        state.selectedId = state.selectedId === node.id ? null : node.id;
+        renderSelection();
+        announce(node, state.selectedId != null ? "selected" : "deselected");
+        break;
+      }
+      case "Escape": {
+        state.selectedId = null;
+        renderSelection();
+        liveRegion.textContent = "Selection cleared";
+        break;
+      }
+      case "Home": {
+        state.focusedNodeIdx = 0;
+        updateView();
+        break;
+      }
+      case "End": {
+        state.focusedNodeIdx = arr.length - 1;
+        updateView();
+        break;
+      }
+      default:
+        return; // don't prevent default for unhandled keys
+    }
+    e.preventDefault();
+  });
+
+  svgEl.addEventListener("focus", () => {
+    updateView();
+  });
+
+  svgEl.addEventListener("blur", () => {
+    focusGroup.selectAll("*").remove();
+  });
+
+  // --- Mouse hover ---
+  nodeEls.on("pointerenter", (e, d) => {
+    // Find axis and index
+    const role = d.role;
+    const axIdx = roles.indexOf(role);
+    const ndIdx = axisNodes[role].indexOf(d);
+    state.focusedAxisIdx = axIdx;
+    state.focusedNodeIdx = ndIdx;
+    updateView();
+  }).on("click", (e, d) => {
+    state.selectedId = state.selectedId === d.id ? null : d.id;
+    renderSelection();
+  });
+
+  // --- Legend ---
+  const legend = d3.select("#legend");
+  legend.append("h3").text("Node Roles");
+  for (const role of roles) {
+    const item = legend.append("div").attr("class", "legend-item");
+    item.append("div").attr("class", "legend-swatch").style("background", COLORS[role]);
+    item.append("span").text(`${roleLabels[role]} (${roleCounts[role]})`);
+  }
+
+  // Initial render
+  renderFocus();
+})();
+</script>
+</body>
+</html>

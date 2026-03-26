@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Falcon Prefetch Histogram</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #fafafa; font-family: system-ui, sans-serif; }
+  .container { width: 1200px; margin: 10px auto; }
+  .header { display: flex; align-items: center; gap: 16px; padding: 8px 0; flex-wrap: wrap; }
+  .header h2 { font-size: 18px; font-weight: 600; }
+  .counter { font-size: 14px; color: #555; }
+  .latency { font-size: 13px; color: #666; font-family: monospace; }
+  .reset-btn { padding: 4px 12px; border: 1px solid #aaa; border-radius: 4px; cursor: pointer;
+    background: #fff; font-size: 13px; font-family: system-ui; margin-left: auto; }
+  .reset-btn:hover { background: #eee; }
+  .chart-label { font-size: 13px; font-weight: 600; fill: #333; }
+  .bg-bar { fill: #ddd; }
+  .fg-bar { fill: #4477AA; }
+  .brush-hint { font-size: 12px; color: #888; margin-top: 4px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h2>Falcon Prefetch Histogram</h2>
+    <span class="counter" id="counter">100,000 of 100,000 events</span>
+    <span class="latency" id="latency"></span>
+    <button class="reset-btn" id="resetBtn">Reset</button>
+  </div>
+  <svg id="overview" width="1200" height="250"></svg>
+  <svg id="detail" width="1200" height="250"></svg>
+  <div class="brush-hint">Drag on the overview to select a time range. Histogram updates via O(1) prefetch.</div>
+</div>
+<script>
+(() => {
+  const N = 100000; // reduced from 500K for test environment
+  const NBINS = 40;
+  const NSLOTS = 256;
+
+  // --- Synthetic data: 100K events ---
+  const rng = d3.randomLcg(42);
+  const normal = () => { let u=0,v=0; while(!u) u=rng(); v=rng(); return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v); };
+
+  const timestamps = new Float32Array(N);
+  const values = new Float32Array(N);
+  const categories = new Uint8Array(N);
+  const catNames = ["Web","API","Batch","Stream","Mobile"];
+
+  for (let i = 0; i < N; i++) {
+    timestamps[i] = rng() * 365;
+    // Mix of 3 log-normals: $25, $80, $250
+    const r = rng();
+    const logVal = r < 0.5 ? Math.log(25) + normal() * 0.4
+                 : r < 0.85 ? Math.log(80) + normal() * 0.35
+                 : Math.log(250) + normal() * 0.3;
+    values[i] = Math.max(1, Math.exp(logVal));
+    categories[i] = Math.floor(rng() * 5);
+  }
+
+  // --- Value histogram bins (log scale) ---
+  const valExtent = [d3.min(values), d3.max(values)];
+  const logMin = Math.log(valExtent[0]);
+  const logMax = Math.log(valExtent[1]);
+  const logStep = (logMax - logMin) / NBINS;
+  const binEdges = d3.range(NBINS + 1).map(i => Math.exp(logMin + i * logStep));
+
+  const getBinIdx = (v) => {
+    const lv = Math.log(v);
+    const idx = Math.floor((lv - logMin) / logStep);
+    return Math.max(0, Math.min(NBINS - 1, idx));
+  };
+
+  // --- Falcon prefetch: 256 cumulative histograms ---
+  // Sort events by timestamp, then build cumulative bin counts at each slot position
+  const sortOrder = d3.range(N).sort((a, b) => timestamps[a] - timestamps[b]);
+  const sortedTimestamps = new Float32Array(N);
+  const sortedBinIdx = new Uint8Array(N);
+  for (let i = 0; i < N; i++) {
+    sortedTimestamps[i] = timestamps[sortOrder[i]];
+    sortedBinIdx[i] = getBinIdx(values[sortOrder[i]]);
+  }
+
+  // cumHist[slot][bin] = count of events with timestamp <= slot position
+  const tMin = 0, tMax = 365;
+  const cumHist = new Array(NSLOTS + 1);
+  for (let s = 0; s <= NSLOTS; s++) {
+    cumHist[s] = new Uint32Array(NBINS);
+  }
+
+  // Build cumulative histograms
+  {
+    let ei = 0; // event index in sorted order
+    const running = new Uint32Array(NBINS);
+    for (let s = 0; s <= NSLOTS; s++) {
+      const tThreshold = tMin + (s / NSLOTS) * (tMax - tMin);
+      while (ei < N && sortedTimestamps[ei] <= tThreshold) {
+        running[sortedBinIdx[ei]]++;
+        ei++;
+      }
+      cumHist[s].set(running);
+    }
+  }
+
+  // Full dataset histogram (background)
+  const fullHist = new Uint32Array(NBINS);
+  for (let i = 0; i < N; i++) fullHist[getBinIdx(values[i])]++;
+
+  // Falcon query: O(NBINS) subtract of two cumulative snapshots
+  const falconQuery = (t0, t1) => {
+    const s0 = Math.max(0, Math.min(NSLOTS, Math.floor((t0 - tMin) / (tMax - tMin) * NSLOTS)));
+    const s1 = Math.max(0, Math.min(NSLOTS, Math.floor((t1 - tMin) / (tMax - tMin) * NSLOTS)));
+    const result = new Uint32Array(NBINS);
+    for (let b = 0; b < NBINS; b++) {
+      result[b] = cumHist[s1][b] - cumHist[s0][b];
+    }
+    return result;
+  };
+
+  // Naive query: loop all records
+  const naiveQuery = (t0, t1) => {
+    const result = new Uint32Array(NBINS);
+    for (let i = 0; i < N; i++) {
+      if (timestamps[i] >= t0 && timestamps[i] <= t1) {
+        result[getBinIdx(values[i])]++;
+      }
+    }
+    return result;
+  };
+
+  // --- Overview chart: daily count line ---
+  const oSvg = d3.select("#overview");
+  const oM = { top: 30, right: 30, bottom: 30, left: 60 };
+  const oW = 1200 - oM.left - oM.right;
+  const oH = 250 - oM.top - oM.bottom;
+  const oG = oSvg.append("g").attr("transform", `translate(${oM.left},${oM.top})`);
+
+  oSvg.append("text").attr("class", "chart-label").attr("x", oM.left).attr("y", 18).text("Daily Event Count");
+
+  // Bin by day
+  const dayBins = d3.range(366).map(() => 0);
+  for (let i = 0; i < N; i++) dayBins[Math.min(365, Math.floor(timestamps[i]))]++;
+
+  const startDate = new Date(2025, 0, 1);
+  const dayData = dayBins.map((c, i) => ({
+    date: d3.timeDay.offset(startDate, i),
+    count: c
+  }));
+
+  const oX = d3.scaleTime()
+    .domain([startDate, d3.timeDay.offset(startDate, 365)])
+    .range([0, oW]);
+  const oY = d3.scaleLinear()
+    .domain([0, d3.max(dayBins)]).nice()
+    .range([oH, 0]);
+
+  oG.append("g").attr("transform", `translate(0,${oH})`).call(d3.axisBottom(oX).ticks(12));
+  oG.append("g").call(d3.axisLeft(oY).ticks(5));
+
+  oG.append("path").datum(dayData)
+    .attr("fill", "none").attr("stroke", "#4477AA").attr("stroke-width", 1.5)
+    .attr("d", d3.line().x(d => oX(d.date)).y(d => oY(d.count)));
+
+  // Brush on overview
+  const brush = d3.brushX()
+    .extent([[0, 0], [oW, oH]])
+    .on("brush end", (event) => {
+      if (!event.sourceEvent) return;
+      if (event.selection) {
+        const [px0, px1] = event.selection;
+        const t0 = oX.invert(px0);
+        const t1 = oX.invert(px1);
+        const day0 = (t0 - startDate) / 86400000;
+        const day1 = (t1 - startDate) / 86400000;
+        updateDetail(day0, day1);
+      } else {
+        resetDetail();
+      }
+    });
+  oG.append("g").attr("class", "brush").call(brush);
+
+  // --- Detail chart: value histogram ---
+  const dSvg = d3.select("#detail");
+  const dM = { top: 30, right: 30, bottom: 40, left: 60 };
+  const dW = 1200 - dM.left - dM.right;
+  const dH = 250 - dM.top - dM.bottom;
+  const dG = dSvg.append("g").attr("transform", `translate(${dM.left},${dM.top})`);
+
+  dSvg.append("text").attr("class", "chart-label").attr("x", dM.left).attr("y", 18)
+    .text("Value Distribution (log-scale bins)");
+
+  const dX = d3.scaleBand()
+    .domain(d3.range(NBINS))
+    .range([0, dW]).padding(0.1);
+  const dY = d3.scaleLinear().range([dH, 0]);
+
+  // X axis: show bin edge values
+  const tickIndices = [0, 10, 20, 30, 39];
+  const xAxis = dG.append("g").attr("transform", `translate(0,${dH})`);
+  dSvg.append("text").attr("x", dM.left + dW / 2).attr("y", 245)
+    .attr("text-anchor", "middle").attr("font-size", 12).text("Value ($)");
+
+  const yAxisG = dG.append("g");
+
+  // Background bars (full dataset)
+  const bgBars = dG.selectAll(".bg-bar").data(d3.range(NBINS)).enter()
+    .append("rect").attr("class", "bg-bar")
+    .attr("x", i => dX(i)).attr("width", dX.bandwidth());
+
+  // Foreground bars (selected)
+  const fgBars = dG.selectAll(".fg-bar").data(d3.range(NBINS)).enter()
+    .append("rect").attr("class", "fg-bar")
+    .attr("x", i => dX(i)).attr("width", dX.bandwidth());
+
+  const renderHist = (hist, isFull) => {
+    const maxVal = Math.max(1, d3.max(isFull ? fullHist : hist));
+    dY.domain([0, d3.max(fullHist)]).nice();
+    yAxisG.call(d3.axisLeft(dY).ticks(5));
+
+    // X axis ticks
+    xAxis.selectAll("*").remove();
+    xAxis.call(d3.axisBottom(dX).tickValues(tickIndices).tickFormat(i => "$" + Math.round(binEdges[i])));
+
+    bgBars
+      .attr("y", i => dY(fullHist[i]))
+      .attr("height", i => dH - dY(fullHist[i]));
+
+    fgBars
+      .attr("y", i => dY(hist[i]))
+      .attr("height", i => dH - dY(hist[i]));
+  };
+
+  const updateDetail = (t0, t1) => {
+    // Falcon prefetch
+    const pStart = performance.now();
+    const fHist = falconQuery(t0, t1);
+    const pTime = performance.now() - pStart;
+
+    // Naive
+    const nStart = performance.now();
+    const nHist = naiveQuery(t0, t1);
+    const nTime = performance.now() - nStart;
+
+    const speedup = nTime / Math.max(0.001, pTime);
+    const total = d3.sum(fHist);
+
+    d3.select("#latency").text(
+      `Prefetch: ${pTime.toFixed(2)}ms | Naive: ${nTime.toFixed(2)}ms | Speedup: ${speedup.toFixed(0)}x`
+    );
+    d3.select("#counter").text(`${total.toLocaleString()} of ${N.toLocaleString()} events`);
+
+    renderHist(fHist, false);
+  };
+
+  const resetDetail = () => {
+    d3.select("#latency").text("");
+    d3.select("#counter").text(`${N.toLocaleString()} of ${N.toLocaleString()} events`);
+    renderHist(fullHist, true);
+  };
+
+  d3.select("#resetBtn").on("click", () => {
+    oG.select(".brush").call(brush.move, null);
+    resetDetail();
+  });
+
+  // Initial render
+  renderHist(fullHist, true);
+})();
+</script>
+</body>
+</html>

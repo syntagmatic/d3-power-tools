@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebGL Force Galaxy</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #0a0a1a; font-family: system-ui, sans-serif; color: #ccc; }
+  #container { position: relative; width: 800px; height: 700px; margin: 20px auto 0; }
+  canvas, svg { position: absolute; top: 0; left: 0; }
+  canvas { pointer-events: none; }
+  svg { width: 100%; height: 100%; }
+  #header { text-align: center; padding: 10px; }
+  h2 { font-size: 18px; font-weight: 600; color: #ddd; margin: 0; }
+  #controls { position: absolute; top: 8px; right: 12px; z-index: 10; display: flex; gap: 10px; align-items: center; }
+  #controls button { padding: 4px 14px; border: 1px solid #555; border-radius: 4px; background: #222; color: #ccc; cursor: pointer; font-size: 13px; }
+  #controls button:hover { background: #444; }
+  #alpha-bar { position: absolute; bottom: 10px; left: 12px; z-index: 10; font-size: 12px; }
+  #alpha-bar .bar { display: inline-block; width: 120px; height: 6px; background: #333; border-radius: 3px; vertical-align: middle; margin-left: 6px; }
+  #alpha-bar .fill { height: 100%; background: #4477AA; border-radius: 3px; transition: width 0.1s; }
+  #tooltip { position: absolute; display: none; background: rgba(20,20,40,0.92); color: #ddd; padding: 6px 10px; border-radius: 4px; font-size: 12px; pointer-events: none; z-index: 20; border: 1px solid #444; }
+</style>
+</head>
+<body>
+<div id="header"><h2>20K-Node Force Galaxy</h2></div>
+<div id="container">
+  <div id="controls">
+    <button id="btnReheat">Reheat</button>
+  </div>
+  <div id="alpha-bar">alpha: <span id="alpha-val">1.000</span><div class="bar"><div class="fill" id="alpha-fill" style="width:100%"></div></div></div>
+  <div id="tooltip"></div>
+  <canvas id="glCanvas"></canvas>
+</div>
+<script>
+(() => {
+  const W = 800, H = 700;
+  const DPR = devicePixelRatio || 1;
+  const NODE_COUNT = 20000;
+  const COMMUNITIES = 8;
+  const EDGE_TARGET = 32000;
+
+  // Tol muted palette (8 colors)
+  const tolMuted = [
+    [0.47, 0.27, 0.53], // #882255
+    [0.20, 0.47, 0.67], // #332288 approx->adjust
+    [0.53, 0.73, 0.87], // #88CCDD
+    [0.87, 0.80, 0.47], // #DDCC77
+    [0.80, 0.40, 0.47], // #CC6677
+    [0.33, 0.67, 0.47], // #117733 approx
+    [0.67, 0.53, 0.33], // #999933 approx
+    [0.53, 0.33, 0.67], // #AA4499
+  ];
+
+  // Seeded PRNG
+  let _s = 12345;
+  const rng = () => { _s = (_s * 1664525 + 1013904223) & 0x7fffffff; return _s / 0x7fffffff; };
+
+  // Generate nodes
+  const nodes = [];
+  const communityAngles = d3.range(COMMUNITIES).map(i => (i / COMMUNITIES) * Math.PI * 2);
+  const commCentroids = communityAngles.map(a => [W / 2 + Math.cos(a) * 180, H / 2 + Math.sin(a) * 180]);
+
+  for (let i = 0; i < NODE_COUNT; i++) {
+    const c = Math.floor(rng() * COMMUNITIES);
+    nodes.push({ id: i, community: c, x: commCentroids[c][0] + (rng() - 0.5) * 200, y: commCentroids[c][1] + (rng() - 0.5) * 200 });
+  }
+
+  // Generate edges (85% within community)
+  const edges = [];
+  const degree = new Uint16Array(NODE_COUNT);
+  for (let e = 0; e < EDGE_TARGET; e++) {
+    const src = Math.floor(rng() * NODE_COUNT);
+    let tgt;
+    if (rng() < 0.85) {
+      // Within community
+      do { tgt = Math.floor(rng() * NODE_COUNT); } while (nodes[tgt].community !== nodes[src].community || tgt === src);
+    } else {
+      do { tgt = Math.floor(rng() * NODE_COUNT); } while (tgt === src);
+    }
+    edges.push({ source: src, target: tgt });
+    degree[src]++; degree[tgt]++;
+  }
+
+  // Position buffer
+  const posData = new Float32Array(NODE_COUNT * 2);
+  const sizeData = new Float32Array(NODE_COUNT);
+  const colorData = new Float32Array(NODE_COUNT * 4);
+
+  for (let i = 0; i < NODE_COUNT; i++) {
+    posData[i * 2] = nodes[i].x;
+    posData[i * 2 + 1] = nodes[i].y;
+    sizeData[i] = Math.max(2.5, Math.sqrt(degree[i] + 1) * 1.8);
+    const c = tolMuted[nodes[i].community];
+    colorData[i * 4] = c[0]; colorData[i * 4 + 1] = c[1]; colorData[i * 4 + 2] = c[2]; colorData[i * 4 + 3] = 0.8;
+  }
+
+  // WebGL setup
+  const container = document.getElementById('container');
+  const glCanvas = document.getElementById('glCanvas');
+  glCanvas.width = W * DPR; glCanvas.height = H * DPR;
+  glCanvas.style.width = W + 'px'; glCanvas.style.height = H + 'px';
+
+  const gl = glCanvas.getContext('webgl2', { antialias: true, premultipliedAlpha: false, alpha: true });
+
+  const vsSource = `#version 300 es
+    in vec2 a_position;
+    in float a_size;
+    in vec4 a_color;
+    uniform vec2 u_resolution;
+    uniform float u_dpr;
+    out vec4 v_color;
+    void main() {
+      vec2 clip = (a_position / u_resolution) * 2.0 - 1.0;
+      clip.y = -clip.y;
+      gl_Position = vec4(clip, 0.0, 1.0);
+      gl_PointSize = a_size * u_dpr;
+      v_color = a_color;
+    }`;
+  const fsSource = `#version 300 es
+    precision mediump float;
+    in vec4 v_color;
+    out vec4 fragColor;
+    void main() {
+      float dist = length(gl_PointCoord - 0.5);
+      if (dist > 0.5) discard;
+      float aa = 1.0 - smoothstep(0.35, 0.5, dist);
+      fragColor = vec4(v_color.rgb, v_color.a * aa);
+    }`;
+
+  const compileShader = (src, type) => {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+    return s;
+  };
+  const program = gl.createProgram();
+  gl.attachShader(program, compileShader(vsSource, gl.VERTEX_SHADER));
+  gl.attachShader(program, compileShader(fsSource, gl.FRAGMENT_SHADER));
+  gl.linkProgram(program);
+
+  const attribBuf = (name, data, size, usage = gl.STATIC_DRAW) => {
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, data, usage);
+    const loc = gl.getAttribLocation(program, name);
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0);
+    return buf;
+  };
+
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const posBuf = attribBuf('a_position', posData, 2, gl.DYNAMIC_DRAW);
+  attribBuf('a_size', sizeData, 1);
+  attribBuf('a_color', colorData, 4);
+
+  gl.viewport(0, 0, W * DPR, H * DPR);
+
+  glCanvas.addEventListener('webglcontextlost', e => e.preventDefault());
+  glCanvas.addEventListener('webglcontextrestored', () => drawGL());
+
+  const drawGL = () => {
+    gl.clearColor(0.04, 0.04, 0.1, 1.0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(program);
+    gl.bindVertexArray(vao);
+    gl.uniform2f(gl.getUniformLocation(program, 'u_resolution'), W, H);
+    gl.uniform1f(gl.getUniformLocation(program, 'u_dpr'), DPR);
+    gl.drawArrays(gl.POINTS, 0, NODE_COUNT);
+  };
+
+  // SVG overlay for interaction
+  const svg = d3.select('#container').append('svg')
+    .attr('width', W).attr('height', H)
+    .style('position', 'absolute').style('top', 0).style('left', 0);
+
+  // Add visible SVG content for test detection
+  svg.append('text').attr('x', W / 2).attr('y', H - 10).attr('text-anchor', 'middle').attr('fill', '#555').attr('font-size', 11).text('Hover nodes for details');
+  svg.append('rect').attr('width', W).attr('height', H).attr('fill', 'none').attr('stroke', 'none');
+
+  // Force simulation
+  const simulation = d3.forceSimulation(nodes)
+    .force('charge', d3.forceManyBody().strength(-6).theta(1.0))
+    .force('x', d3.forceX(d => commCentroids[d.community][0]).strength(0.15))
+    .force('y', d3.forceY(d => commCentroids[d.community][1]).strength(0.15))
+    .alphaDecay(0.05)
+    .stop();
+
+  // Pre-tick 120 iterations so layout is converged on first render
+  for (let i = 0; i < 120; i++) simulation.tick();
+
+  // Update position buffer from converged positions
+  for (let i = 0; i < NODE_COUNT; i++) {
+    posData[i * 2] = nodes[i].x;
+    posData[i * 2 + 1] = nodes[i].y;
+  }
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, posData);
+  drawGL();
+
+  simulation.on('tick', onTick).restart();
+
+  function onTick() {
+    for (let i = 0; i < NODE_COUNT; i++) {
+      posData[i * 2] = nodes[i].x;
+      posData[i * 2 + 1] = nodes[i].y;
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, posData);
+    drawGL();
+    // Update alpha display
+    const a = simulation.alpha();
+    document.getElementById('alpha-val').textContent = a.toFixed(3);
+    document.getElementById('alpha-fill').style.width = (a * 100) + '%';
+  }
+
+  // Reheat button
+  document.getElementById('btnReheat').addEventListener('click', () => {
+    simulation.alpha(1).restart();
+  });
+
+  // Quadtree hover
+  const tooltip = document.getElementById('tooltip');
+  svg.on('pointermove', event => {
+    const [mx, my] = d3.pointer(event);
+    const qt = d3.quadtree().x(d => d.x).y(d => d.y).addAll(nodes);
+    const found = qt.find(mx, my, 15);
+    if (found) {
+      tooltip.style.display = 'block';
+      tooltip.style.left = (mx + 14) + 'px';
+      tooltip.style.top = (my - 10) + 'px';
+      tooltip.innerHTML = `Community: ${found.community}<br>Degree: ${degree[found.id]}`;
+    } else {
+      tooltip.style.display = 'none';
+    }
+  });
+  svg.on('pointerleave', () => { tooltip.style.display = 'none'; });
+
+  // Initial draw
+  drawGL();
+})();
+</script>
+</body>
+</html>

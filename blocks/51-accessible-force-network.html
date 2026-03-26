@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Accessible Force Network</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #fafafa; font-family: system-ui, -apple-system, sans-serif; }
+  h1 { text-align: center; font-size: 17px; color: #333; padding: 12px 0 4px; }
+  .subtitle { text-align: center; font-size: 12px; color: #666; margin-bottom: 8px; }
+  #viz-container { position: relative; display: flex; justify-content: center; }
+  canvas { border: 1px solid #ddd; border-radius: 4px; }
+  canvas:focus { outline: 2px solid #4477AA; outline-offset: 2px; }
+  svg.overlay { position: absolute; pointer-events: none; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+  #live-region { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+  .tooltip {
+    position: absolute; pointer-events: none; background: rgba(255,255,255,0.95);
+    border: 1px solid #ccc; border-radius: 4px; padding: 6px 10px; font-size: 12px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.12); display: none;
+  }
+  #table-section { max-width: 720px; margin: 12px auto; padding: 0 16px; }
+  #table-section h2 { font-size: 14px; margin-bottom: 6px; }
+  .table-wrap { max-height: 300px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; }
+  table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 12px; }
+  th {
+    position: sticky; top: 0; background: #f0f0f0; padding: 6px 8px;
+    text-align: left; border-bottom: 2px solid #ccc; cursor: pointer; user-select: none;
+    font-weight: 600; white-space: nowrap;
+  }
+  th:hover { background: #e4e4e4; }
+  th .sort-arrow { font-size: 10px; margin-left: 3px; }
+  td { padding: 5px 8px; border-bottom: 1px solid #eee; }
+  td.num { text-align: right; font-family: "SF Mono", Monaco, "Cascadia Code", monospace; font-variant-numeric: tabular-nums; }
+  th.num { text-align: right; }
+  tr.highlighted { background: #e8f0fe !important; }
+  tr.focused-row { background: #d4e4ff !important; outline: 2px solid #4477AA; }
+  tr:nth-child(even) { background: #f9f9f9; }
+  tr:hover { background: #eef3fa; }
+  .legend-inline {
+    display: flex; gap: 12px; justify-content: center; font-size: 12px;
+    margin-bottom: 6px; flex-wrap: wrap;
+  }
+  .legend-inline .item { display: flex; align-items: center; gap: 4px; }
+  .legend-inline .dot { width: 10px; height: 10px; border-radius: 50%; }
+</style>
+</head>
+<body>
+<h1>Accessible Force Network</h1>
+<div class="subtitle">150 nodes, 6 communities. Tab to enter, arrow keys to navigate, Enter to select.</div>
+<div class="legend-inline" id="legend"></div>
+<div id="viz-container">
+  <div class="tooltip" id="tooltip"></div>
+  <div id="live-region" aria-live="polite" role="status"></div>
+</div>
+<div id="table-section">
+  <h2>Network Data</h2>
+  <div class="table-wrap" id="table-wrap">
+    <table id="data-table">
+      <thead><tr id="table-head"></tr></thead>
+      <tbody id="table-body"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+(() => {
+  const W = 700, H = 500;
+  const dpr = window.devicePixelRatio || 1;
+  const tolBright = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377"];
+  const communityNames = ["Cluster A","Cluster B","Cluster C","Cluster D","Cluster E","Cluster F"];
+  const NODE_R = 5;
+
+  // Generate data
+  const rng = d3.randomLcg(77);
+  const rand = () => rng();
+
+  const nodes = [];
+  let id = 0;
+  const perComm = 25;
+  for (let c = 0; c < 6; c++) {
+    for (let i = 0; i < perComm; i++) {
+      nodes.push({
+        id: id,
+        name: `Node ${String.fromCharCode(65 + c)}${i + 1}`,
+        community: c,
+        degree: 0
+      });
+      id++;
+    }
+  }
+
+  // Generate ~250 edges (70% within, 30% between)
+  const edges = [];
+  const edgeSet = new Set();
+  const addEdge = (s, t) => {
+    const key = s < t ? `${s}-${t}` : `${t}-${s}`;
+    if (!edgeSet.has(key) && s !== t) { edgeSet.add(key); edges.push({ source: s, target: t }); return true; }
+    return false;
+  };
+
+  // Within community
+  for (let c = 0; c < 6; c++) {
+    const start = c * perComm;
+    for (let i = 0; i < perComm; i++) {
+      for (let j = i + 1; j < perComm; j++) {
+        if (rand() < 0.22 && edges.length < 175) addEdge(start + i, start + j);
+      }
+    }
+  }
+  // Between
+  while (edges.length < 250) {
+    const a = Math.floor(rand() * 150);
+    const b = Math.floor(rand() * 150);
+    if (nodes[a].community !== nodes[b].community) addEdge(a, b);
+  }
+
+  // Compute degree
+  edges.forEach(e => {
+    nodes[typeof e.source === 'object' ? e.source.id : e.source].degree++;
+    nodes[typeof e.target === 'object' ? e.target.id : e.target].degree++;
+  });
+
+  // Compute connections list
+  const adjList = new Map();
+  nodes.forEach(n => adjList.set(n.id, []));
+  edges.forEach(e => {
+    const s = typeof e.source === 'object' ? e.source.id : e.source;
+    const t = typeof e.target === 'object' ? e.target.id : e.target;
+    adjList.get(s).push(t);
+    adjList.get(t).push(s);
+  });
+
+  // Force simulation
+  const simulation = d3.forceSimulation(nodes)
+    .force("link", d3.forceLink(edges).id(d => d.id).distance(30))
+    .force("charge", d3.forceManyBody().strength(-25))
+    .force("center", d3.forceCenter(W / 2, H / 2))
+    .force("collide", d3.forceCollide(6))
+    .stop();
+
+  simulation.tick(300);
+
+  // Canvas
+  const container = d3.select("#viz-container");
+  const canvas = container.append("canvas")
+    .attr("width", W * dpr).attr("height", H * dpr)
+    .style("width", W + "px").style("height", H + "px")
+    .attr("tabindex", "0")
+    .attr("role", "application")
+    .attr("aria-label", `Force-directed network with ${nodes.length} nodes in 6 communities. Use arrow keys to navigate between nodes, Enter to select, Escape to clear selection.`)
+    .node();
+  canvas.textContent = `Network graph with ${nodes.length} nodes. Use arrow keys to navigate.`;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  // SVG overlay for focus ring
+  const svgOverlay = container.append("svg")
+    .attr("class", "overlay")
+    .attr("width", W).attr("height", H)
+    .style("left", canvas.offsetLeft + "px")
+    .style("top", canvas.offsetTop + "px");
+
+  const focusRing = svgOverlay.append("circle")
+    .attr("r", NODE_R + 4)
+    .attr("fill", "none")
+    .attr("stroke", "#000")
+    .attr("stroke-width", 2)
+    .style("display", "none");
+  const focusHalo = svgOverlay.append("circle")
+    .attr("r", NODE_R + 6)
+    .attr("fill", "none")
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 3)
+    .style("display", "none");
+
+  // Quadtree
+  let quadtree = d3.quadtree()
+    .x(d => d.x).y(d => d.y)
+    .addAll(nodes);
+
+  // State
+  let focusedNode = null;
+  let selectedNode = null;
+  let hoveredNode = null;
+
+  const forcedColors = window.matchMedia('(forced-colors: active)').matches;
+
+  // Render
+  const render = () => {
+    ctx.clearRect(0, 0, W, H);
+
+    // Edges
+    ctx.strokeStyle = forcedColors ? "CanvasText" : "#ccc";
+    ctx.globalAlpha = forcedColors ? 0.3 : 0.15;
+    ctx.lineWidth = forcedColors ? 1.5 : 1;
+    ctx.beginPath();
+    edges.forEach(e => {
+      const s = typeof e.source === 'object' ? e.source : nodes[e.source];
+      const t = typeof e.target === 'object' ? e.target : nodes[e.target];
+      ctx.moveTo(s.x, s.y);
+      ctx.lineTo(t.x, t.y);
+    });
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    // Nodes - batch by community
+    const groups = d3.group(nodes, d => d.community);
+    for (const [comm, members] of groups) {
+      if (forcedColors) {
+        ctx.strokeStyle = "CanvasText";
+        ctx.lineWidth = 1.5;
+        ctx.fillStyle = "Canvas";
+      } else {
+        ctx.fillStyle = tolBright[comm];
+      }
+      ctx.beginPath();
+      for (const d of members) {
+        ctx.moveTo(d.x + NODE_R, d.y);
+        ctx.arc(d.x, d.y, NODE_R, 0, Math.PI * 2);
+      }
+      if (forcedColors) {
+        ctx.fill();
+        ctx.stroke();
+      } else {
+        ctx.fill();
+      }
+    }
+
+    // Selected node
+    if (selectedNode) {
+      ctx.strokeStyle = "#4477AA";
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.arc(selectedNode.x, selectedNode.y, NODE_R + 3, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // Focus ring via SVG
+    if (focusedNode && document.activeElement === canvas) {
+      focusHalo.attr("cx", focusedNode.x).attr("cy", focusedNode.y).style("display", null);
+      focusRing.attr("cx", focusedNode.x).attr("cy", focusedNode.y).style("display", null);
+    } else {
+      focusRing.style("display", "none");
+      focusHalo.style("display", "none");
+    }
+
+    // Update SVG position to match canvas
+    const rect = canvas.getBoundingClientRect();
+    const cRect = container.node().getBoundingClientRect();
+    svgOverlay
+      .style("left", (rect.left - cRect.left) + "px")
+      .style("top", (rect.top - cRect.top) + "px");
+  };
+
+  render();
+
+  // Live region
+  const liveRegion = document.getElementById("live-region");
+  let announceTimer;
+  const announce = (node, extra) => {
+    clearTimeout(announceTimer);
+    announceTimer = setTimeout(() => {
+      const connections = adjList.get(node.id).slice(0, 3).map(id => nodes[id].name);
+      const connStr = connections.length > 0
+        ? `Connected to ${connections.join(", ")}${adjList.get(node.id).length > 3 ? " and more" : ""}`
+        : "No connections";
+      let msg = `${node.name}, ${communityNames[node.community]}, ${node.degree} connections. ${connStr}.`;
+      if (extra) msg += ` ${extra}`;
+      liveRegion.textContent = msg;
+    }, 150);
+  };
+
+  // Spatial navigation using quadtree with 90-degree cone
+  const inDirection = (ox, oy, tx, ty, dir) => {
+    const dx = tx - ox, dy = ty - oy;
+    if (!dx && !dy) return false;
+    switch (dir) {
+      case 'right': return dx > 0 && Math.abs(dy) <= dx;
+      case 'left':  return dx < 0 && Math.abs(dy) <= -dx;
+      case 'down':  return dy > 0 && Math.abs(dx) <= dy;
+      case 'up':    return dy < 0 && Math.abs(dx) <= -dy;
+    }
+    return false;
+  };
+
+  const findNearest = (current, direction) => {
+    let best = null, bestDist = Infinity;
+    quadtree.visit((quad, x0, y0, x1, y1) => {
+      if (best) {
+        const dx = Math.max(x0 - current.x, 0, current.x - x1);
+        const dy = Math.max(y0 - current.y, 0, current.y - y1);
+        if (Math.hypot(dx, dy) > bestDist) return true;
+      }
+      if (!quad.length) {
+        let p = quad;
+        do {
+          if (p.data === current) continue;
+          if (!inDirection(current.x, current.y, p.data.x, p.data.y, direction)) continue;
+          const dist = Math.hypot(p.data.x - current.x, p.data.y - current.y);
+          if (dist < bestDist) { bestDist = dist; best = p.data; }
+        } while ((p = p.next));
+      }
+    });
+    return best;
+  };
+
+  // Keyboard navigation
+  const dirMap = { ArrowRight: 'right', ArrowLeft: 'left', ArrowDown: 'down', ArrowUp: 'up' };
+
+  canvas.addEventListener("keydown", (e) => {
+    const dir = dirMap[e.key];
+    if (dir) {
+      e.preventDefault();
+      if (!focusedNode) {
+        // Start with highest degree node
+        focusedNode = [...nodes].sort((a, b) => b.degree - a.degree)[0];
+      } else {
+        const next = findNearest(focusedNode, dir);
+        if (next) focusedNode = next;
+      }
+      announce(focusedNode);
+      highlightTableRow(focusedNode);
+      render();
+    } else if (e.key === "Tab" && !e.shiftKey && !focusedNode) {
+      // On first Tab into canvas, focus highest-degree node
+      focusedNode = [...nodes].sort((a, b) => b.degree - a.degree)[0];
+      announce(focusedNode);
+      highlightTableRow(focusedNode);
+      render();
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      focusedNode = [...nodes].sort((a, b) => a.name.localeCompare(b.name))[0];
+      announce(focusedNode);
+      highlightTableRow(focusedNode);
+      render();
+    } else if (e.key === "End") {
+      e.preventDefault();
+      focusedNode = [...nodes].sort((a, b) => a.name.localeCompare(b.name)).at(-1);
+      announce(focusedNode);
+      highlightTableRow(focusedNode);
+      render();
+    } else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      if (focusedNode) {
+        selectedNode = selectedNode === focusedNode ? null : focusedNode;
+        announce(focusedNode, selectedNode ? "Selected" : "Deselected");
+        render();
+      }
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      selectedNode = null;
+      focusedNode = null;
+      liveRegion.textContent = "Selection cleared";
+      render();
+    }
+  });
+
+  canvas.addEventListener("focus", () => {
+    if (!focusedNode) {
+      focusedNode = [...nodes].sort((a, b) => b.degree - a.degree)[0];
+      announce(focusedNode);
+      highlightTableRow(focusedNode);
+    }
+    render();
+  });
+
+  canvas.addEventListener("blur", () => {
+    render();
+  });
+
+  // Mouse interaction via quadtree
+  const tooltip = d3.select("#tooltip");
+
+  canvas.addEventListener("pointermove", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = (e.clientX - rect.left);
+    const my = (e.clientY - rect.top);
+    const nearest = quadtree.find(mx, my, 15);
+    if (nearest !== hoveredNode) {
+      hoveredNode = nearest;
+      if (hoveredNode) {
+        canvas.style.cursor = "pointer";
+        tooltip.style("display", "block")
+          .html(`<strong>${hoveredNode.name}</strong><br>${communityNames[hoveredNode.community]}<br>Degree: ${hoveredNode.degree}`)
+          .style("left", (e.pageX + 14) + "px")
+          .style("top", (e.pageY - 10) + "px");
+      } else {
+        canvas.style.cursor = "default";
+        tooltip.style("display", "none");
+      }
+    } else if (hoveredNode) {
+      tooltip.style("left", (e.pageX + 14) + "px").style("top", (e.pageY - 10) + "px");
+    }
+  });
+
+  canvas.addEventListener("pointerdown", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = (e.clientX - rect.left);
+    const my = (e.clientY - rect.top);
+    const hit = quadtree.find(mx, my, 15);
+    if (hit) {
+      canvas.focus();
+      focusedNode = hit;
+      selectedNode = selectedNode === hit ? null : hit;
+      announce(hit, selectedNode === hit ? "Selected" : "Deselected");
+      highlightTableRow(hit);
+      render();
+    }
+  });
+
+  canvas.addEventListener("pointerleave", () => {
+    hoveredNode = null;
+    tooltip.style("display", "none");
+  });
+
+  // Data table
+  const columns = [
+    { key: "name", label: "Name", type: "string" },
+    { key: "community", label: "Community", type: "string", format: v => communityNames[v] },
+    { key: "degree", label: "Degree", type: "number" },
+    { key: "connections", label: "Connections", type: "string" }
+  ];
+
+  // Compute connections string
+  nodes.forEach(n => {
+    n.connections = adjList.get(n.id).map(id => nodes[id].name).join(", ");
+  });
+
+  let sortCol = "degree";
+  let sortAsc = false;
+  let tableData = [...nodes].sort((a, b) => d3.descending(a.degree, b.degree));
+
+  const thead = d3.select("#table-head");
+  const tbody = d3.select("#table-body");
+
+  const renderTable = () => {
+    thead.selectAll("th").data(columns).join("th")
+      .attr("class", d => d.type === "number" ? "num" : null)
+      .attr("tabindex", "0")
+      .attr("role", "columnheader")
+      .attr("aria-sort", d => d.key === sortCol ? (sortAsc ? "ascending" : "descending") : "none")
+      .html(d => {
+        const arrow = d.key === sortCol ? (sortAsc ? " \u25B2" : " \u25BC") : "";
+        return `${d.label}<span class="sort-arrow">${arrow}</span>`;
+      })
+      .on("click", (event, d) => {
+        if (sortCol === d.key) sortAsc = !sortAsc;
+        else { sortCol = d.key; sortAsc = true; }
+        sortTable();
+        renderTable();
+      })
+      .on("keydown", (event, d) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          if (sortCol === d.key) sortAsc = !sortAsc;
+          else { sortCol = d.key; sortAsc = true; }
+          sortTable();
+          renderTable();
+        }
+      });
+
+    const rows = tbody.selectAll("tr")
+      .data(tableData, d => d.id)
+      .join("tr")
+      .attr("class", d => {
+        if (focusedNode && d.id === focusedNode.id) return "focused-row";
+        if (selectedNode && d.id === selectedNode.id) return "highlighted";
+        return d.id % 2 === 0 ? "" : "";
+      })
+      .style("cursor", "pointer")
+      .on("click", (event, d) => {
+        focusedNode = d;
+        selectedNode = d;
+        canvas.focus();
+        announce(d, "Selected");
+        render();
+        renderTable();
+      });
+
+    rows.selectAll("td").data(d => columns.map(col => {
+      const val = d[col.key];
+      return { value: col.format ? col.format(val) : val, type: col.type };
+    })).join("td")
+      .attr("class", d => d.type === "number" ? "num" : null)
+      .text(d => d.value);
+  };
+
+  const sortTable = () => {
+    const col = columns.find(c => c.key === sortCol);
+    tableData.sort((a, b) => {
+      let va = a[sortCol], vb = b[sortCol];
+      if (col.format) { va = col.format(va); vb = col.format(vb); }
+      if (col.type === "number") return sortAsc ? d3.ascending(va, vb) : d3.descending(va, vb);
+      return sortAsc ? d3.ascending(String(va), String(vb)) : d3.descending(String(va), String(vb));
+    });
+  };
+
+  const highlightTableRow = (node) => {
+    renderTable();
+    if (node) {
+      const row = tbody.selectAll("tr").filter(d => d.id === node.id).node();
+      if (row) row.scrollIntoView({ block: "nearest" });
+    }
+  };
+
+  // Legend
+  const legend = d3.select("#legend");
+  communityNames.forEach((name, i) => {
+    legend.append("div").attr("class", "item")
+      .html(`<span class="dot" style="background:${tolBright[i]}"></span>${name}`);
+  });
+
+  renderTable();
+})();
+</script>
+</body>
+</html>

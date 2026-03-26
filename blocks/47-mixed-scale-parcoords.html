@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mixed-Scale Parallel Coordinates</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    color: #222;
+    padding: 20px 24px;
+  }
+  h1 { font-size: 1.3rem; font-weight: 600; margin-bottom: 2px; }
+  .header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
+  .counter { font-size: 0.85rem; color: #555; font-variant-numeric: tabular-nums; }
+  .container { position: relative; width: 100%; }
+  canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
+  svg { position: absolute; top: 0; left: 0; }
+  .legend {
+    display: flex; gap: 14px; flex-wrap: wrap; margin-top: 8px; font-size: 0.78rem;
+  }
+  .legend-item { display: flex; align-items: center; gap: 5px; }
+  .legend-swatch { width: 12px; height: 12px; border-radius: 2px; }
+  .axis-label {
+    font-size: 11px; font-weight: 600; fill: #333;
+  }
+  .tick text { font-size: 10px; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Employee Metrics &mdash; Mixed-Scale Parallel Coordinates</h1>
+  <span class="counter" id="counter">Showing 300 of 300</span>
+</div>
+<div class="container" id="chart-container"></div>
+<div class="legend" id="legend"></div>
+
+<script>
+(() => {
+  const TOL = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377"];
+  const departments = ["Engineering", "Sales", "Marketing", "Finance", "HR", "Operations"];
+  const deptWeights = [0.3, 0.25, 0.12, 0.12, 0.1, 0.11];
+  const educationLevels = ["HS", "BS", "MS", "PhD"];
+  const deptColor = d3.scaleOrdinal().domain(departments).range(TOL);
+
+  // --- Seeded random ---
+  const rng = d3.randomLcg(17);
+  const norm = (mu, sig) => {
+    const u1 = rng(), u2 = rng();
+    return mu + sig * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  };
+
+  // --- Data generation ---
+  const pickDept = () => {
+    const r = rng();
+    let cum = 0;
+    for (let i = 0; i < departments.length; i++) {
+      cum += deptWeights[i];
+      if (r < cum) return departments[i];
+    }
+    return departments[departments.length - 1];
+  };
+
+  const data = Array.from({ length: 300 }, (_, id) => {
+    const dept = pickDept();
+    const age = Math.round(Math.max(22, Math.min(62, norm(38, 8))));
+    const yearsExp = Math.round(Math.max(0, Math.min(35, age - 22 + norm(-3, 4))));
+    const deptBonus = { Engineering: 1.4, Sales: 1.1, Marketing: 1.0, Finance: 1.3, HR: 0.9, Operations: 0.95 }[dept];
+    const salary = Math.round(Math.max(30000, Math.min(350000,
+      Math.exp(norm(Math.log(55000 + yearsExp * 3500 * deptBonus), 0.35))
+    )));
+    const eduIdx = Math.min(3, Math.max(0, Math.round(
+      dept === "Engineering" ? norm(2.2, 0.9) :
+      dept === "Finance" ? norm(1.8, 0.8) : norm(1.2, 0.9)
+    )));
+    const performance = Math.max(1.0, Math.min(5.0, +norm(3.5, 0.7).toFixed(1)));
+    return { id, age, department: dept, years_experience: yearsExp, salary, education: educationLevels[eduIdx], performance };
+  });
+
+  // --- Layout ---
+  const margin = { top: 40, right: 30, bottom: 20, left: 30 };
+  const W = Math.min(1200, window.innerWidth - 48);
+  const H = 480;
+  const innerW = W - margin.left - margin.right;
+  const innerH = H - margin.top - margin.bottom;
+
+  const container = d3.select("#chart-container")
+    .style("width", W + "px").style("height", H + "px");
+
+  const canvas = container.append("canvas")
+    .attr("width", W * devicePixelRatio).attr("height", H * devicePixelRatio)
+    .style("width", W + "px").style("height", H + "px");
+  const ctx = canvas.node().getContext("2d");
+  ctx.scale(devicePixelRatio, devicePixelRatio);
+
+  const svg = container.append("svg")
+    .attr("width", W).attr("height", H)
+    .style("pointer-events", "all");
+
+  const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+  // --- Dimensions & scales ---
+  const dims = [
+    { key: "age", label: "Age", scale: d3.scaleLinear().domain([22, 62]).range([innerH, 0]) },
+    { key: "department", label: "Department", scale: d3.scalePoint().domain(departments).range([innerH, 0]).padding(0.3) },
+    { key: "years_experience", label: "Experience (yr)", scale: d3.scaleLinear().domain([0, 35]).range([innerH, 0]) },
+    { key: "salary", label: "Salary ($)", scale: d3.scaleLog().domain([30000, 350000]).range([innerH, 0]) },
+    { key: "education", label: "Education", scale: d3.scalePoint().domain(educationLevels).range([innerH, 0]).padding(0.3) },
+    { key: "performance", label: "Performance", scale: d3.scaleLinear().domain([1, 5]).range([innerH, 0]) }
+  ];
+
+  const xScale = d3.scalePoint().domain(dims.map(d => d.key)).range([0, innerW]).padding(0.08);
+
+  // --- Axes (SVG) ---
+  dims.forEach(dim => {
+    const x = xScale(dim.key);
+    const axisG = g.append("g").attr("transform", `translate(${x},0)`);
+    let axis;
+    if (dim.key === "salary") {
+      axis = d3.axisLeft(dim.scale)
+        .tickValues([30000, 50000, 100000, 200000, 350000])
+        .tickFormat(d => d >= 1000 ? `$${d / 1000}K` : `$${d}`);
+    } else if (dim.key === "department" || dim.key === "education") {
+      axis = d3.axisLeft(dim.scale);
+    } else {
+      axis = d3.axisLeft(dim.scale).ticks(6);
+    }
+    axisG.call(axis).selectAll("text").style("font-size", "10px");
+    axisG.append("text")
+      .attr("class", "axis-label")
+      .attr("y", -14).attr("text-anchor", "middle")
+      .text(dim.label);
+  });
+
+  // --- Brushes ---
+  const brushes = {};
+  const brushSelections = {};
+
+  const isBrushed = d => {
+    for (const dim of dims) {
+      const sel = brushSelections[dim.key];
+      if (!sel) continue;
+      const [y0, y1] = sel;
+      const val = dim.scale(d[dim.key]);
+      if (val < y0 || val > y1) return false;
+    }
+    return true;
+  };
+
+  const drawLines = () => {
+    ctx.clearRect(0, 0, W, H);
+    ctx.save();
+    ctx.translate(margin.left, margin.top);
+
+    const anyBrush = Object.keys(brushSelections).length > 0;
+    let activeCount = 0;
+
+    // Draw inactive lines first
+    if (anyBrush) {
+      ctx.globalAlpha = 0.03;
+      ctx.lineWidth = 1;
+      data.forEach(d => {
+        if (isBrushed(d)) return;
+        ctx.strokeStyle = deptColor(d.department);
+        ctx.beginPath();
+        dims.forEach((dim, i) => {
+          const x = xScale(dim.key);
+          const y = dim.scale(d[dim.key]);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      });
+    }
+
+    // Draw active lines
+    data.forEach(d => {
+      if (anyBrush && !isBrushed(d)) return;
+      activeCount++;
+      ctx.globalAlpha = anyBrush ? 0.6 : 0.33;
+      ctx.lineWidth = anyBrush ? 1.5 : 1;
+      ctx.strokeStyle = deptColor(d.department);
+      ctx.beginPath();
+      dims.forEach((dim, i) => {
+        const x = xScale(dim.key);
+        const y = dim.scale(d[dim.key]);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    });
+
+    ctx.restore();
+    d3.select("#counter").text(`Showing ${anyBrush ? activeCount : 300} of 300`);
+  };
+
+  // Add brushes to axes
+  dims.forEach(dim => {
+    const x = xScale(dim.key);
+    const brush = d3.brushY()
+      .extent([[-12, 0], [12, innerH]])
+      .on("brush end", (event) => {
+        if (event.selection) {
+          brushSelections[dim.key] = event.selection;
+        } else {
+          delete brushSelections[dim.key];
+        }
+        drawLines();
+      });
+
+    const brushG = g.append("g")
+      .attr("class", "brush")
+      .attr("transform", `translate(${x},0)`)
+      .call(brush);
+
+    brushes[dim.key] = { brush, group: brushG };
+  });
+
+  // --- Legend ---
+  const legendDiv = d3.select("#legend");
+  departments.forEach(dept => {
+    const item = legendDiv.append("span").attr("class", "legend-item");
+    item.append("span").attr("class", "legend-swatch")
+      .style("background", deptColor(dept));
+    item.append("span").text(dept);
+  });
+
+  drawLines();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Treemap Sparkline Dashboard</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #fafafa; color: #333; }
+  #dashboard { width: 100%; max-width: 1200px; margin: 0 auto; }
+  #kpi-strip {
+    display: flex; gap: 16px; padding: 12px 16px; flex-wrap: wrap;
+    background: #fff; border-bottom: 1px solid #e0e0e0;
+  }
+  .kpi-card {
+    flex: 1 1 200px; min-width: 140px; padding: 8px 12px;
+    border: 1px solid #e8e8e8; border-radius: 6px; background: #fff;
+  }
+  .kpi-label { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
+  .kpi-value { font-size: 22px; font-weight: 700; margin: 2px 0; }
+  .kpi-sub { font-size: 12px; color: #666; }
+  .kpi-spark { display: inline-block; vertical-align: middle; margin-left: 6px; }
+  #treemap-container {
+    width: 100%; height: 500px; position: relative; overflow: hidden;
+    container-type: inline-size;
+  }
+  .tooltip {
+    position: absolute; pointer-events: none; background: rgba(0,0,0,0.85);
+    color: #fff; padding: 8px 12px; border-radius: 4px; font-size: 12px;
+    line-height: 1.4; display: none; z-index: 10; max-width: 250px;
+  }
+  @container (max-width: 600px) {
+    #kpi-strip { flex-wrap: wrap; }
+    .kpi-card { flex: 1 1 45%; }
+  }
+</style>
+</head>
+<body>
+<div id="dashboard">
+  <div id="kpi-strip"></div>
+  <div id="treemap-container">
+    <div class="tooltip" id="tooltip"></div>
+  </div>
+</div>
+<script>
+const TOL = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377","#BBBBBB"];
+
+// --- Synthetic data: 3-level hierarchy ---
+const divisions = ["Cloud","Enterprise","Consumer","Analytics","Security"];
+const regionNames = ["North America","Europe","APAC","LATAM","MEA"];
+const productPool = ["Platform","Suite","API","Gateway","Agent","Shield","Vault","Core","Hub","Edge","Spark","Relay"];
+
+const rng = d3.randomLcg(42);
+const rand = (lo, hi) => lo + rng() * (hi - lo);
+
+const children = [];
+divisions.forEach((div, di) => {
+  const nRegions = 3 + Math.floor(rng() * 3);
+  const regions = d3.shuffle(regionNames.slice(), rng).slice(0, nRegions);
+  const regionChildren = regions.map(reg => {
+    const nProducts = 3 + Math.floor(rng() * 6);
+    const products = d3.shuffle(productPool.slice(), rng).slice(0, nProducts);
+    return {
+      name: reg,
+      children: products.map(p => {
+        const base = rand(1e6, 50e6);
+        // monthly trend: some growth, some decline
+        const growth = rand(-0.03, 0.05);
+        const monthly = d3.range(12).map((_, m) => +(base / 12 * (1 + growth * m) * (1 + rand(-0.08, 0.08))).toFixed(0));
+        return { name: p, annual_revenue: +d3.sum(monthly).toFixed(0), monthly_revenue: monthly };
+      })
+    };
+  });
+  children.push({ name: div, children: regionChildren });
+});
+
+const hierarchyData = { name: "Company", children };
+const root = d3.hierarchy(hierarchyData)
+  .sum(d => d.annual_revenue || 0)
+  .sort((a, b) => b.value - a.value);
+
+const divisionColor = d3.scaleOrdinal()
+  .domain(divisions)
+  .range(TOL);
+
+const getDivision = (node) => {
+  let n = node;
+  while (n.depth > 1) n = n.parent;
+  return n.data.name;
+};
+
+// --- KPI strip ---
+const totalRevenue = root.value;
+const allLeaves = root.leaves();
+const allMonthly = allLeaves.map(d => d.data.monthly_revenue);
+const totalMonthly = d3.range(12).map(m => d3.sum(allMonthly, arr => arr[m]));
+const yoy = ((totalMonthly[11] - totalMonthly[0]) / totalMonthly[0] * 100).toFixed(1);
+const topDiv = root.children.reduce((a, b) => a.value > b.value ? a : b);
+
+// growth leaders: leaves with highest month-over-month avg growth
+const leafGrowth = allLeaves.map(d => {
+  const m = d.data.monthly_revenue;
+  const g = d3.mean(d3.range(1, 12).map(i => (m[i] - m[i - 1]) / m[i - 1]));
+  return { name: d.data.name, growth: g, monthly: m };
+}).sort((a, b) => b.growth - a.growth);
+
+const kpiData = [
+  { label: "Total Revenue", value: `$${(totalRevenue / 1e9).toFixed(1)}B`, sparkType: "area", sparkData: totalMonthly },
+  { label: "YoY Change", value: `${yoy > 0 ? "+" : ""}${yoy}%`, sparkType: "arrow", up: +yoy > 0 },
+  { label: "Top Division", value: topDiv.data.name, sparkType: "bar",
+    sparkData: root.children.map(c => c.value) },
+  { label: "Growth Leader", value: leafGrowth[0].name, sparkType: "winloss",
+    sparkData: leafGrowth[0].monthly.slice(1).map((v, i) => v > leafGrowth[0].monthly[i] ? 1 : -1) }
+];
+
+const strip = d3.select("#kpi-strip");
+const cards = strip.selectAll(".kpi-card").data(kpiData).join("div").attr("class", "kpi-card");
+
+cards.each(function(d) {
+  const card = d3.select(this);
+  card.append("div").attr("class", "kpi-label").text(d.label);
+  const valRow = card.append("div").attr("class", "kpi-value");
+  valRow.append("span").text(d.value);
+
+  const sw = 60, sh = 16;
+  if (d.sparkType === "area") {
+    const svg = valRow.append("span").attr("class", "kpi-spark")
+      .append("svg").attr("width", sw).attr("height", sh);
+    const x = d3.scaleLinear([0, d.sparkData.length - 1], [1, sw - 1]);
+    const y = d3.scaleLinear(d3.extent(d.sparkData), [sh - 1, 1]);
+    const area = d3.area().x((v, i) => x(i)).y0(sh).y1(v => y(v)).curve(d3.curveMonotoneX);
+    const line = d3.line().x((v, i) => x(i)).y(v => y(v)).curve(d3.curveMonotoneX);
+    svg.append("path").datum(d.sparkData).attr("d", area).attr("fill", "#4477AA").attr("opacity", 0.15);
+    svg.append("path").datum(d.sparkData).attr("d", line).attr("fill", "none").attr("stroke", "#4477AA").attr("stroke-width", 1.5);
+  } else if (d.sparkType === "arrow") {
+    valRow.style("color", d.up ? "#228833" : "#EE6677");
+    valRow.append("span").text(d.up ? " \u2191" : " \u2193");
+  } else if (d.sparkType === "bar") {
+    const svg = valRow.append("span").attr("class", "kpi-spark")
+      .append("svg").attr("width", sw).attr("height", sh);
+    const x = d3.scaleBand().domain(d3.range(d.sparkData.length)).range([0, sw]).padding(0.2);
+    const y = d3.scaleLinear([0, d3.max(d.sparkData)], [sh, 0]);
+    svg.selectAll("rect").data(d.sparkData).join("rect")
+      .attr("x", (v, i) => x(i)).attr("y", v => y(v))
+      .attr("width", x.bandwidth()).attr("height", v => sh - y(v))
+      .attr("fill", (v, i) => TOL[i]);
+  } else if (d.sparkType === "winloss") {
+    const svg = valRow.append("span").attr("class", "kpi-spark")
+      .append("svg").attr("width", sw).attr("height", sh);
+    const bw = Math.max(1, (sw - d.sparkData.length) / d.sparkData.length);
+    const mid = sh / 2;
+    svg.selectAll("rect").data(d.sparkData).join("rect")
+      .attr("x", (v, i) => i * (bw + 1))
+      .attr("y", v => v > 0 ? 1 : mid + 1)
+      .attr("width", bw)
+      .attr("height", mid - 2)
+      .attr("fill", v => v > 0 ? "#228833" : "#EE6677");
+  }
+});
+
+// --- Treemap ---
+const container = document.getElementById("treemap-container");
+const tooltip = d3.select("#tooltip");
+
+const render = () => {
+  const width = container.clientWidth;
+  const height = container.clientHeight || 500;
+
+  d3.select(container).select("svg").remove();
+
+  const treemap = d3.treemap()
+    .size([width, height])
+    .tile(d3.treemapSquarify)
+    .paddingInner(2)
+    .paddingTop(18)
+    .round(true);
+
+  treemap(root);
+
+  const svg = d3.select(container).append("svg")
+    .attr("width", width).attr("height", height)
+    .style("font-family", "system-ui, sans-serif");
+
+  // Draw cells
+  const cell = svg.selectAll("g")
+    .data(root.descendants().filter(d => d.depth > 0))
+    .join("g")
+    .attr("transform", d => `translate(${d.x0},${d.y0})`);
+
+  cell.append("rect")
+    .attr("width", d => Math.max(0, d.x1 - d.x0))
+    .attr("height", d => Math.max(0, d.y1 - d.y0))
+    .attr("fill", d => {
+      const div = getDivision(d);
+      const base = d3.color(divisionColor(div));
+      if (d.depth === 1) return base.darker(0.3);
+      if (d.depth === 2) { base.opacity = 0.6; return base; }
+      return base.brighter(0.4);
+    })
+    .attr("stroke", "#fff")
+    .attr("stroke-width", d => d.depth === 1 ? 1.5 : 0.5)
+    .attr("rx", 2);
+
+  // Internal node labels (depth 1 and 2)
+  cell.filter(d => d.depth <= 2)
+    .append("text")
+    .attr("x", 4).attr("y", 13)
+    .attr("fill", d => d.depth === 1 ? "#fff" : "#333")
+    .attr("font-size", d => d.depth === 1 ? "12px" : "10px")
+    .attr("font-weight", d => d.depth === 1 ? 700 : 600)
+    .text(d => {
+      const w = d.x1 - d.x0;
+      return w > 40 ? d.data.name : "";
+    });
+
+  // Leaf sparklines or value labels
+  cell.filter(d => !d.children).each(function(d) {
+    const g = d3.select(this);
+    const w = d.x1 - d.x0;
+    const h = d.y1 - d.y0;
+    const div = getDivision(d);
+    const col = divisionColor(div);
+
+    if (w > 60 && h > 40) {
+      // Sparkline area chart
+      const data = d.data.monthly_revenue;
+      const px = 3, py = 18;
+      const sw = w - px * 2, sh = h - py - 4;
+      if (sw > 10 && sh > 8) {
+        const x = d3.scaleLinear([0, data.length - 1], [px, px + sw]);
+        const y = d3.scaleLinear(d3.extent(data), [py + sh, py + 2]);
+        const area = d3.area().x((v, i) => x(i)).y0(py + sh).y1(v => y(v)).curve(d3.curveMonotoneX);
+        const line = d3.line().x((v, i) => x(i)).y(v => y(v)).curve(d3.curveMonotoneX);
+        g.append("path").datum(data).attr("d", area).attr("fill", col).attr("opacity", 0.15);
+        g.append("path").datum(data).attr("d", line).attr("fill", "none").attr("stroke", col).attr("stroke-width", 1.5);
+      }
+    } else if (w > 30 && h > 20) {
+      // Just revenue text
+      g.append("text")
+        .attr("x", w / 2).attr("y", h / 2 + 4)
+        .attr("text-anchor", "middle")
+        .attr("font-size", "9px").attr("fill", "#333")
+        .text(`$${(d.value / 1e6).toFixed(0)}M`);
+    }
+    // Smaller cells: color only
+  });
+
+  // Tooltip interactions on leaves
+  cell.filter(d => !d.children)
+    .style("cursor", "pointer")
+    .on("pointerenter", (event, d) => {
+      const monthly = d.data.monthly_revenue;
+      const trend = monthly.map(v => `$${v.toFixed(1)}M`).join(", ");
+      tooltip.style("display", "block")
+        .html(`<strong>${d.data.name}</strong><br>Revenue: $${(d.value / 1e6).toFixed(1)}M<br>Monthly: ${monthly.slice(0,6).map(v => `$${(v / 1e6).toFixed(1)}M`).join(", ")}...`);
+    })
+    .on("pointermove", (event) => {
+      const [mx, my] = d3.pointer(event, container);
+      tooltip.style("left", `${mx + 12}px`).style("top", `${my - 10}px`);
+    })
+    .on("pointerleave", () => tooltip.style("display", "none"));
+};
+
+render();
+
+const ro = new ResizeObserver(() => render());
+ro.observe(container);
+</script>
+</body>
+</html>

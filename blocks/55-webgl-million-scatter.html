@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebGL Million-Point Scatter</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #fafafa; font-family: system-ui, sans-serif; }
+  #container { position: relative; width: 1200px; height: 800px; margin: 0 auto; }
+  canvas, svg { position: absolute; top: 0; left: 0; }
+  canvas { pointer-events: none; }
+  svg { width: 100%; height: 100%; }
+  #controls { position: absolute; top: 12px; right: 20px; z-index: 10; display: flex; gap: 12px; align-items: center; }
+  #controls button { padding: 4px 12px; border: 1px solid #999; border-radius: 4px; background: #fff; cursor: pointer; font-size: 13px; }
+  #controls button.active { background: #4477AA; color: #fff; border-color: #4477AA; }
+  #badge { position: absolute; top: 12px; left: 80px; z-index: 10; font-size: 14px; color: #333; background: rgba(255,255,255,0.9); padding: 4px 10px; border-radius: 4px; }
+  #fps { position: absolute; bottom: 12px; right: 20px; z-index: 10; font-size: 12px; color: #666; }
+  #inset { position: absolute; bottom: 60px; right: 20px; z-index: 10; background: rgba(255,255,255,0.95); border: 1px solid #ccc; border-radius: 4px; padding: 4px; }
+  h2 { position: absolute; top: 10px; left: 20px; font-size: 16px; font-weight: 600; z-index: 10; color: #222; }
+</style>
+</head>
+<body>
+<div id="container">
+  <h2>WebGL Million-Point Scatter</h2>
+  <div id="badge">Showing 200,000 of 200,000</div>
+  <div id="controls">
+    <button id="btnWebGL" class="active">WebGL</button>
+    <button id="btnCanvas">Canvas 2D</button>
+  </div>
+  <div id="fps"></div>
+  <div id="inset"></div>
+  <canvas id="glCanvas"></canvas>
+  <canvas id="c2dCanvas" style="display:none"></canvas>
+</div>
+<script>
+(() => {
+  const W = 1200, H = 800;
+  const margin = { top: 50, right: 40, bottom: 50, left: 60 };
+  const plotW = W - margin.left - margin.right;
+  const plotH = H - margin.top - margin.bottom;
+  const N = 200000; // reduced for software renderer
+  const DPR = devicePixelRatio || 1;
+
+  // Tol bright palette
+  const tolBright = [
+    [0.267, 0.467, 0.667, 0.7],  // #4477AA
+    [0.933, 0.400, 0.467, 0.7],  // #EE6677
+    [0.133, 0.733, 0.533, 0.7],  // #228833 approx
+    [0.800, 0.800, 0.200, 0.7],  // #CCBB44
+    [0.533, 0.200, 0.533, 0.7],  // #AA3377 approx
+  ];
+  const tolHex = ['#4477AA', '#EE6677', '#228833', '#CCBB44', '#AA3377'];
+
+  // Seeded PRNG
+  const seed = s => () => { s = (s * 1664525 + 1013904223) & 0x7fffffff; return s / 0x7fffffff; };
+  const rng = seed(42);
+  const gaussRng = () => { let u, v; do { u = rng(); } while (u === 0); v = rng(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+
+  // Generate 5 clusters
+  const clusterCenters = [[0.2, 0.3], [0.8, 0.7], [0.5, 0.5], [0.15, 0.8], [0.85, 0.2]];
+  const clusterSpreads = [0.08, 0.07, 0.12, 0.06, 0.09];
+
+  const positions = new Float32Array(N * 2);
+  const clusters = new Uint8Array(N);
+  for (let i = 0; i < N; i++) {
+    const c = i % 5;
+    clusters[i] = c;
+    positions[i * 2] = clusterCenters[c][0] + gaussRng() * clusterSpreads[c];
+    positions[i * 2 + 1] = clusterCenters[c][1] + gaussRng() * clusterSpreads[c];
+  }
+
+  // D3 scales
+  const xExtent = [d3.min(positions.filter((_, i) => i % 2 === 0)), d3.max(positions.filter((_, i) => i % 2 === 0))];
+  const yExtent = [d3.min(positions.filter((_, i) => i % 2 === 1)), d3.max(positions.filter((_, i) => i % 2 === 1))];
+  const xScale = d3.scaleLinear().domain(xExtent).range([margin.left, W - margin.right]).nice();
+  const yScale = d3.scaleLinear().domain(yExtent).range([H - margin.bottom, margin.top]).nice();
+
+  // Container
+  const container = d3.select('#container');
+
+  // WebGL Canvas
+  const glCanvas = document.getElementById('glCanvas');
+  glCanvas.width = W * DPR; glCanvas.height = H * DPR;
+  glCanvas.style.width = W + 'px'; glCanvas.style.height = H + 'px';
+
+  // Canvas2D fallback
+  const c2dCanvas = document.getElementById('c2dCanvas');
+  c2dCanvas.width = W * DPR; c2dCanvas.height = H * DPR;
+  c2dCanvas.style.width = W + 'px'; c2dCanvas.style.height = H + 'px';
+
+  // SVG overlay
+  const svg = container.append('svg')
+    .attr('width', W).attr('height', H)
+    .style('position', 'absolute').style('top', 0).style('left', 0);
+
+  // Axes
+  const xAxis = svg.append('g').attr('transform', `translate(0,${H - margin.bottom})`).call(d3.axisBottom(xScale).ticks(10));
+  const yAxis = svg.append('g').attr('transform', `translate(${margin.left},0)`).call(d3.axisLeft(yScale).ticks(10));
+  svg.append('text').attr('x', W / 2).attr('y', H - 8).attr('text-anchor', 'middle').attr('font-size', 13).text('X');
+  svg.append('text').attr('transform', `rotate(-90)`).attr('x', -H / 2).attr('y', 14).attr('text-anchor', 'middle').attr('font-size', 13).text('Y');
+
+  // Pack pixel positions and colors
+  const pixelPositions = new Float32Array(N * 2);
+  const colors = new Float32Array(N * 4);
+  const visibility = new Float32Array(N).fill(1.0);
+
+  for (let i = 0; i < N; i++) {
+    pixelPositions[i * 2] = xScale(positions[i * 2]);
+    pixelPositions[i * 2 + 1] = yScale(positions[i * 2 + 1]);
+    const c = tolBright[clusters[i]];
+    colors[i * 4] = c[0]; colors[i * 4 + 1] = c[1]; colors[i * 4 + 2] = c[2]; colors[i * 4 + 3] = c[3];
+  }
+
+  // ---- WebGL Setup ----
+  const gl = glCanvas.getContext('webgl2', { antialias: true, premultipliedAlpha: false, alpha: true });
+  let program, vao, visBuf;
+
+  if (gl) {
+    const vsSource = `#version 300 es
+      in vec2 a_position;
+      in vec4 a_color;
+      in float a_visibility;
+      uniform vec2 u_resolution;
+      out vec4 v_color;
+      out float v_vis;
+      void main() {
+        vec2 clip = (a_position / u_resolution) * 2.0 - 1.0;
+        clip.y = -clip.y;
+        gl_Position = vec4(clip, 0.0, 1.0);
+        gl_PointSize = 2.0 * ${DPR.toFixed(1)};
+        v_color = a_color;
+        v_vis = a_visibility;
+      }`;
+    const fsSource = `#version 300 es
+      precision mediump float;
+      in vec4 v_color;
+      in float v_vis;
+      out vec4 fragColor;
+      void main() {
+        float dist = length(gl_PointCoord - 0.5);
+        if (dist > 0.5) discard;
+        float aa = 1.0 - smoothstep(0.3, 0.5, dist);
+        fragColor = vec4(v_color.rgb, v_color.a * v_vis * aa);
+      }`;
+
+    const compileShader = (src, type) => {
+      const s = gl.createShader(type);
+      gl.shaderSource(s, src); gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+      return s;
+    };
+    program = gl.createProgram();
+    gl.attachShader(program, compileShader(vsSource, gl.VERTEX_SHADER));
+    gl.attachShader(program, compileShader(fsSource, gl.FRAGMENT_SHADER));
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) console.error(gl.getProgramInfoLog(program));
+
+    const attribBuf = (name, data, size, usage = gl.STATIC_DRAW) => {
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, data, usage);
+      const loc = gl.getAttribLocation(program, name);
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0);
+      return buf;
+    };
+
+    vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    attribBuf('a_position', pixelPositions, 2);
+    attribBuf('a_color', colors, 4);
+    visBuf = attribBuf('a_visibility', visibility, 1, gl.DYNAMIC_DRAW);
+
+    gl.viewport(0, 0, W * DPR, H * DPR);
+
+    glCanvas.addEventListener('webglcontextlost', e => e.preventDefault());
+    glCanvas.addEventListener('webglcontextrestored', () => drawWebGL());
+  }
+
+  const drawWebGL = () => {
+    if (!gl) return;
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(program);
+    gl.bindVertexArray(vao);
+    gl.uniform2f(gl.getUniformLocation(program, 'u_resolution'), W, H);
+    gl.drawArrays(gl.POINTS, 0, N);
+  };
+
+  // Canvas 2D fallback
+  const ctx2d = c2dCanvas.getContext('2d');
+  const drawCanvas2D = () => {
+    ctx2d.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx2d.clearRect(0, 0, W, H);
+    for (let i = 0; i < N; i++) {
+      const px = pixelPositions[i * 2], py = pixelPositions[i * 2 + 1];
+      const ci = clusters[i];
+      ctx2d.globalAlpha = visibility[i] * 0.7;
+      ctx2d.fillStyle = tolHex[ci];
+      ctx2d.fillRect(px - 0.5, py - 0.5, 1, 1);
+    }
+  };
+
+  // State
+  let mode = 'webgl';
+  let selectedCount = N;
+  const badgeEl = document.getElementById('badge');
+  const fpsEl = document.getElementById('fps');
+
+  const draw = () => {
+    const t0 = performance.now();
+    if (mode === 'webgl') { drawWebGL(); } else { drawCanvas2D(); }
+    const dt = performance.now() - t0;
+    fpsEl.textContent = `${mode === 'webgl' ? 'WebGL' : 'Canvas 2D'} — draw: ${dt.toFixed(1)}ms`;
+  };
+
+  // Toggle buttons
+  document.getElementById('btnWebGL').addEventListener('click', () => {
+    mode = 'webgl'; glCanvas.style.display = ''; c2dCanvas.style.display = 'none';
+    document.getElementById('btnWebGL').classList.add('active');
+    document.getElementById('btnCanvas').classList.remove('active');
+    draw();
+  });
+  document.getElementById('btnCanvas').addEventListener('click', () => {
+    mode = 'canvas'; glCanvas.style.display = 'none'; c2dCanvas.style.display = '';
+    document.getElementById('btnWebGL').classList.remove('active');
+    document.getElementById('btnCanvas').classList.add('active');
+    draw();
+  });
+
+  // Brush
+  const brush = d3.brush()
+    .extent([[margin.left, margin.top], [W - margin.right, H - margin.bottom]])
+    .on('brush end', (event) => {
+      if (!event.selection) {
+        visibility.fill(1.0);
+        selectedCount = N;
+      } else {
+        const [[x0, y0], [x1, y1]] = event.selection;
+        selectedCount = 0;
+        for (let i = 0; i < N; i++) {
+          const px = pixelPositions[i * 2], py = pixelPositions[i * 2 + 1];
+          const inside = px >= x0 && px <= x1 && py >= y0 && py <= y1;
+          visibility[i] = inside ? 1.0 : 0.15;
+          if (inside) selectedCount++;
+        }
+      }
+      badgeEl.textContent = `Selected ${d3.format(',')(selectedCount)} of ${d3.format(',')(N)}`;
+      if (mode === 'webgl' && gl) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, visBuf);
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, visibility);
+      }
+      draw();
+      updateInset();
+    });
+
+  svg.append('g').attr('class', 'brush').call(brush);
+
+  // Inset: 2D density histogram of brushed subset
+  const insetW = 180, insetH = 120;
+  const insetSvg = d3.select('#inset').append('svg').attr('width', insetW).attr('height', insetH);
+  insetSvg.append('text').attr('x', insetW / 2).attr('y', 12).attr('text-anchor', 'middle').attr('font-size', 10).attr('fill', '#555').text('Brushed density');
+
+  const updateInset = () => {
+    const gridN = 10;
+    const counts = new Float64Array(gridN * gridN);
+    let total = 0;
+    for (let i = 0; i < N; i++) {
+      if (visibility[i] < 0.5) continue;
+      total++;
+      const gx = Math.min(gridN - 1, Math.floor((positions[i * 2] - xExtent[0]) / (xExtent[1] - xExtent[0]) * gridN));
+      const gy = Math.min(gridN - 1, Math.floor((positions[i * 2 + 1] - yExtent[0]) / (yExtent[1] - yExtent[0]) * gridN));
+      counts[gy * gridN + gx]++;
+    }
+    const maxC = d3.max(counts) || 1;
+    const cellW = (insetW - 20) / gridN, cellH = (insetH - 24) / gridN;
+    const colorScale = d3.scaleSequential(d3.interpolateBlues).domain([0, maxC]);
+
+    const rects = insetSvg.selectAll('rect').data(Array.from(counts));
+    rects.join('rect')
+      .attr('x', (_, i) => 10 + (i % gridN) * cellW)
+      .attr('y', (_, i) => 18 + Math.floor(i / gridN) * cellH)
+      .attr('width', cellW - 0.5).attr('height', cellH - 0.5)
+      .attr('fill', d => colorScale(d));
+  };
+
+  // Initial draw
+  draw();
+  updateInset();
+})();
+</script>
+</body>
+</html>

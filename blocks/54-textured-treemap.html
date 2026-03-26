@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bivariate Treemap — Three Variables, Two Visual Channels</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #fafafa; display: flex; justify-content: center; padding: 24px; }
+  .outer { width: 1200px; max-width: 100%; }
+  h1 { font-size: 20px; font-weight: 600; color: #222; margin-bottom: 4px; }
+  .subtitle { font-size: 13px; color: #666; margin-bottom: 12px; }
+  .chart-wrap { display: flex; gap: 24px; }
+  svg { display: block; }
+  .tooltip {
+    position: absolute; pointer-events: none; background: rgba(255,255,255,0.96);
+    border: 1px solid #ccc; border-radius: 4px; padding: 8px 12px; font-size: 12px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.12); display: none; z-index: 10;
+    font-family: system-ui, sans-serif; line-height: 1.5;
+  }
+  .tooltip .tt-cat { font-weight: 600; }
+  .tooltip .tt-val { color: #555; }
+</style>
+</head>
+<body>
+<div class="outer">
+  <h1>Bivariate Treemap — Three Variables, Two Visual Channels</h1>
+  <p class="subtitle">Area = revenue, color = category, pattern spacing = growth rate</p>
+  <div class="chart-wrap">
+    <div id="treemap" style="position:relative;"></div>
+    <div id="legend"></div>
+  </div>
+</div>
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+(() => {
+  // --- Seeded RNG ---
+  const lcg = (s) => () => { s = (s * 1664525 + 1013904223) & 0x7fffffff; return s / 0x7fffffff; };
+  const rng = lcg(99);
+  const randRange = (lo, hi) => lo + rng() * (hi - lo);
+  const randInt = (lo, hi) => Math.round(randRange(lo, hi));
+
+  // --- Tol bright colors ---
+  const catColors = ["#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE", "#AA3377"];
+
+  // --- Pattern types (6 textons) ---
+  const patternTypes = [
+    { type: "diag",  label: "Diagonal hatch" },
+    { type: "dots",  label: "Dot grid" },
+    { type: "cross", label: "Cross-hatch" },
+    { type: "horiz", label: "Horizontal lines" },
+    { type: "wave",  label: "Waves" },
+    { type: "vert",  label: "Vertical lines" }
+  ];
+
+  // --- Synthetic data ---
+  const categories = [
+    { name: "Electronics", subs: ["Phones", "Laptops", "Tablets", "Wearables", "Audio"] },
+    { name: "Clothing",    subs: ["Tops", "Bottoms", "Shoes", "Outerwear"] },
+    { name: "Food",        subs: ["Produce", "Dairy", "Snacks", "Beverages", "Frozen", "Bakery"] },
+    { name: "Home",        subs: ["Furniture", "Decor", "Kitchen", "Garden"] },
+    { name: "Sports",      subs: ["Fitness", "Outdoor", "Team Sports", "Water Sports", "Cycling"] },
+    { name: "Books",       subs: ["Fiction", "Non-Fiction", "Children", "Academic"] }
+  ];
+
+  const hierarchy = {
+    name: "root",
+    children: categories.map((cat, ci) => ({
+      name: cat.name,
+      catIndex: ci,
+      children: cat.subs.map((sub, si) => ({
+        name: sub,
+        catIndex: ci,
+        subIndex: si,
+        revenue: randInt(2, 80),
+        growth: Math.round(randRange(-15, 40))
+      }))
+    }))
+  };
+
+  // --- Layout ---
+  const tw = 800, th = 600;
+  const root = d3.hierarchy(hierarchy)
+    .sum(d => d.revenue || 0)
+    .sort((a, b) => b.value - a.value);
+
+  d3.treemap()
+    .size([tw, th])
+    .tile(d3.treemapSquarify)
+    .padding(2)
+    (root);
+
+  // --- SVG ---
+  const svg = d3.select("#treemap").append("svg")
+    .attr("width", tw).attr("height", th);
+
+  const defs = svg.append("defs");
+
+  // Growth scale: -15% to +40% -> spacing 4px to 14px
+  const spacingScale = d3.scaleLinear().domain([-15, 40]).range([4, 14]).clamp(true);
+
+  // Create per-leaf patterns (unique spacing per growth rate)
+  const leaves = root.leaves();
+
+  leaves.forEach((leaf, li) => {
+    const d = leaf.data;
+    const sp = spacingScale(d.growth);
+    const ci = d.catIndex;
+    const si = d.subIndex % patternTypes.length;
+    const pType = patternTypes[si].type;
+    const patId = `p-${li}`;
+    const darkColor = d3.color(catColors[ci]).darker(1.5);
+    const markColor = `rgba(${d3.color(darkColor).r},${d3.color(darkColor).g},${d3.color(darkColor).b},0.25)`;
+
+    const pat = defs.append("pattern")
+      .attr("id", patId)
+      .attr("width", sp).attr("height", sp)
+      .attr("patternUnits", "userSpaceOnUse");
+
+    leaf.__patId = patId;
+    leaf.__patType = si;
+
+    switch (pType) {
+      case "diag":
+        pat.attr("patternTransform", "rotate(45)");
+        pat.append("line").attr("x1",0).attr("y1",0).attr("x2",0).attr("y2",sp)
+          .attr("stroke", markColor).attr("stroke-width", 1.5);
+        break;
+      case "dots":
+        pat.append("circle").attr("cx",sp/2).attr("cy",sp/2).attr("r",Math.min(1.5, sp*0.15))
+          .attr("fill", markColor);
+        break;
+      case "cross":
+        pat.attr("patternTransform", "rotate(45)");
+        pat.append("line").attr("x1",0).attr("y1",0).attr("x2",0).attr("y2",sp)
+          .attr("stroke", markColor).attr("stroke-width", 1.2);
+        pat.append("line").attr("x1",0).attr("y1",0).attr("x2",sp).attr("y2",0)
+          .attr("stroke", markColor).attr("stroke-width", 1.2);
+        break;
+      case "horiz":
+        pat.append("line").attr("x1",0).attr("y1",sp/2).attr("x2",sp).attr("y2",sp/2)
+          .attr("stroke", markColor).attr("stroke-width", 1.5);
+        break;
+      case "wave":
+        pat.append("path")
+          .attr("d", `M0,${sp*0.5} Q${sp*0.25},${sp*0.2} ${sp*0.5},${sp*0.5} T${sp},${sp*0.5}`)
+          .attr("fill","none").attr("stroke", markColor).attr("stroke-width", 1.5);
+        break;
+      case "vert":
+        pat.append("line").attr("x1",sp/2).attr("y1",0).attr("x2",sp/2).attr("y2",sp)
+          .attr("stroke", markColor).attr("stroke-width", 1.5);
+        break;
+    }
+  });
+
+  // --- Draw cells ---
+  const cellG = svg.selectAll("g.cell")
+    .data(leaves)
+    .join("g")
+      .attr("class", "cell")
+      .attr("transform", d => `translate(${d.x0},${d.y0})`);
+
+  // Color fill
+  cellG.append("rect")
+    .attr("width", d => d.x1 - d.x0)
+    .attr("height", d => d.y1 - d.y0)
+    .attr("fill", d => catColors[d.data.catIndex])
+    .attr("rx", 1);
+
+  // Pattern overlay
+  cellG.append("rect")
+    .attr("width", d => d.x1 - d.x0)
+    .attr("height", d => d.y1 - d.y0)
+    .attr("fill", d => `url(#${d.__patId})`)
+    .attr("rx", 1);
+
+  // Hover rect (invisible, for interactions)
+  cellG.append("rect")
+    .attr("class", "hover-target")
+    .attr("width", d => d.x1 - d.x0)
+    .attr("height", d => d.y1 - d.y0)
+    .attr("fill", "transparent")
+    .attr("stroke", "none")
+    .style("cursor", "pointer");
+
+  // Labels: name + revenue for cells > 60x30
+  cellG.each(function(d) {
+    const w = d.x1 - d.x0, h = d.y1 - d.y0;
+    if (w < 60 || h < 30) return;
+    const g = d3.select(this);
+    // Text color by luminance
+    const c = d3.color(catColors[d.data.catIndex]);
+    const lum = (0.299 * c.r + 0.587 * c.g + 0.114 * c.b) / 255;
+    const textCol = lum > 0.5 ? "#111" : "#fff";
+
+    g.append("text")
+      .attr("x", 4).attr("y", 16)
+      .text(d.data.name)
+      .attr("font-size", "11px").attr("font-weight", "600")
+      .attr("fill", textCol)
+      .attr("pointer-events", "none");
+
+    if (h > 44) {
+      g.append("text")
+        .attr("x", 4).attr("y", 30)
+        .text(`$${d.data.revenue}M`)
+        .attr("font-size", "10px")
+        .attr("fill", textCol)
+        .attr("opacity", 0.8)
+        .attr("pointer-events", "none");
+    }
+  });
+
+  // --- Tooltip ---
+  const tooltip = d3.select("#tooltip");
+
+  cellG.select(".hover-target")
+    .on("pointerenter", (event, d) => {
+      // Highlight
+      d3.select(event.target.parentNode).selectAll("rect").filter(function() {
+        return !d3.select(this).classed("hover-target");
+      });
+      d3.select(event.target.parentNode).append("rect")
+        .attr("class", "highlight")
+        .attr("width", d.x1 - d.x0).attr("height", d.y1 - d.y0)
+        .attr("fill", "none").attr("stroke", "#333").attr("stroke-width", 2)
+        .attr("pointer-events", "none").attr("rx", 1);
+
+      tooltip.style("display", "block")
+        .html(`<div class="tt-cat">${categories[d.data.catIndex].name} > ${d.data.name}</div>
+          <div class="tt-val">Revenue: $${d.data.revenue}M</div>
+          <div class="tt-val">Growth: ${d.data.growth > 0 ? "+" : ""}${d.data.growth}%</div>
+          <div class="tt-val">Pattern spacing: ${spacingScale(d.data.growth).toFixed(1)}px</div>`);
+    })
+    .on("pointermove", (event) => {
+      tooltip.style("left", (event.pageX + 14) + "px").style("top", (event.pageY - 10) + "px");
+    })
+    .on("pointerleave", (event) => {
+      d3.select(event.target.parentNode).selectAll(".highlight").remove();
+      tooltip.style("display", "none");
+    });
+
+  // --- Legend ---
+  const lw = 200, lh = th;
+  const legendSvg = d3.select("#legend").append("svg").attr("width", lw).attr("height", lh);
+  let ly = 0;
+
+  // Color legend
+  legendSvg.append("text").attr("x", 0).attr("y", ly + 14).text("Category (color)")
+    .attr("font-size", "13px").attr("font-weight", "600").attr("fill", "#333");
+  ly += 26;
+
+  categories.forEach((cat, i) => {
+    legendSvg.append("rect").attr("x", 0).attr("y", ly).attr("width", 16).attr("height", 16)
+      .attr("fill", catColors[i]).attr("rx", 2);
+    legendSvg.append("text").attr("x", 22).attr("y", ly + 12).text(cat.name)
+      .attr("font-size", "11px").attr("fill", "#444");
+    ly += 22;
+  });
+
+  ly += 14;
+
+  // Pattern legend
+  legendSvg.append("text").attr("x", 0).attr("y", ly + 14).text("Subcategory (pattern)")
+    .attr("font-size", "13px").attr("font-weight", "600").attr("fill", "#333");
+  ly += 26;
+
+  // Create legend-specific patterns on gray
+  patternTypes.forEach((pt, i) => {
+    const sp = 8;
+    const patId = `legend-pat-${i}`;
+    const pat = defs.append("pattern")
+      .attr("id", patId).attr("width", sp).attr("height", sp)
+      .attr("patternUnits", "userSpaceOnUse");
+
+    const markColor = "rgba(0,0,0,0.25)";
+    switch (pt.type) {
+      case "diag":
+        pat.attr("patternTransform", "rotate(45)");
+        pat.append("line").attr("x1",0).attr("y1",0).attr("x2",0).attr("y2",sp).attr("stroke",markColor).attr("stroke-width",1.5);
+        break;
+      case "dots":
+        pat.append("circle").attr("cx",sp/2).attr("cy",sp/2).attr("r",1.5).attr("fill",markColor);
+        break;
+      case "cross":
+        pat.attr("patternTransform", "rotate(45)");
+        pat.append("line").attr("x1",0).attr("y1",0).attr("x2",0).attr("y2",sp).attr("stroke",markColor).attr("stroke-width",1.2);
+        pat.append("line").attr("x1",0).attr("y1",0).attr("x2",sp).attr("y2",0).attr("stroke",markColor).attr("stroke-width",1.2);
+        break;
+      case "horiz":
+        pat.append("line").attr("x1",0).attr("y1",sp/2).attr("x2",sp).attr("y2",sp/2).attr("stroke",markColor).attr("stroke-width",1.5);
+        break;
+      case "wave":
+        pat.append("path").attr("d",`M0,${sp*0.5} Q${sp*0.25},${sp*0.2} ${sp*0.5},${sp*0.5} T${sp},${sp*0.5}`)
+          .attr("fill","none").attr("stroke",markColor).attr("stroke-width",1.5);
+        break;
+      case "vert":
+        pat.append("line").attr("x1",sp/2).attr("y1",0).attr("x2",sp/2).attr("y2",sp).attr("stroke",markColor).attr("stroke-width",1.5);
+        break;
+    }
+
+    legendSvg.append("rect").attr("x", 0).attr("y", ly).attr("width", 16).attr("height", 16)
+      .attr("fill", "#bbb").attr("rx", 2);
+    legendSvg.append("rect").attr("x", 0).attr("y", ly).attr("width", 16).attr("height", 16)
+      .attr("fill", `url(#${patId})`).attr("rx", 2);
+    legendSvg.append("text").attr("x", 22).attr("y", ly + 12).text(pt.label)
+      .attr("font-size", "11px").attr("fill", "#444");
+    ly += 22;
+  });
+
+  ly += 14;
+
+  // Spacing gradient legend
+  legendSvg.append("text").attr("x", 0).attr("y", ly + 14).text("Growth rate (spacing)")
+    .attr("font-size", "13px").attr("font-weight", "600").attr("fill", "#333");
+  ly += 26;
+
+  // Draw a gradient bar showing spacing
+  const gradW = 160, gradH = 16;
+  const steps = 8;
+  for (let s = 0; s < steps; s++) {
+    const growth = -15 + (s / (steps - 1)) * 55;
+    const sp = spacingScale(growth);
+    const cx = s * (gradW / steps);
+    const cw = gradW / steps;
+
+    const gPatId = `grad-pat-${s}`;
+    const gPat = defs.append("pattern")
+      .attr("id", gPatId).attr("width", sp).attr("height", sp)
+      .attr("patternUnits", "userSpaceOnUse")
+      .attr("patternTransform", "rotate(45)");
+    gPat.append("line").attr("x1",0).attr("y1",0).attr("x2",0).attr("y2",sp)
+      .attr("stroke","rgba(0,0,0,0.3)").attr("stroke-width",1.5);
+
+    legendSvg.append("rect").attr("x", cx).attr("y", ly).attr("width", cw).attr("height", gradH)
+      .attr("fill", "#ccc");
+    legendSvg.append("rect").attr("x", cx).attr("y", ly).attr("width", cw).attr("height", gradH)
+      .attr("fill", `url(#${gPatId})`);
+  }
+
+  legendSvg.append("text").attr("x", 0).attr("y", ly + gradH + 14).text("-15%")
+    .attr("font-size", "10px").attr("fill", "#666");
+  legendSvg.append("text").attr("x", gradW - 4).attr("y", ly + gradH + 14).text("+40%")
+    .attr("font-size", "10px").attr("fill", "#666").attr("text-anchor", "end");
+
+  legendSvg.append("text").attr("x", 0).attr("y", ly + gradH + 28).text("Dense = negative")
+    .attr("font-size", "10px").attr("fill", "#999");
+  legendSvg.append("text").attr("x", gradW - 4).attr("y", ly + gradH + 28).text("Sparse = positive")
+    .attr("font-size", "10px").attr("fill", "#999").attr("text-anchor", "end");
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Renewable Energy Adoption by State (%)</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #fafafa; display: flex; justify-content: center; padding: 24px; }
+  .container { width: 1200px; max-width: 100%; }
+  h1 { font-size: 20px; font-weight: 600; color: #222; margin-bottom: 4px; }
+  .subtitle { font-size: 13px; color: #666; margin-bottom: 12px; }
+  .controls { display: flex; gap: 12px; margin-bottom: 12px; align-items: center; }
+  .controls button {
+    padding: 6px 14px; border: 1px solid #999; border-radius: 4px;
+    background: #fff; cursor: pointer; font-size: 13px; font-family: system-ui;
+  }
+  .controls button[aria-pressed="true"] { background: #4477AA; color: #fff; border-color: #4477AA; }
+  .map-wrap { position: relative; }
+  canvas { display: block; border: 1px solid #ddd; border-radius: 4px; }
+  .focus-overlay { position: absolute; top: 0; left: 0; pointer-events: none; }
+  .legend { display: flex; gap: 0; margin-top: 10px; align-items: center; }
+  .legend-cell { width: 48px; height: 16px; }
+  .legend-labels { display: flex; justify-content: space-between; width: 240px; font-size: 11px; color: #555; margin-top: 2px; }
+  .legend-title { font-size: 12px; color: #444; margin-right: 8px; }
+  #live-region { position: absolute; left: -9999px; }
+  .table-container { display: none; max-height: 500px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead { position: sticky; top: 0; background: #f5f5f5; z-index: 1; }
+  th { text-align: left; padding: 8px 10px; border-bottom: 2px solid #ccc; cursor: pointer; user-select: none; font-weight: 600; }
+  th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  th:hover { background: #e8e8e8; }
+  td { padding: 6px 10px; border-bottom: 1px solid #eee; }
+  tr.highlighted { background: #e3f0ff; }
+  tr:hover { background: #f0f0f0; }
+  .bar-cell { display: flex; align-items: center; gap: 6px; }
+  .bar-fill { height: 12px; border-radius: 2px; }
+  .bar-label { font-size: 11px; color: #555; min-width: 32px; text-align: right; }
+  .sort-arrow { font-size: 10px; margin-left: 4px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Renewable Energy Adoption by State (%)</h1>
+  <p class="subtitle">Arrow keys to navigate states. Tab to exit map. Enter to select.</p>
+  <div class="controls">
+    <button id="toggle-table" aria-pressed="false">Show as Table</button>
+  </div>
+  <div class="map-wrap" id="map-wrap">
+    <canvas id="map-canvas" width="800" height="500" tabindex="0" role="application"
+      aria-label="US state choropleth map of renewable energy adoption. Use arrow keys to navigate, Enter to select.">
+      Choropleth map with 51 states. Use arrow keys to navigate, Enter to select.
+    </canvas>
+    <svg class="focus-overlay" id="focus-svg" width="800" height="500"></svg>
+  </div>
+  <div class="legend-row" style="margin-top:8px;">
+    <div style="display:flex;align-items:center;gap:6px;">
+      <span class="legend-title">Renewable %</span>
+      <div class="legend" id="legend"></div>
+    </div>
+    <div class="legend-labels" style="margin-left:92px;">
+      <span>5%</span><span>19%</span><span>33%</span><span>47%</span><span>61%</span><span>75%</span>
+    </div>
+  </div>
+  <div class="table-container" id="table-container">
+    <table id="data-table" aria-label="Renewable energy data by state">
+      <thead><tr></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div id="live-region" aria-live="assertive" aria-atomic="true"></div>
+</div>
+
+<script type="module">
+import * as topojson from "https://cdn.jsdelivr.net/npm/topojson-client@3/+esm";
+
+// --- Synthetic data: 50 states + DC with renewable energy % ---
+const stateNames = {
+  "01":"Alabama","02":"Alaska","04":"Arizona","05":"Arkansas","06":"California",
+  "08":"Colorado","09":"Connecticut","10":"Delaware","11":"District of Columbia",
+  "12":"Florida","13":"Georgia","15":"Hawaii","16":"Idaho","17":"Illinois",
+  "18":"Indiana","19":"Iowa","20":"Kansas","21":"Kentucky","22":"Louisiana",
+  "23":"Maine","24":"Maryland","25":"Massachusetts","26":"Michigan","27":"Minnesota",
+  "28":"Mississippi","29":"Missouri","30":"Montana","31":"Nebraska","32":"Nevada",
+  "33":"New Hampshire","34":"New Jersey","35":"New Mexico","36":"New York",
+  "37":"North Carolina","38":"North Dakota","39":"Ohio","40":"Oklahoma",
+  "41":"Oregon","42":"Pennsylvania","44":"Rhode Island","45":"South Carolina",
+  "46":"South Dakota","47":"Tennessee","48":"Texas","49":"Utah","50":"Vermont",
+  "51":"Virginia","53":"Washington","54":"West Virginia","55":"Wisconsin","56":"Wyoming"
+};
+
+const seededRandom = (() => { let s = 12345; return () => { s = (s * 16807 + 0) % 2147483647; return s / 2147483647; }; })();
+const rawValues = Object.keys(stateNames).map(fips => {
+  const base = {
+    "06":68,"53":72,"41":65,"50":70,"23":62,"27":58,"19":57,"46":55,"38":52,
+    "30":48,"16":52,"35":38,"08":42,"32":35,"15":45,"36":40,"25":38,
+    "09":32,"44":28,"34":25,"24":22,"42":18,"39":15,"17":16,"55":22,
+    "26":20,"18":14,"37":18,"51":15,"13":12,"01":10,"28":8,"22":9,
+    "21":8,"47":12,"45":10,"54":6,"40":25,"48":28,"04":30,"05":7,
+    "12":10,"10":9,"33":28,"29":12,"31":30,"56":42,"49":20,"02":35,"11":18,
+    "20":38
+  }[fips] || 20;
+  const value = Math.max(5, Math.min(75, base + Math.round((seededRandom() - 0.5) * 10)));
+  return { fips, name: stateNames[fips], value };
+});
+
+// Rank
+rawValues.sort((a, b) => b.value - a.value);
+rawValues.forEach((d, i) => d.rank = i + 1);
+const dataMap = new Map(rawValues.map(d => [d.fips, d]));
+
+// --- Color scale: 5-step sequential ---
+const colorSteps = ["#BBCCEE", "#8899CC", "#5566AA", "#334488", "#222255"];
+const thresholds = [19, 33, 47, 61];
+const colorScale = d3.scaleThreshold().domain(thresholds).range(colorSteps);
+const binIndex = v => { for (let i = 0; i < thresholds.length; i++) if (v < thresholds[i]) return i; return thresholds.length; };
+
+// --- Pattern fills for forced-colors fallback ---
+const patternDensities = [3, 5, 8, 12, 18]; // dots per 20x20 tile, increasing density
+
+// --- Load US Atlas ---
+const us = await d3.json("https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json");
+const states = topojson.feature(us, us.objects.states).features;
+const stateMesh = topojson.mesh(us, us.objects.states, (a, b) => a !== b);
+const nation = topojson.merge(us, us.objects.states.geometries);
+
+// --- Setup ---
+const canvas = document.getElementById("map-canvas");
+const dpr = window.devicePixelRatio || 1;
+const cw = 800, ch = 500;
+canvas.width = cw * dpr;
+canvas.height = ch * dpr;
+canvas.style.width = cw + "px";
+canvas.style.height = ch + "px";
+const ctx = canvas.getContext("2d");
+ctx.scale(dpr, dpr);
+
+const projection = d3.geoAlbersUsa().fitSize([cw - 20, ch - 20], nation).translate([cw / 2, ch / 2]);
+const path = d3.geoPath(projection, ctx);
+
+// Compute centroids for geographic sorting
+const statesWithCentroids = states.map(f => {
+  const fips = String(f.id).padStart(2, "0");
+  const c = d3.geoPath(projection).centroid(f);
+  return { feature: f, fips, centroid: c, data: dataMap.get(fips) };
+}).filter(d => d.data && d.centroid && isFinite(d.centroid[0]));
+
+// Geographic sort: left-to-right, top-to-bottom (by centroid)
+statesWithCentroids.sort((a, b) => {
+  const rowA = Math.floor(a.centroid[1] / 80);
+  const rowB = Math.floor(b.centroid[1] / 80);
+  if (rowA !== rowB) return rowA - rowB;
+  return a.centroid[0] - b.centroid[0];
+});
+
+// --- Focus overlay SVG ---
+const focusSvg = d3.select("#focus-svg");
+const svgPath = d3.geoPath(projection);
+
+// --- State ---
+let focusedIndex = -1;
+let forcedColorsMode = false;
+const liveRegion = document.getElementById("live-region");
+
+const announce = (d) => {
+  if (!d) return;
+  liveRegion.textContent = `${d.data.name}: ${d.data.value}%, rank ${d.data.rank} of 51.`;
+};
+
+// --- Canvas pattern tiles ---
+const patternTiles = patternDensities.map((density, bi) => {
+  const tile = document.createElement("canvas");
+  const ts = 20;
+  tile.width = ts * dpr; tile.height = ts * dpr;
+  const tc = tile.getContext("2d");
+  tc.scale(dpr, dpr);
+  // Fill with the bin color
+  tc.fillStyle = colorSteps[bi];
+  tc.fillRect(0, 0, ts, ts);
+  // Draw pattern marks
+  tc.fillStyle = "rgba(0,0,0,0.3)";
+  const step = ts / Math.ceil(Math.sqrt(density));
+  for (let x = step / 2; x < ts; x += step) {
+    for (let y = step / 2; y < ts; y += step) {
+      tc.beginPath();
+      tc.arc(x, y, 1.5, 0, Math.PI * 2);
+      tc.fill();
+    }
+  }
+  return ctx.createPattern(tile, "repeat");
+});
+
+// --- Render ---
+const render = () => {
+  ctx.clearRect(0, 0, cw, ch);
+
+  // Fill states
+  for (const s of statesWithCentroids) {
+    const bi = binIndex(s.data.value);
+    ctx.beginPath();
+    path(s.feature);
+    if (forcedColorsMode) {
+      ctx.fillStyle = patternTiles[bi];
+    } else {
+      ctx.fillStyle = colorScale(s.data.value);
+    }
+    ctx.fill();
+  }
+
+  // Internal borders
+  ctx.beginPath();
+  path(stateMesh);
+  ctx.strokeStyle = "#fff";
+  ctx.lineWidth = 0.5;
+  ctx.stroke();
+
+  // Nation outline
+  ctx.beginPath();
+  path(nation);
+  ctx.strokeStyle = "#333";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Focus ring via SVG overlay
+  focusSvg.selectAll("path").remove();
+  if (focusedIndex >= 0) {
+    const s = statesWithCentroids[focusedIndex];
+    focusSvg.append("path")
+      .attr("d", svgPath(s.feature))
+      .attr("fill", "none")
+      .attr("stroke", "#1a73e8")
+      .attr("stroke-width", 3)
+      .attr("stroke-dasharray", "6,3");
+  }
+};
+
+render();
+
+// --- Keyboard navigation ---
+canvas.addEventListener("keydown", (e) => {
+  const n = statesWithCentroids.length;
+  if (!n) return;
+  let next = focusedIndex;
+
+  if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+    next = focusedIndex < 0 ? 0 : Math.min(focusedIndex + 1, n - 1);
+  } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+    next = focusedIndex < 0 ? 0 : Math.max(focusedIndex - 1, 0);
+  } else if (e.key === "Home") {
+    next = 0;
+  } else if (e.key === "End") {
+    next = n - 1;
+  } else if (e.key === "Escape") {
+    focusedIndex = -1;
+    render();
+    return;
+  } else if (e.key === "Enter" || e.key === " ") {
+    if (focusedIndex >= 0) announce(statesWithCentroids[focusedIndex]);
+    e.preventDefault();
+    return;
+  } else {
+    return;
+  }
+
+  e.preventDefault();
+  focusedIndex = next;
+  render();
+  announce(statesWithCentroids[focusedIndex]);
+});
+
+canvas.addEventListener("focus", () => {
+  if (focusedIndex < 0) {
+    focusedIndex = 0;
+    render();
+    announce(statesWithCentroids[0]);
+  }
+});
+
+// --- Color legend ---
+const legendEl = document.getElementById("legend");
+colorSteps.forEach(c => {
+  const div = document.createElement("div");
+  div.className = "legend-cell";
+  div.style.background = c;
+  legendEl.appendChild(div);
+});
+
+// --- Table toggle ---
+const toggleBtn = document.getElementById("toggle-table");
+const tableContainer = document.getElementById("table-container");
+const mapWrap = document.getElementById("map-wrap");
+let tableVisible = false;
+
+const columns = [
+  { key: "rank", label: "Rank", type: "number" },
+  { key: "name", label: "State", type: "string" },
+  { key: "value", label: "Renewable %", type: "number" },
+  { key: "bar", label: "Distribution", type: "bar" }
+];
+
+// Build table
+const table = document.getElementById("data-table");
+const thead = table.querySelector("thead tr");
+const tbody = table.querySelector("tbody");
+let sortKey = "rank", sortAsc = true;
+
+columns.forEach(col => {
+  const th = document.createElement("th");
+  th.textContent = col.label;
+  th.className = col.type === "number" ? "num" : "";
+  th.tabIndex = 0;
+  th.dataset.key = col.key;
+  th.setAttribute("aria-sort", col.key === "rank" ? "ascending" : "none");
+  th.addEventListener("click", () => sortTable(col.key));
+  th.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); sortTable(col.key); } });
+  thead.appendChild(th);
+});
+
+const sortTable = (key) => {
+  if (key === "bar") return;
+  if (sortKey === key) { sortAsc = !sortAsc; } else { sortKey = key; sortAsc = true; }
+  renderTable();
+  // Update aria-sort
+  thead.querySelectorAll("th").forEach(th => {
+    th.setAttribute("aria-sort", th.dataset.key === sortKey ? (sortAsc ? "ascending" : "descending") : "none");
+  });
+};
+
+const renderTable = () => {
+  const sorted = [...rawValues].sort((a, b) => {
+    const av = a[sortKey], bv = b[sortKey];
+    const cmp = typeof av === "string" ? av.localeCompare(bv) : av - bv;
+    return sortAsc ? cmp : -cmp;
+  });
+  const maxVal = 75;
+
+  tbody.innerHTML = "";
+  sorted.forEach(d => {
+    const tr = document.createElement("tr");
+    if (focusedIndex >= 0 && statesWithCentroids[focusedIndex]?.data.fips === d.fips) {
+      tr.classList.add("highlighted");
+    }
+
+    // Rank
+    const tdR = document.createElement("td");
+    tdR.className = "num";
+    tdR.textContent = d.rank;
+    tr.appendChild(tdR);
+
+    // Name
+    const tdN = document.createElement("td");
+    tdN.textContent = d.name;
+    tr.appendChild(tdN);
+
+    // Value
+    const tdV = document.createElement("td");
+    tdV.className = "num";
+    tdV.textContent = d.value + "%";
+    tr.appendChild(tdV);
+
+    // Bar
+    const tdB = document.createElement("td");
+    const barDiv = document.createElement("div");
+    barDiv.className = "bar-cell";
+    const fill = document.createElement("div");
+    fill.className = "bar-fill";
+    fill.style.width = (d.value / maxVal * 120) + "px";
+    fill.style.background = colorScale(d.value);
+    barDiv.appendChild(fill);
+    tdB.appendChild(barDiv);
+    tr.appendChild(tdB);
+
+    tbody.appendChild(tr);
+  });
+};
+
+toggleBtn.addEventListener("click", () => {
+  tableVisible = !tableVisible;
+  toggleBtn.setAttribute("aria-pressed", tableVisible);
+  toggleBtn.textContent = tableVisible ? "Show as Map" : "Show as Table";
+  tableContainer.style.display = tableVisible ? "block" : "none";
+  mapWrap.style.display = tableVisible ? "none" : "block";
+  document.querySelector(".legend-row").style.display = tableVisible ? "none" : "block";
+  if (tableVisible) renderTable();
+});
+
+// Detect forced-colors
+if (window.matchMedia) {
+  const fcMQ = window.matchMedia("(forced-colors: active)");
+  if (fcMQ.matches) { forcedColorsMode = true; render(); }
+  fcMQ.addEventListener("change", e => { forcedColorsMode = e.matches; render(); });
+}
+</script>
+</body>
+</html>

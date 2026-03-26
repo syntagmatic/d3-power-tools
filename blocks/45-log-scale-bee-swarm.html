@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Log Scale Bee Swarm</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px;
+  }
+  h1 { font-size: 18px; font-weight: 600; color: #222; margin-bottom: 4px; }
+  .subtitle { font-size: 13px; color: #666; margin-bottom: 12px; }
+  .controls { margin-bottom: 10px; display: flex; gap: 6px; }
+  .controls button {
+    padding: 5px 14px; border: 1px solid #ccc; border-radius: 4px;
+    background: #fff; font-size: 12px; cursor: pointer; font-family: inherit;
+    transition: all 0.15s;
+  }
+  .controls button.active { background: #333; color: #fff; border-color: #333; }
+  .controls button:hover:not(.active) { background: #eee; }
+  .legend { display: flex; gap: 14px; margin-bottom: 8px; flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #444; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+  .tooltip-box {
+    position: fixed; pointer-events: none; background: white; border: 1px solid #ccc;
+    border-radius: 4px; padding: 6px 10px; font-size: 12px; box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+    opacity: 0; transition: opacity 0.05s; z-index: 10;
+  }
+  .tooltip-box .val { font-family: "SF Mono", Monaco, "Cascadia Code", monospace; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>500 Companies by Revenue &mdash; How Scale Choice Shapes Perception</h1>
+<p class="subtitle">Toggle scale type to see how small companies emerge or vanish.</p>
+<div class="controls">
+  <button class="active" data-scale="log">Log</button>
+  <button data-scale="linear">Linear</button>
+  <button data-scale="symlog">Symlog</button>
+</div>
+<div class="legend" id="legend"></div>
+<svg id="chart"></svg>
+<div class="tooltip-box" id="tip"></div>
+
+<script>
+(() => {
+const rng = d3.randomLcg(42);
+const sectors = ["Technology", "Healthcare", "Finance", "Energy", "Retail", "Manufacturing"];
+const sectorColors = ["#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE", "#AA3377"];
+const colorMap = new Map(sectors.map((s, i) => [s, sectorColors[i]]));
+
+// Generate 500 companies with log-normal revenue
+const data = d3.range(500).map(i => {
+  const sIdx = Math.floor(rng() * sectors.length);
+  const sector = sectors[sIdx];
+  // Log-normal: different sector medians
+  const sectorMedian = [2e6, 1.5e6, 5e6, 8e6, 1e6, 3e6][sIdx];
+  const logMean = Math.log(sectorMedian);
+  const logSd = 1.8 + rng() * 0.6;
+  let u1 = rng(), u2 = rng();
+  while (!u1) u1 = rng();
+  const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  let revenue = Math.exp(logMean + logSd * z);
+  revenue = Math.max(100000, Math.min(1e9, revenue));
+  const name = `${sector.slice(0, 3).toUpperCase()}-${String(i + 1).padStart(3, "0")}`;
+  return { name, sector, revenue, sectorIdx: sIdx };
+});
+
+// Layout
+const margin = { top: 10, right: 160, bottom: 50, left: 60 };
+const width = 900, height = 500;
+const plotW = width - margin.left - margin.right;
+const plotH = height - margin.top - margin.bottom;
+
+const svg = d3.select("#chart").attr("width", width).attr("height", height);
+const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+// Legend
+const legendDiv = d3.select("#legend");
+sectors.forEach((s, i) => {
+  const item = legendDiv.append("span").attr("class", "legend-item");
+  item.append("span").attr("class", "legend-dot").style("background", sectorColors[i]);
+  item.append("span").text(s);
+});
+
+// Scales
+const extent = d3.extent(data, d => d.revenue);
+const scales = {
+  log: d3.scaleLog().domain([extent[0] * 0.9, extent[1] * 1.1]).range([0, plotW]).clamp(true),
+  linear: d3.scaleLinear().domain([0, extent[1] * 1.05]).range([0, plotW]).nice(),
+  symlog: d3.scaleSymlog().domain([0, extent[1] * 1.05]).constant(10000).range([0, plotW]),
+};
+
+let currentScale = "log";
+let xScale = scales[currentScale];
+const yCenter = plotH / 2;
+const r = 3;
+
+// Axis
+const axisG = g.append("g").attr("transform", `translate(0,${plotH})`);
+const xLabel = g.append("text").attr("x", plotW / 2).attr("y", plotH + 40)
+  .attr("text-anchor", "middle").attr("font-size", 12).attr("fill", "#555").text("Revenue");
+
+const formatRevenue = d => {
+  if (d >= 1e9) return `$${(d / 1e9).toFixed(1)}B`;
+  if (d >= 1e6) return `$${(d / 1e6).toFixed(1)}M`;
+  if (d >= 1e3) return `$${(d / 1e3).toFixed(0)}K`;
+  return `$${d}`;
+};
+
+function updateAxis(scale, dur = 0) {
+  let axis;
+  if (currentScale === "log") {
+    // Only show ticks at powers of 10
+    const logTicks = [1e5, 1e6, 1e7, 1e8, 1e9];
+    axis = d3.axisBottom(scale).tickValues(logTicks).tickFormat(formatRevenue);
+  } else {
+    axis = d3.axisBottom(scale).ticks(6).tickFormat(formatRevenue);
+  }
+  if (dur) {
+    axisG.transition().duration(dur).call(axis);
+  } else {
+    axisG.call(axis);
+  }
+  axisG.select(".domain").attr("stroke", "#aaa");
+  axisG.selectAll("text").attr("font-size", 10);
+}
+
+// Simulation nodes — clone data
+const nodes = data.map(d => ({ ...d, x: xScale(d.revenue), y: yCenter }));
+
+// Force simulation
+const simulation = d3.forceSimulation(nodes)
+  .force("x", d3.forceX(d => xScale(d.revenue)).strength(0.8))
+  .force("y", d3.forceY(yCenter).strength(0.06))
+  .force("collide", d3.forceCollide(r + 0.8).iterations(2))
+  .stop();
+
+// Pre-compute
+for (let i = 0; i < 200; i++) simulation.tick();
+
+// Clip
+g.append("clipPath").attr("id", "plot-clip")
+  .append("rect").attr("width", plotW).attr("height", plotH);
+
+const dotG = g.append("g").attr("clip-path", "url(#plot-clip)");
+
+// Draw circles
+const circles = dotG.selectAll("circle")
+  .data(nodes)
+  .join("circle")
+  .attr("cx", d => d.x)
+  .attr("cy", d => d.y)
+  .attr("r", r)
+  .attr("fill", d => colorMap.get(d.sector))
+  .attr("fill-opacity", 0.7)
+  .attr("stroke", d => d3.color(colorMap.get(d.sector)).darker(0.3))
+  .attr("stroke-width", 0.4)
+  .style("cursor", "pointer");
+
+updateAxis(xScale);
+
+// Tooltip
+const tip = d3.select("#tip");
+const quadtree = d3.quadtree()
+  .x(d => d.x).y(d => d.y)
+  .addAll(nodes);
+
+svg.on("pointermove", (event) => {
+  const [mx, my] = d3.pointer(event, g.node());
+  const found = quadtree.find(mx, my, 12);
+  if (found) {
+    circles.attr("fill-opacity", d => d === found ? 1 : 0.3)
+      .attr("r", d => d === found ? 5 : r);
+    tip.html(`<strong>${found.name}</strong><br>${found.sector}<br><span class="val">${formatRevenue(found.revenue)}</span>`)
+      .style("opacity", 1)
+      .style("left", (event.clientX + 14) + "px")
+      .style("top", (event.clientY - 10) + "px");
+  } else {
+    circles.attr("fill-opacity", 0.7).attr("r", r);
+    tip.style("opacity", 0);
+  }
+});
+svg.on("pointerleave", () => {
+  circles.attr("fill-opacity", 0.7).attr("r", r);
+  tip.style("opacity", 0);
+});
+
+// Box plot on right margin
+const boxG = g.append("g").attr("transform", `translate(${plotW + 24}, 0)`);
+const boxW = 30;
+
+function computeStats(values) {
+  const sorted = Float64Array.from(values).sort();
+  const q1 = d3.quantile(sorted, 0.25);
+  const q3 = d3.quantile(sorted, 0.75);
+  const iqr = q3 - q1;
+  return {
+    q1, median: d3.quantile(sorted, 0.5), q3,
+    whiskerLow: d3.quantile(sorted, 0.05),
+    whiskerHigh: d3.quantile(sorted, 0.95),
+  };
+}
+
+const allRevenues = data.map(d => d.revenue);
+const stats = computeStats(allRevenues);
+
+// Box plot uses a vertical scale matching the x scale type
+function drawBoxPlot(scaleType) {
+  boxG.selectAll("*").remove();
+  let yBoxScale;
+  if (scaleType === "log") {
+    yBoxScale = d3.scaleLog().domain(scales.log.domain()).range([plotH, 0]).clamp(true);
+  } else if (scaleType === "symlog") {
+    yBoxScale = d3.scaleSymlog().domain(scales.symlog.domain()).constant(10000).range([plotH, 0]);
+  } else {
+    yBoxScale = d3.scaleLinear().domain(scales.linear.domain()).range([plotH, 0]);
+  }
+
+  const wLow = yBoxScale(stats.whiskerLow);
+  const wHigh = yBoxScale(stats.whiskerHigh);
+  const bQ1 = yBoxScale(stats.q1);
+  const bQ3 = yBoxScale(stats.q3);
+  const bMed = yBoxScale(stats.median);
+
+  // Whisker line
+  boxG.append("line").attr("x1", boxW / 2).attr("x2", boxW / 2)
+    .attr("y1", wHigh).attr("y2", wLow)
+    .attr("stroke", "#555").attr("stroke-width", 1);
+  // Whisker caps
+  [wLow, wHigh].forEach(yy => {
+    boxG.append("line").attr("x1", boxW * 0.2).attr("x2", boxW * 0.8)
+      .attr("y1", yy).attr("y2", yy)
+      .attr("stroke", "#555").attr("stroke-width", 1);
+  });
+  // Box
+  boxG.append("rect")
+    .attr("x", 2).attr("y", bQ3).attr("width", boxW - 4).attr("height", bQ1 - bQ3)
+    .attr("fill", "#ddd").attr("stroke", "#555").attr("stroke-width", 1);
+  // Median
+  boxG.append("line").attr("x1", 2).attr("x2", boxW - 2)
+    .attr("y1", bMed).attr("y2", bMed)
+    .attr("stroke", "#333").attr("stroke-width", 2);
+
+  // Labels
+  boxG.append("text").attr("x", boxW + 4).attr("y", bMed + 4)
+    .attr("font-size", 9).attr("fill", "#555").text(`Med: ${formatRevenue(stats.median)}`);
+  boxG.append("text").attr("x", boxW / 2).attr("y", -6)
+    .attr("text-anchor", "middle").attr("font-size", 10).attr("fill", "#555").text("All");
+}
+
+drawBoxPlot(currentScale);
+
+// Scale toggle
+function switchScale(scaleType) {
+  currentScale = scaleType;
+  xScale = scales[scaleType];
+
+  // Update buttons
+  d3.selectAll(".controls button").classed("active", function() {
+    return this.dataset.scale === scaleType;
+  });
+
+  // Update force targets and reheat
+  simulation.force("x", d3.forceX(d => xScale(d.revenue)).strength(0.8));
+  simulation.alpha(0.8).restart();
+
+  // Animate over ~60 frames
+  let ticks = 0;
+  simulation.on("tick", () => {
+    circles
+      .attr("cx", d => d.x)
+      .attr("cy", d => d.y);
+    ticks++;
+    if (ticks > 120) simulation.stop();
+  });
+
+  // Rebuild quadtree after settling
+  setTimeout(() => {
+    quadtree.removeAll(nodes);
+    nodes.forEach(d => quadtree.add(d));
+  }, 1500);
+
+  updateAxis(xScale, 500);
+  drawBoxPlot(scaleType);
+}
+
+d3.selectAll(".controls button").on("click", function() {
+  switchScale(this.dataset.scale);
+});
+
+// Initial quadtree is built from pre-computed positions — rebuild it
+// (already done above via addAll)
+})();
+</script>
+</body>
+</html>

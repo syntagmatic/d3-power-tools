@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Temporal Edge Bundling</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #fafafa; color: #333; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 16px; }
+  h2 { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { font-size: 13px; color: #666; margin-bottom: 12px; }
+  .chart-wrapper { position: relative; width: 100%; display: flex; justify-content: center; }
+  canvas { position: absolute; top: 0; left: 50%; transform: translateX(-50%); }
+  svg { position: relative; z-index: 1; }
+  .controls { display: flex; align-items: center; gap: 16px; margin-top: 12px; justify-content: center; }
+  .controls label { font-size: 13px; color: #555; }
+  .controls input[type="range"] { width: 240px; }
+  .controls button {
+    padding: 4px 14px; font-size: 13px; border: 1px solid #bbb; border-radius: 4px;
+    background: #fff; cursor: pointer; font-family: system-ui;
+  }
+  .controls button:hover { background: #f0f0f0; }
+  .badge {
+    font-size: 12px; background: #4477AA; color: #fff; padding: 2px 8px;
+    border-radius: 10px; font-variant-numeric: tabular-nums;
+  }
+  .month-label { font-size: 13px; font-weight: 600; min-width: 36px; text-align: center; }
+  .legend { display: flex; gap: 14px; margin-top: 8px; justify-content: center; flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 4px; font-size: 12px; }
+  .legend-swatch { width: 10px; height: 10px; border-radius: 50%; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h2>Temporal Edge Bundling</h2>
+  <p class="subtitle">Cross-department connections over 12 months. Edges route through the hierarchy via LCA path bundling.</p>
+  <div class="chart-wrapper" id="chart"></div>
+  <div class="controls">
+    <button id="playBtn">Play</button>
+    <label for="monthSlider">Month:</label>
+    <input type="range" id="monthSlider" min="1" max="12" value="1" step="1">
+    <span class="month-label" id="monthLabel">Jan</span>
+    <span class="badge" id="edgeBadge">0 edges</span>
+  </div>
+  <div class="legend" id="legend"></div>
+</div>
+<script>
+(() => {
+  const TOL = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377","#BBBBBB"];
+  const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const DEPTS = ["Engineering","Design","Marketing","Sales","Operations"];
+  const dpr = window.devicePixelRatio || 1;
+  const size = 600;
+  const radius = size / 2 - 70;
+  const margin = { top: 20, right: 20, bottom: 20, left: 20 };
+  const width = size + margin.left + margin.right;
+  const height = size + margin.top + margin.bottom;
+
+  // --- Generate hierarchy: root -> departments -> teams -> members ---
+  const nodes = [{ id: "root", parent: null, dept: null }];
+  const rng = d3.randomLcg(12345);
+  const teamCounts = [5, 4, 5, 4, 5];
+  const memberCounts = () => 4 + Math.floor(rng() * 2); // 4-5
+
+  DEPTS.forEach((dept, di) => {
+    const deptId = dept;
+    nodes.push({ id: deptId, parent: "root", dept });
+    for (let t = 0; t < teamCounts[di]; t++) {
+      const teamId = `${deptId}-T${t}`;
+      nodes.push({ id: teamId, parent: deptId, dept });
+      const mc = memberCounts();
+      for (let m = 0; m < mc; m++) {
+        nodes.push({ id: `${teamId}-M${m}`, parent: teamId, dept });
+      }
+    }
+  });
+
+  const root = d3.stratify().id(d => d.id).parentId(d => d.parent)(nodes);
+
+  // Radial cluster layout
+  const cluster = d3.cluster()
+    .size([2 * Math.PI, radius])
+    .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth);
+  cluster(root);
+
+  // Convert to cartesian for each node
+  root.each(d => {
+    d.cx = d.y * Math.cos(d.x - Math.PI / 2);
+    d.cy = d.y * Math.sin(d.x - Math.PI / 2);
+  });
+
+  const leaves = root.leaves();
+  const nodesById = new Map(root.descendants().map(d => [d.id, d]));
+
+  // --- Generate ~300 cross-department edges with temporal windows ---
+  const edges = [];
+  const leafList = leaves.map(d => d.data);
+  for (let i = 0; i < 300; i++) {
+    let srcIdx, tgtIdx;
+    do {
+      srcIdx = Math.floor(rng() * leafList.length);
+      tgtIdx = Math.floor(rng() * leafList.length);
+    } while (srcIdx === tgtIdx || leafList[srcIdx].dept === leafList[tgtIdx].dept);
+
+    const startMonth = 1 + Math.floor(rng() * 10);
+    const duration = 1 + Math.floor(rng() * 5);
+    const endMonth = Math.min(12, startMonth + duration);
+
+    edges.push({
+      source: leafList[srcIdx].id,
+      target: leafList[tgtIdx].id,
+      startMonth,
+      endMonth,
+    });
+  }
+
+  // Precompute LCA paths
+  const edgePaths = edges.map(e => {
+    const src = nodesById.get(e.source);
+    const tgt = nodesById.get(e.target);
+    if (!src || !tgt) return null;
+    const path = src.path(tgt);
+    return { ...e, path: path.map(n => ({ cx: n.cx, cy: n.cy })) };
+  }).filter(Boolean);
+
+  // Color scale by department
+  const deptColor = d3.scaleOrdinal().domain(DEPTS).range(TOL);
+
+  // --- Canvas for edges ---
+  const chartDiv = d3.select("#chart");
+  const canvas = chartDiv.append("canvas")
+    .attr("width", width * dpr)
+    .attr("height", height * dpr)
+    .style("width", `${width}px`)
+    .style("height", `${height}px`);
+  const ctx = canvas.node().getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  // --- SVG for nodes ---
+  const svg = chartDiv.append("svg")
+    .attr("width", width)
+    .attr("height", height)
+    .attr("viewBox", `0 0 ${width} ${height}`);
+
+  const g = svg.append("g")
+    .attr("transform", `translate(${width / 2}, ${height / 2})`);
+
+  // Draw nodes
+  const nodeGs = g.selectAll("circle.leaf")
+    .data(leaves)
+    .join("circle")
+      .attr("class", "leaf")
+      .attr("cx", d => d.cx)
+      .attr("cy", d => d.cy)
+      .attr("r", 3)
+      .attr("fill", d => deptColor(d.data.dept))
+      .attr("fill-opacity", 0.3)
+      .attr("stroke", "none");
+
+  // Bundle line generator
+  const line = d3.line()
+    .curve(d3.curveBundle.beta(0.15))
+    .x(d => d.cx)
+    .y(d => d.cy);
+
+  // --- Render function ---
+  let currentMonth = 1;
+
+  const render = (month) => {
+    currentMonth = month;
+    const activeEdges = edgePaths.filter(e => e.startMonth <= month && e.endMonth >= month);
+
+    // Active leaf IDs
+    const activeLeafIds = new Set();
+    activeEdges.forEach(e => {
+      activeLeafIds.add(e.source);
+      activeLeafIds.add(e.target);
+    });
+
+    // Update nodes
+    nodeGs
+      .attr("r", d => activeLeafIds.has(d.data.id) ? 5 : 3)
+      .attr("fill", d => activeLeafIds.has(d.data.id) ? deptColor(d.data.dept) : "#bbb")
+      .attr("fill-opacity", d => activeLeafIds.has(d.data.id) ? 1 : 0.3);
+
+    // Draw edges on canvas
+    ctx.clearRect(0, 0, width, height);
+    ctx.save();
+    ctx.translate(width / 2, height / 2);
+    ctx.strokeStyle = "rgba(68,119,170,0.3)";
+    ctx.lineWidth = 1;
+    const lineCtx = d3.line()
+      .curve(d3.curveBundle.beta(0.15))
+      .x(d => d.cx)
+      .y(d => d.cy)
+      .context(ctx);
+
+    for (const edge of activeEdges) {
+      ctx.beginPath();
+      lineCtx(edge.path);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // Update badge
+    d3.select("#edgeBadge").text(`${activeEdges.length} edges`);
+    d3.select("#monthLabel").text(MONTHS[month - 1]);
+    d3.select("#monthSlider").property("value", month);
+  };
+
+  render(1);
+
+  // --- Controls ---
+  d3.select("#monthSlider").on("input", function () {
+    render(+this.value);
+  });
+
+  let playInterval = null;
+  d3.select("#playBtn").on("click", function () {
+    if (playInterval) {
+      clearInterval(playInterval);
+      playInterval = null;
+      d3.select(this).text("Play");
+      return;
+    }
+    d3.select(this).text("Pause");
+    playInterval = setInterval(() => {
+      let next = currentMonth + 1;
+      if (next > 12) next = 1;
+      render(next);
+    }, 800);
+  });
+
+  // --- Legend ---
+  const legend = d3.select("#legend");
+  DEPTS.forEach(dept => {
+    const item = legend.append("div").attr("class", "legend-item");
+    item.append("div").attr("class", "legend-swatch").style("background", deptColor(dept));
+    item.append("span").text(dept);
+  });
+})();
+</script>
+</body>
+</html>

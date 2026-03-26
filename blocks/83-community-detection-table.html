@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Community Detection with Table</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #fafafa; color: #222; }
+  .header { padding: 12px 20px 8px; }
+  h1 { font-size: 1.2rem; font-weight: 600; }
+  .summary { font-size: 0.82rem; color: #555; margin-top: 2px; }
+  .layout { display: flex; height: calc(100vh - 60px); }
+  .network-panel { flex: 0 0 55%; position: relative; overflow: hidden; border-right: 1px solid #e0e0e0; }
+  .table-panel { flex: 0 0 45%; overflow-y: auto; }
+  svg { display: block; }
+  /* Table styles */
+  table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+  thead { position: sticky; top: 0; z-index: 2; }
+  th { background: #f5f5f5; border-bottom: 2px solid #ddd; padding: 6px 8px; text-align: left;
+       font-weight: 600; cursor: pointer; user-select: none; white-space: nowrap; }
+  th:hover { background: #eaeaea; }
+  td { padding: 5px 8px; border-bottom: 1px solid #eee; }
+  tr.data-row:nth-child(even) { background: #fafafa; }
+  tr.data-row:nth-child(odd) { background: #fff; }
+  tr.data-row:hover { background: #e8f0fe; }
+  tr.data-row.highlighted { background: #d2e3fc; }
+  tr.group-header { background: #e8e8e8; cursor: pointer; }
+  tr.group-header td { font-weight: 600; padding: 6px 8px; font-size: 0.8rem; }
+  tr.group-header:hover { background: #ddd; }
+  tr.group-header.highlighted { background: #c9daf8; }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  th.num { text-align: right; }
+  .sort-arrow { font-size: 0.65rem; margin-left: 3px; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Community Detection with Linked Table</h1>
+  <p class="summary" id="summary"></p>
+</div>
+<div class="layout">
+  <div class="network-panel" id="net-panel">
+    <svg id="network"></svg>
+  </div>
+  <div class="table-panel">
+    <table id="table">
+      <thead><tr id="table-head"></tr></thead>
+      <tbody id="table-body"></tbody>
+    </table>
+  </div>
+</div>
+<script>
+(() => {
+  // --- Community colors: OKLCH-derived ---
+  const communityColors = d3.range(5).map(i => `oklch(65% 0.15 ${i * 72 + 30})`);
+  // Precompute hex fallbacks for Canvas compatibility
+  const colorHex = ["#b86832","#6a9c2e","#009e97","#5280d6","#c054b3"];
+
+  // --- Data generation ---
+  const rng = d3.randomLcg(12);
+  const rand = d3.randomUniform.source(rng);
+  const commSizes = [25, 22, 20, 18, 15];
+  const commNames = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"];
+  const nodes = [];
+  let nodeId = 0;
+  commSizes.forEach((size, ci) => {
+    for (let i = 0; i < size; i++) {
+      nodes.push({
+        id: nodeId++,
+        name: `${commNames[ci][0]}${i + 1}`,
+        community: ci,
+        degree: 0,
+        betweenness: 0
+      });
+    }
+  });
+
+  const edges = [];
+  const edgeSet = new Set();
+  const addEdge = (s, t) => {
+    if (s === t) return;
+    const key = Math.min(s, t) + "-" + Math.max(s, t);
+    if (edgeSet.has(key)) return;
+    edgeSet.add(key);
+    edges.push({ source: s, target: t });
+    nodes[s].degree++;
+    nodes[t].degree++;
+  };
+
+  // Within-community edges (~75% of ~250 = ~187)
+  const comGroups = commSizes.map((_, ci) => nodes.filter(n => n.community === ci));
+  for (const group of comGroups) {
+    for (let i = 0; i < group.length; i++) {
+      for (let j = i + 1; j < group.length; j++) {
+        if (rand(0, 1)() < 0.45) addEdge(group[i].id, group[j].id);
+      }
+    }
+  }
+  // Between-community edges (~25%)
+  for (let i = 0; i < 80; i++) {
+    const ci = Math.floor(rand(0, 5)());
+    let cj = Math.floor(rand(0, 5)());
+    while (cj === ci) cj = Math.floor(rand(0, 5)());
+    const g1 = comGroups[Math.min(ci, comGroups.length - 1)];
+    const g2 = comGroups[Math.min(cj, comGroups.length - 1)];
+    const a = g1[Math.floor(rand(0, g1.length)())];
+    const b = g2[Math.floor(rand(0, g2.length)())];
+    if (a && b) addEdge(a.id, b.id);
+  }
+
+  // Approximate betweenness centrality (BFS from 20 random sources)
+  const adj = nodes.map(() => []);
+  edges.forEach(e => { adj[e.source].push(e.target); adj[e.target].push(e.source); });
+  const btwn = new Float64Array(nodes.length);
+  for (let s = 0; s < 20; s++) {
+    const src = Math.floor(rand(0, nodes.length)());
+    const dist = new Int32Array(nodes.length).fill(-1);
+    const sigma = new Float64Array(nodes.length);
+    const delta = new Float64Array(nodes.length);
+    dist[src] = 0; sigma[src] = 1;
+    const queue = [src], order = [];
+    const preds = nodes.map(() => []);
+    while (queue.length) {
+      const v = queue.shift();
+      order.push(v);
+      for (const w of adj[v]) {
+        if (dist[w] < 0) { dist[w] = dist[v] + 1; queue.push(w); }
+        if (dist[w] === dist[v] + 1) { sigma[w] += sigma[v]; preds[w].push(v); }
+      }
+    }
+    for (let i = order.length - 1; i >= 0; i--) {
+      const w = order[i];
+      for (const v of preds[w]) {
+        delta[v] += (sigma[v] / sigma[w]) * (1 + delta[w]);
+      }
+      if (w !== src) btwn[w] += delta[w];
+    }
+    delta.fill(0);
+  }
+  nodes.forEach((n, i) => { n.betweenness = +(btwn[i] / 20).toFixed(3); });
+
+  // Compute modularity
+  const m2 = edges.length * 2;
+  let Q = 0;
+  for (const e of edges) {
+    if (nodes[e.source].community === nodes[e.target].community) {
+      Q += 1 - (nodes[e.source].degree * nodes[e.target].degree) / m2;
+    }
+  }
+  Q = +(Q / (edges.length)).toFixed(2);
+
+  document.getElementById("summary").textContent =
+    `${commSizes.length} communities, ${nodes.length} nodes, ${edges.length} edges. Modularity: ${Q}`;
+
+  // --- Dispatch ---
+  const dispatch = d3.dispatch("highlightNode", "highlightCommunity", "clear");
+
+  // --- Network rendering ---
+  const netPanel = document.getElementById("net-panel");
+  const netW = netPanel.clientWidth || 660;
+  const netH = netPanel.clientHeight || 700;
+  const svg = d3.select("#network").attr("width", netW).attr("height", netH);
+
+  const rScale = d3.scaleSqrt().domain(d3.extent(nodes, d => d.degree)).range([3, 10]);
+
+  // Copy for simulation
+  const simNodes = nodes.map(d => ({ ...d }));
+  const simEdges = edges.map(d => ({ source: d.source, target: d.target }));
+
+  const simulation = d3.forceSimulation(simNodes)
+    .force("link", d3.forceLink(simEdges).id(d => d.id).distance(d => {
+      const s = simNodes[typeof d.source === "object" ? d.source.id : d.source];
+      const t = simNodes[typeof d.target === "object" ? d.target.id : d.target];
+      return (s && t && s.community === t.community) ? 30 : 80;
+    }))
+    .force("charge", d3.forceManyBody().strength(-15))
+    .force("center", d3.forceCenter(netW / 2, netH / 2))
+    .force("collide", d3.forceCollide(d => rScale(d.degree) + 2))
+    .on("tick", ticked);
+
+  const linkG = svg.append("g");
+  const hullG = svg.append("g");
+  const nodeG = svg.append("g");
+
+  const linkEls = linkG.selectAll("line").data(simEdges).join("line")
+    .attr("stroke", "#ccc").attr("stroke-width", 0.6).attr("stroke-opacity", 0.4);
+
+  const nodeEls = nodeG.selectAll("circle").data(simNodes).join("circle")
+    .attr("r", d => rScale(d.degree))
+    .attr("fill", d => colorHex[d.community])
+    .attr("stroke", "#fff").attr("stroke-width", 1)
+    .attr("cursor", "pointer")
+    .call(d3.drag()
+      .on("start", (e, d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on("drag", (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on("end", (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; })
+    );
+
+  nodeEls.on("click", (e, d) => {
+    e.stopPropagation();
+    dispatch.call("highlightNode", null, d.id);
+  });
+
+  svg.on("click", () => dispatch.call("clear"));
+
+  function ticked() {
+    linkEls.attr("x1", d => d.source.x).attr("y1", d => d.source.y)
+           .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
+    nodeEls.attr("cx", d => d.x).attr("cy", d => d.y);
+    drawHulls();
+  }
+
+  function drawHulls(highlightComm = null) {
+    hullG.selectAll("path").remove();
+    for (let ci = 0; ci < 5; ci++) {
+      const pts = simNodes.filter(n => n.community === ci).map(n => [n.x, n.y]);
+      if (pts.length < 3) continue;
+      const hull = d3.polygonHull(pts);
+      if (!hull) continue;
+      hullG.append("path")
+        .attr("d", `M${hull.join("L")}Z`)
+        .attr("fill", colorHex[ci])
+        .attr("opacity", ci === highlightComm ? 0.2 : 0.08)
+        .attr("stroke", "none");
+    }
+  }
+
+  // --- Table rendering ---
+  const columns = [
+    { key: "name", label: "Name", type: "string" },
+    { key: "degree", label: "Degree", type: "number" },
+    { key: "betweenness", label: "Betweenness", type: "number", format: d3.format(".3f") },
+    { key: "community", label: "Community", type: "community" }
+  ];
+
+  const thead = d3.select("#table-head");
+  columns.forEach(col => {
+    thead.append("th")
+      .attr("class", col.type === "number" ? "num" : "")
+      .text(col.label)
+      .on("click", () => sortWithin(col));
+  });
+
+  let sortCol = null, sortAsc = true;
+
+  const tbody = d3.select("#table-body");
+
+  const renderTable = () => {
+    tbody.selectAll("*").remove();
+    for (let ci = 0; ci < 5; ci++) {
+      let group = nodes.filter(n => n.community === ci);
+      if (sortCol) {
+        const cmp = sortCol.type === "number"
+          ? (a, b) => (sortAsc ? d3.ascending : d3.descending)(a[sortCol.key], b[sortCol.key])
+          : (a, b) => (sortAsc ? d3.ascending : d3.descending)(a[sortCol.key], b[sortCol.key]);
+        group = [...group].sort(cmp);
+      }
+
+      // Group header
+      const headerRow = tbody.append("tr").attr("class", "group-header")
+        .attr("data-comm", ci);
+      headerRow.append("td").attr("colspan", columns.length).html(
+        `<span class="dot" style="background:${colorHex[ci]}"></span>${commNames[ci]} (${group.length} nodes)`
+      );
+      headerRow.on("click", () => dispatch.call("highlightCommunity", null, ci));
+
+      // Data rows
+      for (const node of group) {
+        const tr = tbody.append("tr").attr("class", "data-row").attr("data-id", node.id);
+        for (const col of columns) {
+          const td = tr.append("td");
+          if (col.type === "number") {
+            td.attr("class", "num").text(col.format ? col.format(node[col.key]) : node[col.key]);
+          } else if (col.type === "community") {
+            td.html(`<span class="dot" style="background:${colorHex[node.community]}"></span>${commNames[node.community]}`);
+          } else {
+            td.text(node[col.key]);
+          }
+        }
+        tr.on("click", (e) => {
+          e.stopPropagation();
+          dispatch.call("highlightNode", null, node.id);
+        });
+      }
+    }
+  };
+
+  const sortWithin = (col) => {
+    if (sortCol === col) sortAsc = !sortAsc;
+    else { sortCol = col; sortAsc = true; }
+    // Update header arrows
+    thead.selectAll("th").each(function(_, i) {
+      const th = d3.select(this);
+      th.selectAll(".sort-arrow").remove();
+      if (columns[i] === sortCol) {
+        th.append("span").attr("class", "sort-arrow").text(sortAsc ? " ▲" : " ▼");
+      }
+    });
+    renderTable();
+  };
+
+  renderTable();
+
+  // --- Dispatch handlers ---
+  dispatch.on("highlightNode", (nodeId) => {
+    // Network
+    nodeEls.attr("opacity", d => d.id === nodeId ? 1 : 0.2)
+      .attr("stroke", d => d.id === nodeId ? "#222" : "#fff")
+      .attr("stroke-width", d => d.id === nodeId ? 2.5 : 1)
+      .attr("r", d => d.id === nodeId ? rScale(d.degree) + 3 : rScale(d.degree));
+    linkEls.attr("stroke-opacity", d =>
+      d.source.id === nodeId || d.target.id === nodeId ? 0.7 : 0.05
+    );
+    drawHulls();
+    // Table
+    tbody.selectAll("tr.data-row").classed("highlighted", false);
+    const row = tbody.select(`tr[data-id="${nodeId}"]`).classed("highlighted", true);
+    if (row.node()) row.node().scrollIntoView({ block: "nearest" });
+    tbody.selectAll("tr.group-header").classed("highlighted", false);
+  });
+
+  dispatch.on("highlightCommunity", (ci) => {
+    nodeEls.attr("opacity", d => d.community === ci ? 1 : 0.15)
+      .attr("stroke", d => d.community === ci ? "#222" : "#fff")
+      .attr("stroke-width", d => d.community === ci ? 1.5 : 1)
+      .attr("r", d => rScale(d.degree));
+    linkEls.attr("stroke-opacity", d => {
+      const sc = typeof d.source === "object" ? d.source.community : nodes[d.source].community;
+      const tc = typeof d.target === "object" ? d.target.community : nodes[d.target].community;
+      return sc === ci && tc === ci ? 0.5 : 0.03;
+    });
+    drawHulls(ci);
+    // Table
+    tbody.selectAll("tr.data-row").classed("highlighted", false);
+    tbody.selectAll("tr.group-header").classed("highlighted", false);
+    tbody.select(`tr[data-comm="${ci}"]`).classed("highlighted", true);
+  });
+
+  dispatch.on("clear", () => {
+    nodeEls.attr("opacity", 1).attr("stroke", "#fff").attr("stroke-width", 1)
+      .attr("r", d => rScale(d.degree));
+    linkEls.attr("stroke-opacity", 0.4);
+    drawHulls();
+    tbody.selectAll("tr").classed("highlighted", false);
+  });
+})();
+</script>
+</body>
+</html>

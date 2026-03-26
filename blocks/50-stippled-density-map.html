@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stippled Density Map</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #f5f0e8; font-family: system-ui, -apple-system, sans-serif; }
+  h1 { text-align: center; font-size: 17px; color: #333; padding: 14px 0 2px; }
+  h2 { text-align: center; font-size: 12px; color: #666; font-weight: 400; margin-bottom: 10px; }
+  #map-container { position: relative; display: flex; justify-content: center; }
+  canvas, svg { position: absolute; top: 0; }
+  .tooltip {
+    position: absolute; pointer-events: none; background: rgba(255,255,255,0.95);
+    border: 1px solid #ccc; border-radius: 4px; padding: 6px 10px; font-size: 12px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.12); display: none;
+  }
+  .tooltip .num { font-family: "SF Mono", Monaco, "Cascadia Code", monospace; }
+  .legend {
+    position: absolute; bottom: 20px; left: 30px; background: rgba(245,240,232,0.92);
+    border: 1px solid #ccc; border-radius: 4px; padding: 8px 14px; font-size: 12px;
+    color: #444;
+  }
+</style>
+</head>
+<body>
+<h1>Population Density by Stipple</h1>
+<h2>A Print-Friendly Alternative to Choropleth</h2>
+<div id="map-container">
+  <div class="tooltip" id="tooltip"></div>
+  <div class="legend" id="legend"></div>
+</div>
+
+<script>
+(async () => {
+  const W = 960, H = 600;
+  const dpr = window.devicePixelRatio || 1;
+
+  const container = d3.select("#map-container")
+    .style("width", W + "px").style("height", H + "px");
+
+  // Canvas for stipple dots
+  const canvas = container.append("canvas")
+    .attr("width", W * dpr).attr("height", H * dpr)
+    .style("width", W + "px").style("height", H + "px")
+    .style("position", "absolute")
+    .node();
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  // SVG overlay for borders and hover
+  const svg = container.append("svg")
+    .attr("width", W).attr("height", H)
+    .style("position", "absolute");
+
+  // Load US TopoJSON
+  const us = await d3.json("https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json");
+  const states = topojson.feature(us, us.objects.states).features;
+  const stateMesh = topojson.mesh(us, us.objects.states, (a, b) => a !== b);
+  const nation = topojson.merge(us, us.objects.states.geometries);
+
+  const projection = d3.geoAlbersUsa().fitSize([W - 40, H - 40], nation).translate([W / 2, H / 2]);
+  const path = d3.geoPath(projection);
+
+  // Synthetic population data by state FIPS
+  // Approximate real populations
+  const popData = new Map([
+    ["01",5024279],["02",733391],["04",7151502],["05",3011524],["06",39538223],
+    ["08",5773714],["09",3605944],["10",989948],["11",689545],["12",21538187],
+    ["13",10711908],["15",1455271],["16",1839106],["17",12812508],["18",6732219],
+    ["19",3190369],["20",2937880],["21",4505836],["22",4657757],["23",1362359],
+    ["24",6177224],["25",7029917],["26",10077331],["27",5706494],["28",2961279],
+    ["29",6154913],["30",1084225],["31",1961504],["32",3104614],["33",1377529],
+    ["34",9288994],["35",2117522],["36",20201249],["37",10439388],["38",779094],
+    ["39",11799448],["40",3959353],["41",4237256],["42",13002700],["44",1097379],
+    ["45",5118425],["46",886667],["47",6910840],["48",29145505],["49",3271616],
+    ["50",643077],["51",8631393],["53",7614893],["54",1793716],["55",5893718],["56",576851]
+  ]);
+
+  // State areas (sq miles) - approximate
+  const areaData = new Map([
+    ["01",52420],["02",665384],["04",113990],["05",53179],["06",163695],
+    ["08",104094],["09",5543],["10",2489],["11",68],["12",65758],
+    ["13",59425],["15",10932],["16",83569],["17",57914],["18",36420],
+    ["19",56273],["20",82278],["21",40408],["22",52378],["23",35380],
+    ["24",12407],["25",10554],["26",96714],["27",86936],["28",48432],
+    ["29",69707],["30",147040],["31",77348],["32",110572],["33",9349],
+    ["34",8723],["35",121590],["36",54555],["37",53819],["38",70698],
+    ["39",44826],["40",69899],["41",98379],["42",46054],["44",1545],
+    ["45",32020],["46",77116],["47",42144],["48",268596],["49",84897],
+    ["50",9616],["51",42775],["53",71298],["54",24230],["55",65496],["56",97813]
+  ]);
+
+  // State names
+  const stateNames = new Map([
+    ["01","Alabama"],["02","Alaska"],["04","Arizona"],["05","Arkansas"],["06","California"],
+    ["08","Colorado"],["09","Connecticut"],["10","Delaware"],["11","District of Columbia"],
+    ["12","Florida"],["13","Georgia"],["15","Hawaii"],["16","Idaho"],["17","Illinois"],
+    ["18","Indiana"],["19","Iowa"],["20","Kansas"],["21","Kentucky"],["22","Louisiana"],
+    ["23","Maine"],["24","Maryland"],["25","Massachusetts"],["26","Michigan"],
+    ["27","Minnesota"],["28","Mississippi"],["29","Missouri"],["30","Montana"],
+    ["31","Nebraska"],["32","Nevada"],["33","New Hampshire"],["34","New Jersey"],
+    ["35","New Mexico"],["36","New York"],["37","North Carolina"],["38","North Dakota"],
+    ["39","Ohio"],["40","Oklahoma"],["41","Oregon"],["42","Pennsylvania"],
+    ["44","Rhode Island"],["45","South Carolina"],["46","South Dakota"],
+    ["47","Tennessee"],["48","Texas"],["49","Utah"],["50","Vermont"],
+    ["51","Virginia"],["53","Washington"],["54","West Virginia"],["55","Wisconsin"],["56","Wyoming"]
+  ]);
+
+  // Seeded PRNG (mulberry32)
+  const mulberry32 = (a) => () => {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  const prng = mulberry32(12345);
+
+  // Rejection sampling: for each state, generate dots inside polygon
+  // 1 dot per 10,000 people
+  const dotScale = 10000;
+  let totalDots = 0;
+
+  ctx.fillStyle = "rgba(51, 51, 51, 0.7)";
+
+  for (const state of states) {
+    const fips = String(state.id).padStart(2, "0");
+    const pop = popData.get(fips);
+    if (!pop) continue;
+
+    const nDots = Math.round(pop / dotScale);
+    totalDots += nDots;
+
+    // Get bounding box of projected state
+    const bounds = path.bounds(state);
+    const [x0, y0] = bounds[0];
+    const [x1, y1] = bounds[1];
+    const bw = x1 - x0, bh = y1 - y0;
+
+    let placed = 0;
+    let attempts = 0;
+    const maxAttempts = nDots * 80;
+
+    ctx.beginPath();
+    while (placed < nDots && attempts < maxAttempts) {
+      attempts++;
+      const px = x0 + prng() * bw;
+      const py = y0 + prng() * bh;
+
+      // Convert screen to geo coords to test containment
+      const geo = projection.invert([px, py]);
+      if (geo && d3.geoContains(state, geo)) {
+        ctx.moveTo(px + 0.7, py);
+        ctx.arc(px, py, 0.7, 0, Math.PI * 2);
+        placed++;
+      }
+    }
+    ctx.fill();
+  }
+
+  // SVG borders
+  svg.append("path")
+    .datum(stateMesh)
+    .attr("d", path)
+    .attr("fill", "none")
+    .attr("stroke", "#999")
+    .attr("stroke-width", 0.5)
+    .attr("stroke-linejoin", "round");
+
+  svg.append("path")
+    .datum(nation)
+    .attr("d", path)
+    .attr("fill", "none")
+    .attr("stroke", "#333")
+    .attr("stroke-width", 1)
+    .attr("stroke-linejoin", "round");
+
+  // Tooltip and hover
+  const tooltip = d3.select("#tooltip");
+
+  // Invisible fill paths for hover detection
+  const hoverGroup = svg.append("g");
+  hoverGroup.selectAll("path")
+    .data(states).join("path")
+    .attr("d", path)
+    .attr("fill", "transparent")
+    .attr("stroke", "none")
+    .style("cursor", "pointer")
+    .on("pointerenter", (event, d) => {
+      const fips = String(d.id).padStart(2, "0");
+      const pop = popData.get(fips) || 0;
+      const area = areaData.get(fips) || 1;
+      const density = Math.round(pop / area);
+      const name = stateNames.get(fips) || "Unknown";
+
+      // Highlight border
+      d3.select(event.currentTarget)
+        .attr("stroke", "#333").attr("stroke-width", 2);
+
+      tooltip.style("display", "block")
+        .html(`<strong>${name}</strong><br>
+          Pop: <span class="num">${d3.format(",")(pop)}</span><br>
+          Density: <span class="num">${d3.format(",")(density)}</span>/sq mi<br>
+          Dots: <span class="num">${d3.format(",")(Math.round(pop / dotScale))}</span>`);
+    })
+    .on("pointermove", (event) => {
+      tooltip.style("left", (event.pageX + 14) + "px")
+        .style("top", (event.pageY - 10) + "px");
+    })
+    .on("pointerleave", (event) => {
+      d3.select(event.currentTarget).attr("stroke", "none");
+      tooltip.style("display", "none");
+    });
+
+  // Legend
+  d3.select("#legend").html(
+    `<div style="margin-bottom:4px;font-weight:600;">\u2022 = ${d3.format(",")(dotScale)} people</div>
+     <div style="color:#777;">~${d3.format(",")(totalDots)} dots total</div>
+     <div style="margin-top:6px;color:#777;font-size:11px;">
+       Dense: NJ ~${d3.format(",")(Math.round(9288994/8723))}/mi\u00B2<br>
+       Sparse: WY ~${d3.format(",")(Math.round(576851/97813))}/mi\u00B2
+     </div>`
+  );
+})();
+</script>
+</body>
+</html>

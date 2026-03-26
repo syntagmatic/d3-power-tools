@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Scale Perception Network</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    color: #222;
+    padding: 20px 24px;
+  }
+  h1 { font-size: 1.3rem; font-weight: 600; margin-bottom: 2px; }
+  .subtitle { font-size: 0.82rem; color: #666; margin-bottom: 12px; }
+  .controls {
+    display: flex; gap: 16px; align-items: center; margin-bottom: 12px; font-size: 0.85rem;
+  }
+  .controls label { font-weight: 500; }
+  .controls select {
+    padding: 4px 8px; border: 1px solid #bbb; border-radius: 4px;
+    font-size: 0.85rem; background: #fff;
+  }
+  .annotation {
+    font-size: 0.78rem; color: #666; max-width: 400px; margin-left: 16px;
+    line-height: 1.4;
+  }
+  .chart-area { position: relative; }
+  svg { display: block; }
+  .tooltip {
+    position: absolute; pointer-events: none; background: rgba(255,255,255,0.95);
+    border: 1px solid #ccc; border-radius: 4px; padding: 8px 10px;
+    font-size: 12px; line-height: 1.5; box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+    display: none; white-space: nowrap;
+  }
+  .tooltip .label { font-weight: 600; }
+  .legend-section { display: flex; gap: 32px; margin-top: 12px; flex-wrap: wrap; }
+  .legend-group { font-size: 0.78rem; }
+  .legend-group h3 { font-size: 0.75rem; font-weight: 600; margin-bottom: 4px; color: #555; text-transform: uppercase; letter-spacing: 0.5px; }
+  .size-legend { display: flex; align-items: end; gap: 12px; }
+  .size-item { display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 10px; color: #888; }
+  .color-bar { display: flex; align-items: center; gap: 6px; }
+  .color-bar .bar { width: 120px; height: 12px; border-radius: 2px; }
+  .color-bar .label { font-size: 10px; color: #888; }
+  .edge-legend { display: flex; align-items: center; gap: 8px; }
+  .edge-legend .line { height: 2px; background: #999; border-radius: 1px; }
+</style>
+</head>
+<body>
+<h1>Scale Choice Distorts Network Perception</h1>
+<p class="subtitle">Toggle between linear, sqrt, and log size scales to see how encoding choice changes what you notice.</p>
+<div class="controls">
+  <label for="scale-select">Node size scale:</label>
+  <select id="scale-select">
+    <option value="sqrt" selected>Sqrt (area-accurate)</option>
+    <option value="linear">Linear (exaggerates)</option>
+    <option value="log">Log (compresses)</option>
+  </select>
+  <span class="annotation" id="annotation">Sqrt maps influence to circle area proportionally &mdash; the perceptually honest default.</span>
+</div>
+<div class="chart-area" id="chart-area">
+  <div class="tooltip" id="tooltip"></div>
+</div>
+<div class="legend-section" id="legends"></div>
+
+<script>
+(() => {
+  const TOL = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE"];
+  const groupNames = ["Research", "Engineering", "Design", "Marketing", "Leadership"];
+
+  const rng = d3.randomLcg(31);
+  const norm = (mu, sig) => {
+    const u1 = rng(), u2 = rng();
+    return mu + sig * Math.sqrt(-2 * Math.log(Math.max(1e-10, u1))) * Math.cos(2 * Math.PI * u2);
+  };
+
+  // --- Data ---
+  const N = 60;
+  const nodes = Array.from({ length: N }, (_, i) => {
+    const group = i < 14 ? 0 : i < 26 ? 1 : i < 38 ? 2 : i < 50 ? 3 : 4;
+    // Right-skewed influence: few high, many low
+    const influence = Math.round(Math.max(5, Math.min(500,
+      Math.exp(norm(Math.log(40), 1.1))
+    )));
+    const sentiment = Math.max(-1, Math.min(1, +norm(0.1, 0.45).toFixed(2)));
+    return {
+      id: i,
+      name: `${groupNames[group].slice(0, 3)}-${String(i + 1).padStart(2, "0")}`,
+      group,
+      influence,
+      sentiment
+    };
+  });
+
+  // Edges: 70% within community
+  const edges = [];
+  const edgeSet = new Set();
+  const addEdge = (s, t) => {
+    const key = s < t ? `${s}-${t}` : `${t}-${s}`;
+    if (edgeSet.has(key) || s === t) return false;
+    edgeSet.add(key);
+    edges.push({ source: s, target: t, frequency: Math.round(1 + rng() * 49) });
+    return true;
+  };
+
+  // Within-community edges
+  let attempts = 0;
+  while (edges.filter(e => nodes[typeof e.source === 'object' ? e.source.id : e.source].group === nodes[typeof e.target === 'object' ? e.target.id : e.target].group).length < 84 && attempts < 1000) {
+    const i = Math.floor(rng() * N);
+    const sameGroup = nodes.filter(n => n.group === nodes[i].group && n.id !== i);
+    if (sameGroup.length > 0) {
+      const j = sameGroup[Math.floor(rng() * sameGroup.length)].id;
+      addEdge(i, j);
+    }
+    attempts++;
+  }
+  // Between-community edges
+  attempts = 0;
+  while (edges.length < 120 && attempts < 1000) {
+    const i = Math.floor(rng() * N);
+    let j = Math.floor(rng() * N);
+    if (nodes[i].group !== nodes[j].group) addEdge(i, j);
+    attempts++;
+  }
+
+  // Compute degree
+  nodes.forEach(n => n.degree = 0);
+  edges.forEach(e => {
+    nodes[typeof e.source === 'object' ? e.source.id : e.source].degree++;
+    nodes[typeof e.target === 'object' ? e.target.id : e.target].degree++;
+  });
+
+  // --- Layout ---
+  const W = Math.min(1200, window.innerWidth - 48);
+  const H = 600;
+
+  const svg = d3.select("#chart-area").append("svg")
+    .attr("width", W).attr("height", H)
+    .attr("viewBox", `0 0 ${W} ${H}`);
+
+  const tooltip = d3.select("#tooltip");
+  const groupColor = d3.scaleOrdinal().domain([0,1,2,3,4]).range(TOL);
+  const sentimentColor = d3.scaleDiverging()
+    .domain([-1, 0, 1])
+    .interpolator(t => d3.interpolateRgb("#4477AA", "#EE6677")(t));
+
+  const edgeWidthScale = d3.scalePow().exponent(0.5).domain([1, 50]).range([0.5, 3]);
+
+  // --- Scale options ---
+  const scaleOpts = {
+    linear: d3.scaleLinear().domain([5, 500]).range([3, 30]),
+    sqrt: d3.scaleSqrt().domain([5, 500]).range([3, 30]),
+    log: d3.scaleLog().domain([5, 500]).range([3, 30])
+  };
+
+  const annotations = {
+    linear: "Linear maps influence directly to radius. High-influence nodes appear massively larger &mdash; area grows quadratically with radius, exaggerating differences.",
+    sqrt: "Sqrt maps influence to circle area proportionally &mdash; the perceptually honest default.",
+    log: "Log compresses the range. Small and large nodes look similar &mdash; useful for finding connections, but hides magnitude differences."
+  };
+
+  let currentScale = "sqrt";
+
+  const getRadius = d => scaleOpts[currentScale](d.influence);
+
+  // --- Force simulation ---
+  const simulation = d3.forceSimulation(nodes)
+    .force("link", d3.forceLink(edges).id(d => d.id).distance(40))
+    .force("charge", d3.forceManyBody().strength(-40))
+    .force("center", d3.forceCenter(W / 2, H / 2))
+    .force("collide", d3.forceCollide().radius(d => getRadius(d) + 2).iterations(2))
+    .on("tick", ticked);
+
+  // --- Drawing ---
+  const linkG = svg.append("g").attr("class", "links");
+  const nodeG = svg.append("g").attr("class", "nodes");
+
+  const linkEls = linkG.selectAll("line").data(edges).join("line")
+    .attr("stroke", "#bbb")
+    .attr("stroke-opacity", 0.35)
+    .attr("stroke-width", d => edgeWidthScale(d.frequency));
+
+  const nodeEls = nodeG.selectAll("circle").data(nodes).join("circle")
+    .attr("r", d => getRadius(d))
+    .attr("fill", d => sentimentColor((d.sentiment + 1) / 2))
+    .attr("stroke", d => groupColor(d.group))
+    .attr("stroke-width", 2)
+    .attr("cursor", "pointer");
+
+  // --- Drag ---
+  const drag = d3.drag()
+    .on("start", (event, d) => {
+      if (!event.active) simulation.alphaTarget(0.3).restart();
+      d.fx = d.x; d.fy = d.y;
+    })
+    .on("drag", (event, d) => { d.fx = event.x; d.fy = event.y; })
+    .on("end", (event, d) => {
+      if (!event.active) simulation.alphaTarget(0);
+      d.fx = null; d.fy = null;
+    });
+  nodeEls.call(drag);
+
+  // --- Hover ---
+  const neighborSet = new Map();
+  nodes.forEach(n => neighborSet.set(n.id, new Set()));
+  edges.forEach(e => {
+    const s = typeof e.source === 'object' ? e.source.id : e.source;
+    const t = typeof e.target === 'object' ? e.target.id : e.target;
+    neighborSet.get(s).add(t);
+    neighborSet.get(t).add(s);
+  });
+
+  nodeEls.on("pointerenter", (event, d) => {
+    const nbrs = neighborSet.get(d.id);
+    nodeEls.attr("opacity", n => n.id === d.id || nbrs.has(n.id) ? 1 : 0.15);
+    linkEls.attr("stroke-opacity", e => {
+      const s = typeof e.source === 'object' ? e.source.id : e.source;
+      const t = typeof e.target === 'object' ? e.target.id : e.target;
+      return s === d.id || t === d.id ? 0.7 : 0.03;
+    });
+    tooltip.style("display", "block")
+      .html(`<span class="label">${d.name}</span><br>
+        Group: ${groupNames[d.group]}<br>
+        Influence: ${d.influence}<br>
+        Sentiment: ${d.sentiment > 0 ? "+" : ""}${d.sentiment}<br>
+        Degree: ${d.degree}`);
+  })
+  .on("pointermove", event => {
+    tooltip.style("left", (event.offsetX + 14) + "px")
+      .style("top", (event.offsetY - 10) + "px");
+  })
+  .on("pointerleave", () => {
+    nodeEls.attr("opacity", 1);
+    linkEls.attr("stroke-opacity", 0.35);
+    tooltip.style("display", "none");
+  });
+
+  function ticked() {
+    linkEls
+      .attr("x1", d => d.source.x).attr("y1", d => d.source.y)
+      .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
+    nodeEls
+      .attr("cx", d => d.x = Math.max(30, Math.min(W - 30, d.x)))
+      .attr("cy", d => d.y = Math.max(30, Math.min(H - 30, d.y)));
+  }
+
+  // --- Scale switch ---
+  d3.select("#scale-select").on("change", function() {
+    currentScale = this.value;
+    d3.select("#annotation").html(annotations[currentScale]);
+
+    nodeEls.transition().duration(800).ease(d3.easeCubicOut)
+      .attr("r", d => getRadius(d));
+
+    simulation.force("collide", d3.forceCollide().radius(d => getRadius(d) + 2).iterations(2));
+    simulation.alpha(0.4).restart();
+  });
+
+  // --- Legends ---
+  const legendDiv = d3.select("#legends");
+
+  // Size legend
+  const sizeGroup = legendDiv.append("div").attr("class", "legend-group");
+  sizeGroup.append("h3").text("Influence (size)");
+  const sizeLeg = sizeGroup.append("div").attr("class", "size-legend");
+  [10, 100, 500].forEach(v => {
+    const r = scaleOpts.sqrt(v);
+    const item = sizeLeg.append("div").attr("class", "size-item");
+    const s = item.append("svg").attr("width", r * 2 + 4).attr("height", r * 2 + 4);
+    s.append("circle").attr("cx", r + 2).attr("cy", r + 2).attr("r", r)
+      .attr("fill", "#ccc").attr("stroke", "#999").attr("stroke-width", 1);
+    item.append("span").text(v);
+  });
+
+  // Color bar legend
+  const colorGroup = legendDiv.append("div").attr("class", "legend-group");
+  colorGroup.append("h3").text("Sentiment (fill)");
+  const colorBar = colorGroup.append("div").attr("class", "color-bar");
+  colorBar.append("span").attr("class", "label").text("-1");
+  const barCanvas = document.createElement("canvas");
+  barCanvas.width = 120; barCanvas.height = 12;
+  const bctx = barCanvas.getContext("2d");
+  for (let i = 0; i < 120; i++) {
+    bctx.fillStyle = sentimentColor(i / 119);
+    bctx.fillRect(i, 0, 1, 12);
+  }
+  const barDiv = colorBar.append("span").attr("class", "bar");
+  barDiv.node().style.background = `url(${barCanvas.toDataURL()})`;
+  barDiv.node().style.backgroundSize = "cover";
+  colorBar.append("span").attr("class", "label").text("+1");
+
+  // Group legend (stroke)
+  const gGroup = legendDiv.append("div").attr("class", "legend-group");
+  gGroup.append("h3").text("Community (stroke)");
+  const gLeg = gGroup.append("div").style("display", "flex").style("gap", "10px").style("flex-wrap", "wrap");
+  groupNames.forEach((name, i) => {
+    const item = gLeg.append("span").style("display", "flex").style("align-items", "center").style("gap", "4px");
+    item.append("span").style("width", "10px").style("height", "10px").style("border-radius", "50%")
+      .style("border", `2.5px solid ${TOL[i]}`).style("background", "#eee");
+    item.append("span").text(name).style("font-size", "11px");
+  });
+
+  // Edge width legend
+  const eGroup = legendDiv.append("div").attr("class", "legend-group");
+  eGroup.append("h3").text("Interaction freq. (edge)");
+  const eLeg = eGroup.append("div").attr("class", "edge-legend");
+  [1, 25, 50].forEach(v => {
+    const w = edgeWidthScale(v);
+    eLeg.append("span").attr("class", "line").style("width", "20px").style("height", Math.max(1, w) + "px");
+    eLeg.append("span").text(v).style("font-size", "10px").style("color", "#888");
+  });
+})();
+</script>
+</body>
+</html>
