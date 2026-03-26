@@ -84,6 +84,24 @@ rowKeys.forEach((row, ri) => {
 
 Add row labels on the left edge and column labels on the top edge.
 
+## Facet Wrap
+
+When you have one faceting variable with many levels (not a row x column cross), wrap panels into a grid. Compute row and column from index:
+
+```js
+const keys = [...d3.group(data, d => d.category).keys()];
+const cols = Math.ceil(Math.sqrt(keys.length * aspectRatio));
+keys.forEach((key, i) => {
+  const col = i % cols;
+  const row = Math.floor(i / cols);
+  renderPanel(grouped.get(key), col * (cellWidth + gap), row * (cellHeight + gap));
+});
+```
+
+The column count formula `Math.ceil(Math.sqrt(n * aspectRatio))` produces roughly square grids adjusted for wide containers. For a fixed 4-column layout, just hardcode `cols = 4`.
+
+> **Observable Plot note:** Plot's `fx` and `fy` channels handle faceting declaratively — shared scales, axis deduplication, and empty facet suppression are automatic. Mark-level `facet: "exclude"` lets annotations repeat across all panels. As of March 2026, auto-wrapping single-dimension facets is still manual in Plot (compute `fx = i % cols`, `fy = Math.floor(i / cols)`).
+
 ## Synchronized Interaction
 
 The key UX pattern: interacting with one panel affects all panels simultaneously.
