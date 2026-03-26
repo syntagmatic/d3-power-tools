@@ -159,6 +159,8 @@ rows.selectAll("td")
 
 Cell sizing: `white-space: nowrap`, tight padding (`2px 6px`), `line-height: 1`.
 
+This is also how Grafana's table visualization works (as of March 2026): a "sparkline" cell type renders a tiny line/bar chart from time series data directly in the table cell. The pattern validates the design — sparklines are most effective when adjacent to the number they contextualize, not isolated in a separate panel.
+
 ### Shared scales across rows
 
 When sparkcharts in different rows represent the same metric, they **must share a common y-domain** so heights are visually comparable. Without this, every sparkline auto-scales to its own `d3.extent`, and a 1% fluctuation filling its range looks identical to a 40% swing — Tufte's lie factor made invisible by the absence of axes.
@@ -205,6 +207,39 @@ Larger sparklines (40–60px tall) in metric cards. At this size you have pixels
 - A dashed reference line at a meaningful value (budget, target, zero) — gives the shape a baseline the reader can judge against
 - Min/max dots — anchors the range without adding an axis
 - Endpoint value label — lets the reader skip the mental lookup to the KPI number
+
+The dominant real-world layout (used by Grafana stat panels, Datadog metric cards, every monitoring dashboard): large number + delta arrow + sparkline, stacked vertically in a fixed-width card.
+
+```js
+// KPI card structure
+const card = d3.select(container).append("div")
+  .style("padding", "12px 16px").style("min-width", "160px");
+
+card.append("div").style("font-size", "28px").style("font-weight", "600")
+  .text(d3.format(",.0f")(latest));
+
+const delta = latest - previous;
+card.append("div")
+  .style("font-size", "13px")
+  .style("color", delta >= 0 ? "#2ca02c" : "#d62728")
+  .text(`${delta >= 0 ? "▲" : "▼"} ${d3.format("+.1%")(delta / previous)}`);
+
+const svg = card.append("svg").attr("width", 140).attr("height", 40);
+// Draw sparkline with shared domain across all cards
+```
+
+### Fixed-window vs auto-scaled sparklines
+
+For monitoring dashboards, use a **fixed time window** (last 1h, 6h, 24h) rather than auto-scaling the x-axis. When the window is consistent, the viewer learns the "normal shape" — a spike or dip stands out because the baseline shape is familiar. Auto-scaled sparklines shift shape as the data extent changes, destroying this learned recognition.
+
+```js
+// Fixed 24h window: always show the same time range
+const now = Date.now();
+const x = d3.scaleTime([now - 24 * 60 * 60 * 1000, now], [0, w]);
+// Data outside the window is simply not plotted
+```
+
+Auto-scaling is fine for editorial sparklines (in articles, reports) where each chart is read once. Fixed-window is better for operational sparklines that the same person monitors repeatedly.
 
 ## Small Multiples Grid
 
@@ -292,6 +327,10 @@ Sparklines strip away axes and labels, which makes them powerful — and dangero
 3. **SVG in table cells adds height** — the SVG's default `display: inline` respects line-height and adds whitespace below. Fix: `display: block` on SVG or `line-height: 0` on `<td>`.
 4. **Missing null handling** — use `.defined(d => d != null)` on the line generator to break gaps instead of connecting across missing data.
 5. **Too many data points** — 1000 points in 80px means <0.1px each, wasting CPU with no visual benefit. Downsample with LTTB.
+
+## Observable Plot
+
+Observable Plot has no dedicated sparkline mark, but you can approximate one with `Plot.line` in a small fixed-size plot with `axis: null` on both scales. For spark-in-table, D3 gives you more control over cell-level rendering and shared scales across rows.
 
 ## References
 
