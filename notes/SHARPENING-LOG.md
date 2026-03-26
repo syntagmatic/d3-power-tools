@@ -714,3 +714,16 @@ Running notes from the philosophy pass. One section per skill — observations, 
 **Line count:** 302 → 340 (+12.6%)
 
 **Key judgment:** The fixed-window vs auto-scaled distinction is the most valuable addition. It captures a design decision that monitoring tools got right empirically — consistent time windows let operators learn "normal shape" — but that most sparkline tutorials ignore.
+
+---
+
+## navigation (Priority 4 — targeted)
+
+**What changed:**
+- Added LOD state machine with hysteresis pattern: different zoom thresholds for entering vs. exiting detail levels, prevents flickering at boundaries. Includes code recipe and tuning guidance (wider bands for touch).
+- Added "Scroll-Driven Animations vs. d3-zoom" section: clarifies when CSS `animation-timeline: scroll()` applies (scrollytelling) vs. when d3-zoom remains necessary (interactive zoom with transform state). Timestamped browser support.
+- Enhanced wheel-hijack pitfall: documented d3-zoom v3's built-in passthrough behavior at zoom limits, warned against breaking it with custom `wheelDelta`.
+
+**Line count:** 321 → 352 (+10%). Targeted P4 additions — no bloat.
+
+**Key judgment:** The hysteresis pattern was the highest-value addition. The existing LOD section showed *what* to render at each level but not how to handle the transition boundaries — exactly the kind of subtle bug that only appears during real interaction.
