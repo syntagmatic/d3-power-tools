@@ -757,3 +757,19 @@ Running notes from the philosophy pass. One section per skill — observations, 
 **Line count:** 220 → 237 (+7.7%)
 
 **Key judgment:** The algorithm comparison table is the highest-value addition. The existing skill covered hierarchical bundling deeply but never told readers when to reach for a different algorithm entirely. The Edge-Path Bundling entry directly addresses the false-connection problem the skill already warns about — it's the structural fix, not just a parameter tweak.
+
+---
+
+## webgl (Priority 4 — targeted)
+
+**What changed:**
+- Added "WebGPU: When to Start Paying Attention" section with browser support status (as of March 2026), mobile caveats
+- Added compute shaders as the differentiating WebGPU feature for viz: GPU-side binning, aggregation, force layout — what WebGL cannot do
+- Added migration decision table: stay on WebGL 2 vs luma.gl v9 vs raw WebGPU, keyed to bottleneck type
+- Added deck.gl v9 / luma.gl v9 as reference implementation (not production-ready caveat noted)
+- Cross-referenced canvas skill for the broader GPU escalation decision framework
+- Updated References with luma.gl, WebGPU Fundamentals links
+
+**Line count:** 363 → 385 (+6%). Deliberately minimal — the existing WebGL patterns are solid; WebGPU is additive context, not a replacement.
+
+**Key judgment:** Framing WebGPU around compute shaders (not rendering) was the right call. The existing instanced rendering patterns already solve the draw-call bottleneck that most D3 viz authors hit. WebGPU's value for viz is GPU-side data processing, and the skill now makes that distinction clear rather than implying WebGPU is a blanket upgrade.
