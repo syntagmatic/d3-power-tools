@@ -52,6 +52,61 @@ ctx.strokeStyle = `rgba(0, 100, 160, ${alpha})`;
 
 This prevents oversaturation with large datasets and ensures visibility with small ones.
 
+## Reading Crossing Patterns (Duality)
+
+The geometry of line crossings between adjacent axes encodes variable relationships — these are consequences of Inselberg's point-line duality, not just visual heuristics:
+
+| Pattern between axes Xi, Xi+1 | Meaning | What to look for |
+|-------------------------------|---------|-----------------|
+| Parallel segments (no crossings) | Strong positive correlation | Lines flow smoothly left to right |
+| X-pattern (lines cross between axes) | Negative correlation | Lines form an hourglass at the midpoint |
+| Tight "bowtie" / hyperbolic envelope | Elliptical cluster in (xi, xi+1) space | Waist width = correlation strength |
+| All segments converge to a point | Perfect linear relationship | All data on one line in that 2D projection |
+| Random crossings, no structure | Independence | Uniform tangle |
+
+The bowtie pattern is the most actionable: when you see a tight hyperbolic envelope between two axes, you're looking at a cluster. The waist width tells you how tight the cluster is; the orientation tells you the correlation sign. This is why **axis ordering matters** — you can only see pairwise relationships between adjacent axes.
+
+## Axis Ordering Strategies
+
+Drag-to-reorder is necessary but insufficient. Guide users toward meaningful orderings:
+
+| Strategy | When to use | How |
+|----------|-------------|-----|
+| Correlation-based | Default for numeric exploration | Place highly correlated axes adjacent; use `|r|` to maximize visible structure |
+| Domain grouping | Dimensions have natural categories (e.g., demographics, performance, cost) | Group related dimensions; place the "outcome" axis at the far right |
+| Variance-first | Screening many dimensions | Put highest-variance axes at left where they get the most visual attention |
+| Manual hypothesis | User has a specific question | Let them drag to test specific adjacencies |
+
+For automatic ordering, compute the pairwise correlation matrix and use a greedy nearest-neighbor traversal: start with the highest-variance dimension, then always place the most-correlated unplaced dimension next. This maximizes visible structure between adjacent axes without requiring the user to know the data.
+
+```js
+// Greedy correlation-based ordering
+function correlationOrder(data, dims) {
+  const corr = (a, b) => {
+    const va = data.map(d => d[a]), vb = data.map(d => d[b]);
+    const ma = d3.mean(va), mb = d3.mean(vb);
+    const num = d3.sum(va.map((v, i) => (v - ma) * (vb[i] - mb)));
+    const den = Math.sqrt(d3.sum(va.map(v => (v - ma) ** 2))
+              * d3.sum(vb.map(v => (v - mb) ** 2)));
+    return den === 0 ? 0 : num / den;
+  };
+  const remaining = new Set(dims);
+  const ordered = [dims[0]]; // start with first dimension
+  remaining.delete(dims[0]);
+  while (remaining.size > 0) {
+    const last = ordered[ordered.length - 1];
+    let best = null, bestCorr = -Infinity;
+    for (const d of remaining) {
+      const r = Math.abs(corr(last, d));
+      if (r > bestCorr) { bestCorr = r; best = d; }
+    }
+    ordered.push(best);
+    remaining.delete(best);
+  }
+  return ordered;
+}
+```
+
 ## Interaction Patterns
 
 ### Axis Brushing
@@ -80,6 +135,26 @@ function brushed(event, dimension) {
 ```
 
 **Multi-brush**: Allow multiple brushes per axis for disjoint selections. Store an array of [min, max] ranges per dimension.
+
+### Strum Brushing (Between-Axis Selection)
+
+Standard axis brushes select by **value** on one dimension. Strum brushing selects by **relationship** between two dimensions — it draws a line between adjacent axes and selects polylines that intersect it. This is Inselberg's angular brushing made interactive.
+
+```js
+// Test if a data polyline segment intersects the user-drawn strum line
+function intersectsStrum(axX1, axX2, ya, yb, strum) {
+  // Cross-product segment intersection test
+  const cross = (ux, uy, vx, vy) => ux * vy - uy * vx;
+  const d1 = cross(strum.x2-strum.x1, strum.y2-strum.y1, axX1-strum.x1, ya-strum.y1);
+  const d2 = cross(strum.x2-strum.x1, strum.y2-strum.y1, axX2-strum.x1, yb-strum.y1);
+  const d3 = cross(axX2-axX1, yb-ya, strum.x1-axX1, strum.y1-ya);
+  const d4 = cross(axX2-axX1, yb-ya, strum.x2-axX1, strum.y2-ya);
+  return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0))
+      && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+}
+```
+
+Strum brushing is strictly more expressive than axis brushing for finding correlations — it selects wedge-shaped regions in the dual scatterplot, which axis brushes cannot. Combine both: axis brushes for value-range filtering, strum brushes for relationship filtering.
 
 ### Axis Reordering (Drag)
 
@@ -336,6 +411,24 @@ const color = d3.scaleOrdinal(d3.schemeTableau10);
 
 For parallel coordinates specifically, color encodes a dimension's value across all lines — pair it with opacity so the pattern is readable even in grayscale.
 
+## When to Use Parallel Coordinates
+
+Parallel coordinates are powerful but not always the right choice. Decision framework:
+
+| Situation | Use parallel coordinates | Use instead |
+|-----------|------------------------|-------------|
+| 5+ numeric dimensions, want to see all at once | Yes | — |
+| Comparing individual items across dimensions | Yes | — |
+| Finding clusters in high-dimensional data | Yes, with brushing | Scatterplot matrix for < 5 dims |
+| 2-3 dimensions | No | Scatterplot or small multiples |
+| Categorical data (mostly) | No | Parallel sets (Kosara), alluvial diagrams |
+| Time series across dimensions | Maybe | Small multiples of line charts usually clearer |
+| > 50 dimensions | Yes, with fisheye + column management | Dimensionality reduction (t-SNE, UMAP) for overview |
+
+The key advantage is **brushing as analysis**: no other chart type lets users interactively define multi-dimensional filters and immediately see which items pass. If the workflow is "explore, filter, export subset," parallel coordinates are the right tool.
+
+Observable Plot (as of March 2026) does not have a parallel coordinates mark. Build with D3 directly.
+
 ## Common Pitfalls
 
 1. **Canvas blurriness on retina displays**: See the `canvas` skill's DPR section. TL;DR: set `canvas.width = width * dpr`, `ctx.scale(dpr, dpr)`, CSS size stays at `width`.
@@ -355,3 +448,5 @@ For parallel coordinates specifically, color encodes a dimension's value across 
 - [High-Dimensional Data Analysis with Parallel Coordinates](https://doi.org/10.1145/1281500.1281552) — Xiaoru Yuan et al.'s survey of interaction techniques for parallel coordinates (2007)
 - [Crossfilter](https://square.github.io/crossfilter/) — fast multidimensional filtering, often paired with parallel coordinates
 - [Parallel Sets](https://eagereyes.org/parallel-sets) — Robert Kosara & Caroline Ziemkiewicz's categorical variant of parallel coordinates
+- [Hauser, Ledermann, Doleisch, "Angular Brushing of Extended Parallel Coordinates" (InfoVis 2002)](https://ieeexplore.ieee.org/document/1173157/) — angular/strum brushing theory and implementation
+- [Heinrich & Weiskopf, "State of the Art of Parallel Coordinates" (2013)](https://joules.de/files/heinrich_state_2013.pdf) — comprehensive survey of rendering and interaction techniques
