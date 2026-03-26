@@ -102,6 +102,18 @@ Skills for testing, evaluating, and improving other skills. The compound tool.
 
 **[skill-eval](meta/skill-eval/SKILL.md)** — Evaluate skill effectiveness with before/after comparisons.
 
+**[metamorphic-tester](meta/metamorphic-tester/SKILL.md)** — Validate math and logic via visual invariants. Scaling, permutation, and subset relations to catch silent bugs.
+
+**[visual-critic](meta/visual-critic/SKILL.md)** — Audit design quality and "taste." Typographic hierarchy, 8px grid, WCAG accessibility, and visual logic.
+
+**[robustness-contract](meta/robustness-contract/SKILL.md)** — Pre-negotiate behavior for edge cases. "Data of Death" defense (nulls, outliers, cardinality) and interaction state machines.
+
+**[perceptual-red-team](meta/perceptual-red-team/SKILL.md)** — Audit for cognitive overload. Working memory limits, "Chart Fatigue," hairball detection, and congruence in animation.
+
+**[deception-detector](meta/deception-detector/SKILL.md)** — Audit for mathematical and ethical honesty. Truncated axes, "The Lie Factor," quantile traps, and fabricated correlations.
+
+**[interaction-stress-test](meta/interaction-stress-test/SKILL.md)** — Audit for race conditions and "update storms." Feedback loops, stale closures, RAF coalescing, and dirty-flag rendering.
+
 ## Testing
 
 41 test fixtures with 161 test cases covering rendering, interactions, transitions, and edge cases:
