@@ -791,3 +791,20 @@ Running notes from the philosophy pass. One section per skill — observations, 
 **Line count:** 304 -> 341 (+12%). Modest growth appropriate for priority 4.
 
 **Key insight:** The forced-colors gap is the most actionable finding. Canvas is invisible to Windows High Contrast mode — unlike SVG, which responds automatically. This makes the DOM mirror or table toggle not just a nice-to-have but a hard requirement for accessibility compliance in forced-colors environments.
+
+---
+
+## hierarchy-interaction
+
+**Priority 4 research expansion — 2026-03-26**
+
+**What changed:**
+- Strengthened breadcrumb guidance from "matter more" to "mandatory" — research confirms users lose context after 2+ zoom levels without them.
+- Added "Label Fitting on Zoom" subsection: recalculate visibility at each zoom level, check on transition end to avoid flicker.
+- Added "Touch Targets" subsection: 44x44px minimum (WCAG 2.5.8), two-step tap pattern for small cells.
+- Named the scale-domain-swap technique explicitly as "preferred" in the treemap section.
+- Added Observable Plot note: Plot has no hierarchy interaction, use D3 directly.
+
+**Line count:** 172 -> 184 (+7%). Modest growth for priority 4.
+
+**Key insight:** The skill already covered scale-domain-swap and breadcrumbs well. The main gap was mobile touch interaction — small treemap cells are genuinely untappable without the two-step pattern or enlarged hit areas.
