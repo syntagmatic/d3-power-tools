@@ -567,3 +567,21 @@ Running notes from the philosophy pass. One section per skill — observations, 
 **Key judgment:** The research contained full calendar heatmap implementation (~50 lines), detailed Grafana annotation rendering code, and complete multi-scale drill-down with bar/line switching. All compressed: calendar heatmap became a decision table row, annotation code became a cross-reference to the annotation skill, and semantic zoom became the core `getTemporalLevel` function plus prose guidance. The decision table is the highest-value addition -- it answers "which chart?" before the viewer reaches any recipe.
 
 **Tests:** 4/4 passing (no example changes needed).
+
+---
+
+## hierarchy-layouts (research expansion, March 2026)
+
+**What changed:**
+- Added flame graph row to layout selection table with viewer question framing
+- Expanded tiling strategy tradeoffs: added squarify custom ratio note, resquarify degradation behavior, slice/dice primitives, Marimekko-as-sliceDice pattern, and a decision shortcut paragraph
+- Added "Partition Orientation Variants" section showing icicle/flame graph/left-to-right as coordinate remappings of the same `d3.partition()` layout, with icicle-vs-sunburst tradeoff guidance and flame graph/chart distinction
+- Added Observable Plot note (Plot.tree() for simple cases, D3 for space-filling/Canvas/interaction)
+- Added two references (Brendan Gregg flame graphs, Kong et al. perceptual guidelines)
+- Cross-referenced `hierarchy-interaction` for zoomable icicle
+
+**Line count:** 141 -> 175 (+24%). Within 10-30% growth target.
+
+**Key judgment:** The research contained full icicle implementation code, flame graph search/highlight patterns, and Marimekko rendering recipes. Compressed: icicle became a 3-line coordinate-mapping snippet in the unified partition variants section, Marimekko became one sentence in the sliceDice bullet, flame graph search was cut entirely (implementation detail, not judgment). The partition orientation variants section is the highest-value addition -- it shows that four seemingly different visualizations are the same layout with different coordinate mappings.
+
+**Tests:** 10/10 passing (no example changes needed).
