@@ -132,10 +132,23 @@ Without virtualization, 50K+ DOM nodes cause visible scroll lag. Render only vis
 1. Container with `max-height` and `overflow-y: auto`
 2. Spacer element (`height: data.length * rowHeight`) to size the scrollbar correctly
 3. On scroll, compute `startIdx`/`endIdx` from `scrollTop` and `clientHeight`
-4. Slice data, join visible rows, offset `<tbody>` with `translateY(startIdx * rowHeight)`
-5. Set `aria-rowcount` on `<table>` and `aria-rowindex` on each visible `<tr>` — screen readers need the logical row position, not the DOM position
+4. Add a buffer (5-10 rows above and below viewport) to prevent white flash during fast scrolling
+5. Slice data, join visible rows, offset `<tbody>` with `translateY(startIdx * rowHeight)`
+6. Set `aria-rowcount` on `<table>` and `aria-rowindex` on each visible `<tr>` — screen readers need the logical row position, not the DOM position
+
+This is framework-agnostic — no React/TanStack needed. D3's data join handles the row recycling: `tbody.selectAll('tr').data(slice, d => d.id).join('tr')` reuses existing `<tr>` elements when the slice shifts by a few rows during scrolling.
 
 **Gotcha**: after sorting, re-call `renderVisible()`. Data order changed but scroll position didn't — the user sees stale rows until the next scroll event.
+
+**Ctrl+F is broken.** Virtual scrolling removes off-screen rows from the DOM, so the browser's native find (Ctrl+F) can't search them. Compensate with a visible search input that filters the data array — the same filtering pattern described above. Users expect search to work; a table that swallows Ctrl+F with no alternative is a support ticket.
+
+### When to paginate instead
+
+Virtual scrolling suits exploration — the user scrolls freely through sorted/filtered data. Server-side pagination suits datasets that exceed browser memory: request only the visible page from the server, fetch the next page on demand. The tradeoff: pagination loses scroll momentum and makes "scan all rows" impossible, but it works at any scale. If the full dataset fits in memory (<100K rows of simple objects), virtual scrolling is simpler and feels faster.
+
+## Observable Plot Note
+
+Observable Plot's `Plot.table()` (as of March 2026) is not a first-class mark — it produces an HTML table outside the Plot SVG. For basic sortable tables from tidy data, it's faster than hand-rolling D3 joins. Reach for D3 when you need linked highlighting, virtual scrolling, or chart↔table toggle — Plot's table has no interaction hooks.
 
 ## Common Pitfalls
 
