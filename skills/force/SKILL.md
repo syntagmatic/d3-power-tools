@@ -178,26 +178,83 @@ The N-body force is O(n log n) per tick, but the constant factor is large — at
 3. **Switch to Canvas.** SVG DOM updates are O(n) per tick on top of the simulation cost. Canvas `beginPath`/`arc` batches are an order of magnitude cheaper.
 4. **Batch ticks** (3 per frame). The simulation converges in ~100 frames instead of ~300, reducing total work.
 5. **Pre-compute** when animation isn't needed. `simulation.stop(); simulation.tick(300);` runs synchronously — no rendering overhead at all.
-6. **Web Worker offloading.** Move the simulation off the main thread entirely. Post node positions back every N ticks for rendering:
+6. **Web Worker offloading.** Move the simulation off the main thread entirely. d3-force has no DOM dependency — it works in a Worker with just the `d3-force` module. Three patterns, in order of complexity:
+
+**Static pre-computation** — worker runs `sim.tick(300)`, posts final positions once. Good for dashboards, thumbnails, server-side rendering.
+
+**Progressive rendering** — worker posts positions every N ticks. User sees convergence but can't interact:
 
 ```js
-// force-worker.js
-self.onmessage = (e) => {
-  const { nodes, links, width, height } = e.data;
+// force-worker.js (progressive)
+importScripts('https://d3js.org/d3-force.v3.min.js');
+self.onmessage = ({ data: { nodes, links, width, height } }) => {
   const sim = d3.forceSimulation(nodes)
     .force("link", d3.forceLink(links).id(d => d.id))
-    .force("charge", d3.forceManyBody().distanceMax(300).theta(1.5))
+    .force("charge", d3.forceManyBody().distanceMax(400))
     .force("center", d3.forceCenter(width / 2, height / 2))
     .stop();
   for (let i = 0; i < 300; i++) {
     sim.tick();
-    if (i % 10 === 0) self.postMessage({ nodes, done: false });
+    if (i % 5 === 0) self.postMessage(nodes.map(d => ({ id: d.id, x: d.x, y: d.y })));
   }
-  self.postMessage({ nodes, done: true });
+  self.postMessage({ done: true, nodes: nodes.map(d => ({ id: d.id, x: d.x, y: d.y })) });
 };
 ```
 
-At 10K+ nodes, consider `d3-force-reuse` (drops `forceManyBody` cost by reusing the quadtree across ticks instead of rebuilding every tick) or switch to WebGL rendering (see `webgl`).
+**Interactive with drag** — worker runs a continuous tick loop; main thread sends drag events with node id + coordinates. Worker sets `fx`/`fy` and reheats. This gives the best UX but requires message coordination:
+
+```js
+// force-worker.js (interactive)
+let sim, nodeMap;
+self.onmessage = ({ data }) => {
+  if (data.type === 'init') {
+    nodeMap = new Map(data.nodes.map(d => [d.id, d]));
+    sim = d3.forceSimulation(data.nodes)
+      .force("link", d3.forceLink(data.links).id(d => d.id))
+      .force("charge", d3.forceManyBody().distanceMax(400))
+      .force("center", d3.forceCenter(data.width / 2, data.height / 2))
+      .on("tick", () => {
+        self.postMessage(data.nodes.map(d => ({ id: d.id, x: d.x, y: d.y })));
+      });
+  }
+  if (data.type === 'drag') {
+    const node = nodeMap.get(data.id);
+    if (node) { node.fx = data.x; node.fy = data.y; sim.alpha(0.3).restart(); }
+  }
+  if (data.type === 'dragend') {
+    const node = nodeMap.get(data.id);
+    if (node) { node.fx = null; node.fy = null; }
+  }
+};
+```
+
+`postMessage` deep-copies objects. For 10K nodes posting `{id, x, y}` each tick, this is ~1-2ms — acceptable. At 50K+, use `Float64Array` with `postMessage(buffer, [buffer])` to transfer ownership instead of cloning (~29ms vs ~268ms), but you need double-buffering because the transferred buffer is detached from the sender.
+
+7. **`d3-force-reuse`** — drop-in replacement for `forceManyBody` that reuses the quadtree across ~13 ticks instead of rebuilding every tick. 10-90% speedup depending on graph density, no measurable quality loss (as of March 2026):
+
+```js
+import { forceManyBodyReuse } from 'd3-force-reuse';
+simulation.force("charge", forceManyBodyReuse().strength(-30).distanceMax(300));
+```
+
+At 10K+ nodes with Canvas rendering, the combination of `d3-force-reuse` + `distanceMax` + Worker offloading handles most cases. Beyond that, see `webgl` for rendering and "Beyond d3-force" below for alternative algorithms.
+
+## Beyond d3-force
+
+d3-force is the right tool when your data is a graph with < 5K nodes and you want interactive, animated layout. When those assumptions don't hold, escalate — don't fight the algorithm.
+
+| Your situation | Better tool | Why |
+|---|---|---|
+| High-dimensional feature data, not a graph | UMAP (`umap-js`) | Discovers clusters from feature vectors directly; d3-force needs explicit edges |
+| Need community structure to pop | ForceAtlas2 (`graphology-layout-forceatlas2`) | Degree-dependent repulsion + LinLog mode separates communities that d3-force mushes together |
+| Need alignment, ordering, or group boxes | WebCola (`webcola`) | Constraint-based layout — impossible with pure force |
+| 5K–50K node graph | ForceAtlas2 in WebWorker | Adaptive per-node temperature avoids the alpha-decay tuning fight |
+| 50K+ nodes | Server-side layout (Graphviz `sfdp`, Python UMAP) + static render | Too expensive for real-time browser computation |
+| Faithful edge-length distances | Stress majorization (WebCola internally) | Monotonic convergence; d3-force annealing can oscillate |
+
+**Quick decision:** Is your data a graph? If yes, and < 5K nodes, use d3-force — it's simpler, better documented, and integrates natively with D3 drag/zoom. If no (you have feature vectors, not edges), use UMAP. If you need constraints (alignment, ordering), use WebCola. If you need Gephi-quality community separation or > 5K nodes, use ForceAtlas2.
+
+These tools produce x/y coordinates. Render with D3 as a normal scatterplot or node-link diagram — the layout engine is separate from the renderer. For network-specific rendering patterns (node-link, adjacency matrix, arc diagram, chord, Sankey), see `network`.
 
 ## Common Pitfalls
 
@@ -221,5 +278,9 @@ At 10K+ nodes, consider `d3-force-reuse` (drops `forceManyBody` cost by reusing 
 
 - [D3 Force](https://d3js.org/d3-force)
 - [Force-Directed Graph](https://observablehq.com/@d3/force-directed-graph)
+- [Force-Directed Web Worker](https://observablehq.com/@d3/force-directed-web-worker)
 - [d3-force-reuse](https://github.com/twosixlabs/d3-force-reuse) — quadtree reuse for faster N-body
 - [Clustered Force Layout](https://observablehq.com/@d3/clustered-force-layout)
+- [graphology-layout-forceatlas2](https://graphology.github.io/standard-library/layout-forceatlas2.html) — Gephi-style layout
+- [WebCola](https://ialab.it.monash.edu/webcola/) — constraint-based layout with d3 adaptor
+- [umap-js](https://github.com/PAIR-code/umap-js) — dimensionality reduction for feature data
