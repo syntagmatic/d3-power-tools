@@ -546,3 +546,24 @@ Running notes from the philosophy pass. One section per skill — observations, 
 **Line count:** 322 → 406 (+26%). Within 10-30% growth target.
 
 **Key judgment:** The research contained substantial d3-annotation API detail (type tables, editMode authoring workflow, responsive resize patterns) and ChartMark grammar specification. Both omitted — d3-annotation types are API docs, and ChartMark is a research prototype. The skill keeps its hand-rolled-first philosophy and points to d3-annotation only as a "when to escalate" option. Step-sequenced annotations live here because they're about annotation timing; general scrollytelling layout (sticky graphic CSS, step containers) cross-references to motion skill.
+
+---
+
+## time-series (research expansion)
+
+**Date:** 2026-03-26
+
+**What changed:**
+- Added "Choosing a Time-Series Chart" decision table mapping viewer questions to chart types with rationale (9 entries + common pairings)
+- Added "Prediction Bands and Anomaly Detection" section: graduated-opacity fan chart pattern, anomaly markers, threshold line alternative, performance note
+- Added "Semantic Temporal Zoom" section: `getTemporalLevel` function, re-aggregation guidance, when to use vs overview+detail
+- Added "Annotation Bands and Event Markers" cross-reference to annotation skill with Grafana-inspired patterns summary
+- Added "Difference Area" section: two-clip approach for period comparison, year-over-year join recipe
+- Added Observable Plot note (differenceY mark, shift transform) timestamped as of March 2026
+- Added 3 references: Observable Plot difference mark, IEEE VIS 2024 semantic zoom, D3 Graph Gallery confidence intervals
+
+**Line count:** 329 -> 420 (+28%). Within 10-30% growth target.
+
+**Key judgment:** The research contained full calendar heatmap implementation (~50 lines), detailed Grafana annotation rendering code, and complete multi-scale drill-down with bar/line switching. All compressed: calendar heatmap became a decision table row, annotation code became a cross-reference to the annotation skill, and semantic zoom became the core `getTemporalLevel` function plus prose guidance. The decision table is the highest-value addition -- it answers "which chart?" before the viewer reaches any recipe.
+
+**Tests:** 4/4 passing (no example changes needed).
