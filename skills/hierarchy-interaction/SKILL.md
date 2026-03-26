@@ -161,6 +161,7 @@ function zoomed(event) {
 2. **Double-click fires click first.** Use a 250ms timer to distinguish, or avoid the conflict entirely: single-click for toggle, modifier+click for select.
 3. **Treemap cells overflow during zoom transition.** Apply `clipPath` so children don't render outside parent bounds mid-transition. This is only visible during the animation — easy to miss in development.
 4. **Enter + update not merged.** Use `.merge()` or `.join()` so both entering and updating nodes get the position transition. Otherwise new nodes jump to final position while existing nodes animate.
+5. **Multiple unnamed transitions cancel each other.** A common collapsible tree bug: one `.transition()` for transform and a separate `.transition()` for opacity on the same `<g>` elements. The second replaces the first — nodes never move from their enter position. Fix: chain all attributes in a single `.transition()` call, or use named transitions (`.transition("move")`, `.transition("style")`).
 
 ## References
 
