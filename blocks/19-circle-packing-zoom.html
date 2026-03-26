@@ -224,6 +224,107 @@ const label = svg.append("g")
     .attr("dy", "0.35em")
     .text(d => d.data.name);
 
+// --- Constraint relaxation for label placement ---
+
+function rectCollideForce(padding = 2) {
+  let nodes;
+  function force(alpha) {
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const a = nodes[i], b = nodes[j];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const overlapX = (a.w + b.w) / 2 + padding - Math.abs(dx);
+        const overlapY = (a.h + b.h) / 2 + padding - Math.abs(dy);
+        if (overlapX > 0 && overlapY > 0) {
+          if (overlapX < overlapY) {
+            const shift = overlapX * alpha * 0.5;
+            a.x -= Math.sign(dx) * shift;
+            b.x += Math.sign(dx) * shift;
+          } else {
+            const shift = overlapY * alpha * 0.5;
+            a.y -= Math.sign(dy) * shift;
+            b.y += Math.sign(dy) * shift;
+          }
+        }
+      }
+    }
+  }
+  force.initialize = n => { nodes = n; };
+  return force;
+}
+
+// Contain labels inside their own circle (hard constraint)
+function forceContainInCircle() {
+  let nodes;
+  function force() {
+    for (const n of nodes) {
+      const dx = n.x - n.cx, dy = n.y - n.cy;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const maxDist = Math.max(0, n.cr - n.w / 2);
+      if (dist > maxDist && dist > 0) {
+        const scale = maxDist / dist;
+        n.x = n.cx + dx * scale;
+        n.y = n.cy + dy * scale;
+        n.vx = 0;
+        n.vy = 0;
+      }
+    }
+  }
+  force.initialize = n => { nodes = n; };
+  return force;
+}
+
+function relaxLabels(focusNode, kt) {
+  // Determine which nodes get labels at this zoom level
+  const candidates = root.descendants().filter(d => {
+    if (d === focusNode && d.children) return true; // focus label at top
+    if (d.parent === focusNode) return true;          // direct children
+    if (!d.children && d.parent && d.parent.parent === focusNode) return true; // leaves in child groups
+    return false;
+  });
+
+  // Compute screen positions and font sizes
+  const labelNodes = [];
+  for (const d of candidates) {
+    const apparentR = d.r * kt;
+    const isFocus = d === focusNode && d.children;
+    const fontSize = isFocus ? 13 : Math.min(apparentR * 0.3, 13);
+    if (!isFocus && (apparentR < 12 || fontSize < 6)) continue; // too small
+
+    const sx = (d.x - view[0]) * kt + diameter / 2;
+    const sy = (d.y - view[1]) * kt + diameter / 2;
+    const textW = d.data.name.length * fontSize * 0.52;
+
+    labelNodes.push({
+      x: sx,
+      y: isFocus ? sy - apparentR + fontSize + 4 : sy,
+      cx: sx,
+      cy: isFocus ? sy - apparentR + fontSize + 4 : sy,
+      cr: apparentR,
+      w: textW,
+      h: fontSize * 1.3,
+      fontSize,
+      isFocus,
+      datum: d,
+    });
+  }
+
+  if (labelNodes.length > 1) {
+    // Run force simulation to resolve overlaps
+    const sim = d3.forceSimulation(labelNodes)
+      .force("x", d3.forceX(n => n.cx).strength(0.4))
+      .force("y", d3.forceY(n => n.cy).strength(0.4))
+      .force("collide", rectCollideForce(3))
+      .force("contain", forceContainInCircle())
+      .velocityDecay(0.65)
+      .stop();
+
+    for (let i = 0; i < 100; i++) sim.tick();
+  }
+
+  return labelNodes;
+}
+
 // Background click: zoom out
 svg.on("click", () => {
   if (focus !== root) zoomTo(focus.parent || root);
@@ -249,40 +350,48 @@ function zoomTo(target) {
             `translate(${(d.x - vt[0]) * kt + diameter / 2},${(d.y - vt[1]) * kt + diameter / 2})`
           );
           node.attr("r", d => d.r * kt);
-          label.attr("transform", d =>
-            `translate(${(d.x - vt[0]) * kt + diameter / 2},${(d.y - vt[1]) * kt + diameter / 2})`
-          );
-          // LOD: show labels only for children of focus + focus itself
-          // At each zoom level, show the focused node's label and its direct children
+
+          // During animation: simple LOD (no relaxation — too expensive per frame)
           label.each(function(d) {
             const el = d3.select(this);
             const apparentR = d.r * kt;
-            const isFocus = d === focus;
-            const isChildOfFocus = d.parent === focus;
-            const isLeafInFocus = !d.children && d.parent && d.parent.parent === focus;
-
-            if (isFocus && d.children) {
-              // Focus node: show label at top
-              el.attr("font-size", "14px")
-                .attr("opacity", 0.6)
-                .attr("dy", d => (-d.r * kt + 16) + "px");
-            } else if (isChildOfFocus || isLeafInFocus) {
-              // Direct children of focus: size to fit inside circle
-              const maxSize = Math.min(apparentR * 0.3, 14);
-              if (apparentR > 15 && maxSize > 6) {
-                el.attr("font-size", maxSize + "px")
-                  .attr("dy", "0.35em");
-                // Measure text width vs circle diameter — hide if it doesn't fit
-                const textLen = d.data.name.length * maxSize * 0.55; // approximate
-                el.attr("opacity", textLen < apparentR * 1.8 ? 1 : 0);
-              } else {
-                el.attr("opacity", 0);
-              }
-            } else {
+            const isVisible = d === focus || d.parent === focus ||
+              (!d.children && d.parent && d.parent.parent === focus);
+            if (!isVisible || apparentR < 12) {
               el.attr("opacity", 0);
+            } else {
+              el.attr("transform",
+                `translate(${(d.x - vt[0]) * kt + diameter / 2},${(d.y - vt[1]) * kt + diameter / 2})`)
+                .attr("font-size", (d === focus && d.children)
+                  ? "13px"
+                  : Math.min(apparentR * 0.3, 13) + "px")
+                .attr("dy", (d === focus && d.children)
+                  ? (-apparentR + 16) + "px"
+                  : "0.35em")
+                .attr("opacity", 1);
             }
           });
         };
+      })
+      .on("end", () => {
+        // After animation: run constraint relaxation for final label placement
+        const kt = diameter / view[2];
+        const relaxed = relaxLabels(focus, kt);
+        const relaxedMap = new Map(relaxed.map(n => [n.datum, n]));
+
+        label.each(function(d) {
+          const el = d3.select(this);
+          const n = relaxedMap.get(d);
+          if (n) {
+            el.transition().duration(200)
+              .attr("transform", `translate(${n.x},${n.y})`)
+              .attr("font-size", n.fontSize + "px")
+              .attr("dy", "0.35em")
+              .attr("opacity", n.isFocus ? 0.5 : 1);
+          } else {
+            el.attr("opacity", 0);
+          }
+        });
       });
 }
 
