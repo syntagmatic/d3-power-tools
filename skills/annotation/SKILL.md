@@ -26,6 +26,16 @@ The hardest part of annotation is not geometry -- it is deciding what deserves a
 
 **When not to annotate.** Exploratory dashboards where the user defines their own questions. Annotation imposes the author's narrative; if the viewer's task is open-ended exploration, use tooltips and brushing instead. Also skip annotation when the chart is one panel in a small-multiples grid -- the pattern across panels *is* the insight.
 
+**Highlight by desaturation.** Instead of making the annotated element louder, make everything else quieter. Gray out non-annotated data so the annotated point pops by being the only colored element. This scales better than adding callout decorations:
+
+```js
+selection
+    .attr("fill", d => annotatedIds.has(d.id) ? color(d.category) : "#ccc")
+    .attr("opacity", d => annotatedIds.has(d.id) ? 1 : 0.3);
+```
+
+**Text hierarchy in the chart.** A well-annotated chart has five levels: (1) headline above the chart states the finding, (2) subtitle gives scope or method, (3) 1-3 inline callouts within the chart area, (4) axis labels -- minimal, just enough to read values, (5) source line for provenance. Each level uses progressively smaller, lighter type. If you skip the headline, the viewer must reconstruct your claim from scattered annotations.
+
 ## Leader Line Geometry
 
 Three connector types. Straight lines for sparse charts; elbows when the note sits directly above/beside the point; curves when you need to route around nearby data:
@@ -158,6 +168,27 @@ function updateLabels(width) {
   });
 }
 ```
+
+## Annotation as Data
+
+Treat annotations as structured data, not ad-hoc SVG elements hand-positioned in rendering code. Store them in a JSON array alongside your dataset:
+
+```js
+const annotations = [
+  { id: "pandemic", x: "2020-03-11", y: 142000, dx: -80, dy: -40,
+    title: "Pandemic declared", body: "WHO declaration preceded sharpest weekly rise.",
+    priority: 1, connector: "curve" },
+  { id: "vaccine", x: "2021-01-04", y: 98000, dx: 60, dy: -30,
+    title: "Vaccine rollout", body: "First doses administered.",
+    priority: 2, connector: "elbow" },
+];
+```
+
+This buys you three things: **priority filtering** (at narrow widths, show only `priority <= 1`), **separation of concerns** (editors modify annotation text without touching rendering code), and **data-coordinate binding** (annotations survive rescaling because they reference data values, not pixels). Render with a standard `.data().join()` -- annotations are just more data bound to groups with connector paths and note text.
+
+**When to use d3-annotation instead.** Susie Lu's [d3-annotation](https://d3-annotation.susielu.com/) library (as of March 2026, stable at v2.5.1 but unmaintained since 2019) provides a subject+connector+note architecture with built-in types (callout, circle, rect, threshold, badge) and an `editMode(true)` for drag-to-position authoring. Use it when you need 3+ richly styled callouts quickly or when your team includes non-D3 developers. Hand-roll when you need Canvas rendering, custom connector shapes, or full control over the annotation lifecycle.
+
+> **Observable Plot note.** Plot treats annotations as ordinary marks -- `Plot.tip()` for callouts, `Plot.ruleY()` for thresholds, `Plot.text()` with `lineWidth` for auto-wrapping labels. The design principle is sound for D3 too: bind annotations to data, use scales, use enter/update/exit.
 
 ## SVG Text Wrapping
 
@@ -292,6 +323,58 @@ svg.append("rect")
     .on("pointerleave", () => tooltip.style("opacity", 0));
 ```
 
+## Step-Sequenced Annotations
+
+When a chart tells a multi-step story, show annotations one at a time as the reader scrolls rather than cluttering a single view. Each step reveals one insight -- the annotation equivalent of progressive disclosure.
+
+The pattern: a sticky chart with scroll-triggered step handlers. Map each step index to an annotation object (or `null` for no annotation). On step enter, clear previous callouts and render the current one at data coordinates. Wire steps to scroll position with [Scrollama](https://github.com/russellsamora/scrollama) (IntersectionObserver-based, stable as of March 2026) or CSS `position: sticky` with your own IntersectionObserver:
+
+```js
+const stepAnnotations = [
+  null,  // step 0: base chart, no annotation
+  { x: "2020-03-11", y: 142000, dx: -80, dy: -40,
+    title: "Pandemic declared", body: "Sharpest weekly increase followed." },
+  { x: "2021-01-04", y: 98000, dx: 60, dy: -30,
+    title: "Vaccines begin", body: "Recovery trend starts here." },
+];
+
+function onStepEnter(stepIndex) {
+  annotationLayer.selectAll(".callout").remove();
+  const ann = stepAnnotations[stepIndex];
+  if (ann) renderAnnotation(ann, xScale, yScale); // reuse your callout renderer
+}
+```
+
+For the general scrollytelling layout pattern (sticky graphic, step containers, CSS scroll-snap), see `motion`.
+
+**When to sequence vs. show all at once:**
+
+| Sequence annotations when... | Show all at once when... |
+|---|---|
+| The story has temporal or causal order | The chart makes one or two claims |
+| Multiple callouts would clutter a single view | The audience is expert and scans quickly |
+| The audience is general public (news, reports) | The chart is one panel in a dashboard or grid |
+
+## Choosing an Annotation Approach
+
+```
+Need to sequence annotations over scroll?
+  YES → Step-sequenced (above) + Scrollama / IntersectionObserver
+  NO ↓
+
+Need 3+ richly styled callouts quickly?
+  YES → d3-annotation library or annotation-as-data with full renderer
+  NO → Hand-rolled SVG text + leader line
+
+Rendering on Canvas?
+  YES → Hand-rolled Canvas callouts (see Canvas Annotations above)
+  NO → SVG annotations
+
+Need non-developer editing of annotation text?
+  YES → Annotation-as-data pattern (JSON alongside dataset)
+  NO → Inline in rendering code is fine
+```
+
 ## Common Pitfalls
 
 **Too many annotations clutter the chart.** If every point has a callout, none stand out. Research on visual emphasis shows blur/focus is perceived fastest (~830ms), followed by size (~910ms), then color (~1240ms). Callouts work by contrast with unannotated data -- that contrast disappears when everything is annotated. Keep to 3 callouts; use tooltips for the rest.
@@ -315,7 +398,9 @@ g.insert("rect", "text")
 
 ## References
 
-- [d3-annotation](https://d3-annotation.susielu.com/) -- Susie Lu's annotation library
+- [d3-annotation](https://d3-annotation.susielu.com/) -- Susie Lu's annotation library (subject+connector+note architecture)
+- [Making Annotations First-Class Citizens](https://medium.com/@Elijah_Meeks/making-annotations-first-class-citizens-in-data-visualization-21db6383d3fe) -- Elijah Meeks on annotation as data visualization of metadata
+- [Scrollama](https://github.com/russellsamora/scrollama) -- IntersectionObserver-based scrollytelling
 - [Automatic Label Placement](https://en.wikipedia.org/wiki/Automatic_label_placement) -- computational geometry approaches
 - [D3 Voronoi Labels](https://observablehq.com/@d3/voronoi-labels) -- Voronoi-based label placement
 - [Emphasis Techniques in Visualization](https://pmc.ncbi.nlm.nih.gov/articles/PMC8841630/) -- perceptual research on visual prominence
