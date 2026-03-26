@@ -773,3 +773,21 @@ Running notes from the philosophy pass. One section per skill — observations, 
 **Line count:** 363 → 385 (+6%). Deliberately minimal — the existing WebGL patterns are solid; WebGPU is additive context, not a replacement.
 
 **Key judgment:** Framing WebGPU around compute shaders (not rendering) was the right call. The existing instanced rendering patterns already solve the draw-call bottleneck that most D3 viz authors hit. WebGPU's value for viz is GPU-side data processing, and the skill now makes that distinction clear rather than implying WebGPU is a blanket upgrade.
+
+---
+
+## canvas-accessibility
+
+**Date:** 2026-03-26
+
+**Priority 4 — targeted additions only.**
+
+**What changed:**
+- Added "System Accessibility Preferences" section: `prefers-reduced-motion`, `prefers-contrast`, and `forced-colors` media queries with canvas-specific handling. The forced-colors gap is unique to canvas (SVG adapts automatically, canvas is a bitmap) — this is the strongest argument for always providing a DOM mirror or table toggle.
+- Added `aria-description` (ARIA 1.3) note in Hidden DOM Mirror section as a lightweight alternative to `aria-describedby` for mirror elements.
+- Added pitfall #9: ignoring `forced-colors` mode.
+- Updated example to query system preferences and adapt rendering (stroke boost, font boost, animation gating).
+
+**Line count:** 304 -> 341 (+12%). Modest growth appropriate for priority 4.
+
+**Key insight:** The forced-colors gap is the most actionable finding. Canvas is invisible to Windows High Contrast mode — unlike SVG, which responds automatically. This makes the DOM mirror or table toggle not just a nice-to-have but a hard requirement for accessibility compliance in forced-colors environments.
