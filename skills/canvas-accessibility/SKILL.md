@@ -191,6 +191,36 @@ if (!matchMedia('(prefers-reduced-motion: reduce)').matches)
   ctx.lineDashOffset = -performance.now() / 50;
 ```
 
+## System Accessibility Preferences
+
+Canvas ignores CSS — you must query media features and adapt rendering yourself.
+
+| Media query | What to do in Canvas | Browser support |
+|-------------|---------------------|-----------------|
+| `prefers-reduced-motion: reduce` | Skip transitions, show final state immediately. Disable animated focus ring dash offset. | 93%+ (as of March 2026) |
+| `prefers-contrast: more` | Increase stroke widths (+1px), switch to higher-contrast palette, enlarge text by ~2px. | ~85% |
+| `forced-colors` (Windows High Contrast) | Canvas is a bitmap — forced-colors has **no effect**. The hidden DOM mirror becomes the only accessible representation. If you skip the mirror, high-contrast users see nothing meaningful. | Chromium + Firefox |
+
+```js
+// Query once at init, listen for changes
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+const highContrast = matchMedia('(prefers-contrast: more)');
+
+function getA11ySettings() {
+  return {
+    skipTransitions: reducedMotion.matches,
+    strokeBoost: highContrast.matches ? 1 : 0,
+    fontBoost: highContrast.matches ? 2 : 0
+  };
+}
+
+// Re-render when preference changes (e.g., user toggles system setting)
+reducedMotion.addEventListener('change', render);
+highContrast.addEventListener('change', render);
+```
+
+The `forced-colors` gap is unique to canvas. SVG elements respond to forced-colors automatically; canvas does not. This is the strongest argument for always providing a DOM mirror or data table toggle alongside canvas visualizations.
+
 ## Announce Function with Field Config
 
 ```js
@@ -256,6 +286,12 @@ function createDOMMirror(canvas, data, { role = 'listbox', itemRole = 'option', 
 }
 ```
 
+For richer descriptions without a separate `aria-describedby` target, use `aria-description` (ARIA 1.3, as of March 2026 supported in Chrome and Firefox):
+```js
+.attr('aria-description', d => `${d.category}, revenue ${fmt(d.revenue)}`)
+```
+This is lighter than creating a described-by element for each mirror node — one attribute instead of two elements plus an ID link.
+
 Track focus with `aria-activedescendant`:
 ```js
 canvas.setAttribute('aria-activedescendant', `mirror-node-${state.focusedId}`);
@@ -293,6 +329,8 @@ Two strategies:
 7. **Invisible focus ring on light backgrounds** — use white shadow behind ring or double ring (white outer, blue inner).
 
 8. **Stale DOM mirror after filter** — built at init, never updated when brush/filter changes visible data. Update in same render pass.
+
+9. **Ignoring `forced-colors` mode** — Windows High Contrast users get a raw bitmap with no color adaptation. Always pair canvas with a DOM mirror or table toggle. Test with `matchMedia('(forced-colors: active)')` — if true, consider auto-switching to the table view.
 
 ## References
 
