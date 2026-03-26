@@ -427,35 +427,24 @@ Running notes from the philosophy pass. One section per skill — observations, 
 
 ---
 
-## distributions (research expansion)
+## color (research expansion)
 
 **Date:** 2026-03-26
 
 **What changed:**
-- Added raincloud plot section: composite half-violin + box + strip pattern, horizontal layout guidance, defensive KDE design (Waskom 2023 — clip density to data range), when NOT to use (n < 10, n > 5000, >8 groups), Observable Plot note
-- Added letter-value plot section: nested quantile boxes for large n (Hofmann/Wickham/Kafadar 2017), `computeLetterValues` implementation, stopping rule (`floor(log2(n)) - 2`), when it beats box plots vs when to skip
-- Added "Quick Selection by Sample Size" flowchart — 5 tiers from n < 10 through n > 5000, each with concrete chart recommendations
-- Added defensive KDE note to the bandwidth section: bounded data needs density clipping after computation
-- Expanded decision table with letter-value plot and raincloud rows
-- Added 3 references (Allen 2019, Hofmann/Wickham/Kafadar 2017, Waskom 2023)
+- Replaced OKLab conversion math (pure numerics) with OKLCH palette generation section: CSS-native oklch() usage and culori library integration for D3-compatible interpolators
+- Added "Choosing a Palette System" decision table covering Viridis, Cividis, Magma, Tableau10, Observable10, Tol, ColorBrewer, and Crameri — when to use each and why
+- Added APCA contrast section alongside existing WCAG 2: asymmetric scoring, Lc thresholds for chart elements (45 labels, 60 axes, 75 body text), dark mode advantage over WCAG 2
+- Added Crameri scientific colour maps guidance (import pattern for D3, when to use: citable scientific publications)
+- Updated color space table: HCL "Mostly" uniform hue (honest about blue-purple range), OKLCH as the programmatic generation choice
+- Expanded Wide Gamut section with practical guidance (useful for categorical, not sequential)
+- Added cross-reference to axes-and-scales for classification scales
+- Added Observable Plot note (schemeObservable10 default)
+- Updated references: added OKLCH picker, Culori, Crameri Zenodo DOI, APCA
+- Timestamped version-dependent claims (d3-color OKLCH support, WCAG 3.0 draft status)
 
-**Line count:** 327 → 406 (+24%). Growth is new chart types with implementation recipes and decision guidance.
+**Line count:** 282 → 329 (+47 lines, +17%). Within 10-30% growth target.
 
-**Cross-skill connections:** The defensive KDE note (clip to data range) parallels the edge-bundling beta parameter — both are "how much smoothing" judgment calls. Letter-value plots connect to the axes-and-scales skill's guidance on showing meaningful quantiles. Raincloud composition pattern is the same kind of layered assembly described in cross-skill-composition.
+**Key judgment:** The research contained a full d3-scale-chromatic inventory and extensive Crameri map tables. These were compressed into a decision table and brief prose — the skill guides palette *choice*, not palette *enumeration*. The OKLCH section prioritizes the two practical approaches (CSS-native and culori) over conversion math.
 
----
-
-## network-visualization (research expansion)
-
-**Date:** 2026-03-26
-
-**What changed:**
-- Added hive plot section: deterministic radial-axis layout (Krzywinski 2012) as alternative to force for network comparison, structural questions, and reproducible figures. When force is still better (exploratory, unknown grouping).
-- Added community detection section: graphology + Louvain integration pattern, resolution parameter as interaction, connection to matrix reordering (algorithmic version of manual "sort by group"), convex hull overlays with clustering force dependency warning.
-- Added "Scaling Past D3" section: D3 SVG wall at ~5K, Canvas to ~10K, sigma.js v3 as WebGL escalation path, deck.gl for geospatial networks.
-- Expanded decision table with hive plot row and decision sequence with deterministic layout and 10K+ escalation steps.
-- Added 4 references (Krzywinski 2012, Henry/Fekete/McGuffin 2007 NodeTrix, graphology, sigma.js).
-
-**Line count:** 144 → 172 (+19%). No examples changed; all 15 tests pass.
-
-**Cross-skill connections:** Clustering force implementation belongs in `force` skill (cross-referenced, not duplicated). Graphology as shared data layer connects to the `canvas` and `webgl` skills for rendering at scale. Hive plot geometry (polar coordinates, custom path generators) is pure D3 — no external dependencies.
+**Cross-skill connections:** Classification scales for choropleths cross-referenced to axes-and-scales. APCA thresholds connect to annotation skill's label sizing guidance.
