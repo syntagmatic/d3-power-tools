@@ -185,9 +185,16 @@ Each agent:
 
 ## Constraints
 
-- **Don't bloat.** Research expands options, but the skill should guide choices, not list everything. If adding 3 palette systems, add a decision table for when to use each.
-- **Verify everything.** New code snippets must work. New palette names must be correct. New library references must be current.
-- **Stay D3-focused.** Mention alternatives (deck.gl, Observable Plot) but frame them as "when to reach for this instead," not as tutorials for other libraries.
+- **Don't bloat.** Research expands options, but the skill should guide choices, not list everything. If adding 3 palette systems, add a decision table for when to use each. Extract verbose inventories (e.g., all 60 d3-scale-chromatic schemes) to appendices, not main skill text.
+- **Verify everything.** New code snippets must work. New palette names must be correct. New library references must be current. Timestamp version-dependent claims: "as of March 2026: ~70% browser support."
+- **Stay D3-focused.** Mention alternatives (deck.gl, Observable Plot, Falcon, Mosaic) but frame them as "when to reach for this instead," not as tutorials for other libraries. External libraries get 1-2 paragraphs of "when to escalate" + link to external docs, not embedded tutorials.
+- **Observable Plot "vs D3"** — where Plot offers the same pattern, add a consistent 1-2 sentence note: "Observable Plot's X mark handles this declaratively; use it for quick exploratory work, D3 for custom interaction or Canvas rendering." Don't teach Plot.
+- **Respect skill ownership.** Each technique lives in ONE skill, cross-referenced from others:
+  - OKLCH/color spaces → `color` skill
+  - GPU escalation (WebGL/WebGPU decision) → `canvas` skill
+  - Scrollytelling general patterns → `motion` skill; step-sequenced annotations → `annotation` skill
+  - Falcon/scalable cross-filtering → `brushing` skill
+  - Classification scales for choropleths → `scales` skill; color perception → `color` skill
 - **Update examples.** If a skill gains significant new material, the example should demonstrate it.
 - **Log findings.** Append to `notes/SHARPENING-LOG.md`.
 
