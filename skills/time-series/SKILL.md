@@ -9,6 +9,22 @@ Time is the one axis viewers think they understand — until DST eats an hour, a
 
 For axis customization and tick formatting, see `scales`. For brush mechanics, see `brushing`. For zoom integration, see `navigation`. For Canvas performance patterns, see `canvas`. For animated transitions, see `motion`. For callout annotations on time series, see `annotation`.
 
+## Choosing a Time-Series Chart
+
+| Viewer question | Best chart | Why |
+|---|---|---|
+| What's the trend? | Line chart | Simplest encoding for temporal continuity |
+| How do 10+ series compare? | Horizon chart (2-3 bands) | Line spaghetti is unreadable beyond 5 series |
+| Is this value normal? | Line + prediction band | Shows expected range; deviations pop visually |
+| When did A exceed B? | Difference area (two-clip) | Line chart requires mental subtraction |
+| Is Tuesday always slow? | Cycle plot | Line charts bury weekly seasonality in trend |
+| What day-of-week patterns exist across a year? | Calendar heatmap | Encodes 2D temporal structure that lines can't show |
+| What happened during this deployment? | Line + annotation bands | Without annotations, viewers guess at causation |
+| How does this year compare to last? | Shift + difference area | Overlaid lines are hard to compare precisely |
+| What's the distribution at each time point? | Fan chart (nested CI bands) | Line shows only central tendency |
+
+Common pairings: line + prediction band + annotation markers (monitoring dashboard), overview+detail + LTTB (large dataset exploration), horizon chart + state timeline below (multi-metric with shared events).
+
 ## scaleTime vs scaleUtc
 
 `d3.scaleUtc` is the safe default. Use `d3.scaleTime` only when you need local-timezone axis labels (e.g., "9 AM" in the user's timezone for a work-hours dashboard).
@@ -316,6 +332,78 @@ function brushed(event) {
 - **Programmatic brush.move** — to set the brush from buttons (e.g., "Last 6 months"), call `brushG.transition().call(brush.move, [x0, x1])`. This triggers the `brushed` handler via the transition, so don't also call the update function manually or you get a double render.
 - **Snap to intervals** — in the `end` event, snap the selection to day/week/month boundaries with `interval.floor(start)` and `interval.ceil(end)`, then call `brush.move` with the snapped pixels.
 
+## Prediction Bands and Anomaly Detection
+
+Layer `d3.area()` bands behind the data line to answer "is this value normal?" The key is graduated opacity — draw widest band first (lowest opacity), narrowest last:
+
+```js
+// Data shape: { date, value, p5, p95, p20, p80 }
+const levels = [
+  { lower: "p5", upper: "p95", opacity: 0.1 },
+  { lower: "p20", upper: "p80", opacity: 0.2 },
+];
+
+levels.forEach(({ lower, upper, opacity }) => {
+  g.append("path").datum(data)
+    .attr("d", d3.area()
+      .x(d => x(d.date))
+      .y0(d => y(d[lower]))
+      .y1(d => y(d[upper]))
+      .curve(d3.curveMonotoneX))
+    .attr("fill", "steelblue").attr("fill-opacity", opacity);
+});
+
+// Anomaly markers — points outside the outer band
+g.selectAll(".anomaly")
+  .data(data.filter(d => d.value < d.p5 || d.value > d.p95))
+  .join("circle")
+    .attr("cx", d => x(d.date)).attr("cy", d => y(d.value))
+    .attr("r", 4).attr("fill", "red").attr("stroke", "white").attr("stroke-width", 1.5);
+```
+
+This is a "fan chart" — the Bank of England's inflation forecasts popularized this form. Don't fabricate confidence intervals; if no statistical model provides bounds, use threshold lines instead (a dashed `line` at a known limit + a shaded `rect` for the alert zone above it).
+
+Bands are just area paths — same rendering cost as a line. If hundreds of anomaly markers accumulate, switch to Canvas circles.
+
+## Semantic Temporal Zoom
+
+Standard zoom stretches the same axis. Semantic zoom changes what the marks *represent* at each level — yearly view shows monthly aggregates as bars, daily view shows hourly lines.
+
+```js
+function getTemporalLevel(domain) {
+  const spanMs = domain[1] - domain[0];
+  if (spanMs > 365 * 86400000) return { interval: d3.utcMonth, format: "%b %Y" };
+  if (spanMs > 30 * 86400000)  return { interval: d3.utcWeek, format: "%b %d" };
+  if (spanMs > 7 * 86400000)   return { interval: d3.utcDay, format: "%a %d" };
+  if (spanMs > 86400000)       return { interval: d3.utcHour, format: "%H:%M" };
+  return { interval: d3.utcMinute, format: "%H:%M:%S" };
+}
+```
+
+On each zoom event, call `getTemporalLevel` on the visible domain, re-aggregate with `d3.rollups` using that interval, and update the axis with `.ticks(interval).tickFormat(d3.utcFormat(format))`. Pre-compute aggregates per level to avoid re-rolling on every zoom frame (see LTTB virtual windowing pattern above).
+
+Use semantic zoom when the dataset spans years with sub-hourly granularity available. If the viewer needs both macro and micro simultaneously, use overview+detail instead — it costs vertical space but shows both at once.
+
+## Annotation Bands and Event Markers
+
+For marking deployments, incidents, or regime changes on a time-series chart, see the `annotation` skill. The key Grafana-inspired patterns: point annotations (vertical dashed line + label), range annotations (shaded band spanning a time window), and state timelines (a categorical swimlane below the chart showing healthy/degraded/down). Draw annotation bands behind the data line but in front of grid lines.
+
+## Difference Area (Period Comparison)
+
+To show when metric A exceeds metric B (or this year vs last year), use two clipped area paths — one green (A > B), one red (B > A). This is what Observable Plot's `differenceY` mark does declaratively; in D3, create a `clipPath` from each series line and apply it to the opposing fill area.
+
+For year-over-year comparison, join each point with its value from one year ago:
+
+```js
+const byDate = new Map(data.map(d => [+d.date, d.value]));
+const oneYear = 365.25 * 86400000;
+const yoy = data
+  .map(d => ({ date: d.date, current: d.value, previous: byDate.get(+d.date - oneYear) ?? null }))
+  .filter(d => d.previous != null);
+```
+
+**Observable Plot note:** Plot's `differenceY` mark and `shift` transform handle these patterns declaratively and are worth considering for quick exploratory views (as of March 2026). When you need custom interaction, zoom integration, or Canvas performance, build in D3 directly.
+
 ## Common Pitfalls
 
 **scaleTime domain must be Date objects.** Passing strings or epoch numbers to `scaleTime.domain()` silently produces wrong results — the scale treats them as generic continuous values and the axis renders nonsense labels.
@@ -327,3 +415,6 @@ function brushed(event) {
 - [Sizing the Horizon (Heer et al., CHI 2009)](https://idl.cs.washington.edu/files/2009-TimeSeries-CHI.pdf) — perceptual study of horizon chart band count and chart size
 - [LTTB Algorithm](https://skemman.is/bitstream/1946/15343/3/SS_MSthesis.pdf) — Steinarsson's downsampling thesis
 - [Focus + Context via Brushing](https://observablehq.com/@d3/focus-context) — canonical overview+detail pattern
+- [Observable Plot: Difference Mark](https://observablehq.github.io/plot/marks/difference) — declarative two-series comparison
+- [Semantic Zoom for Time Series (IEEE VIS 2024)](https://ieeexplore.ieee.org/document/10714315/) — qualitative abstraction at each zoom level
+- [D3 Graph Gallery: Confidence Interval](https://d3-graph-gallery.com/graph/line_confidence_interval.html) — area-based prediction bands
