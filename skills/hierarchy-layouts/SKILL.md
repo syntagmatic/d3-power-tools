@@ -15,7 +15,8 @@ Pick the layout that answers the viewer's actual question:
 |--------|-----------|-----------------|-------------------|
 | **Treemap** | Leaf sizes | "Where is the budget going?" | Rectangle area — accurate size comparison |
 | **Sunburst** | Depth + proportion | "How does this break down level by level?" | Arc angle — outer rings get *more* space at deeper levels |
-| **Icicle** | Depth + proportion | Same as sunburst, but comparison-friendly | Rectangle width — easier to compare than arc angle |
+| **Icicle** | Depth + proportion | "How does this break down, and which parts are biggest?" | Rectangle width — easier to compare than arc angle |
+| **Flame graph** | Aggregated call frequency | "Which code paths consume the most CPU?" | Merged partition rectangles — root at bottom |
 | **Pack** | Grouping + containment | "Which cluster does this belong to?" | Enclosure — Gestalt makes groups pop, but wastes ~30% of space |
 | **Tree** | Topology + paths | "How is A connected to B?" | Position — the only layout that shows edges |
 | **Cluster** | Topology, leaves aligned | "How do endpoints compare?" | Same as tree, but all leaves at one depth |
@@ -57,10 +58,13 @@ treemap.tile(d3.treemapBinary);        // balanced binary split
 treemap.tile(d3.treemapSliceDice);     // alternates by depth
 ```
 
-- **Squarify**: best for static — minimizes aspect ratios, cells are readable. But node order is NOT preserved across data updates (jumpy animations).
-- **Resquarify**: same aspect ratios as squarify but preserves node order — **essential for animated treemaps**. Use whenever you transition between data states.
-- **Binary**: balanced splits, moderate aspect ratios, stable ordering. Good middle ground.
-- **SliceDice**: preserves ordering and adjacency — use when spatial position has meaning (e.g., timeline).
+- **Squarify**: best for static — minimizes aspect ratios (targets golden ratio ~1.618), cells are readable. But node order is NOT preserved across data updates (jumpy animations). Custom target: `d3.treemapSquarify.ratio(2)` — rarely needed, the default is perceptually optimal.
+- **Resquarify**: same as squarify on first layout, then caches topology. Sizes change but positions stay — **essential for animated treemaps**. Aspect ratios degrade over many updates as the cached topology drifts from what squarify would choose fresh.
+- **Binary**: recursive median-split, alternates H/V by container shape. Moderate aspect ratios, deterministic ordering. Good middle ground when stability matters more than aspect ratio quality.
+- **SliceDice**: preserves ordering and adjacency — use when spatial position has meaning (e.g., timeline). Also the basis of Marimekko charts: `treemapSliceDice` on a 2-level hierarchy (depth-1 = variable-width columns, depth-2 = segments).
+- **Slice / Dice** (primitives): `treemapSlice` = top-to-bottom strips, `treemapDice` = left-to-right strips. Rarely used directly.
+
+**Decision shortcut:** Is it animated? Use resquarify. Does position encode meaning? Use sliceDice. Otherwise squarify. Consider binary only if you need stability without the sliceDice aspect-ratio penalty.
 
 ## Coordinate System Semantics
 
@@ -75,6 +79,30 @@ Each layout uses `.x`/`.y` differently — this is a major source of bugs:
 **Pack**: `d.x, d.y, d.r` — center and radius.
 
 **Partition for sunburst**: `x` maps to angle, `y` to radius. Apply `d3.scaleSqrt` to the radial dimension — without it, outer rings dominate visually because area grows with r-squared.
+
+## Partition Orientation Variants
+
+Icicle, flame graph, and sunburst are the same `d3.partition()` layout with different coordinate mappings. Choose the orientation that matches your viewer's mental model:
+
+```js
+const partition = d3.partition().size([width, height]).padding(1);
+const root = partition(hierarchy);
+
+// Top-down icicle (root at top) — default mapping
+rect.attr("x", d => d.x0).attr("y", d => d.y0);
+
+// Bottom-up "flame graph" (root at bottom) — flip y
+rect.attr("x", d => d.x0).attr("y", d => height - d.y1);
+
+// Left-to-right icicle — swap size dimensions, swap x/y in rendering
+// partition.size([height, width])
+rect.attr("x", d => d.y0).attr("y", d => d.x0)
+    .attr("width", d => d.y1 - d.y0).attr("height", d => d.x1 - d.x0);
+```
+
+**Icicle vs sunburst:** icicles win for label placement (horizontal text), size comparison (common baseline), deep hierarchies (no r-squared area distortion), and static output (no rotation). Sunbursts win for compactness in wide-but-shallow trees and provide a natural center target for zoom-out navigation.
+
+**Flame graphs** (Brendan Gregg, 2011) are inverted partition layouts where the x-axis is alphabetically sorted — identical stack frames are merged so width = total sampled time. Flame *charts* (Chrome DevTools) are time-ordered on x and don't merge frames. Both are partition layouts, but flame charts typically require custom x-positioning rather than `d3.partition()`. For the canonical D3 implementation, see [d3-flame-graph](https://github.com/spiermar/d3-flame-graph). For zoomable icicle interaction, see `hierarchy-interaction`.
 
 ## Radial Labels
 
@@ -133,9 +161,15 @@ For node-link layouts, swap `.x`/`.y` accessors to match coordinate semantics: `
 
 4. **Squarify for animated data.** Squarify reorders nodes to minimize aspect ratios, so cells jump to new positions when data changes. Switch to `treemapResquarify` for any treemap that transitions between data states.
 
+## Observable Plot
+
+For simple node-link trees from path-like data, Observable Plot's `Plot.tree()` mark handles stratify, links, and label placement declaratively. The D3 skill's value is in space-filling layouts, Canvas rendering, custom interactions, and the coordinate-system control that Plot abstracts away.
+
 ## References
 
 - [D3 Hierarchy](https://d3js.org/d3-hierarchy)
 - [Squarified Treemaps](https://www.win.tue.nl/~vanwijk/stm.pdf) — Bruls, Huizing & van Wijk (EuroVis 2000)
 - [Treemaps for space-constrained visualization](http://www.cs.umd.edu/hcil/treemap-history/) — Shneiderman (1991)
 - [Visualization of large hierarchical data by circle packing](https://dl.acm.org/doi/10.1145/1124772.1124851) — Wang et al. (CHI 2006)
+- [Flame Graphs](https://www.brendangregg.com/flamegraphs.html) — Brendan Gregg
+- [Perceptual Guidelines for Treemaps](https://doi.org/10.1109/TVCG.2010.186) — Kong et al. (aspect ratios near 1 minimize area judgment error)
