@@ -7,6 +7,8 @@ description: "Build accessible data tables as companions or alternatives to D3.j
 
 Charts show patterns; tables show values. When the viewer's task is looking up a specific number, comparing exact figures across rows, or exporting data, a table outperforms any chart. Build tables as first-class views alongside D3 visualizations, not as accessibility afterthoughts.
 
+Related: `linked-views` · `brushing` · `canvas-accessibility` · `color` · `responsive`
+
 ## Table vs. Chart: When the Table Wins
 
 Use a table — not a chart — when:
