@@ -742,3 +742,18 @@ Running notes from the philosophy pass. One section per skill — observations, 
 **Line count:** 155 → 168 (+8.4%)
 
 **Key judgment:** The Ctrl+F gotcha is the highest-value addition — it's the most common user complaint about virtualized tables and the fix (search input) is simple but easy to forget. The pagination subsection captures a real architecture decision rather than just listing options.
+
+---
+
+## edge-bundling (Priority 4 — targeted)
+
+**What changed:**
+- Added "Alternative Bundling Algorithms" section with decision table comparing hierarchical (Holten), Edge-Path (Wallinger 2022/2023), and Divided (Selassie) bundling approaches
+- Added guidance on when to leave hierarchical bundling for Edge-Path Bundling (no natural hierarchy, accuracy matters)
+- Added Divided Edge Bundling for directional networks where flow direction matters
+- Added Observable Plot note (no bundling support as of March 2026)
+- Added two references: Wallinger 2023 spanner speedup, Selassie Divided Edge Bundling
+
+**Line count:** 220 → 237 (+7.7%)
+
+**Key judgment:** The algorithm comparison table is the highest-value addition. The existing skill covered hierarchical bundling deeply but never told readers when to reach for a different algorithm entirely. The Edge-Path Bundling entry directly addresses the false-connection problem the skill already warns about — it's the structural fix, not just a parameter tweak.
