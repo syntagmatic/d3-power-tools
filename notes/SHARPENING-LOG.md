@@ -432,6 +432,7 @@ Running notes from the philosophy pass. One section per skill — observations, 
 **Date:** 2026-03-26
 
 **What changed:**
+<<<<<<< HEAD
 - Replaced OKLab conversion math (pure numerics) with OKLCH palette generation section: CSS-native oklch() usage and culori library integration for D3-compatible interpolators
 - Added "Choosing a Palette System" decision table covering Viridis, Cividis, Magma, Tableau10, Observable10, Tol, ColorBrewer, and Crameri — when to use each and why
 - Added APCA contrast section alongside existing WCAG 2: asymmetric scoring, Lc thresholds for chart elements (45 labels, 60 axes, 75 body text), dark mode advantage over WCAG 2
@@ -472,3 +473,20 @@ Running notes from the philosophy pass. One section per skill — observations, 
 **Key judgment:** The research contained full MapLibre+PMTiles+D3 stack code (~80 lines), dark mode theme objects with Canvas rendering code (~50 lines), a projection selection helper function (~40 lines), and Tissot's indicatrix code. These were compressed to: a decision table, one bridge pattern, one paragraph, and prose guidance. The skill guides the *choice* of when to escalate, not how to build a full MapLibre app.
 
 **Cross-skill connections:** Classification scales for choropleths cross-referenced to axes-and-scales (don't duplicate). Dark mode palette guidance cross-referenced to color skill. Performance escalation connects to canvas and webgl skills.
+
+---
+
+## data-gathering (research expansion)
+
+**Date:** 2026-03-26
+
+**What changed:**
+- Added "When to Escalate Beyond d3.csv" decision table: DuckDB-WASM, hyparquet, apache-arrow, AbortController, ReadableStream -- with bundle sizes, row-count thresholds, and judgment on when each earns its weight
+- Added "Cancellable Data Loading" section with AbortController pattern and the visual bug it prevents (stale response overwrites fresh data)
+- Added Parquet/Arrow BigInt pitfall (Arrow Int64 columns break D3 scales)
+- Added Observable Plot/Framework note on build-time pre-aggregation
+- Added DuckDB-WASM and hyparquet references
+
+**Line count:** 136 → 177 (+30%). Growth is decision guidance and one code pattern, not API docs.
+
+**Key judgment:** The research contained full DuckDB-WASM initialization boilerplate, hyparquet examples, Papa Parse streaming, progressive rendering, and NDJSON generators. All compressed into one decision table that tells you *when* to reach for each tool. The skill stays D3-focused -- these are escape hatches, not primary content.

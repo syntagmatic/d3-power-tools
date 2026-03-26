@@ -121,6 +121,43 @@ while (true) {
 }
 ```
 
+## When to Escalate Beyond d3.csv
+
+`d3.csv` with a row accessor handles most visualization data. Escalate when it doesn't:
+
+| Signal | Tool | Why |
+|--------|------|-----|
+| >500K rows, need aggregation only | DuckDB-WASM (SQL in browser) | Queries remote Parquet via HTTP range requests -- fetches only needed columns/row groups. ~4 MB WASM bundle; not worth it below ~100K rows. |
+| >500K rows, need all rows for Canvas | Manual `fetch` + `ReadableStream` | Stream-parse into typed arrays without holding the full CSV string + parsed objects simultaneously. |
+| Large Parquet file, lightweight page | hyparquet (9 KB) | Pure JS Parquet reader with column selection and HTTP range requests. No WASM runtime. |
+| Dashboard with rapid filter changes | AbortController | Cancel in-flight requests when the user changes filters before data arrives. |
+| Pre-aggregated Arrow IPC files | apache-arrow JS | Zero-copy typed array access via `tableFromIPC`. ~150 KB. Use when a build step already produces Arrow files. |
+| Multiple ad-hoc queries, joins | DuckDB-WASM | Register a table once, run SQL per view. Shared state across linked views. |
+
+**Observable Plot** uses the same `d3.csv`/`d3.autoType` pipeline. For large data in Observable Framework, data loaders pre-aggregate at build time -- a pattern worth adopting even outside Observable: run a build script to produce small derived CSV/Parquet, ship that instead of raw data.
+
+## Cancellable Data Loading
+
+Essential for filter-driven dashboards where users change selections faster than data loads:
+
+```js
+let controller = null;
+
+async function loadData(url) {
+  if (controller) controller.abort();
+  controller = new AbortController();
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    return await res.json();
+  } catch (e) {
+    if (e.name === "AbortError") return null; // superseded, caller ignores
+    throw e;
+  }
+}
+```
+
+Without cancellation, stale responses arrive after fresh ones and silently overwrite the chart with outdated data. The visual bug: the chart flickers between states, sometimes settling on the wrong one.
+
 ## Common Pitfalls
 
 1. **CSV values are always strings.** `"3" + "5" === "35"`. Always coerce in the row accessor, not after.
@@ -129,8 +166,12 @@ while (true) {
 
 3. **`d3.sort` returns a new array.** Unlike `Array.sort()`, the original is unchanged. Forgetting the return value is a silent no-op -- your data stays unsorted and the line still zigzags.
 
+4. **Parquet/Arrow type mismatches.** Arrow BigInt columns (Int64) don't work with D3 scales. Convert: `Number(bigintValue)`. As of March 2026, DuckDB-WASM returns BigInt for integer columns by default.
+
 ## References
 
 - [d3-array](https://d3js.org/d3-array) -- group, rollup, bin, sort, extent, sum, mean
 - [d3-dsv](https://d3js.org/d3-dsv) -- csvParse, autoType
 - [d3-time-format](https://d3js.org/d3-time-format) -- timeParse, utcParse
+- [DuckDB-WASM](https://duckdb.org/docs/stable/clients/wasm/overview) -- SQL queries on client-side data
+- [hyparquet](https://github.com/hyparam/hyparquet) -- lightweight Parquet reader (9 KB)
