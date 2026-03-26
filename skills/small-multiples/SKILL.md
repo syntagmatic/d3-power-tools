@@ -7,7 +7,7 @@ description: "Build small multiples (trellis/faceted) layouts with D3.js. Use th
 
 Small multiples solve the overplotting problem: when too many series on one chart turn it into spaghetti, repeating the same chart structure across panels lets the eye compare without untangling.
 
-For axes and tick formatting, see `axes-and-scales`. For brushing and cross-chart linking, see `brushing`. For canvas rendering patterns, see `canvas`.
+For axes and tick formatting, see `scales`. For brushing and cross-chart linking, see `brushing`. For canvas rendering patterns, see `canvas`.
 
 ## When Small Multiples Beat a Single Chart
 

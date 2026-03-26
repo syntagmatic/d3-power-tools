@@ -82,8 +82,8 @@ Each `SKILL.md` encodes domain knowledge, architecture patterns, interaction rec
 - `skills/hierarchy-layouts/` — treemap, pack, tree, cluster, partition, stratify, tiling strategies, labels, color encoding
 - `skills/hierarchy-interaction/` — expand/collapse, zoomable treemap/sunburst/pack, focus+context navigation
 - `skills/edge-bundling/` — LCA path routing, d3.curveBundle tension, radial dendrograms, SVG and Canvas rendering
-- `skills/force-simulation/` — simulation lifecycle, all built-in forces, custom forces, drag, constrained layouts, clustering, 10K+ nodes
-- `skills/network-visualization/` — node-link diagrams, adjacency matrix, arc diagrams, chord diagrams, Sankey flow
+- `skills/force/` — simulation lifecycle, all built-in forces, custom forces, drag, constrained layouts, clustering, 10K+ nodes
+- `skills/network/` — node-link diagrams, adjacency matrix, arc diagrams, chord diagrams, Sankey flow
 
 ### Seeing place
 - `skills/cartography/` — projections, TopoJSON topology operations, choropleth, bubble maps, hex binning, cartograms, flow maps, geographic labels, zoom-to-feature, globe versor rotation, Canvas multi-layer architecture, tile layers, large geometry/LOD, projection transitions
@@ -94,7 +94,7 @@ Each `SKILL.md` encodes domain knowledge, architecture patterns, interaction rec
 - `skills/shape-morphing/` — circle↔rect via cornerRadius, bar↔pie via arc params, arbitrary path morphing via point resampling, projection transitions
 
 ### Making it legible
-- `skills/axes-and-scales/` — scale selection, axis customization, tick formats, responsive ticks, label collision, broken axes, dual-y, time gaps
+- `skills/scales/` — scale selection, axis customization, tick formats, responsive ticks, label collision, broken axes, dual-y, time gaps
 - `skills/color/` — perceptual color spaces, Tol colorblind-safe palettes, compositing, alpha/overdraw, CVD simulation, dark mode, wide gamut, WCAG contrast, color legends
 - `skills/visual-texture/` — SVG/Canvas pattern fills (hatching, stipple, diamonds, zigzag), filter textures, pattern+color dual encoding for accessibility
 - `skills/annotation/` — callout annotations, leader lines, force-based label collision, responsive labels, tooltips, threshold/reference lines

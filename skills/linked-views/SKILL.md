@@ -7,7 +7,7 @@ description: "Coordinate multiple D3.js visualizations that share state. Use thi
 
 A single chart shows one question. Linked views let the viewer ask a question in one chart and see the answer ripple across others — brushing a time range in a line chart instantly filters a scatter plot, a histogram, and a map. The power is combinatorial: N views give N simultaneous angles on the same data without N separate mental models, but only if the coordination is fast enough to feel like a single instrument.
 
-For brush mechanics and lasso selection, see `brushing`. For scale construction, see `axes-and-scales`. For zoom API details, see `navigation`. For faceted layouts of the same chart type, see `small-multiples`. For data reshaping, see `data-gathering`. For parallel coordinates linking, see `parallel-coordinates`.
+For brush mechanics and lasso selection, see `brushing`. For scale construction, see `scales`. For zoom API details, see `navigation`. For faceted layouts of the same chart type, see `small-multiples`. For data reshaping, see `data-gathering`. For parallel coordinates linking, see `parallel-coordinates`.
 
 ## When Not to Link
 

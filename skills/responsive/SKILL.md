@@ -7,7 +7,7 @@ description: "Making D3.js visualizations responsive and adaptive. Use this skil
 
 A chart built for 960px becomes unreadable at 320px — not because the data changed, but because tick labels overlap, legends occlude data, and 14px text shrinks to 7px. Responsive D3 means adapting the *design decisions* (tick count, margin, layout) to the available space, not just scaling pixels.
 
-Related skills: `axes-and-scales` (tick formatting at narrow widths), `canvas` (DPI, layers), `small-multiples` (responsive reflow), `visual-texture` (pattern fills for print).
+Related skills: `scales` (tick formatting at narrow widths), `canvas` (DPI, layers), `small-multiples` (responsive reflow), `visual-texture` (pattern fills for print).
 
 ## viewBox vs Redraw: When Scaling Breaks
 

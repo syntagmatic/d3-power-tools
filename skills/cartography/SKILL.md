@@ -7,7 +7,7 @@ description: "D3.js geographic maps and spatial visualization: projections, chor
 
 D3's geographic stack is its deepest subsystem — spherical math, streaming geometry, topological operations — and production maps require architectural decisions that simple examples don't reveal.
 
-Related: `shape-morphing` (projection transitions), `color` (choropleth color scales, bivariate palettes, dark mode), `visual-texture` (accessible pattern choropleth), `canvas` (DPR, batching), `canvas-accessibility` (keyboard nav for canvas maps), `axes-and-scales` (classification scales for choropleth — quantize, quantile, threshold).
+Related: `shape-morphing` (projection transitions), `color` (choropleth color scales, bivariate palettes, dark mode), `visual-texture` (accessible pattern choropleth), `canvas` (DPR, batching), `canvas-accessibility` (keyboard nav for canvas maps), `scales` (classification scales for choropleth — quantize, quantile, threshold).
 
 ```
 GeoJSON / TopoJSON ──► topojson.feature() / mesh() / merge() / neighbors()

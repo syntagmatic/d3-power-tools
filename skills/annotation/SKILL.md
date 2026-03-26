@@ -7,7 +7,7 @@ description: "Build annotations, callouts, leader lines, and responsive labels f
 
 A chart without annotation is a chart without an argument. Annotation converts a picture of data into a claim about the world -- it tells the viewer what to look at, why it matters, and what they might otherwise miss.
 
-For axis labels and tick formatting, see `axes-and-scales`. For color legends, see `color`. For accessible text alternatives, see `canvas-accessibility`.
+For axis labels and tick formatting, see `scales`. For color legends, see `color`. For accessible text alternatives, see `canvas-accessibility`.
 
 ## Editorial Judgment: What to Annotate
 
