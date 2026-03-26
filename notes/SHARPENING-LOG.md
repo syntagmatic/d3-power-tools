@@ -628,3 +628,25 @@ Running notes from the philosophy pass. One section per skill — observations, 
 **Key judgment:** The research contained full ComposableSelectionManager with difference mode, detailed Vega-Lite selection grammar comparison, progressive visual analytics literature review, and d3-lasso API walkthrough. Compressed: difference mode cut (rare in practice — union and intersect cover >95% of cases), Vega-Lite became one sentence of context for the union/intersect semantics, PVA literature became the sample-first pattern, d3-lasso became a note that it's D3 v4/v5 only. The decision table and Falcon section are the highest-value additions — they answer "which approach at my data scale?" before the reader reaches any recipe.
 
 **Tests:** 2/2 passing (no example changes needed).
+
+---
+
+## motion (research expansion)
+
+**Diagnosis:** The skill had solid D3 transition mechanics but lacked decision guidance — no framework for when to animate vs. use small multiples, no duration recommendations, and a minimal scrollytelling section that showed raw IntersectionObserver without the dominant sticky-graphic pattern. No mention of View Transitions API or CSS scroll-driven animations.
+
+**Changes:**
+- Added perception-driven decision framework to Core Principle: "When Animation Helps" (Heer & Robertson 2007), "When to Use Small Multiples Instead," and research-backed duration guidelines table
+- Added Congruence Principle framing: maintain valid intermediate states
+- Expanded scrollytelling from bare IntersectionObserver snippet to sticky-graphic pattern with scrollama integration, progress-driven interpolation note, cross-reference to annotation skill for step-sequenced callouts
+- Added CSS scroll-driven animations section (as of March 2026): `animation-timeline: view()` for visual polish alongside scrollama for data updates, with clear limitation note
+- Added View Transitions API section (Baseline October 2025): when to use (view-level swaps) vs. D3 transitions (data-level interpolation), fallback pattern, don't-combine warning
+- Added Observable Plot note (uses View Transitions for `plot.update()`)
+- Added "Choosing an Animation Approach" decision table
+- Updated references with scrollama, View Transitions API, CSS scroll-driven animations
+
+**Line count:** 538 -> 633 (+18%). Well within 10-30% growth target.
+
+**Key judgment:** Research contained extensive View Transitions API details (2025 additions, naming strategies, CSS customization), full scrollama API surface, Gemini grammar, and CSS scroll-driven animation spec details. Compressed heavily: View Transitions became "use for view-level swaps, not data animation" with one code pattern; scrollama became the sticky-graphic pattern plus one setup snippet; CSS scroll-driven animations became a complement-not-replacement paragraph; Gemini grammar cut entirely (theoretical, not actionable for practitioners). The decision table and Heer & Robertson framing are the highest-value additions.
+
+**Tests:** 7/7 passing (no example changes needed).
