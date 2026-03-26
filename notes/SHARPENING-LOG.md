@@ -442,3 +442,20 @@ Running notes from the philosophy pass. One section per skill — observations, 
 **Line count:** 327 → 406 (+24%). Growth is new chart types with implementation recipes and decision guidance.
 
 **Cross-skill connections:** The defensive KDE note (clip to data range) parallels the edge-bundling beta parameter — both are "how much smoothing" judgment calls. Letter-value plots connect to the axes-and-scales skill's guidance on showing meaningful quantiles. Raincloud composition pattern is the same kind of layered assembly described in cross-skill-composition.
+
+---
+
+## network-visualization (research expansion)
+
+**Date:** 2026-03-26
+
+**What changed:**
+- Added hive plot section: deterministic radial-axis layout (Krzywinski 2012) as alternative to force for network comparison, structural questions, and reproducible figures. When force is still better (exploratory, unknown grouping).
+- Added community detection section: graphology + Louvain integration pattern, resolution parameter as interaction, connection to matrix reordering (algorithmic version of manual "sort by group"), convex hull overlays with clustering force dependency warning.
+- Added "Scaling Past D3" section: D3 SVG wall at ~5K, Canvas to ~10K, sigma.js v3 as WebGL escalation path, deck.gl for geospatial networks.
+- Expanded decision table with hive plot row and decision sequence with deterministic layout and 10K+ escalation steps.
+- Added 4 references (Krzywinski 2012, Henry/Fekete/McGuffin 2007 NodeTrix, graphology, sigma.js).
+
+**Line count:** 144 → 172 (+19%). No examples changed; all 15 tests pass.
+
+**Cross-skill connections:** Clustering force implementation belongs in `force` skill (cross-referenced, not duplicated). Graphology as shared data layer connects to the `canvas` and `webgl` skills for rendering at scale. Hive plot geometry (polar coordinates, custom path generators) is pure D3 — no external dependencies.
