@@ -49,38 +49,38 @@ Gemini reviewed the skill collection with a focus on production-readiness: acces
 Full review of all 27 skills, 40 examples, and 145 tests. Ranked by how much each skill encodes **hard-won insight** vs reorganized API docs.
 
 ### Tier 1 — Genuinely hand-crafted
-1. **parallel-coordinates** — Color-picking hit detection, opacity scaling formula, render queue w/ shuffle, Canvas+SVG hybrid. Feels built from real parcoords work.
-2. **canvas** — 12 real pitfalls. Progressive render queue, DPR as systematic concern, typed array layouts, batch-by-style, quadtree rebuild timing.
-3. **canvas-accessibility** — Solves a problem most skip. Quadtree directional nav with 90° cone, navigation model taxonomy, announce function with field config, DOM mirror.
-4. **motion** — TransitionManager for mid-flight interruption. Named transition collision semantics, FLIP, Canvas timer with background-tab fallback.
-5. **brushing** — Segment intersection geometry, SelectionManager on EventTarget, "all selected if empty" semantics, 80ms+easeExpOut linked timing, spatial grid indexing.
-6. **color** — Tol palettes with bad-color per scheme, overdraw alpha formula+solver, Brettel/Viénot simulation matrices, bivariate legend recipes. Now also: color perception (simultaneous contrast, small-area, Mach bands), scale design principles (sequential lightness, diverging symmetry), dark mode HCL adaptation, wide gamut, masking compositing, auto text color. 375→736 lines.
+1. **parallel-coordinates** — Color-picking hit detection, opacity scaling, render queue w/ shuffle, Canvas+SVG hybrid. Now also: Inselberg duality reading (crossing patterns → correlation), axis ordering strategies with greedy algorithm, strum brushing geometry. Decision table vs alternatives.
+2. **canvas** — 12 real pitfalls. Progressive render queue, DPR, typed arrays, batch-by-style, quadtree rebuild. Now also: OffscreenCanvas worker bridge with zoom message passing, texture atlas for custom markers, GPU escalation decision table (Canvas 2D → OffscreenCanvas → regl → WebGPU).
+3. **canvas-accessibility** — Solves a problem most skip. Quadtree directional nav, navigation model taxonomy, announce function, DOM mirror. Now also: system preference queries (prefers-reduced-motion, prefers-contrast, forced-colors), forced-colors gap as hard compliance requirement.
+4. **motion** — TransitionManager for mid-flight interruption, FLIP, Canvas timer. Now also: Heer & Robertson perception research (when animation helps vs. small multiples), research-backed duration guidelines, sticky-graphic scrollytelling with scrollama, View Transitions API guidance, CSS scroll-driven animations.
+5. **brushing** — Segment intersection geometry, SelectionManager, linked timing, spatial grid indexing. Now also: 8-scenario selection decision table, brush composition (shift+drag multi-region, union/intersect), Falcon prefetch cross-filtering for O(1) brush updates, progressive reservoir-sampled filtering for 50K+ points.
+6. **color** — Tol palettes, overdraw alpha solver, Brettel/Viénot CVD simulation, bivariate legends, perception pitfalls, dark mode. Now also: OKLCH palette generation (CSS-native + culori), palette selection decision table (Viridis/Cividis/Tol/ColorBrewer/Crameri), APCA contrast with Lc thresholds for chart elements, Crameri scientific colour maps.
 
 ### Tier 2 — Strong domain knowledge
-7. **cartography** — Expanded from 348→1169 lines. Topology operations (merge/dissolve/neighbors), bivariate choropleth, bubble maps with force-collision, hex binning, cartograms (non-contiguous, Dorling), flow maps (great-circle, curved, animated), geographic label placement (polylabel, collision), Canvas multi-layer architecture with color-pick hit detection and frame budgeting, large geometry/LOD, globe versor rotation with back-face, projection transitions. 14 pitfalls. Moved from Tier 4 #27.
-8. **force** — Verlet internals, custom force recipes, 5K performance cliff, hybrid a11y example.
-9. **shape-morphing** — Parametric > resampling > topology hierarchy. bestRotation, stash on DOM element not datum.
-10. **data-gathering** — autoType FIPS pitfall, circular buffer, columnar typed arrays, pre-computed sort indices.
-11. **edge-bundling** — LCA paths, Holten reference, data-space interpolation for layout transitions. Niche but thorough.
-12. **webgl** — Breaks the boilerplate wall. Full shader code, instanced rendering, color-picking framebuffer, honest regl recommendation.
+7. **cartography** — Topology operations, bivariate choropleth, bubble maps, hex binning, cartograms, flow maps, geographic labels, Canvas multi-layer, LOD, globe versor. Now also: Snyder's projection selection framework (distortion property → geographic extent → projection family), MapLibre+D3 escalation with geoTransform bridge, PMTiles serverless tiles, dark mode maps (Schiewe 2024).
+8. **force** — Verlet internals, custom forces, 5K cliff, hybrid a11y. Now also: three WebWorker patterns (static/progressive/interactive with drag), d3-force-reuse, "Beyond d3-force" decision table (UMAP, ForceAtlas2, WebCola, stress majorization).
+9. **distributions** — KDE bandwidth, Tukey fences, QQ. Now also: raincloud plots (half-violin + box + strip), letter-value plots with stopping rule (Hofmann/Wickham/Kafadar 2017), sample-size selection flowchart (5 tiers), defensive KDE (clip to data range). Moved from Tier 3 — the selection guidance and composite chart patterns encode real visualization judgment.
+10. **scales** — Time gap via band scale, scale selection. Now also: diverging scale midpoint problem (symmetric vs asymmetric domains), classification scales for choropleths (quantize/quantile/threshold/Jenks decision table + code), the quantile trap warning, scale selection decision framework. Moved from Tier 3 — classification scale guidance is editorial, not API docs.
+11. **linked-views** — Bitmap crossfilter, dispatch, shared selection. Now also: Baldonado's four guidelines (parsimony, complementarity, self-evidence, attention), owned-state pattern for 4+ views, scalability ladder (Array.filter → crossfilter → Falcon → Mosaic/DuckDB-WASM), framework decision rule (Vega-Lite/Plot/Mosaic). Moved from Tier 3 — the Baldonado framing and escalation ladder add real architectural judgment.
+12. **time-series** — Horizon/cycle plots, streaming. Now also: 9-question chart selection table, prediction bands with graduated opacity, semantic temporal zoom (getTemporalLevel), difference area with two-clip approach. Moved from Tier 3 — the selection table and semantic zoom encode visualization judgment beyond API docs.
+13. **annotation** — Now also: highlight-by-desaturation, text hierarchy framework, annotation-as-data (structured JSON with priority filtering), step-sequenced annotations with scrollama, decision flowchart. Moved from Tier 4 — the editorial judgment gap is now addressed (desaturation, text hierarchy, when-to-annotate guidance).
+14. **shape-morphing** — Parametric > resampling > topology hierarchy, bestRotation. Now also: library decision tree (d3-interpolate-path → flubber → polymorph → GSAP MorphSVG).
+15. **data-gathering** — autoType FIPS pitfall, circular buffer, columnar typed arrays. Now also: "When to Escalate Beyond d3.csv" decision table (DuckDB-WASM, hyparquet, apache-arrow), cancellable loading with AbortController, Arrow BigInt pitfall.
+16. **edge-bundling** — LCA paths, Holten reference, layout transitions. Now also: algorithm comparison table (hierarchical vs Edge-Path vs Divided bundling), directional bundling guidance.
+17. **webgl** — Full shaders, instanced rendering, color-picking framebuffer, regl recommendation. Now also: WebGPU status and migration decision table (stay WebGL 2 / luma.gl v9 / raw WebGPU).
 
 ### Tier 3 — Competent reference
-13. **navigation** — Geometric vs semantic distinction, minimap, linked-zoom loop prevention. Solid but mostly API docs.
-14. **network** — 5 layouts in 532 lines = breadth over depth. Decision table and validation scripts are strong.
-15. **visual-texture** — Expanded from 262→615 lines. Now includes diamond/triangle/zigzag patterns, perceptual distinctiveness ranking, SVG filter textures (feTurbulence, halftone), Canvas pattern atlas, accessible choropleth patterns, pattern+color compositing. 12 pitfalls. Moved from Tier 4 #25.
-16. **hierarchy-layouts** — Good validation helpers, layout-switcher example. "Which layout for which insight" deserves more than a table.
-17. **hierarchy-interaction** — Well-executed standard patterns (zoomable treemap/sunburst/pack). Observable notebook translations.
-18. **linked-views** — Bitmap crossfilter is useful. Core patterns (dispatch, shared selection) are standard.
-19. **distributions** — Deep stats (KDE bandwidth, Tukey fences, QQ). Reads like a textbook adapted for D3, not visualization wisdom.
-20. **time-series** — 847 lines. Horizon/cycle plot sections are interesting; date parsing and time scale sections are well-covered elsewhere.
-21. **scales** — D3 API organized well. Time gap via band scale is the most interesting pattern.
+18. **visual-texture** — Patterns, perceptual ranking, SVG filters, Canvas atlas. Now also: Julesz texton theory (scientific foundation for pattern limits), canonical 6-pattern accessible set with texton dimensions, Voronoi stippling guidance, CSS Paint API status. Solid scientific grounding but narrower domain than Tier 2.
+19. **responsive** — ResizeObserver, viewBox vs redraw. Now also: container queries for CSS-level adaptation, WCAG 2.2 touch targets (24/44px), prefers-reduced-motion, high-DPI print, decision table. More opinionated than before but still fundamentally web engineering applied to charts.
+20. **hierarchy-layouts** — Validation helpers, layout-switcher. Now also: icicle/flame graph/left-to-right partition variants as coordinate remappings, expanded tiling strategy tradeoffs, Marimekko-as-sliceDice.
+21. **network** — 5 layouts, decision table, validation. Now also: hive plots (deterministic alternative to force), community detection with graphology + Louvain, scaling path (SVG → Canvas → sigma.js → deck.gl).
+22. **hierarchy-interaction** — Zoomable treemap/sunburst/pack. Now also: breadcrumbs as mandatory (not optional), label fitting on zoom, WCAG 2.5.8 touch targets, two-step tap pattern.
+23. **navigation** — Geometric vs semantic zoom, minimap. Now also: LOD state machine with hysteresis bands, scroll-driven animations vs d3-zoom clarification, wheel passthrough at zoom limits.
 
-### Tier 4 — Useful but thin
-22. **annotation** — 769 lines, encyclopedic. Hard part (editorial judgment) untouched.
-23. **responsive** — Standard web engineering applied to D3. 628 lines for "use ResizeObserver."
-24. **small-multiples** — Core insight (shared scales) is one section. Rest is grid math.
-25. **sparkcharts** — Nice pattern collection, fundamentally simple domain.
-26. **data-table** — HTML table patterns with D3 joins. Merge candidate with canvas-accessibility.
+### Tier 4 — Useful but focused
+24. **small-multiples** — Shared scales, grid math. Now also: facet wrap recipe with column-count formula, Observable Plot fx/fy note. Core domain is inherently simple.
+25. **sparkcharts** — Pattern collection. Now also: KPI card layout recipe, fixed-window vs auto-scaled guidance. Simple domain, well-served.
+26. **data-table** — HTML table patterns with D3 joins. Now also: Ctrl+F gotcha in virtual scrolling, buffer rows, pagination decision guidance. Still a merge candidate with canvas-accessibility for a unified "accessible alternatives" skill.
 
 ### Most transformative paths
 1. ~~**Cross-skill composition guide**~~ — Done. `cross-skill-composition` skill added.
@@ -123,6 +123,15 @@ Analysis of 34,196 real D3 blocks from Blockbuilder Search reveals which D3 modu
 - **Blockbuilder explorer:** `blocks/blockbuilder-explorer.html` — 4-view linked explorer (timeline, force network, color scatter, block list) of 34K real D3 blocks from Blockbuilder Search Data. Loads blocks-api.json (10MB) + blocks-colors.json (12MB). Exercises linked-views, force, canvas, color, time-series, and data-gathering skills simultaneously.
 - **Coverage gap analysis:** Compared API function usage across 34K blocks against skill coverage. Identified 3 high-priority missing skills: selections (95% of blocks), shapes (13%), drag (4%). Updated IDEAS.md with data-informed prioritization.
 - **First real-data block:** All previous blocks use synthetic data. This is the first to load and explore a real external dataset.
+
+### 2026-03-26 — Research-Driven Expansion (Philosophy Pass 2)
+- **All 26 skills research-expanded** with alternatives, decision guidance, and field references. Pre-gathered research in `notes/research/` compressed into judgment-first additions.
+- **Priority 1–3 skills** (color, distributions, network, data-gathering, force, cartography, time-series, linked-views, annotation, canvas, hierarchy-layouts, brushing, scales, visual-texture, motion) received 18-30% growth with new sections, decision tables, and cross-references.
+- **Priority 4 skills** (parallel-coordinates, responsive, small-multiples, sparkcharts, data-table, navigation, webgl, canvas-accessibility, edge-bundling, shape-morphing, hierarchy-interaction) received 6-13% targeted additions.
+- **4 skills promoted**: distributions and scales (Tier 3→2), annotation (Tier 4→2), time-series (Tier 3→2), linked-views (Tier 3→2). Promotions driven by added decision guidance that moved skills from "API reference" to "editorial judgment."
+- **Cross-reference audit**: Fixed 3 stale directory names in CLAUDE.md and 6 cross-reference mismatches across skills.
+- **158/158 tests pass** after expansion.
+- **Total: 8,744 lines across 26 skills** (up from ~7,200 pre-expansion).
 
 ### 2026-03-21 → 2026-03-23 — Skill Expansion & Infrastructure
 - **3 new skills:** `annotation` (768 lines), `distributions` (855 lines), `small-multiples` (642 lines). All three were high/medium priority items from IDEAS.md.
