@@ -81,7 +81,7 @@ Each `SKILL.md` encodes domain knowledge, architecture patterns, interaction rec
 ### Seeing structure
 - `skills/hierarchy-layouts/` — treemap, pack, tree, cluster, partition, stratify, tiling strategies, labels, color encoding
 - `skills/hierarchy-interaction/` — expand/collapse, zoomable treemap/sunburst/pack, focus+context navigation
-- `skills/hierarchy-edge-bundling/` — LCA path routing, d3.curveBundle tension, radial dendrograms, SVG and Canvas rendering
+- `skills/edge-bundling/` — LCA path routing, d3.curveBundle tension, radial dendrograms, SVG and Canvas rendering
 - `skills/force-simulation/` — simulation lifecycle, all built-in forces, custom forces, drag, constrained layouts, clustering, 10K+ nodes
 - `skills/network-visualization/` — node-link diagrams, adjacency matrix, arc diagrams, chord diagrams, Sankey flow
 
@@ -103,7 +103,7 @@ Each `SKILL.md` encodes domain knowledge, architecture patterns, interaction rec
 
 ### Making it work
 - `skills/canvas/` — high-performance Canvas 2D: quadtree hit detection, typed arrays, batched rendering, zoom, LOD
-- `skills/webgl-rendering/` — GPU-accelerated rendering for 100K–10M+ elements: shaders, instanced rendering, texture atlases, zoom/picking
+- `skills/webgl/` — GPU-accelerated rendering for 100K–10M+ elements: shaders, instanced rendering, texture atlases, zoom/picking
 - `skills/navigation/` — d3-zoom, geometric vs semantic zoom, rescaleX/rescaleY, zoom constraints, minimap, pinch-to-zoom, level-of-detail
 - `skills/responsive/` — ResizeObserver, container sizing, viewBox vs redraw, aspect ratio, breakpoints, touch, Canvas DPI, iframe embedding
 
