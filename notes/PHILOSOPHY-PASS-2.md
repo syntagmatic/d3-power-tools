@@ -132,14 +132,14 @@ The container firewall (`init-firewall.sh`) blocks all outbound traffic except G
 **Phase A: Research (on host, before container)**
 Run from the host machine with full internet access. For each skill:
 1. Do 3-5 web searches for state-of-the-art in the skill's domain
-2. Save findings as structured markdown files in `temp/research/<skill-name>.md`
+2. Save findings as structured markdown files in `notes/research/<skill-name>.md`
 3. Include: key techniques to add, palette/library names, code patterns, notable examples, citations
 
 This can be parallelized with 3 research agents running concurrently. Each produces a research file that the container agents will consume.
 
 **Phase B: Expansion (in container)**
 Run inside the container. For each skill:
-1. Read `temp/research/<skill-name>.md` for pre-gathered research
+1. Read `notes/research/<skill-name>.md` for pre-gathered research
 2. Read the current SKILL.md
 3. Expand the skill based on research findings
 4. Update examples if needed
@@ -169,13 +169,13 @@ This is simpler but permanently widens the firewall. The two-phase approach is s
 ## Parallelism
 
 ### Phase A (host): 3 research agents in parallel
-Each agent does web research for one skill and writes `temp/research/<skill-name>.md`.
+Each agent does web research for one skill and writes `notes/research/<skill-name>.md`.
 
 ### Phase B (container): 3 expansion agents in parallel via worktrees
 Queue file at `temp/research-queue.json`.
 
 Each agent:
-1. Reads `temp/research/<skill-name>.md` (pre-gathered research)
+1. Reads `notes/research/<skill-name>.md` (pre-gathered research)
 2. Reads the current SKILL.md
 3. Identifies gaps between current coverage and state of the art
 4. Expands the skill with researched alternatives and guidance
@@ -199,12 +199,12 @@ Same as Phase 1. One commit per skill: `Research-expand <skill-name>: <brief sum
 
 ### Phase A: Research (run on host with internet)
 ```
-/loop 25m Research 3 skills in parallel per iteration. Read temp/research-queue.json. Claim next 3 skills not yet researched. Launch 3 agents in parallel. Each agent: (1) do 3-5 web searches for state-of-the-art techniques, palettes, libraries, perceptual research, and notable examples, (2) read the current SKILL.md to understand what's already covered, (3) write findings to temp/research/<skill-name>.md with sections: New Techniques, Broader Alternatives, Notable Examples, Code Patterns, Decision Guidance. Mark as researched in the queue.
+/loop 25m Research 3 skills in parallel per iteration. Read temp/research-queue.json. Claim next 3 skills not yet researched. Launch 3 agents in parallel. Each agent: (1) do 3-5 web searches for state-of-the-art techniques, palettes, libraries, perceptual research, and notable examples, (2) read the current SKILL.md to understand what's already covered, (3) write findings to notes/research/<skill-name>.md with sections: New Techniques, Broader Alternatives, Notable Examples, Code Patterns, Decision Guidance. Mark as researched in the queue.
 ```
 
 ### Phase B: Expansion (run in container)
 ```
-/loop 25m Expand 3 skills in parallel per iteration. Read temp/research-queue.json. Claim next 3 researched-but-not-expanded skills. Launch 3 worktree-isolated agents. Each agent: (1) read temp/research/<skill-name>.md, (2) read the current SKILL.md, (3) expand with researched alternatives and decision guidance, (4) update example if needed, (5) run tests, (6) commit. Mark as expanded in the queue.
+/loop 25m Expand 3 skills in parallel per iteration. Read temp/research-queue.json. Claim next 3 researched-but-not-expanded skills. Launch 3 worktree-isolated agents. Each agent: (1) read notes/research/<skill-name>.md, (2) read the current SKILL.md, (3) expand with researched alternatives and decision guidance, (4) update example if needed, (5) run tests, (6) commit. Mark as expanded in the queue.
 ```
 
 ## Done When
