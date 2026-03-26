@@ -335,6 +335,26 @@ Use regl when you want WebGL performance without managing raw GL state. Skip it 
 
 WebGL is invisible to assistive technology. See `canvas-accessibility` for hidden DOM mirrors and keyboard nav. See `data-table` for data table alternatives.
 
+## WebGPU: When to Start Paying Attention
+
+WebGPU is the successor to WebGL, but "successor" doesn't mean "replacement today." As of March 2026, browser support has reached critical mass — Chrome (since v113), Firefox 141+ (Windows; macOS with 145+), Safari 26+, and Edge all ship it by default. Mobile remains fragmented: Chrome Android works on recent GPUs (Android 12+), Firefox Android is behind a flag, Safari iOS 26 requires the latest OS.
+
+**What WebGPU offers that WebGL cannot:** compute shaders. These run general-purpose computation on the GPU without a render pass — binning, aggregation, force simulation ticks, KDE density estimation can all happen GPU-side. Data never round-trips to JavaScript. For visualizations that currently bottleneck on JS data processing rather than rendering, this is the real upgrade.
+
+**What it doesn't change for most D3 work:** if your bottleneck is draw calls (the common case this skill addresses), WebGL 2 already solves it with instanced rendering and VAOs. WebGPU's render pipeline is more explicit but doesn't make a 1M-point scatter plot meaningfully faster than the WebGL patterns above.
+
+**Migration path.** Don't port WebGL shaders directly — the API concepts are fundamentally different (bind groups and command encoders replace `gl.bindBuffer`/`gl.bindTexture`). Use an abstraction layer:
+
+| Approach | When |
+|----------|------|
+| Stay on WebGL 2 | Your bottleneck is draw calls, not data processing. The patterns in this skill are sufficient |
+| luma.gl v9 | You need a portable API across WebGL 2 and WebGPU. deck.gl v9 uses this internally |
+| Raw WebGPU | You need compute shaders for GPU-side data processing and are willing to own the boilerplate |
+
+deck.gl v9 (March 2024) added WebGPU support via luma.gl v9, though it remains explicitly "not production ready" as of March 2026 — useful as a reference implementation, not yet a dependency to bet on for custom D3 work.
+
+**The decision for D3 visualization authors:** if you're rendering large point clouds and the patterns in this skill work, stay on WebGL 2. If you're doing GPU-side data transformation (real-time aggregation, force-directed layout at 100K+ nodes), WebGPU's compute shaders are worth the migration cost. See `canvas` skill for the broader GPU escalation decision framework.
+
 ## Common Pitfalls
 
 1. **Y-axis flip** — WebGL is Y-up, CSS/D3 is Y-down. Always `clip.y = -clip.y` in vertex shader. Forgetting this produces upside-down charts that look plausible until you check axis alignment.
@@ -359,5 +379,7 @@ WebGL is invisible to assistive technology. See `canvas-accessibility` for hidde
 
 - [WebGL Fundamentals](https://webglfundamentals.org/) — Gregg Tavares
 - [regl](https://github.com/regl-project/regl) — Mikola Lysenko's functional WebGL wrapper
-- [deck.gl](https://deck.gl/) — Uber's WebGL viz framework (good for seeing patterns, overkill as a dependency)
+- [deck.gl](https://deck.gl/) — Uber's WebGL/WebGPU viz framework via luma.gl v9 (good for seeing patterns, overkill as a dependency for custom D3 work)
+- [luma.gl v9](https://luma.gl/) — portable GPU API across WebGL 2 and WebGPU; the abstraction layer if you need WebGPU without raw boilerplate
 - [Instanced Rendering tutorial](https://webgl2fundamentals.org/webgl/lessons/webgl-instanced-drawing.html)
+- [WebGPU Fundamentals](https://webgpufundamentals.org/) — Gregg Tavares (same author as WebGL Fundamentals)
