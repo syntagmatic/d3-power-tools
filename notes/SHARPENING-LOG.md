@@ -650,3 +650,20 @@ Running notes from the philosophy pass. One section per skill — observations, 
 **Key judgment:** Research contained extensive View Transitions API details (2025 additions, naming strategies, CSS customization), full scrollama API surface, Gemini grammar, and CSS scroll-driven animation spec details. Compressed heavily: View Transitions became "use for view-level swaps, not data animation" with one code pattern; scrollama became the sticky-graphic pattern plus one setup snippet; CSS scroll-driven animations became a complement-not-replacement paragraph; Gemini grammar cut entirely (theoretical, not actionable for practitioners). The decision table and Heer & Robertson framing are the highest-value additions.
 
 **Tests:** 7/7 passing (no example changes needed).
+
+---
+
+## axes-and-scales (research expansion)
+
+**Date:** 2026-03-26
+
+**What changed:**
+- Added "Diverging Scales: The Midpoint Problem" section: three-element domain semantics, asymmetric vs symmetric domains, scaleDivergingLog/Pow/Sqrt/Symlog variants, Observable Plot `pivot` note
+- Added "Classification Scales for Choropleths" section: decision table (quantize/quantile/threshold/Jenks) with code patterns, the quantile trap warning, color scheme cross-reference to `color` skill
+- Added "Scale Selection Decision Framework": categorical→temporal→quantitative flowthrough, histogram-first transform guidance
+- Updated example with 7th panel: classification scales comparison (quantize vs quantile vs threshold on skewed data)
+- Added 2 references (D3 Diverging Scales, Classification Scales Observable notebooks)
+
+**Line count:** 238 → 308 (+29%). Growth justified by three distinct new topic areas.
+
+**Cross-skill connections:** Classification scale ownership here per skill ownership rules, with `cartography` owning rendering. Perceptual uniformity defers to `color` skill.
