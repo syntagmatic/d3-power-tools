@@ -424,3 +424,21 @@ Running notes from the philosophy pass. One section per skill — observations, 
 - Fixed test config: filenames pointed to nonexistent `webgl.html`, corrected to `webgl-rendering.html`
 
 **Line count:** 392 → ~240. Net reduction while adding the "when not to use" section and rationales throughout.
+
+---
+
+## distributions (research expansion)
+
+**Date:** 2026-03-26
+
+**What changed:**
+- Added raincloud plot section: composite half-violin + box + strip pattern, horizontal layout guidance, defensive KDE design (Waskom 2023 — clip density to data range), when NOT to use (n < 10, n > 5000, >8 groups), Observable Plot note
+- Added letter-value plot section: nested quantile boxes for large n (Hofmann/Wickham/Kafadar 2017), `computeLetterValues` implementation, stopping rule (`floor(log2(n)) - 2`), when it beats box plots vs when to skip
+- Added "Quick Selection by Sample Size" flowchart — 5 tiers from n < 10 through n > 5000, each with concrete chart recommendations
+- Added defensive KDE note to the bandwidth section: bounded data needs density clipping after computation
+- Expanded decision table with letter-value plot and raincloud rows
+- Added 3 references (Allen 2019, Hofmann/Wickham/Kafadar 2017, Waskom 2023)
+
+**Line count:** 327 → 406 (+24%). Growth is new chart types with implementation recipes and decision guidance.
+
+**Cross-skill connections:** The defensive KDE note (clip to data range) parallels the edge-bundling beta parameter — both are "how much smoothing" judgment calls. Letter-value plots connect to the axes-and-scales skill's guidance on showing meaningful quantiles. Raincloud composition pattern is the same kind of layered assembly described in cross-skill-composition.
