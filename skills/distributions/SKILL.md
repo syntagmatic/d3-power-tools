@@ -1,6 +1,6 @@
 ---
 name: distributions
-description: "Build statistical distribution charts with D3.js. Use this skill when the user wants box plots, violin plots, ridgeline/joy plots, density plots, bee swarm plots, strip/jitter plots, or QQ plots. Covers kernel density estimation, quartile calculation, outlier detection, grouped/faceted statistical comparisons, and animated transitions between distribution views."
+description: "Build statistical distribution charts with D3.js. Use this skill when the user wants box plots, violin plots, ridgeline/joy plots, density plots, bee swarm plots, strip/jitter plots, QQ plots, raincloud plots, or letter-value plots. Covers kernel density estimation, quartile calculation, outlier detection, grouped/faceted statistical comparisons, and animated transitions between distribution views."
 ---
 
 # Distribution Charts
@@ -17,7 +17,9 @@ The choice is analytical, not aesthetic. Each chart type conceals something:
 |-------|-----------|-------|-------|
 | **Histogram** | Small n (< 50), exploring bin structure | Actual counts, gaps, discreteness | Smoothness is an illusion of bin width |
 | **Box plot** | Comparing medians across 5+ groups | Median, quartiles, outliers | Shape — bimodal data looks identical to unimodal |
+| **Letter-value plot** | Large n (200+), tail behavior matters | Nested quantiles, tail asymmetry | Shape (less than box plot, but shows more of the tail) |
 | **Violin plot** | Distribution shape matters (bimodal, skewed) | Full density shape, symmetry | Individual points; KDE fabricates shape from < 30 points |
+| **Raincloud** | Shape + individuals + summary, n 20–2000 | All three: density, points, quartiles | Nothing — but space-intensive (limit to 2–8 groups) |
 | **Ridgeline** | Comparing many (6+) ordered distributions | Trend across groups, density overlap | Precise comparison (rows lack shared y baseline) |
 | **Bee swarm** | Individual observations matter, n < 500/group | Every point, gaps, clusters | Nothing — but force simulation degrades past ~500 pts |
 | **Strip/jitter** | Quick overview, any n | Raw data distribution | Overplots past ~200 pts/group without opacity |
@@ -26,6 +28,14 @@ The choice is analytical, not aesthetic. Each chart type conceals something:
 **The box plot trap.** Two datasets — one normal, one bimodal with the same median and IQR — produce identical box plots. If you haven't already confirmed unimodality, a box plot will hide the most important feature of your data. Use a violin or overlay raw points to check before committing to box plots.
 
 **Combining charts** improves insight: violin + inner box shows shape and summary; bee swarm + median line shows individuals and center. Raincloud plots (half-violin + strip + box) give all three.
+
+### Quick Selection by Sample Size
+
+- **n < 10:** strip + median line. No summary stats — too few points for reliable estimates.
+- **n 10–30:** strip + box or bee swarm. No KDE — too few for reliable density.
+- **n 30–500:** raincloud, violin, or bee swarm. All three work; choose by how many groups.
+- **n 500–5000:** violin + box or letter-value plot. Individual points overplot; use density.
+- **n 5000+:** letter-value plot or violin. Never bee swarm or strip.
 
 **When NOT to use:**
 - **Box plots with n < 10** — quartiles from tiny samples are noise; just show the raw points
@@ -75,6 +85,8 @@ const bandwidth = 0.9 * Math.min(std, iqr / 1.34) * Math.pow(values.length, -0.2
 - **Bimodal data:** Silverman assumes one peak, so it over-smooths and merges two modes into one. Halve the bandwidth and check visually.
 - **Very skewed data:** log-transform before KDE, then back-transform the density curve.
 - **Small samples (n < 30):** the rule produces tiny bandwidths that create spiky, misleading curves. Increase by 20-50%, or just use a histogram — it honestly shows what you observed.
+
+**Defensive KDE.** Clip density to the observed data range — extending 3 bandwidths past the extent (the code above) prevents edge truncation but can show density at impossible values (negative durations, scores above 100). For bounded data, truncate the density curve at the domain boundaries after computing it. For rainclouds and violins this matters more because the shape is directly visible.
 
 ## Descriptive Statistics Helper
 
@@ -236,6 +248,71 @@ violin.append("path")
   .attr("fill", colorB);
 ```
 
+## Raincloud Plot
+
+Three components stacked asymmetrically: half-violin (density shape), box plot (summary stats), and jittered strip (individual observations). The half-violin frees horizontal space that a mirrored violin wastes. Allen et al. 2019 formalized the pattern; empirical studies show 0.43–0.76 SD improvement in correct interpretation vs single-view alternatives.
+
+Horizontal orientation (groups on y-axis, values on x-axis) is most common — group labels read naturally.
+
+```js
+// Layout: each group gets a band. Within the band:
+//   top third: half-violin (area, one side only)
+//   middle: box plot (rect + lines)
+//   bottom third: jittered strip (circles)
+const bw = yBand.bandwidth();
+
+// 1. Half-violin — area going upward from midpoint
+const violinArea = d3.area()
+  .x(d => xScale(d[0]))
+  .y0(bw * 0.45)                          // baseline at midpoint
+  .y1(d => bw * 0.45 - densityScale(d[1])) // density goes up
+  .curve(d3.curveBasis);
+
+// 2. Box plot — narrow rect centered below the violin (use computeStats)
+// 3. Jittered strip — circles in lower portion of band, seeded random
+```
+
+**Defensive design** (Waskom 2023): clip the density curve to the observed data range — naive KDE extends density into impossible values (negative heights, impossible scores). For discrete or small-n data, consider a histogram-based half instead of KDE.
+
+**When NOT to use:** n < 10 (density curve is unreliable), n > 5000 (jittered points become overplotted mess — use violin + box), more than 8 groups (use ridgelines — rainclouds consume too much space per group).
+
+Observable Plot has no raincloud mark — compose from `Plot.areaY`, `Plot.boxX`/`Plot.boxY`, and `Plot.dot` with jitter.
+
+## Letter-Value Plot (Large-n Box Plot)
+
+Standard box plots show only median + quartiles regardless of n. With 10,000 points, you can reliably estimate 1/128th quantiles, but a box plot throws that away and flags hundreds of expected tail values as "outliers." Letter-value plots (Hofmann, Wickham, Kafadar 2017) show progressively more quantile levels as nested, shrinking boxes.
+
+Tukey's letter values: M (median, 0.500), F (fourths, 0.250/0.750), E (eighths, 0.125/0.875), D (sixteenths), C, B, A... Depth formula: `d_i = (1 + floor(d_{i-1})) / 2`, recursively from `d_1 = (1+n)/2`. Stop when the estimate is unreliable — rule of thumb: `k = floor(log2(n)) - 2` levels.
+
+```js
+function computeLetterValues(sorted) {
+  const n = sorted.length;
+  const levels = [];
+  let depth = (1 + n) / 2;
+  levels.push({ letter: "M", lower: atDepth(sorted, depth), upper: atDepth(sorted, depth) });
+
+  const letters = ["F", "E", "D", "C", "B", "A", "Z", "Y", "X", "W"];
+  const maxLevels = Math.max(0, Math.floor(Math.log2(n)) - 2);
+  for (let k = 0; k < Math.min(maxLevels, letters.length); k++) {
+    depth = (1 + Math.floor(depth)) / 2;
+    if (depth < 1) break;
+    levels.push({ letter: letters[k], lower: atDepth(sorted, depth), upper: atDepth(sorted, n + 1 - depth) });
+  }
+  return levels;
+}
+
+function atDepth(sorted, depth) {
+  const i = Math.floor(depth) - 1;
+  return depth === Math.floor(depth) ? sorted[i] : (sorted[i] + sorted[i + 1]) / 2;
+}
+
+// Render: nested rects, widest at center, sequential color encodes depth
+const widthScale = d3.scaleLinear().domain([0, levels.length]).range([bandW, bandW * 0.15]);
+const colorScale = d3.scaleSequential(d3.interpolateBlues).domain([-1, levels.length]);
+```
+
+**When it beats box plots:** large n (>200) where box plots flag too many "outliers," comparing tail behavior across groups, detecting tail asymmetry. **When NOT to use:** small n (<100) where only 2–3 levels are reliable (just use a box plot), or when distribution shape matters more than tail quantiles (use violin).
+
 ## QQ Plot
 
 QQ plots answer "does my data follow this distribution?" — points on the diagonal mean yes, curvature means no. Heavy tails curve up at right and down at left; skew curves one way throughout.
@@ -324,3 +401,6 @@ This is a hidden editorial choice that changes what the viewer concludes:
 
 - Wilke, [Visualizing Distributions](https://clauswilke.com/dataviz/boxplots-violins.html) — when box plots lie and violins help
 - Akin, [KDE Bandwidth Importance](https://aakinshin.net/posts/kde-bw/) — visual consequences of bandwidth choice
+- Allen et al. 2019, [Raincloud plots](https://pmc.ncbi.nlm.nih.gov/articles/PMC6480976/) — the composite pattern formalized (as of 2025)
+- Hofmann, Wickham, Kafadar 2017, [Letter-Value Plots](https://vita.had.co.nz/papers/letter-value-plot.pdf) — box plots for large data
+- Waskom 2023, [Defensive Raincloud Plots](https://arxiv.org/pdf/2303.17709) — KDE pitfalls in rainclouds
