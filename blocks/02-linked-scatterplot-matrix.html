@@ -138,6 +138,7 @@ function kde(kernel, bandwidth, values) {
 
 // --- Draw cells ---
 const cellGroups = [];
+const diagGroups = [];
 for (let row = 0; row < n; row++) {
   for (let col = 0; col < n; col++) {
     const g = svg.append("g")
@@ -159,6 +160,7 @@ for (let row = 0; row < n; row++) {
 
     if (row === col) {
       // Diagonal: KDE density curves per species
+      // Compute full-data densities for background
       const grouped = d3.group(data, d => d.species);
       const extent = xScale.domain();
       const allDensities = [];
@@ -170,7 +172,7 @@ for (let row = 0; row < n; row++) {
         const bw = 0.9 * Math.min(std, iqr / 1.34) * Math.pow(values.length, -0.2);
         const ticks = d3.ticks(extent[0] - 3 * bw, extent[1] + 3 * bw, 100);
         const density = kde(gaussian, bw, values)(ticks);
-        allDensities.push({ species: sp, density });
+        allDensities.push({ species: sp, density, bw, ticks });
       }
       const maxDensity = d3.max(allDensities, s => d3.max(s.density, d => d[1]));
       const densityY = d3.scaleLinear().domain([0, maxDensity]).range([innerSize, 0]);
@@ -181,15 +183,31 @@ for (let row = 0; row < n; row++) {
         .y1(d => densityY(d[1]))
         .curve(d3.curveBasis);
 
+      // Background paths (ghost — always show full data)
       for (const { species: sp, density } of allDensities) {
         inner.append("path")
+          .datum(density)
+          .attr("d", area)
+          .attr("fill", "#ddd")
+          .attr("fill-opacity", 0.3)
+          .attr("stroke", "#bbb")
+          .attr("stroke-width", 0.5);
+      }
+
+      // Foreground paths (active — update on brush)
+      const fgPaths = [];
+      for (const { species: sp, density } of allDensities) {
+        const path = inner.append("path")
           .datum(density)
           .attr("d", area)
           .attr("fill", colorMap[sp])
           .attr("fill-opacity", 0.25)
           .attr("stroke", colorMap[sp])
           .attr("stroke-width", 1.5);
+        fgPaths.push({ species: sp, path });
       }
+
+      diagGroups.push({ xCol, inner, fgPaths, allDensities, densityY, area, xScale });
 
       // Axis at bottom
       inner.append("g")
@@ -261,11 +279,41 @@ for (let row = 0; row < n; row++) {
 // --- Brush listener: update all cells ---
 dispatch.on("brush", ({ selected, source }) => {
   brushedSet = selected;
+
+  // Update scatter cells
   for (const { circles } of cellGroups) {
     circles.attr("fill-opacity", d => {
       if (!brushedSet) return 0.6;
       return brushedSet.has(d._i) ? 0.6 : 0.1;
     });
+  }
+
+  // Update diagonal KDE cells
+  for (const { xCol, fgPaths, allDensities, densityY, area, xScale } of diagGroups) {
+    if (!brushedSet) {
+      // No brush — restore full-data densities
+      for (const { species: sp, path } of fgPaths) {
+        const orig = allDensities.find(d => d.species === sp);
+        path.datum(orig.density).attr("d", area)
+          .attr("fill-opacity", 0.25)
+          .attr("stroke-width", 1.5);
+      }
+    } else {
+      // Recompute KDE from brushed subset
+      for (const { species: sp, path } of fgPaths) {
+        const orig = allDensities.find(d => d.species === sp);
+        const subset = data.filter(d => d.species === sp && brushedSet.has(d._i));
+        if (subset.length < 2) {
+          path.attr("d", null);
+          continue;
+        }
+        const values = subset.map(d => d[xCol]);
+        const density = kde(gaussian, orig.bw, values)(orig.ticks);
+        path.datum(density).attr("d", area)
+          .attr("fill-opacity", 0.35)
+          .attr("stroke-width", 2);
+      }
+    }
   }
 });
 
