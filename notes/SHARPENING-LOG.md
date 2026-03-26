@@ -506,3 +506,43 @@ Running notes from the philosophy pass. One section per skill — observations, 
 **Line count:** 226 → 286 (+27%). Within 10-30% growth target.
 
 **Key judgment:** Detailed ForceAtlas2/WebCola/UMAP code recipes were omitted — those belong in network-visualization or would bloat this skill. The expansion focuses on *when* to leave d3-force, not how to use the alternatives.
+
+---
+
+## linked-views (research expansion)
+
+**Date:** 2026-03-26
+
+**What changed:**
+- Restructured "When Not to Link" around Baldonado's four most-violated guidelines (parsimony, complementarity, self-evidence, attention management) instead of ad-hoc bullet points
+- Added owned-state pattern (from Observable's viewof model) as a fourth feedback-loop prevention strategy — structural prevention vs. boolean guards, with guidance on when each fits
+- Added "Scaling Cross-Filtering Beyond the Browser" section with decision table from Array.filter through Mosaic/DuckDB-WASM; cross-referenced Falcon prefetch details to brushing skill
+- Added "When to Use a Framework" section: Vega-Lite for prototyping coordination designs, Observable Plot note, Mosaic for large data, with a clear three-part decision rule
+- Added Mosaic (TVCG 2024), Falcon (CHI 2019), and Baldonado references
+- Timestamped version-dependent claims (Observable Plot selection, March 2026)
+
+**Line count:** 248 → 304 (+22.6%). Within 10-30% growth target.
+
+**Key judgment:** The research contained Mosaic client interface code (~25 lines), Falcon prefetch index code (~40 lines), Vega-Lite JSON examples, and Observable runtime patterns. All omitted from the skill — Mosaic/Falcon details belong in their respective docs or in brushing, and Vega-Lite JSON is not D3. The skill stays focused on *when* to reach for each tool and *why*, not how to use them. The owned-state pattern was the one portable code pattern worth including because it solves a real D3 problem (feedback loops at 4+ views) better than the existing boolean guard approach.
+
+**Cross-skill connections:** Falcon prefetch cross-referenced to brushing skill. Scalability table connects to canvas and webgl skills at the high end. The owned-state pattern complements the createStore pattern already in the skill.
+
+---
+
+## annotation (research expansion)
+
+**Date:** 2026-03-26
+
+**What changed:**
+- Added "Highlight by desaturation" pattern to editorial judgment section — gray out non-annotated data instead of making annotated elements louder
+- Added text hierarchy framework (headline/subtitle/inline callouts/axis labels/source)
+- Added "Annotation as Data" section — structured JSON with priority filtering, separation of concerns, data-coordinate binding
+- Added d3-annotation library guidance as "when to escalate" (stable but unmaintained since 2019, timestamped March 2026)
+- Added Observable Plot note (annotations-as-marks philosophy)
+- Added "Step-Sequenced Annotations" section — scroll-driven progressive disclosure with Scrollama, cross-reference to motion skill for general scrollytelling layout
+- Added "Choosing an Annotation Approach" decision flowchart
+- Expanded references with Meeks' first-class citizens article and Scrollama
+
+**Line count:** 322 → 406 (+26%). Within 10-30% growth target.
+
+**Key judgment:** The research contained substantial d3-annotation API detail (type tables, editMode authoring workflow, responsive resize patterns) and ChartMark grammar specification. Both omitted — d3-annotation types are API docs, and ChartMark is a research prototype. The skill keeps its hand-rolled-first philosophy and points to d3-annotation only as a "when to escalate" option. Step-sequenced annotations live here because they're about annotation timing; general scrollytelling layout (sticky graphic CSS, step containers) cross-references to motion skill.
