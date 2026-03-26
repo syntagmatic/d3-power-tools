@@ -16,6 +16,23 @@ These patterns come from syntagmatic's parallel coordinates work, generalized fo
 - **Fisheye focus**: distort layout to magnify region of interest while preserving global context
 - **Brush & link**: coordinated selection across multiple views
 
+## Choosing a Selection Approach
+
+Start here. The right technique depends on data size, view type, and what the viewer is asking.
+
+| Scenario | Technique | Why |
+|---|---|---|
+| <1K points, simple views | `d3.brush` + SelectionManager | Direct, no optimization needed |
+| 1K–50K points, scatter/parcoords | Lasso or intersection brush + Web Worker | Worker prevents jank during drag |
+| 50K+ points, histogram/aggregate views | Falcon-style prefetch or DuckDB-WASM | O(1) brush updates via prefetched aggregation |
+| 50K+ points, scatter/item views | Sample-first progressive filtering | Immediate approximate feedback, refine on idle |
+| Multiple disjoint regions | Shift+drag additive brush | Union of rectangles on one view |
+| Cross-view, same dimension | SelectionManager with union mode | Any brush selects |
+| Cross-view, different dimensions | SelectionManager with intersect mode | All brushes must agree |
+| Small multiples / facets | Per-facet brush + shared manager | Observable Plot handles this natively for simple cases |
+
+**Observable Plot note:** For straightforward linked brushing across Plot charts, Plot's built-in brush interaction (built on `d3.brush`) handles the plumbing automatically. Drop to raw D3 when you need lasso, intersection brushing, fisheye, or custom composition logic.
+
 ## Line Intersection Brushing
 
 Traditional brushes select by bounding box — you define a range on one axis. Line intersection brushing lets you draw a line across the visualization and select all data lines that cross it. This is powerful for finding correlations in parallel coordinates, scatterplots, or any path-based visualization.
@@ -353,7 +370,7 @@ For large datasets where the linked view does expensive recomputation (re-binnin
 
 ## Lasso Selection
 
-Freeform selection by drawing an arbitrary closed shape:
+Freeform selection by drawing an arbitrary closed shape. For the point-in-polygon test, prefer `d3.polygonContains` from d3-polygon — it's the same ray-casting algorithm but tested and maintained. The hand-rolled version below is still useful in Web Workers where importing d3-polygon adds bundle complexity.
 
 ```js
 function lasso(container, pointAccessor) {
@@ -543,6 +560,153 @@ function queryGrid(index, queryStart, queryEnd, polylines) {
 
 Build the grid once when data/layout changes. Queries against it are O(cells touched) instead of O(all segments).
 
+## Brush Composition
+
+D3's `d3.brush` creates a single rectangular region. Two common needs require composition logic on top.
+
+### Multi-Region Selection (Shift+Drag)
+
+Hold shift to add a new brush rectangle without clearing the previous ones. Store regions as an array of extents, render them as SVG rects, and union-test all regions on each update:
+
+```js
+let regions = [];
+
+brush.on("end", ({ selection, sourceEvent }) => {
+  if (!selection) return;
+  if (sourceEvent?.shiftKey) {
+    regions.push(selection);
+  } else {
+    regions = [selection];
+  }
+  const selected = new Set();
+  for (const [[x0, y0], [x1, y1]] of regions) {
+    data.forEach((d, i) => {
+      const px = xScale(d.x), py = yScale(d.y);
+      if (px >= x0 && px <= x1 && py >= y0 && py <= y1) selected.add(i);
+    });
+  }
+  manager.select([...selected], "scatter");
+});
+```
+
+### Cross-View Composition (Union vs. Intersect)
+
+When multiple views each produce a selection, you need a rule for combining them. Extend `SelectionManager` with a `mode` property:
+
+- **Union**: a point is selected if it falls in *any* active brush. Use when brushes filter the same dimension (e.g., two histograms of the same variable).
+- **Intersect**: a point is selected if it satisfies *all* active brushes. Use when brushes filter different dimensions (e.g., scatter X brush + histogram Y brush). This is the more common cross-filtering pattern.
+
+```js
+class ComposableSelectionManager extends EventTarget {
+  #sources = new Map(); // source → Set<index>
+  #mode; // "union" | "intersect"
+
+  constructor(mode = "intersect") {
+    super();
+    this.#mode = mode;
+  }
+
+  update(source, indices) {
+    if (indices.length === 0) this.#sources.delete(source);
+    else this.#sources.set(source, new Set(indices));
+    this.#resolve();
+  }
+
+  #resolve() {
+    const active = [...this.#sources.values()].filter(s => s.size > 0);
+    let result;
+    if (active.length === 0) {
+      this.dispatchEvent(new CustomEvent("selection", { detail: { indices: [] } }));
+      return;
+    }
+    if (this.#mode === "union") {
+      result = new Set(active.flatMap(s => [...s]));
+    } else {
+      result = new Set(active[0]);
+      for (let k = 1; k < active.length; k++) {
+        for (const i of result) if (!active[k].has(i)) result.delete(i);
+      }
+    }
+    this.dispatchEvent(new CustomEvent("selection", { detail: { indices: [...result] } }));
+  }
+}
+```
+
+## Scalable Cross-Filtering (Falcon Pattern)
+
+The `SelectionManager` refilters data on every brush event — O(N) per update per view. Beyond ~50K rows, this becomes the bottleneck. The Falcon approach (Moritz & Heer, CHI 2019) makes brush updates O(1) by prefetching aggregation indices.
+
+### When to Use
+
+- **SelectionManager** (above): <50K rows, or views that show individual items (scatter, parallel coordinates).
+- **Falcon-style prefetch**: 50K+ rows with histogram/aggregate passive views. The key insight is that cross-filtering is an *aggregation* problem — you don't need to refilter individual rows, just recompute bin counts.
+- **DuckDB-WASM**: 100K–30M rows in the browser without a server. Serves as the aggregation backend for Falcon-style queries.
+
+### How It Works
+
+1. **On hover** over a view (before the brush starts), prefetch a prefix-sum index for that view's dimension against all passive views.
+2. **During brushing**, compute updated counts for all passive views via constant-time prefix-sum lookups.
+3. **Resolution trade-off**: lower resolution at brush edges (still dragging), high resolution at center.
+
+```js
+// Prefetch when user hovers — hides latency before they start brushing
+views.forEach(view => {
+  view.container.on("pointerenter", async () => {
+    activeIndex = await buildPrefixSumIndex(data, {
+      active: view.dimension,
+      passive: views.filter(v => v !== view).map(v => v.dimension),
+      bins: view.bins,
+    });
+  });
+});
+
+// During brush: O(1) lookups instead of O(N) scans
+function onBrush(extent) {
+  if (!activeIndex) return; // fallback to naive filtering
+  const updates = activeIndex.query(extent);
+  updates.forEach(({ dimension, counts }) => {
+    findView(dimension).updateCounts(counts);
+  });
+}
+```
+
+The [falcon-vis](https://github.com/cmudig/falcon-vis) library (as of March 2026) provides a ready-made implementation with DuckDB-WASM and Arrow backends. For a pure D3 solution, build the prefix sums yourself over binned data — the math is straightforward for 1D histograms.
+
+### Progressive Filtering for Item Views
+
+Falcon solves aggregation views. For scatter/item views with 50K+ points where you must test each item, use sample-first progressive filtering:
+
+```js
+// Build a fixed random sample via reservoir sampling
+const sample = reservoirSample(data.length, 2000);
+let idleId;
+
+brush.on("brush", ({ selection }) => {
+  if (!selection) return;
+  const [[x0, y0], [x1, y1]] = selection;
+
+  // Immediate: test sample only (~2K items, <1ms)
+  const approx = [];
+  for (const i of sample) {
+    const px = projected[i * 2], py = projected[i * 2 + 1];
+    if (px >= x0 && px <= x1 && py >= y0 && py <= y1) approx.push(i);
+  }
+  manager.select(approx, "scatter");
+
+  // Deferred: full scan when idle
+  cancelIdleCallback(idleId);
+  idleId = requestIdleCallback(() => {
+    const full = [];
+    for (let i = 0; i < data.length; i++) {
+      if (inExtent(i, x0, y0, x1, y1)) full.push(i);
+    }
+    manager.select(full, "scatter");
+  });
+});
+```
+
+On `brush.end`, run the full scan synchronously to ensure the final selection is exact. The visual effect: the viewer sees an approximate highlight instantly during drag, refined to the exact set when they stop.
+
 ## Performance at Scale
 
 For brushing over 10K+ elements on Canvas, see the `canvas` skill's frame budgeting and render queue patterns — rAF-gated redraws prevent main-thread blocking during continuous brush updates. For WebGL-backed views, see `webgl` for `bufferSubData` partial updates during interaction.
@@ -559,7 +723,10 @@ For brushing over 10K+ elements on Canvas, see the `canvas` skill's frame budget
 ## References
 
 - [D3 Brush documentation](https://d3js.org/d3-brush) — Mike Bostock's API reference for `d3-brush`
+- [d3-polygon](https://d3js.org/d3-polygon) — `polygonContains` for idiomatic point-in-polygon testing
 - [Crossfilter](https://square.github.io/crossfilter/) — fast multidimensional filtering, the conceptual foundation for linked brushing
+- [Falcon (CHI 2019)](https://idl.cs.washington.edu/files/2019-Falcon-CHI.pdf) — Moritz & Heer, prefetch-based O(1) cross-filtering
+- [falcon-vis](https://github.com/cmudig/falcon-vis) — library implementing Falcon with DuckDB-WASM and Arrow backends
 - [Focus + Context via Brushing](https://observablehq.com/@d3/focus-context) — canonical brush-driven zoom pattern
 - [d3-lasso](https://github.com/skokenes/d3-lasso) — Steve Kokenes's lasso selection plugin for D3
 - [d3.parcoords](https://github.com/syntagmatic/parallel-coordinates) — Kai Chang's parallel coordinates library, pioneering axis-specific brush-linked views in D3
