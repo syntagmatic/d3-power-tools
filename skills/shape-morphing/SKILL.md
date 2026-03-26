@@ -15,11 +15,21 @@ Use the simplest technique that fits. Each tier trades generality for fidelity a
 |---|---|---|---|
 | **Parametric** | Both shapes share numeric parameters (cornerRadius, arc angles, position) | Perfect curves, no polygonal artifacts | Cheapest — standard D3 transitions |
 | **Point resampling** | Shapes have different geometry (star→circle, rect→arc wedge) | Smooth at 128 pts, always polygonal | Moderate — O(n^2) rotation alignment once, then array lerps per frame |
-| **Topology-aware** (flubber, d3-interpolate-path) | Shapes with holes, multiple subpaths, or winding-order mismatches | Handles holes and subpaths | Library dependency; heavier than hand-rolled resampling |
+| **Open-path interpolation** (d3-interpolate-path) | Line transitions where source and target have different point counts | Extends paths to match, then linear interpolation | Light library; 188K weekly npm downloads as of March 2026 |
+| **Topology-aware** (flubber) | Closed shapes with holes, multiple subpaths, or winding-order mismatches | Handles holes and subpaths | Heavier library; stable/finished, 30K weekly npm downloads |
 
 **Why not just always resample?** Parametric morphs preserve true curves — a circle stays a perfect circle at every frame. Resampled morphs approximate curves as 128-gons, which is visually fine but mathematically imprecise. Parametric also runs on Canvas without path parsing.
 
 **Why not just use flubber?** Flubber handles edge cases (holes, subpaths, winding order) that raw resampling does not. But it is a dependency, and for the common cases — cornerRadius morphs, arc parameter morphs, simple path-to-path — the built-in approaches here are lighter and give you full control.
+
+### Library decision tree
+
+When the built-in approaches (parametric, point resampling) don't fit, pick a library based on what you're morphing:
+
+1. **Open lines with mismatched point counts** → `d3-interpolate-path`. It extends the shorter path to match, then interpolates. The right tool for transitioning between line charts with different data lengths.
+2. **Closed shapes with topology issues** (holes, subpaths, winding order) → `flubber`. Still the go-to for arbitrary closed-shape morphing.
+3. **Size-constrained contexts** → `polymorph` (6KB). Lighter alternative to flubber; works well for complex shapes but less reliable for simple ones.
+4. **Production apps already using GSAP** → `MorphSVG` plugin (commercial, GreenSock license). The most robust solution for edge cases but not open source.
 
 ## Parametric Morphing
 
@@ -193,8 +203,14 @@ Morphing implies "this is the same thing, changing form." When that is false, th
 4. **Resampling per frame**: `getPointAtLength()` is expensive. Resample once, then interpolate cached arrays.
 5. **Too few sample points**: Below ~64 points, resampled circles look polygonal. 128 is a safe default.
 
+## Observable Plot
+
+Observable Plot has no built-in shape morphing — transitions between mark types require manual D3 animation. Plot is useful for rendering the static start and end states, but the interpolation between them is pure D3.
+
 ## References
 
-- [flubber](https://github.com/veltman/flubber) — Noah Veltman's library for smooth shape interpolation, handles topology mismatches and winding order
-- [d3-interpolate-path](https://github.com/pbeshai/d3-interpolate-path) — Peter Beshai's plugin for interpolating SVG paths with mismatched commands
+- [flubber](https://github.com/veltman/flubber) — Noah Veltman's library for smooth shape interpolation, handles topology mismatches and winding order. Stable/finished as of March 2026 (~30K weekly npm downloads)
+- [d3-interpolate-path](https://github.com/pbeshai/d3-interpolate-path) — Peter Beshai's plugin for interpolating SVG paths with mismatched commands. Best for open-path (line) transitions (~188K weekly npm downloads as of March 2026)
+- [polymorph](https://github.com/notoriousb1t/polymorph) — Lightweight (6KB) shape morphing alternative
+- [GSAP MorphSVG](https://gsap.com/docs/v3/Plugins/MorphSVGPlugin/) — Commercial plugin; most robust edge-case handling, integrates with GSAP's timeline system
 - [Animated Transitions in Statistical Data Graphics](https://idl.cs.washington.edu/papers/motion/) — Heer & Robertson's research on when transitions help vs. hinder comprehension (IEEE InfoVis 2007)
