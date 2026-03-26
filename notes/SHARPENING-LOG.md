@@ -700,3 +700,17 @@ Running notes from the philosophy pass. One section per skill — observations, 
 **Line count:** 238 → 309 (+30%). Growth at upper bound but justified — five distinct new topic areas filling identified gaps.
 
 **Key judgment:** Container queries and ResizeObserver are complementary, not competing. The decision table makes this clear rather than forcing a choice. Touch targets and reduced motion are small but high-impact accessibility wins that belong in responsive (not just canvas-accessibility) because they affect every chart.
+
+---
+
+## sparkcharts (Priority 4 — targeted)
+
+**What changed:**
+- Added KPI card layout recipe: large number + delta arrow + sparkline, the pattern every monitoring dashboard uses (Grafana, Datadog)
+- Added fixed-window vs auto-scaled sparkline guidance: fixed time windows for operational monitoring (shape becomes recognizable), auto-scaled for editorial use
+- Added Grafana table cell reference in the table embedding section — validates the spark-in-table pattern as the dominant real-world approach
+- Added Observable Plot note (no dedicated sparkline mark; D3 gives more cell-level control)
+
+**Line count:** 302 → 340 (+12.6%)
+
+**Key judgment:** The fixed-window vs auto-scaled distinction is the most valuable addition. It captures a design decision that monitoring tools got right empirically — consistent time windows let operators learn "normal shape" — but that most sparkline tutorials ignore.
