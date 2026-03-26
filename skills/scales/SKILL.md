@@ -1,13 +1,13 @@
 ---
 name: scales
-description: "D3.js axes and scales: log vs symlog tradeoffs, band vs point, time gaps in financial data, responsive tick counts, label collision, broken axes, dual-y, .nice() pitfalls, and axis transitions."
+description: "D3.js axes and scales: log vs symlog tradeoffs, band vs point, time gaps, responsive ticks, label collision, broken axes, dual-y, diverging scales, classification scales (quantile/quantize/threshold/Jenks), scale selection decision framework."
 ---
 
 # Axes and Scales
 
 A reader's first question is "how much?" Scales answer it — but the wrong scale lies. Log scales hide zeros. Linear scales bury orders of magnitude. Time scales allocate pixels to weekends nobody traded on. Every scale choice is an editorial decision about what the viewer can see.
 
-Related skills: `data-gathering` (type coercion before scaling), `brushing` (brush extents map through scales), `motion` (scale domain transitions), `canvas` (drawing axes on Canvas), `responsive` (container sizing and DPI).
+Related skills: `data-gathering` (type coercion before scaling), `brushing` (brush extents map through scales), `motion` (scale domain transitions), `canvas` (drawing axes on Canvas), `responsive` (container sizing and DPI), `color` (perceptual uniformity, colorblind-safe palettes), `cartography` (choropleth rendering — classification scale choices live here).
 
 ## Log vs Symlog: Zeros Kill Log
 
@@ -217,6 +217,74 @@ t.selectAll(".bar")
 
 D3's axis component uses a data join internally, so `.call(axis)` is safe to repeat. But manually appended label text will duplicate — guard with `.selectAll(".axis-label").data([0]).join("text")`.
 
+## Diverging Scales: The Midpoint Problem
+
+`d3.scaleDiverging` takes a three-element domain: `[minimum, midpoint, maximum]`. The midpoint maps to the neutral color at interpolator 0.5. Each side normalizes independently — asymmetric data like `[-2, 0, +8]` is handled correctly without wasting color resolution.
+
+```js
+// Election margin: negative = party A, positive = party B
+const extent = d3.extent(data, d => d.margin);
+const color = d3.scaleDiverging([extent[0], 0, extent[1]], d3.interpolateRdBu);
+```
+
+**When to force symmetry:** Only when proportional comparison across the midpoint matters — if +4 should look as intense as -4. This wastes color range on the shorter side but prevents the visual lie where equal distances from zero appear as different intensities.
+
+```js
+const absMax = Math.max(Math.abs(extent[0]), Math.abs(extent[1]));
+const colorSym = d3.scaleDiverging([-absMax, 0, absMax], d3.interpolateRdBu);
+```
+
+For skewed data that clusters near zero, D3 provides `scaleDivergingLog`, `scaleDivergingPow`, `scaleDivergingSqrt`, and `scaleDivergingSymlog` (as of March 2026). These apply the transform on each side of the midpoint independently.
+
+**Observable Plot** uses a `pivot` option on diverging color scales — cleaner than manually constructing a three-element domain: `color: { type: "diverging", scheme: "RdBu", pivot: 0 }`.
+
+## Classification Scales for Choropleths
+
+Classification is the single most impactful decision in choropleth design. The same data mapped through different methods tells different stories.
+
+| Method | D3 scale | Domain takes | Effect | Use when |
+|--------|----------|-------------|--------|----------|
+| Equal-interval | `scaleQuantize` | `[min, max]` | Equal-width value bins | Distribution shape matters — "how far from the mean?" |
+| Equal-count | `scaleQuantile` | Full value array | Equal-count bins | Ranking matters — "which areas are in the top 20%?" |
+| Manual breaks | `scaleThreshold` | Breakpoint array | Analyst-chosen bins | Domain knowledge dictates boundaries (poverty line, safety limits) |
+| Natural breaks | Jenks → `scaleThreshold` | Computed breaks | Minimizes within-class variance | Data has natural clusters you don't know in advance |
+
+```js
+// Quantile: pass the full data array, not just extent
+const color = d3.scaleQuantile(values, d3.schemeBlues[5]);
+const breaks = color.quantiles(); // [q1, q2, q3, q4] — show these in the legend
+
+// Quantize: pass extent only
+const color2 = d3.scaleQuantize(d3.extent(values), d3.schemeBlues[5]);
+
+// Jenks via simple-statistics (not built into D3)
+import { jenks } from "simple-statistics";
+const breaks = jenks(values, 5); // [min, b1, b2, b3, b4, max]
+const color3 = d3.scaleThreshold(breaks.slice(1, -1), d3.schemeYlOrRd[5]);
+```
+
+**The quantile trap:** Because every color appears equally on the map, two very different distributions produce identical-looking maps. A bimodal distribution and a uniform distribution are indistinguishable. Always pair a quantile choropleth with a histogram showing the actual distribution and breakpoints.
+
+**Color scheme selection:** Use perceptually uniform sequential schemes (viridis, magma, plasma) for magnitude data. Use diverging schemes (RdBu, PuOr) for deviation-from-midpoint data. Avoid rainbow/spectral — uneven perceptual steps create false boundaries. See the `color` skill for full guidance on perceptual uniformity and colorblind safety.
+
+## Scale Selection Decision Framework
+
+When choosing a scale, work through this sequence:
+
+**Is the data categorical?** Unordered categories → `scaleOrdinal`. Marks with width (bars, cells) → `scaleBand`. Marks at a point (dots, lollipops) → `scalePoint`.
+
+**Is the data temporal?** Use `scaleUtc` (not `scaleTime`). Financial data with gaps → band or index approach (see Time Gaps above).
+
+**Is the data quantitative?** Start with `scaleLinear`. Then ask:
+- Spans 2+ orders of magnitude, strictly positive → `scaleLog`
+- Spans 2+ orders, includes zero/negatives → `scaleSymlog`
+- Has a meaningful midpoint (anomaly, margin, profit/loss) → `scaleDiverging`
+- Needs discrete classes for a choropleth → `scaleQuantize` / `scaleQuantile` / `scaleThreshold`
+
+**Is this a color encoding?** Sequential magnitude → `d3.interpolateViridis`. Diverging → `d3.interpolateRdBu` with explicit midpoint. Categorical → `d3.schemeTableau10`.
+
+**Should you transform?** Plot a histogram first. Roughly uniform or normal → linear. Right-skewed with a long tail → log or symlog. Bimodal or clustered → threshold/Jenks classification. Meaningful center → diverging. Extreme outliers → consider broken axis, but only if the outlier isn't the story.
+
 ## Common Pitfalls
 
 1. **Axis labels are manual.** D3 doesn't generate axis titles — append a `<text>` element yourself. Every axis without a label forces the reader to guess units.
@@ -231,8 +299,10 @@ D3's axis component uses a data join internally, so `.call(axis)` is safe to rep
 
 ## References
 
-- [D3 Scales](https://d3js.org/d3-scale) — scale API
+- [D3 Scales](https://d3js.org/d3-scale) — scale API including diverging, quantile, quantize, threshold
 - [D3 Axes](https://d3js.org/d3-axis) — axis generation
+- [D3 Diverging Scales](https://observablehq.com/@d3/diverging-scales) — midpoint and asymmetric domain examples
+- [Classification Scales](https://observablehq.com/@d3/quantile-quantize-and-threshold-scales) — quantile vs quantize vs threshold comparison
 - [Dual-Axis Charts](https://blog.datawrapper.de/dualaxis/) — Lisa Charlotte Muth on when dual-y is appropriate
 - [Broken Y-Axis](https://blog.datawrapper.de/broken-y-axis/) — Datawrapper's axis break design analysis
 - [d3fc Discontinuous Scale](https://d3fc.io/api/scale/discontinuous-scale.html) — library for financial time gaps
