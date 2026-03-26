@@ -490,3 +490,19 @@ Running notes from the philosophy pass. One section per skill — observations, 
 **Line count:** 136 → 177 (+30%). Growth is decision guidance and one code pattern, not API docs.
 
 **Key judgment:** The research contained full DuckDB-WASM initialization boilerplate, hyparquet examples, Papa Parse streaming, progressive rendering, and NDJSON generators. All compressed into one decision table that tells you *when* to reach for each tool. The skill stays D3-focused -- these are escape hatches, not primary content.
+
+---
+
+## force-simulation (research expansion)
+
+**Date:** 2026-03-26
+
+**What changed:**
+- Expanded WebWorker patterns from a 15-line sketch to three concrete patterns (static pre-computation, progressive rendering, interactive with drag), including message protocol, structured clone overhead, and Float64Array transfer for 50K+ nodes
+- Promoted d3-force-reuse from one-line mention to proper mitigation step with import pattern and performance characteristics (timestamped "as of March 2026")
+- Added "Beyond d3-force" decision table: UMAP (high-dimensional), ForceAtlas2 (community structure, 5K-50K), WebCola (constraints), stress majorization (faithful distances), server-side (50K+)
+- Added references: ForceAtlas2, WebCola, umap-js, D3 WebWorker observable
+
+**Line count:** 226 → 286 (+27%). Within 10-30% growth target.
+
+**Key judgment:** Detailed ForceAtlas2/WebCola/UMAP code recipes were omitted — those belong in network-visualization or would bloat this skill. The expansion focuses on *when* to leave d3-force, not how to use the alternatives.
