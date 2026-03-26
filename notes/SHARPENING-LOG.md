@@ -667,3 +667,36 @@ Running notes from the philosophy pass. One section per skill — observations, 
 **Line count:** 238 → 308 (+29%). Growth justified by three distinct new topic areas.
 
 **Cross-skill connections:** Classification scale ownership here per skill ownership rules, with `cartography` owning rendering. Perceptual uniformity defers to `color` skill.
+
+---
+
+## small-multiples (research expansion)
+
+**Date:** 2026-03-26
+
+**What changed:**
+- Added "Facet Wrap" section: grid-wrap recipe for single-variable faceting with column-count formula (`Math.ceil(Math.sqrt(n * aspectRatio))`)
+- Added Observable Plot note: `fx`/`fy` channels, mark-level `facet: "exclude"` for cross-panel annotations, auto-wrap still manual as of March 2026
+
+**Line count:** 211 → 228 (+8%). Minimal growth appropriate for priority 4 — research findings were narrow (Plot faceting model, facet-wrap pattern).
+
+**Key judgment:** The research identified Plot's declarative faceting as the main gap. The skill already covered grid math, shared scales, and interaction sync well. Added the facet-wrap recipe (the most common question) and a concise Plot note rather than expanding into Plot API surface. No example changes needed — the existing example already demonstrates the core patterns.
+
+---
+
+## responsive (research expansion)
+
+**Date:** 2026-03-26
+
+**What changed:**
+- Added "Container Queries for CSS-Level Adaptation" section: `@container` for presentation-layer adaptations (legend, font, annotations), decision table vs ResizeObserver, container collapse caveat
+- Added "Touch Targets and Pointer Adaptation" section: WCAG 2.2 24/44px targets, `pointer: coarse` media query for hit radius
+- Added "Reduced Motion" section: `prefers-reduced-motion` for D3 transition duration
+- Added "Choosing the Right Responsive Approach" decision table: viewBox / ResizeObserver / container queries / both / debounced / layout switching
+- Enhanced print section: high-DPI Canvas print fallback (300 DPI), SVG vs Canvas print quality, visual-texture cross-reference, DevTools debugging tip
+- Added Observable Plot note on auto `width` vs D3's manual control
+- Updated example: `container-type: inline-size`, `@container` rule, `prefers-reduced-motion` media query
+
+**Line count:** 238 → 309 (+30%). Growth at upper bound but justified — five distinct new topic areas filling identified gaps.
+
+**Key judgment:** Container queries and ResizeObserver are complementary, not competing. The decision table makes this clear rather than forcing a choice. Touch targets and reduced motion are small but high-impact accessibility wins that belong in responsive (not just canvas-accessibility) because they affect every chart.
