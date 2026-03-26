@@ -727,3 +727,18 @@ Running notes from the philosophy pass. One section per skill — observations, 
 **Line count:** 321 → 352 (+10%). Targeted P4 additions — no bloat.
 
 **Key judgment:** The hysteresis pattern was the highest-value addition. The existing LOD section showed *what* to render at each level but not how to handle the transition boundaries — exactly the kind of subtle bug that only appears during real interaction.
+
+---
+
+## data-table (Priority 4 — targeted)
+
+**What changed:**
+- Added Ctrl+F gotcha for virtual scrolling: virtualization breaks browser find, so a search input is mandatory compensation
+- Added buffer rows concept (5-10 rows above/below viewport) to prevent white flash during fast scrolling
+- Added note that D3's data join handles row recycling naturally — no framework/TanStack needed
+- Added "When to paginate instead" subsection: virtual scrolling vs server-side pagination decision guidance
+- Added Observable Plot note: Plot.table() exists but has no interaction hooks, so D3 is needed for linked highlighting or toggle patterns
+
+**Line count:** 155 → 168 (+8.4%)
+
+**Key judgment:** The Ctrl+F gotcha is the highest-value addition — it's the most common user complaint about virtualized tables and the fix (search input) is simple but easy to forget. The pagination subsection captures a real architecture decision rather than just listing options.
