@@ -180,6 +180,22 @@ Internal nodes must have interpolated positions even though they're invisible �
 
 **Why this works:** The bundle curve is a pure function of its control point positions. Since LCA paths depend on tree structure (not layout), interpolating control points smoothly deforms the curves. No path morphing library needed.
 
+## Alternative Bundling Algorithms
+
+Hierarchical bundling (this skill's focus) requires a tree structure and routes edges through LCA paths. Two other approaches solve different problems:
+
+| Algorithm | Requires | Best for | Key tradeoff |
+|---|---|---|---|
+| **Hierarchical** (Holten 2006) | Tree hierarchy | Module/package dependencies with natural grouping | Bundles reflect hierarchy, not graph topology — false connections possible |
+| **Edge-Path** (Wallinger 2022) | Weighted graph | General networks where accuracy matters | Routes edges along shortest paths in the graph itself, eliminating independent-edge ambiguity. Spanner speedup (2023) makes it practical for larger graphs |
+| **Divided** (Selassie et al.) | Directional edges | Import/export, trade flow, migration | Separates opposite-direction edges so bundling doesn't hide flow direction |
+
+**When to leave hierarchical bundling.** If your graph has no natural hierarchy but you still have clutter, Edge-Path Bundling is the better choice — it bundles edges along actual graph paths, so merged bundles always reflect real connectivity. The CHI 2025 false-connection problem (see Beta section) is structurally eliminated because edges only share paths they actually share in the graph.
+
+**Directional networks.** Standard bundling merges edges traveling in opposite directions into the same bundle, erasing directionality. Divided Edge Bundling (an extension of force-directed bundling) offsets opposing edges to opposite sides of the bundle center, revealing flow asymmetry. This matters for dependency visualizations where "A imports B" and "B imports A" carry different meanings.
+
+**Observable Plot note.** Plot has no edge bundling support (as of March 2026). This is inherently a D3 + custom rendering task.
+
 ## When Not to Use Edge Bundling
 
 **When individual connections matter more than group patterns.** If the viewer needs to trace specific edges (e.g., "does module A depend on module B?"), bundling actively hides the answer. Use a force-directed layout with highlight-on-hover, or an adjacency matrix.
@@ -216,4 +232,6 @@ Internal nodes must have interpolated positions even though they're invisible �
 - [Hierarchical Edge Bundles](https://doi.org/10.1109/TVCG.2006.147) — Danny Holten's original paper (IEEE InfoVis 2006)
 - [How Do People Perceive Bundling?](https://dl.acm.org/doi/10.1145/3706598.3713444) — CHI 2025 study on false connections and bundling ambiguity
 - [Hierarchical Edge Bundling](https://observablehq.com/@d3/hierarchical-edge-bundling) — Mike Bostock's canonical D3 implementation
-- [Edge-Path Bundling](https://arxiv.org/abs/2108.05467) — less ambiguous alternative that bundles along graph paths rather than spatial proximity
+- [Edge-Path Bundling](https://arxiv.org/abs/2108.05467) — bundles along graph shortest paths, eliminating false connections from spatial proximity
+- [Faster Edge-Path Bundling via Graph Spanners](https://arxiv.org/abs/2302.09384) — spanner speedup making Edge-Path Bundling practical for larger graphs (Wallinger 2023)
+- [Divided Edge Bundling](https://doi.org/10.1109/TVCG.2011.190) — directional bundling that separates opposite-flow edges
