@@ -9,10 +9,10 @@
 - ~~**Zoom & pan**~~ ✅ Built (initial commit, expanded with SVG-overlay-on-Canvas in 5bdc13d)
 - ~~**Temporal & time-series**~~ ✅ Built as `time-series`
 
-### High value — informed by Blockbuilder usage data (34K blocks)
-- **Selections** — In 95% of blocks. `.join()` patterns, enter/update/exit, nested selections, `.each()`, `.call()`, data key functions, selection merging. The foundational skill that all others assume. Currently re-taught piecemeal; deserves to be "the first skill you read."
-- **Shapes** — `d3.line` (8%), `d3.arc` (3.6%), `d3.area`, `d3.pie`, `d3.stack` in ~13% of blocks. Generators, curve factories, custom symbols, radialLine/radialArea. Currently scattered across time-series, hierarchy-layouts, distributions.
-- **Drag & reorder** — 4% of blocks, more than brush or zoom. Constrained drag, drag data binding, snap-to-grid, sortable lists, drag-to-connect. General patterns beyond force-specific drag.
+### Considered from Blockbuilder usage data (34K blocks) — declined
+- ~~**Selections**~~ — 95% of blocks, but well-documented territory. `idiomatic-d3` already covers `.join()`, key functions, `.call()` composition. Not enough hard-won insight to justify a standalone skill.
+- ~~**Shapes**~~ — 13% of blocks. Generators, curves, arcs are well-documented in D3 docs. Judgment calls (curve selection, `.defined()`) are already covered where they matter: time-series, hierarchy-layouts, distributions.
+- ~~**Drag & reorder**~~ — 4% of blocks. Patterns are straightforward. Force skill covers drag+simulation. Not deep enough for a standalone skill.
 
 ### Medium value
 - ~~**Statistical charts**~~ ✅ Built (fc08228)

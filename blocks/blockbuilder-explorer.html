@@ -826,11 +826,10 @@ function createColorView(container, blocks, colorMap, bitFilter) {
   const ctx = canvas.getContext("2d");
   ctx.scale(dpr, dpr);
 
-  // SVG overlay for axes
+  // SVG overlay for axes and brush
   const svg = d3.select(el).append("svg")
     .attr("width", width).attr("height", height)
-    .style("position", "absolute").style("top", 0).style("left", 0)
-    .style("pointer-events", "none");
+    .style("position", "absolute").style("top", 0).style("left", 0);
 
   const gAxes = svg.append("g")
     .attr("transform", `translate(${margin.left},${margin.top})`);
@@ -862,6 +861,41 @@ function createColorView(container, blocks, colorMap, bitFilter) {
     .attr("text-anchor", "middle")
     .style("fill", "#666").style("font-size", "9px")
     .text("Lightness");
+
+  // 2D brush for hue × lightness selection
+  const brush = d3.brush()
+    .extent([[0, 0], [innerW, innerH]])
+    .on("brush end", event => {
+      if (event.selection) {
+        const [[bx0, by0], [bx1, by1]] = event.selection;
+        const hueRange = [x.invert(bx0), x.invert(bx1)];
+        const lightRange = [y.invert(by1), y.invert(by0)]; // y is inverted
+
+        // Collect all block indices from color points inside the brush
+        const brushedBlocks = new Set();
+        for (const p of colorPoints) {
+          if (p.h >= hueRange[0] && p.h <= hueRange[1] &&
+              p.l >= lightRange[0] && p.l <= lightRange[1]) {
+            for (const bi of p.blockIndices) brushedBlocks.add(bi);
+          }
+        }
+        bitFilter.set("color", d => brushedBlocks.has(d.idx), blocks);
+      } else {
+        bitFilter.clear("color");
+      }
+      store.setState({ filteredIndices: bitFilter.filtered() });
+      markDirty(LAYER.TIMELINE | LAYER.NETWORK | LAYER.LIST);
+    });
+
+  const colorBrushG = gAxes.append("g")
+    .attr("class", "brush")
+    .call(brush);
+
+  colorBrushG.select(".selection")
+    .style("fill", "#fff")
+    .style("fill-opacity", 0.1)
+    .style("stroke", "#aaa")
+    .style("stroke-width", 1);
 
   function draw() {
     ctx.clearRect(0, 0, width, height);
@@ -904,6 +938,8 @@ function createColorView(container, blocks, colorMap, bitFilter) {
 
   updaters.colors = draw;
   draw();
+
+  return { brush, brushG: colorBrushG };
 }
 
 // ============================================================
@@ -989,11 +1025,14 @@ function createBlockList(container, blocks) {
 // Reset
 // ============================================================
 
+let colorParts = null;
+
 function setupReset(bitFilter, timelineParts) {
   d3.select("#reset-btn").on("click", () => {
     bitFilter.clear("time");
     bitFilter.clear("api");
     bitFilter.clear("thumb");
+    bitFilter.clear("color");
     store.setState({
       timeRange: null,
       selectedApi: null,
@@ -1002,6 +1041,9 @@ function setupReset(bitFilter, timelineParts) {
     document.getElementById("thumb-filter").checked = false;
     if (timelineParts) {
       timelineParts.brushG.call(timelineParts.brush.move, null);
+    }
+    if (colorParts) {
+      colorParts.brushG.call(colorParts.brush.move, null);
     }
     markDirty(LAYER.ALL);
   });
@@ -1061,7 +1103,7 @@ async function main() {
     for (const d of rawColors) {
       if (d.colors && d.id) colorMap.set(d.id, d.colors);
     }
-    createColorView("colors", blocks, colorMap, bitFilter);
+    colorParts = createColorView("colors", blocks, colorMap, bitFilter);
     d3.select("#colors .panel-label").text(`Color usage (${d3.format(",")(colorMap.size)} blocks)`);
   } catch (e) {
     d3.select("#colors .panel-label").text("Color data unavailable");
