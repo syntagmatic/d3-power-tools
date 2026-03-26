@@ -28,6 +28,25 @@ For sequential/ordinal data, vary **spacing** within a single pattern type (e.g.
 
 For categorical data, vary **pattern type** (lines vs dots vs shapes) to maximize distinctiveness. Angle alone is too subtle — diagonal (/) vs backslash (\\) is barely distinguishable at small sizes.
 
+### Why the 5-6 Pattern Limit Works — Texton Theory
+
+Julesz's texton theory (1981) explains *why* certain texture differences pop out instantly while others require study. Texture discrimination is preattentive — driven by three texton classes: elongated blobs (line segments with orientation/width/length), color, and terminators (endpoints, crossings). Only the **density** of these textons is detected preattentively; their spatial arrangement is not.
+
+This means: to make two patterns instantly distinguishable, they must differ in a texton dimension — orientation, shape (line vs blob), or density. Two patterns that differ only in spatial arrangement (e.g., grid dots vs random dots at the same density) require focused attention. Ware's synthesis adds that orientation needs **at least 30 degrees of separation** to pop out — 40° vs 50° is not preattentive.
+
+A well-chosen 6-pattern set uses a different texton class per pattern, maximizing preattentive discriminability:
+
+| Pattern | Texton dimension | Notes |
+|---------|-----------------|-------|
+| Diagonal hatch (/) | Orientation (45°) | Default first pattern |
+| Horizontal lines | Orientation (0°) | 45° separation from diagonal |
+| Dots (grid) | Shape (blob vs line) | Strongest contrast with any line pattern |
+| Cross-hatch | Density (crossing terminator) | Reads as "denser" than single hatch |
+| Waves / zigzag | Curvature | Distinct from all straight-line patterns |
+| Vertical lines | Orientation (90°) | 45° from both diagonal and horizontal |
+
+This set exhausts the preattentive texton dimensions. A 7th pattern would reuse a dimension, forcing the viewer to consult the legend.
+
 ## Pattern Library
 
 All patterns: append `<pattern>` to defs, draw marks inside, return id. **Always use `patternUnits="userSpaceOnUse"`** — otherwise pattern density varies with shape size, and the viewer reads density as data when it's actually an artifact of geometry.
@@ -147,6 +166,27 @@ ctx.globalCompositeOperation = "source-over";
 - Test at 100% and 50% print scale — some spacings cause moire
 - `@media print` CSS to boost pattern contrast or switch to pattern-only mode
 
+## Weighted Voronoi Stippling
+
+Stippling encodes a continuous scalar field through dot density — algorithmically optimized via Lloyd's relaxation weighted by a density function. The result is a blue-noise distribution that avoids grid Moire and random clumping. Use for editorial/narrative visualization where an illustrative quality is appropriate, or for inherently accessible scalar field encoding (works in grayscale by default).
+
+The algorithm: seed points via rejection sampling weighted by density, then iteratively move each point to the weighted centroid of its Voronoi cell using `d3.Delaunay`. 20-50 iterations suffice for visual convergence. Pre-compute offline (each iteration recomputes the full Voronoi diagram) and render the static dots on Canvas for >1000 points.
+
+See Bostock's [Voronoi Stippling notebook](https://observablehq.com/@mbostock/voronoi-stippling) for the canonical D3 implementation using `d3.Delaunay.from()` and `voronoi.cellPolygon()`.
+
+## Choosing a Texture Approach
+
+| Situation | Technique | Why |
+|-----------|-----------|-----|
+| Categorical bars/areas, ≤6 groups | SVG `<pattern>` with texton-diverse set | Simple, cross-browser, print-safe |
+| Sequential/ordinal encoding | Single pattern type, vary spacing | Density is ordered; pattern type is not |
+| Continuous scalar field (editorial) | Weighted Voronoi stippling | Blue-noise dot density; inherently accessible |
+| Large area fills, organic look | SVG `<filter>` (feTurbulence) | No tile seams; expensive per element |
+| Canvas rendering, many shapes | Pre-built `CanvasPattern` atlas | GPU-resident tiles; batch by pattern |
+| Accessible choropleth | Color + pattern dual encoding | Redundant channels for CVD and print |
+
+**Observable Plot** provides built-in fill pattern support via its marks. For quick accessible categorical charts, Plot's `symbol` and opacity channels may suffice; drop to D3 `<pattern>` elements when you need custom tile geometry or density-varied hatching.
+
 ## Common Pitfalls
 
 1. **`objectBoundingBox` stretches patterns** — density varies per shape. The viewer reads density as data. Use `userSpaceOnUse`.
@@ -162,3 +202,9 @@ ctx.globalCompositeOperation = "source-over";
 6. **Animated `stroke-dashoffset` via D3 transitions** triggers repaint per frame (not GPU-accelerated). Use CSS `@keyframes` for marching ants.
 
 7. **Pattern URL with `<base>` tag** — `url(#id)` resolves against the base URL, not the page. Fix: `url(${window.location.pathname}#id)`.
+
+## Future: CSS Paint API and SVG 2 Hatch
+
+**CSS Paint API (Houdini worklets)** allows parameterized procedural patterns via CSS custom properties — data-driven `--hatch-angle`, `--hatch-spacing` etc. without SVG defs management. As of March 2026, Chrome/Edge support it fully, but Firefox does not, making it unsuitable as a primary technique for cross-browser work. A [polyfill](https://github.com/GoogleChromeLabs/css-paint-polyfill) exists but adds complexity. For Chromium-only dashboards, it's viable as progressive enhancement with SVG `<pattern>` fallback.
+
+**SVG 2 `<hatch>`** is a native paint server for continuous parallel-line fills without tile seams. As of March 2026, no browser implements it. Continue using `<pattern>` with `patternTransform="rotate(...)"` — the visual result is identical for visualization purposes.
