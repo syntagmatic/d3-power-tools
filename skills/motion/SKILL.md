@@ -11,6 +11,32 @@ Build fluid, purposeful D3 transitions that communicate data changes clearly. Co
 
 Animation should answer: **"What changed?"** If a transition doesn't help the viewer track changes, remove it. Gratuitous animation is worse than no animation.
 
+### When Animation Helps (Heer & Robertson 2007)
+
+- **Tracking identity**: the viewer needs to see which elements moved where (object constancy)
+- **Revealing causation**: temporal sequence shows this-caused-that
+- **Sequential storytelling**: scrollytelling, steppers, guided narratives
+- **Aggregation/disaggregation**: seeing how points roll up into summaries
+
+### When to Use Small Multiples Instead
+
+- The viewer needs to **compare** two states precisely — side-by-side beats sequential
+- More than ~4 elements move simultaneously without staggering — the visual system can't track them
+- The animation creates **occluded intermediate states** where elements overlap mid-flight
+- Users will see the transition **repeatedly** (it becomes annoying fast)
+
+### Duration Guidelines (from perception research)
+
+| Motion type | Duration |
+|---|---|
+| Simple position change | 300–500ms |
+| Complex multi-element transition | ~1000ms total |
+| Dwell time between stages | 200–400ms |
+| Stagger gap per element | 20–80ms (total stagger < 500ms) |
+| Scrollytelling step transition | 400–800ms |
+
+The Heer & Robertson **Congruence Principle** applies: maintain valid data graphics during transitions. No nonsensical intermediate states — if bars pass through each other mid-animation, stage the transition instead.
+
 ## SVG Transitions (D3 Built-in)
 
 ### Enter / Update / Exit with Key Functions
@@ -427,29 +453,63 @@ selection.transition().duration(600)
 
 ## Animated Data Storytelling
 
-### Scrollytelling Transitions
+### Scrollytelling: The Sticky-Graphic Pattern
 
-Trigger transitions based on scroll position:
+The dominant scrollytelling pattern (NYT, The Pudding, etc.): a chart stays fixed (`position: sticky`) while narrative text steps scroll past it. Each step triggers a D3 transition.
+
+**Architecture**: Use IntersectionObserver (or scrollama, which wraps it) to detect when step elements cross a viewport threshold, then call a D3 update function.
+
+```js
+// Scrollama setup — scrollama v3+ uses IntersectionObserver internally
+const scroller = scrollama();
+scroller.setup({
+  step: ".step",
+  offset: 0.5,        // trigger at 50% of viewport
+}).onStepEnter(({ index, direction }) => {
+  updateChart(states[index]);  // D3 transition inside
+});
+```
+
+Without scrollama, raw IntersectionObserver works the same way:
 
 ```js
 const observer = new IntersectionObserver(
   (entries) => {
     entries.forEach(entry => {
       if (entry.isIntersecting) {
-        const step = entry.target.dataset.step;
-        transitionTo(step);
+        updateChart(states[entry.target.dataset.step]);
       }
     });
   },
   { threshold: 0.5 }
 );
-
 document.querySelectorAll(".step").forEach(el => observer.observe(el));
 ```
 
+**Key layout**: The graphic container uses `position: sticky; top: 0` and the step text elements scroll past it in a sibling column or overlay. CSS grid or flexbox handles the two-column layout.
+
+**Progress-driven interpolation**: For smooth continuous animation tied to scroll position (not just step snaps), scrollama's `progress: true` mode fires events with a 0–1 progress value you can feed to `d3.interpolate`.
+
+For step-sequenced annotations that reveal callouts, labels, or highlights at each scroll step, see the **annotation** skill.
+
+### CSS Scroll-Driven Animations (as of March 2026)
+
+CSS `animation-timeline: view()` animates elements based on their viewport visibility — GPU-accelerated and off the main thread. Use this for visual polish (fade-in, slide-up) alongside scrollama for D3 data updates:
+
+```css
+.step {
+  animation: fade-in linear both;
+  animation-timeline: view();
+  animation-range: entry 20% entry 80%;
+}
+@keyframes fade-in { from { opacity: 0.3; } to { opacity: 1; } }
+```
+
+**Limitation**: CSS scroll-driven animations only animate CSS properties, not SVG attributes or D3 data joins. They complement scrollama, they don't replace it.
+
 ### Stepper / Slideshow
 
-For presentation-style narratives:
+For presentation-style narratives (button/keyboard-driven rather than scroll-driven):
 
 ```js
 const steps = [
@@ -467,6 +527,38 @@ function advance() {
   updateTitle(step.title);
 }
 ```
+
+## View Transitions API (as of March 2026)
+
+The View Transitions API (Baseline Newly Available, October 2025) provides browser-native animated transitions between DOM states. The browser screenshots before and after your update, then cross-fades or morphs between them.
+
+**When to use it with D3**: Container-level view changes — switching between chart types, toggling chart vs. data table, navigating dashboard panels. Not for data-level animation (updating bar heights), where D3's interpolation-based transitions produce valid intermediate states.
+
+```js
+function switchView(newData) {
+  if (!document.startViewTransition) {
+    renderChart(newData);  // fallback: instant update
+    return;
+  }
+  document.startViewTransition(() => renderChart(newData));
+}
+```
+
+**Don't combine with D3 transitions**: View Transitions animate a snapshot, not the live DOM. If your callback also starts D3 transitions, you get the View Transition cross-fade *and* the D3 interpolation fighting each other. Pick one per update.
+
+> Observable Plot uses View Transitions for its `plot.update()` method. If your use case is simple charts with standard layouts, Plot handles this automatically.
+
+## Choosing an Animation Approach
+
+| Need | Tool |
+|---|---|
+| Data-driven element animation | D3 `.transition()` |
+| Container-level view swap | View Transitions API |
+| Scroll-triggered data updates | IntersectionObserver / scrollama + D3 |
+| Scroll-linked visual polish (opacity, transform) | CSS `animation-timeline: view()` |
+| Canvas animation (500+ elements) | `requestAnimationFrame` loop with state interpolation |
+| Complex multi-stage choreography | Coordinated delays (preferred) or `transition.end()` promises |
+| Reduced-motion fallback | `prefers-reduced-motion`: instant state change, no interpolation |
 
 ## Performance Guidelines
 
@@ -529,10 +621,13 @@ window.matchMedia("(prefers-reduced-motion: reduce)")
 
 ## References
 
-- [D3 Transition documentation](https://d3js.org/d3-transition) — Mike Bostock's API reference for `d3-transition`
+- [D3 Transition documentation](https://d3js.org/d3-transition) — API reference for `d3-transition`
 - [General Update Pattern](https://observablehq.com/@d3/selection-join) — canonical enter/update/exit with `.join()`
 - [Object Constancy](https://bost.ocks.org/mike/constancy/) — foundational article on key-based transitions
-- [Animated Transitions in Statistical Data Graphics](https://idl.cs.washington.edu/papers/motion/) — Jeffrey Heer & George Robertson's research on how animation aids perception of data changes (IEEE InfoVis 2007)
+- [Animated Transitions in Statistical Data Graphics](https://idl.cs.washington.edu/papers/motion/) — Heer & Robertson's perception research (IEEE InfoVis 2007)
 - [D3 Easing Functions](https://observablehq.com/@d3/easing) — visual reference for all `d3-ease` curves
 - [Staggered Transitions](https://observablehq.com/@d3/staggered-transitions) — staggered delay patterns
-- [prefers-reduced-motion](https://developer.mozilla.org/en-US/docs/Web/CSS/@media/prefers-reduced-motion) — MDN reference for respecting user motion preferences
+- [prefers-reduced-motion](https://developer.mozilla.org/en-US/docs/Web/CSS/@media/prefers-reduced-motion) — MDN reference for motion preferences
+- [Scrollama](https://github.com/russellsamora/scrollama) — IntersectionObserver-based scrollytelling library
+- [View Transitions API](https://developer.mozilla.org/en-US/docs/Web/API/View_Transition_API) — browser-native view transitions (Baseline 2025)
+- [CSS Scroll-Driven Animations](https://developer.mozilla.org/en-US/docs/Web/CSS/Guides/Scroll-driven_animations) — declarative scroll-linked effects
