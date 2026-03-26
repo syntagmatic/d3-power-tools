@@ -585,3 +585,46 @@ Running notes from the philosophy pass. One section per skill — observations, 
 **Key judgment:** The research contained full icicle implementation code, flame graph search/highlight patterns, and Marimekko rendering recipes. Compressed: icicle became a 3-line coordinate-mapping snippet in the unified partition variants section, Marimekko became one sentence in the sliceDice bullet, flame graph search was cut entirely (implementation detail, not judgment). The partition orientation variants section is the highest-value addition -- it shows that four seemingly different visualizations are the same layout with different coordinate mappings.
 
 **Tests:** 10/10 passing (no example changes needed).
+
+---
+
+## canvas (research expansion)
+
+**Date:** 2026-03-26
+
+**What changed:**
+- Expanded OffscreenCanvas from a 3-line mention to a full pattern: `transferControlToOffscreen` zoom bridge, main-thread quadtree for hover, when-to-use guidance, gotchas (transferred canvas throws on `getContext`, no `document.fonts` in workers)
+- Added "Texture Atlas for Custom Markers" section: pre-render shapes to offscreen canvas, stamp with `drawImage`, when-to-use vs when-not-to (uniform circles, continuous size variation)
+- Added "GPU Escalation" section with decision table (Canvas 2D -> OffscreenCanvas -> regl/WebGL -> WebGPU), timestamped browser support, regl/regl-scatterplot/d3fc pointers, WebGPU compute shader use case
+- Added Observable Plot note for raster/density use cases
+- Enhanced `willReadFrequently` coverage: explicit trade-off (fast reads vs disabled GPU acceleration, 35ms+ draw penalty)
+- Added modern Canvas 2D API notes: `roundRect()`, `ctx.reset()`
+- Added 3 references: Chrome Canvas2D blog post, regl, regl-scatterplot
+
+**Line count:** 327 -> 396 (+21%). Within 10-30% growth target.
+
+**Key judgment:** The research contained full regl draw command examples, WebGPU shader pipelines, detailed `desynchronized`/`createConicGradient` coverage, and complete color-picking implementation. All compressed or omitted: regl gets a summary sentence + link (shader code belongs in the `webgl` skill), WebGPU gets decision criteria not API tutorial, `desynchronized` omitted (marginal for dataviz, tearing artifacts), color-picking already covered by existing hit detection section. The GPU escalation table is the highest-value addition -- it answers "when do I leave Canvas 2D?" which the skill previously left unanswered.
+
+**Tests:** 6/6 passing (no example changes needed).
+
+---
+
+## brushing (research expansion)
+
+**Date:** 2026-03-26
+
+**What changed:**
+- Added "Choosing a Selection Approach" decision table (8 scenarios) at top of skill — guides technique choice by data size, view type, and composition need
+- Added "Brush Composition" section: shift+drag multi-region selection, cross-view union vs intersect semantics with `ComposableSelectionManager`
+- Added "Scalable Cross-Filtering (Falcon Pattern)" section: prefetch-on-hover architecture, when to use Falcon vs SelectionManager vs DuckDB-WASM, prefix-sum O(1) query pattern
+- Added "Progressive Filtering for Item Views" section: reservoir-sampled approximate feedback during drag, `requestIdleCallback` deferred full scan
+- Added `d3.polygonContains` note to lasso section — idiomatic alternative to hand-rolled ray-casting, with caveat for Worker use
+- Added Observable Plot note (built-in brush for simple cases, drop to D3 for custom interactions)
+- Added references: d3-polygon, Falcon paper, falcon-vis library
+- Timestamped falcon-vis claim (as of March 2026)
+
+**Line count:** 568 -> 735 (+29%). At upper bound of 10-30% growth target.
+
+**Key judgment:** The research contained full ComposableSelectionManager with difference mode, detailed Vega-Lite selection grammar comparison, progressive visual analytics literature review, and d3-lasso API walkthrough. Compressed: difference mode cut (rare in practice — union and intersect cover >95% of cases), Vega-Lite became one sentence of context for the union/intersect semantics, PVA literature became the sample-first pattern, d3-lasso became a note that it's D3 v4/v5 only. The decision table and Falcon section are the highest-value additions — they answer "which approach at my data scale?" before the reader reaches any recipe.
+
+**Tests:** 2/2 passing (no example changes needed).
