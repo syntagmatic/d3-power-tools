@@ -19,6 +19,67 @@ d3.geoPath(projection) ──► SVG <path> or Canvas ctx
 layers: tiles → fills → borders → points → labels → legend
 ```
 
+## Canonical Data Sources
+
+**Never synthesize geometry.** US states have thousands of coordinate pairs with precise coastlines, shared borders, and correct winding order. Always load from the canonical TopoJSON atlases.
+
+### Standard Atlases
+
+```js
+import * as topojson from "https://cdn.jsdelivr.net/npm/topojson-client@3/+esm";
+
+// US — counties, states, nation
+const us = await d3.json("https://cdn.jsdelivr.net/npm/us-atlas@3/counties-10m.json");
+const counties  = topojson.feature(us, us.objects.counties).features;   // fillable polygons
+const states    = topojson.feature(us, us.objects.states).features;
+const stateMesh = topojson.mesh(us, us.objects.states, (a, b) => a !== b); // internal borders only
+const nation    = topojson.merge(us, us.objects.states.geometries);        // dissolved outline
+
+// World — countries, land
+const world     = await d3.json("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json");
+const countries = topojson.feature(world, world.objects.countries).features;
+const land      = topojson.feature(world, world.objects.land);
+const borders   = topojson.mesh(world, world.objects.countries, (a, b) => a !== b);
+```
+
+| Dataset | Resolution | Use case |
+|---------|-----------|----------|
+| `us-atlas@3/counties-10m.json` | 10m | US county choropleth, full detail |
+| `us-atlas@3/states-10m.json` | 10m | US state-level maps (smaller file, no counties) |
+| `world-atlas@2/countries-110m.json` | 110m | World thematic maps, coarse |
+| `world-atlas@2/countries-50m.json` | 50m | World maps needing coastal detail |
+
+### Fitting the Projection
+
+Fit to the **merged outline**, not individual features — this ensures consistent sizing:
+
+```js
+// US
+const projection = d3.geoAlbersUsa().fitSize([width, height], nation);
+
+// World — fit to Sphere, not to land
+const projection = d3.geoEqualEarth().fitSize([width, height], { type: "Sphere" });
+```
+
+### Rendering Order
+
+For choropleth: fills first, then internal borders (mesh), then outer boundary. This prevents overlap artifacts:
+
+```js
+// 1. Fill features
+for (const f of features) {
+  ctx.beginPath(); path(f);
+  ctx.fillStyle = color(data.get(f.id));
+  ctx.fill();
+}
+// 2. Internal borders (single path via mesh — no doubled strokes)
+ctx.beginPath(); path(stateMesh);
+ctx.strokeStyle = "#fff"; ctx.lineWidth = 0.5; ctx.stroke();
+// 3. Nation outline
+ctx.beginPath(); path(nation);
+ctx.strokeStyle = "#333"; ctx.lineWidth = 1; ctx.stroke();
+```
+
 ## Projection Selection
 
 | Need | Projection | Properties |
@@ -307,14 +368,25 @@ function zoomed({ transform }) {
 
 ## Projection Transitions
 
-Interpolate between projections in screen space:
+### Screen-Space Interpolation
+
+Interpolate projected [x, y] coordinates between two projections. Works for any pair but has artifacts at clip boundaries:
 
 ```js
 function interpolateProjection(proj0, proj1) {
-  return t => point => {
-    const p0 = proj0(point), p1 = proj1(point);
-    if (!p0 || !p1) return null;
-    return [p0[0] * (1 - t) + p1[0] * t, p0[1] * (1 - t) + p1[1] * t];
+  return t => {
+    const proj = point => {
+      const p0 = proj0(point), p1 = proj1(point);
+      if (!p0 || !p1) return null;  // critical: either projection clips this point
+      return [p0[0] * (1 - t) + p1[0] * t, p0[1] * (1 - t) + p1[1] * t];
+    };
+    // geoPath needs a stream interface, not just a function
+    return d3.geoTransform({
+      point(x, y) {
+        const p = proj([x, y]);
+        if (p) this.stream.point(p[0], p[1]);
+      }
+    });
   };
 }
 
@@ -325,7 +397,35 @@ svg.selectAll("path").transition().duration(2000)
   });
 ```
 
-This is screen-space interpolation. For smoother globe transitions, interpolate projection parameters directly.
+**Pitfall**: when one projection clips a point the other shows (e.g., orthographic → equal earth), the null check causes path segments to disappear abruptly. Mitigate by pre-clipping geometry to the intersection of both visible regions, or by cross-fading opacity instead of morphing paths.
+
+### Parameter Interpolation (Preferred)
+
+When transitioning within the same projection type — rotating a globe, re-centering, zooming — interpolate projection parameters directly. No screen-space artifacts:
+
+```js
+// Globe rotation
+const r0 = projection.rotate(), r1 = [-lon, -lat, 0];
+svg.transition().duration(1000)
+  .tween("rotate", () => {
+    const interp = d3.interpolate(r0, r1);
+    return t => {
+      projection.rotate(interp(t));
+      svg.selectAll("path").attr("d", path);
+    };
+  });
+```
+
+For transitions between different projection types, interpolate `.scale()`, `.translate()`, and `.rotate()` when both projections support them — this is smoother than screen-space for projections in the same family (e.g., conic → conic).
+
+### clipAngle Transitions
+
+When transitioning to or from orthographic (clipAngle 90°), features pop in/out abruptly at the hemisphere boundary. Animate clipAngle to soften:
+
+```js
+// Orthographic → full view: expand clip from 90° to 180° over first half
+const clipInterp = t => t < 0.5 ? 90 + t * 180 : 180;
+```
 
 ## Large Geometry LOD / Simplification
 
@@ -379,6 +479,8 @@ Lazy-load detailed geometry only when zoom demands it.
 12. **`topojson.mesh` filter confusion.** `(a, b) => a !== b` = internal borders. `(a, b) => a === b` = outer boundary. No filter = all borders. Getting this backwards doubles stroke weight on some edges.
 
 13. **Mercator for choropleth.** Areas near poles appear much larger. Use equal-area projections for choropleth.
+
+14. **Synthesizing geometry.** Never create GeoJSON coordinates by hand or from approximate values. US states have thousands of coordinate pairs with precise coastal boundaries, shared borders, and correct winding. Use `us-atlas` or `world-atlas` TopoJSON — these are pre-cut at the antimeridian, correctly wound, and topologically consistent (shared borders rendered once via `mesh`). See [Canonical Data Sources](#canonical-data-sources).
 
 ## References
 
