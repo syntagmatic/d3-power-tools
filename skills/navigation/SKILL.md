@@ -239,6 +239,31 @@ else drawPoints(ctx, data, zx, zy, { labels: true });
 
 Smooth LOD transitions: cross-fade by interpolating `globalAlpha` in the crossover range (e.g., k = 1.5–2.5). Hard cuts between LOD levels are jarring and make the viewer think data changed.
 
+### LOD State Machine with Hysteresis
+
+Naive threshold checks cause flickering when the user hovers near a boundary — zoom in at k=2 triggers "points" mode, the tiniest zoom-out at k=1.99 snaps back to "density." Fix with hysteresis: use different thresholds for zooming in vs. out.
+
+```js
+const LOD_STATES = [
+  { name: "density",  enterAbove: 0,   exitBelow: 0 },
+  { name: "points",   enterAbove: 2.5, exitBelow: 2.0 },
+  { name: "labeled",  enterAbove: 8,   exitBelow: 6.5 }
+];
+
+let lodIndex = 0;
+function updateLOD(k) {
+  // Check if we should move to a higher-detail state
+  while (lodIndex < LOD_STATES.length - 1 && k >= LOD_STATES[lodIndex + 1].enterAbove)
+    lodIndex++;
+  // Check if we should move to a lower-detail state
+  while (lodIndex > 0 && k < LOD_STATES[lodIndex].exitBelow)
+    lodIndex--;
+  return LOD_STATES[lodIndex].name;
+}
+```
+
+The hysteresis band (here 0.5–1.5 units wide) should be proportional to the zoom speed your users exhibit. Wider bands for touch (coarse, fast gestures), narrower for wheel (fine control). Google Maps uses this pattern at every scale transition.
+
 ## Touch and Gestures
 
 `d3-zoom` handles multi-touch pinch natively, but mobile has two traps:
@@ -306,11 +331,17 @@ Essential for Canvas with 10K+ elements — without rAF gating, fast wheel scrol
 
 6. **`scaleExtent([1, ...])` prevents zoom-out.** Set minimum to a fraction (e.g., 0.5) if you want the viewer to see more than the initial viewport.
 
-7. **Wheel zoom hijacks page scroll.** If the chart doesn't fill the viewport, wheel events get captured before the page can scroll. Use `zoom.filter()` to require a modifier key (Ctrl+wheel) or only enable zoom on focus.
+7. **Wheel zoom hijacks page scroll.** If the chart doesn't fill the viewport, wheel events get captured before the page can scroll. Use `zoom.filter()` to require a modifier key (Ctrl+wheel) or only enable zoom on focus. A subtler fix: let wheel events pass through to page scroll when the user is already at the zoom limit. `scaleExtent` does this by default as of d3-zoom v3 — wheel events that would exceed the extent are not consumed, so page scroll resumes naturally. If you override `wheelDelta`, preserve this pass-through behavior or users get trapped.
 
 8. **Programmatic zoom without transition.** `svg.call(zoom.transform, t)` is instant — the viewer loses spatial context and can't track what moved. Almost always use `svg.transition().duration(500).call(zoom.transform, t)`.
 
 9. **Canvas zoom without clearing.** Forgetting `ctx.clearRect()` produces layered artifacts — each frame draws on top of the previous one.
+
+## Scroll-Driven Animations vs. d3-zoom
+
+CSS scroll-driven animations (`animation-timeline: scroll()`) let you bind keyframe animations to scroll position with zero JS — useful for scrollytelling where chart elements animate as the user scrolls through a narrative. As of March 2026, shipped in Chrome and Edge; Firefox and Safari support is partial.
+
+**Don't use them for interactive zoom.** Scroll-driven CSS can't manage the `{x, y, k}` transform matrix that `rescaleX`/`rescaleY` depend on. For anything with axes, pan, or continuous zoom state, `d3-zoom` remains the right tool. The overlap is narrow: if your "zoom" is really "scroll position drives an animation," CSS handles it natively. If the user needs to pan, pinch, or zoom to arbitrary levels, that's `d3-zoom`.
 
 ## References
 
