@@ -1,49 +1,72 @@
 ---
 name: perceptual-red-team
-description: "Audit D3.js visualizations for cognitive overload and perceptual failure modes. Use this skill to 'Red-Team' complex dashboards, linked views, and animations. Flags 'Chart Fatigue', working memory violations, and 'Congruence' breaks where transitions confuse the viewer instead of helping them. Ensures visualizations stay within human cognitive limits (e.g., < 4-7 linked views, < 20 small multiple panels)."
+description: "Audit D3.js visualizations for cognitive overload and perceptual failure modes. Screenshot the output and assess whether the viewer can extract insights without being overwhelmed. Evaluates execution quality of complex charts — a 16-cell SPLOM can be readable or overwhelming depending on how it's done. Flags real perceptual failures, not chart type choices."
 ---
 
 # Perceptual Red-Team: Auditing Cognitive Load
 
-A visualization can be technically perfect (no bugs, fast rendering) but fail because it exceeds the viewer's cognitive bandwidth. This skill acts as an adversarial auditor for "Analytical Usability."
+A visualization can be technically perfect but fail because it exceeds the viewer's cognitive bandwidth. This skill audits whether the viewer can actually extract insights from the visualization without being overwhelmed.
 
-## 1. The 'Working Memory' Audit
-Humans can typically hold only 4–7 "chunks" of information in working memory simultaneously.
-- **Violation:** A dashboard with 8+ independent linked views.
-- **Adversarial Check:** "Can a viewer reasonably track a change in Chart A across all other charts without losing focus?"
-- **Red-Team Rule:** If view count > 5, suggest **aggregation**, **faceting**, or **progressive disclosure** (show/hide) over simultaneous display.
+## How to Evaluate
 
-## 2. Congruence & Animation Fatigue
-Animations must follow the **Congruence Principle**: the structure of the transition must match the structure of the data change.
-- **Violation:** "Spaghetti Transitions" where 100+ elements move in different directions simultaneously (e.g., a force layout re-heating on every filter).
-- **Adversarial Check:** "Does the animation help the viewer maintain 'Object Constancy', or does it just look like a swarm of bees?"
-- **Red-Team Rule:** Use **Staged Transitions** (e.g., move X, then move Y) or **Highlight-by-Desaturation** instead of full-canvas movement.
+**Screenshot + code review.** Use code to count structural elements (views, categories, nodes, animation targets). Use the screenshot to assess whether the result is actually overwhelming. A 16-cell scatterplot matrix is not inherently a perceptual failure — it depends on whether the cells are readable, the colors are distinguishable, and the layout guides the eye.
 
-## 3. The 'Spaghetti' vs. 'Matrix' Threshold
+**Evaluate execution, not chart type.** Don't penalize a visualization for choosing a complex form. Penalize it if the complexity is unmanaged. A force layout with 80 nodes can be clear if clusters are well-separated and colors are restrained. A bar chart with 3 bars can be confusing if the labels overlap and the colors clash. Judge what the viewer actually sees.
+
+The thresholds below are warning signs, not automatic failures. Exceeding a threshold means "look harder at whether this works" — not "score it low."
+
+## Perceptual Risks
+
+### 1. Cognitive Overload (Working Memory)
+Humans hold 4-7 chunks in working memory. Dashboards with many independent linked views can exceed this.
+
+- **Warning sign:** 5+ independent views that all update on every interaction
+- **But it depends:** Are the views truly independent, or do they form natural groups? A SPLOM's 16 cells are one conceptual unit, not 16 separate views. A crossfilter with 3 histograms is manageable. A dashboard with 8 unrelated charts is not.
+- **What to check in the screenshot:** Can you track a brushing change across all views without losing your place? Does the layout group related views together?
+
+### 2. Animation Congruence
+Transitions should help the viewer maintain object constancy, not create visual noise.
+
+- **Warning sign:** 100+ elements moving in different directions simultaneously; force layouts that reheat on every filter
+- **But it depends:** Staged transitions (exit → update → enter) can handle large element counts. The question is whether the animation helps you track what changed or just looks like a swarm of bees.
+- **What to check in the screenshot:** N/A for static screenshots. Note when a block is animation-heavy and flag that perceptual evaluation is limited without seeing it in motion.
+
+### 3. Network Density (Spaghetti Threshold)
 Node-link diagrams are the most common perceptual failure in D3.
-- **Violation:** A node-link force diagram with > 50 nodes and high edge density (a "hairball").
-- **Adversarial Check:** "Can I identify a single community or 'hub' without hovering every node?"
-- **Red-Team Rule:** If density is high, force the agent to justify why an **Adjacency Matrix** or **Arc Diagram** wasn't used instead.
 
-## 4. Visual Search Efficiency
-- **Violation:** Using 10+ distinct colors for a categorical scale (color-mapping explosion).
-- **Adversarial Check:** "How long does it take to find 'Category K' in the legend and then locate it in the chart?"
-- **Red-Team Rule:** Limit categorical colors to < 8. For high cardinality, use **Interactive Highlighting** (hover one, dim the rest) or **Small Multiples**.
+- **Warning sign:** Force layout with 50+ nodes and high edge density
+- **But it depends:** Are there visible clusters? Does edge bundling or opacity manage the density? Can you identify a hub or community without hovering every node? A 100-node network with clear clusters reads fine. A 30-node network where every node connects to every other is a hairball.
+- **What to check in the screenshot:** Can you identify structure (clusters, hubs, paths) at a glance, or does it read as a tangle?
 
-## Perceptual Red-Team Checklist
+### 4. Color Overload
+Too many categorical colors makes visual search slow and error-prone.
 
-| Perceptual Trap | Red-Team Trigger | Adversarial Fix |
-| :--- | :--- | :--- |
-| **Chart Fatigue** | > 5 views on screen | Consolidate or use a 'View Switcher' |
-| **Change Blindness** | Instant data swaps without transitions | Add a 250ms-750ms D3 transition |
-| **Spaghetti Hairball** | Force layout with > 50 nodes | Switch to Matrix or add Edge Bundling |
-| **Color Explosion** | > 8 colors in a palette | Use group-level colors or text labels |
-| **Jumpy Scrolly** | Graphic jumps during scroll | Use 'Sticky-Graphic' pattern with interpolation |
+- **Warning sign:** 8+ distinct hues in a categorical palette
+- **But it depends:** Are all categories visible simultaneously, or does interaction highlight one at a time? Are the colors perceptually distinct? A 12-color legend where you hover to highlight one category at a time is fine. A 12-color scatter with no interaction is not.
+- **What to check in the screenshot:** Can you match a legend entry to its marks in under 3 seconds?
+
+### 5. Small Multiples Overload
+Too many panels shifts from comparison to lookup.
+
+- **Warning sign:** 20+ panels on screen simultaneously
+- **But it depends:** Are the panels small enough that the grid reads as a pattern? Do they share axes so comparison is easy? Sparkline grids can work at 50+. Full charts with independent axes break at 8.
+- **What to check in the screenshot:** Can you compare adjacent panels, or do you need to memorize values to compare?
+
+## Reporting Format
+
+For each visualization:
+
+1. **Structural counts:** views, categories, nodes/edges, animation targets (from code)
+2. **Screenshot assessment:** Does it actually feel overwhelming? One sentence.
+3. **Score:** 1-10. A perceptually clear visualization scores high regardless of complexity. A confusing one scores low regardless of simplicity.
+4. **Risks identified:** Specific perceptual risks with enough detail to act on
+5. **Note limitations:** Flag when animation/interaction quality can't be assessed from a static screenshot
 
 ## Example Critique
 
-**Generated Design:** A dashboard with a Scatterplot, 4 Histograms, a Heatmap, and a 20-row Data Table, all linked via brushing.
+**Block: linked-scatterplot-matrix (screenshot reviewed)**
 
-**Perceptual Red-Team Critique:**
-> **Violation of Working Memory (Overload):** This dashboard contains 7 active views. Brushing in the scatterplot requires the viewer to monitor 6 other charts simultaneously, which exceeds the ~4-chunk cognitive limit. This will lead to 'Change Blindness' where the viewer misses insights in peripheral charts.
-> **Fix:** Group the 4 histograms into a single 'Small Multiples' view with a shared X-axis, or use a dropdown to select which attribute is shown in a single histogram.
+> **Structural counts:** 16 cells (4×4 SPLOM), 3 categories, ~150 points per cell, brush linking across all cells.
+> **Screenshot assessment:** Readable. The three-color palette separates cleanly, cells are large enough to see point distributions, and the diagonal KDE panels break up the grid.
+> **Score: 7** — The 16-cell count is high but the SPLOM is a single conceptual unit with consistent encoding across cells. The viewer compares adjacent cells, not all 16 simultaneously. Color separation is strong enough for the 3-category case. Would break down with more categories or smaller cells.
+> **Risks:** At smaller viewport sizes the cells would become too small to read point positions — this is near the minimum viable cell size for a scatter.

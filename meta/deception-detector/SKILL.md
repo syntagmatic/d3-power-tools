@@ -27,7 +27,7 @@ Inspired by Tufte: `Lie Factor = Size of effect shown in graphic / Size of effec
 ## 4. Fabricated Correlation (Dual-Y Axis)
 - **The Deception:** Using two different Y-scales to "force" two lines to line up, implying a correlation that doesn't exist.
 - **Deception-Detector Check:** "Does this chart use a dual-Y axis to compare two different units?"
-- **Rule:** Flag all dual-axis charts. Suggest **Index Charts** (both start at 100%) or **Small Multiples**.
+- **Rule:** Flag dual-axis as a deception risk and suggest alternatives (**Index Charts** or **Small Multiples**). But if the block is *demonstrating* dual-axis technique, score based on execution quality — does it label both axes clearly, use distinct visual channels, avoid implying false correlation? A well-executed dual-axis demo is not deceptive; a sloppy one is.
 
 ## 5. The 'Smoothing' Deception (KDE & Histograms)
 - **The Deception:** Using a high bandwidth in a KDE (Density Plot) that "smooths over" a bimodal distribution, making it look unimodal.
@@ -44,6 +44,15 @@ Inspired by Tufte: `Lie Factor = Size of effect shown in graphic / Size of effec
 | **Binning Bias** | Arbitrary histogram bins | Use Sturges' or Scott's rule |
 | **Hidden Outliers** | `d3.scaleQuantile` on skewed data | Use `d3.scaleLog` or `d3.scaleThreshold` |
 | **Silent Gap** | Missing data drawn as a straight line | Use `line.defined()` to show gaps |
+
+## Synthetic Data Caveat
+
+Most generated blocks use synthetic data tailored to the chart. With synthetic data, there's no real opportunity for deception — the data was made to fit. A high deception score on synthetic data means the code *structures* are honest (zero baselines, sqrt scaling, proper binning), but says nothing about whether the chart would deceive with real data.
+
+When evaluating blocks with synthetic data:
+- Score based on structural correctness (scale choices, baseline rules, encoding math)
+- Note that the data is synthetic — don't treat a 9/10 as proof the chart is trustworthy
+- Reserve the highest confidence for blocks using real datasets where deception is actually possible
 
 ## Example Critique
 

@@ -19,6 +19,7 @@ An MR defines how the output should change (or stay the same) when the input is 
 
 *   **Logic:** `Output(k * Data) == k * Output(Data)`
 *   **Common Bug caught:** Hardcoded margins, fixed "max" values in scales, or magic numbers in the drawing loop.
+*   **Severity:** This is a code quality issue, not a correctness bug in blocks with synthetic data. Flag hardcoded domains as "won't adapt to different data" — the code works but teaches a brittle pattern.
 
 ### 2. The Permutation Relation (Identity Robustness)
 **Transformation:** Shuffle the order of the data array.
@@ -57,9 +58,24 @@ List what data fields map to what visual attributes:
 - Does it use `.domain([0, 100])`? (Fail - will clip or overflow if doubled)
 
 ### Step 3: Check the Data Join
-"If the user sorts the data..."
-- Is there a key function in `.data(data, d => d.id)`?
-- If no, flag it: "Missing key function will cause visual corruption on data updates."
+Key functions (`d => d.id`) tell D3 which datum maps to which DOM element. Without them, D3 joins by index — which is correct in some cases and silently wrong in others.
+
+**Key functions are necessary when:**
+- The chart transitions between data states (sort, filter, add/remove) — without keys, bars morph into unrelated values (Bostock's "Object Constancy" problem)
+- Force layouts or hierarchies add/remove nodes — without keys, existing nodes lose their simulation positions and jump
+- `attrTween` reads stashed state from `this` — key mismatch means the interpolator gets `undefined` and snaps instead of animating
+
+**Key functions are unnecessary (don't flag) when:**
+- The chart renders once and never updates — index join is identical to keyed join
+- Inner/nested joins where position is the identity (e.g., cells in a table row)
+- Canvas rendering — no DOM to join against
+- Data has no natural unique identifier — fabricated composite keys (`d => d.name + d.date`) are fragile and worse than index
+
+**Key functions are harmful when:**
+- Keys are not unique — duplicates cause elements to be destroyed and recreated on every update
+- The key function doesn't return a string — returning objects produces `"[object Object]"` for every datum
+
+Only flag missing key functions as a permutation relation violation when the block has update or transition patterns where element identity matters.
 
 ## Example Adversarial Critique
 

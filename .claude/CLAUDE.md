@@ -128,5 +128,4 @@ Skills for testing, evaluating, and improving other skills.
 - `meta/deception-detector/` — audit for mathematical deception: lie factor, zero baselines, quantile trap, dual-axis fabrication
 - `meta/interaction-stress-test/` — hunt race conditions: update storms, stale closures, feedback loops, transition handoff conflicts
 - `meta/perceptual-red-team/` — audit cognitive load: working memory limits, animation congruence, spaghetti threshold, chart fatigue
-- `meta/robustness-contract/` — pre-negotiate edge cases: empty state, NaN/Infinity, outliers, resource budgets, interaction state machines
 - `meta/metamorphic-tester/` — validate without an oracle: scaling, permutation, subset, and shifting relations on visual output

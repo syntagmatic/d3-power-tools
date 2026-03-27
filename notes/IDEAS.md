@@ -3,7 +3,7 @@
 ## Next
 
 - [ ] Review front matter (name, description) across all 27 skills for consistency and trigger accuracy
-- [ ] Calibrate remaining 5 adversarial agents (deception-detector, interaction-stress-test, perceptual-red-team, robustness-contract, metamorphic-tester) using the blind eval protocol in `meta/adversarial-eval/`
+- [ ] Calibrate remaining 4 adversarial agents (deception-detector, interaction-stress-test, perceptual-red-team, metamorphic-tester) using the blind eval protocol in `meta/adversarial-eval/`
 - [ ] Voronoi & Delaunay — interactive nearest-neighbor lookup, Voronoi diagrams as tooltip regions, Voronoi treemaps, Delaunay triangulation, clipped Voronoi cells
 - [ ] Live & streaming data — append-only charts with sliding window, circular buffers, WebSocket integration, `requestAnimationFrame`-gated updates, graceful reconnection
 
