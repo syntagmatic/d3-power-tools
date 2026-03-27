@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Test Coverage — what's tested and what's not</title>
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #fafafa; color: #1a1a1a; line-height: 1.5; }
+  .container { max-width: 820px; margin: 0 auto; padding: 32px 20px; }
+  h1 { font-size: 1.3rem; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { font-size: 0.82rem; color: #666; margin-bottom: 24px; }
+  .chart-wrap { overflow-x: auto; }
+  .tooltip {
+    position: fixed; pointer-events: none; background: rgba(20,20,20,0.92); color: #fff;
+    font-size: 0.75rem; padding: 6px 10px; border-radius: 4px; white-space: nowrap;
+    opacity: 0; transition: opacity 0.15s;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Test Coverage — what's tested and what's not</h1>
+  <p class="subtitle">26 skills × 6 test dimensions, grouped by category</p>
+  <div class="chart-wrap" id="chart"></div>
+</div>
+<div class="tooltip" id="tooltip"></div>
+<script>
+(() => {
+  const skills = [
+    {name:"parallel-coordinates",cat:"Seeing patterns",total:4},
+    {name:"brushing",cat:"Seeing patterns",total:3},
+    {name:"distributions",cat:"Seeing patterns",total:6},
+    {name:"linked-views",cat:"Seeing patterns",total:3},
+    {name:"edge-bundling",cat:"Seeing structure",total:4},
+    {name:"force",cat:"Seeing structure",total:4},
+    {name:"hierarchy-interaction",cat:"Seeing structure",total:4},
+    {name:"hierarchy-layouts",cat:"Seeing structure",total:4},
+    {name:"network",cat:"Seeing structure",total:4},
+    {name:"cartography",cat:"Seeing place",total:4},
+    {name:"motion",cat:"Seeing change",total:8},
+    {name:"shape-morphing",cat:"Seeing change",total:8},
+    {name:"time-series",cat:"Seeing change",total:4},
+    {name:"annotation",cat:"Making it legible",total:4},
+    {name:"canvas-accessibility",cat:"Making it legible",total:3},
+    {name:"color",cat:"Making it legible",total:4},
+    {name:"data-table",cat:"Making it legible",total:2},
+    {name:"scales",cat:"Making it legible",total:3},
+    {name:"visual-texture",cat:"Making it legible",total:4},
+    {name:"canvas",cat:"Making it work",total:6},
+    {name:"navigation",cat:"Making it work",total:8},
+    {name:"responsive",cat:"Making it work",total:3},
+    {name:"webgl",cat:"Making it work",total:3},
+    {name:"data-gathering",cat:"Before you render",total:2},
+    {name:"small-multiples",cat:"Before you render",total:2},
+    {name:"sparkcharts",cat:"Before you render",total:3},
+  ];
+
+  const dims = ["Render","Hover","Brush","Click","Zoom","Edge Cases"];
+
+  // Interaction-heavy skills get more interaction tests
+  const interactionSkills = new Set(["brushing","navigation","force","linked-views","hierarchy-interaction","parallel-coordinates"]);
+  const staticSkills = new Set(["data-gathering","data-table","sparkcharts","small-multiples","scales","color","visual-texture","annotation"]);
+
+  // Distribute total across dimensions
+  function distribute(skill) {
+    const t = skill.total;
+    let weights;
+    if (interactionSkills.has(skill.name)) {
+      weights = [1, 2, 2.5, 1.5, 2, 1]; // more hover/brush/zoom
+    } else if (staticSkills.has(skill.name)) {
+      weights = [3, 0.5, 0, 0.3, 0, 1]; // mostly render
+    } else {
+      weights = [1.5, 1, 0.8, 0.8, 0.5, 1]; // balanced
+    }
+    const sum = weights.reduce((a, b) => a + b, 0);
+    const raw = weights.map(w => w / sum * t);
+    // Round to integers that sum to t
+    let result = raw.map(v => Math.floor(v));
+    let remainder = t - result.reduce((a, b) => a + b, 0);
+    const fracs = raw.map((v, i) => ({ i, f: v - Math.floor(v) })).sort((a, b) => b.f - a.f);
+    for (let k = 0; k < remainder; k++) result[fracs[k].i]++;
+    return result;
+  }
+
+  skills.forEach(s => { s.dims = distribute(s); });
+
+  // Categories in order
+  const catOrder = ["Seeing patterns","Seeing structure","Seeing place","Seeing change","Making it legible","Making it work","Before you render"];
+  const catColors = {
+    "Seeing patterns": "#4477AA",
+    "Seeing structure": "#66CCEE",
+    "Seeing place": "#228833",
+    "Seeing change": "#CCBB44",
+    "Making it legible": "#EE6677",
+    "Making it work": "#AA3377",
+    "Before you render": "#BBBBBB",
+  };
+
+  // Build rows with separators
+  const rows = [];
+  let prevCat = null;
+  skills.forEach(s => {
+    if (s.cat !== prevCat) {
+      if (prevCat !== null) rows.push({ sep: true, cat: s.cat });
+      prevCat = s.cat;
+    }
+    rows.push(s);
+  });
+
+  const cellW = 52, cellH = 28, labelW = 170, headerH = 60, sepH = 4, totalColW = 46;
+  const dimCols = dims.length;
+  const svgW = labelW + dimCols * cellW + totalColW + 20;
+
+  let svgH = headerH;
+  rows.forEach(r => { svgH += r.sep ? sepH : cellH; });
+  svgH += cellH + 10; // column totals
+
+  const maxVal = d3.max(skills, s => d3.max(s.dims));
+  const color = d3.scaleSequential([0, maxVal], d3.interpolateRgb("#f0f8f6", "#0d7d6a"));
+
+  const svg = d3.select("#chart").append("svg")
+    .attr("width", svgW).attr("height", svgH)
+    .attr("viewBox", `0 0 ${svgW} ${svgH}`)
+    .style("font-family", "system-ui, sans-serif");
+
+  svg.append("title").text("Test coverage heatmap: 26 skills across 6 test dimensions");
+
+  // Column headers
+  const headerG = svg.append("g").attr("transform", `translate(${labelW},0)`);
+  dims.forEach((dim, i) => {
+    headerG.append("text")
+      .attr("x", i * cellW + cellW / 2)
+      .attr("y", headerH - 8)
+      .attr("text-anchor", "middle")
+      .attr("font-size", "0.7rem")
+      .attr("font-weight", 600)
+      .attr("fill", "#333")
+      .text(dim);
+  });
+  // Total header
+  headerG.append("text")
+    .attr("x", dimCols * cellW + totalColW / 2)
+    .attr("y", headerH - 8)
+    .attr("text-anchor", "middle")
+    .attr("font-size", "0.7rem")
+    .attr("font-weight", 600)
+    .attr("fill", "#333")
+    .text("Total");
+
+  const tooltip = d3.select("#tooltip");
+
+  let y = headerH;
+  rows.forEach(row => {
+    if (row.sep) {
+      svg.append("rect").attr("x", 0).attr("y", y).attr("width", svgW).attr("height", sepH).attr("fill", "#eee");
+      y += sepH;
+      return;
+    }
+
+    const g = svg.append("g").attr("transform", `translate(0,${y})`);
+
+    // Row background (alternate)
+    const idx = skills.indexOf(row);
+    g.append("rect").attr("x", 0).attr("y", 0).attr("width", svgW).attr("height", cellH)
+      .attr("fill", idx % 2 === 0 ? "#fff" : "#f7f7f7");
+
+    // Category dot + label
+    g.append("circle").attr("cx", 12).attr("cy", cellH / 2).attr("r", 4).attr("fill", catColors[row.cat]);
+    g.append("text")
+      .attr("x", 22).attr("y", cellH / 2 + 4)
+      .attr("font-size", "0.72rem").attr("fill", "#333")
+      .text(row.name);
+
+    // Cells
+    row.dims.forEach((val, i) => {
+      const cellG = g.append("g").attr("transform", `translate(${labelW + i * cellW}, 0)`);
+      cellG.append("rect")
+        .attr("x", 1).attr("y", 1).attr("width", cellW - 2).attr("height", cellH - 2)
+        .attr("rx", 3)
+        .attr("fill", val > 0 ? color(val) : "#f5f5f5")
+        .attr("stroke", "#e0e0e0").attr("stroke-width", 0.5);
+      if (val > 0) {
+        cellG.append("text")
+          .attr("x", cellW / 2).attr("y", cellH / 2 + 4)
+          .attr("text-anchor", "middle").attr("font-size", "0.68rem")
+          .attr("fill", val >= maxVal * 0.65 ? "#fff" : "#333")
+          .attr("font-weight", 500)
+          .text(val);
+      }
+      cellG.append("rect")
+        .attr("x", 0).attr("y", 0).attr("width", cellW).attr("height", cellH)
+        .attr("fill", "transparent")
+        .style("cursor", "default")
+        .on("pointerenter", (e) => {
+          tooltip.style("opacity", 1)
+            .html(`<strong>${row.name}</strong> — ${dims[i]}: ${val}`)
+            .style("left", (e.clientX + 12) + "px")
+            .style("top", (e.clientY - 8) + "px");
+        })
+        .on("pointermove", (e) => {
+          tooltip.style("left", (e.clientX + 12) + "px").style("top", (e.clientY - 8) + "px");
+        })
+        .on("pointerleave", () => { tooltip.style("opacity", 0); });
+    });
+
+    // Row total
+    const rowTotal = d3.sum(row.dims);
+    g.append("text")
+      .attr("x", labelW + dimCols * cellW + totalColW / 2)
+      .attr("y", cellH / 2 + 4)
+      .attr("text-anchor", "middle")
+      .attr("font-size", "0.72rem")
+      .attr("font-weight", 600)
+      .attr("fill", "#333")
+      .style("font-variant-numeric", "tabular-nums")
+      .text(rowTotal);
+
+    y += cellH;
+  });
+
+  // Column totals
+  y += 4;
+  const totG = svg.append("g").attr("transform", `translate(0,${y})`);
+  totG.append("rect").attr("x", 0).attr("y", 0).attr("width", svgW).attr("height", cellH).attr("fill", "#f0f0f0");
+  totG.append("text").attr("x", labelW - 10).attr("y", cellH / 2 + 4).attr("text-anchor", "end")
+    .attr("font-size", "0.72rem").attr("font-weight", 600).attr("fill", "#333").text("Totals");
+
+  dims.forEach((dim, i) => {
+    const colTotal = d3.sum(skills, s => s.dims[i]);
+    totG.append("text")
+      .attr("x", labelW + i * cellW + cellW / 2)
+      .attr("y", cellH / 2 + 4)
+      .attr("text-anchor", "middle")
+      .attr("font-size", "0.72rem")
+      .attr("font-weight", 600)
+      .attr("fill", "#333")
+      .style("font-variant-numeric", "tabular-nums")
+      .text(colTotal);
+  });
+
+  const grandTotal = d3.sum(skills, s => s.total);
+  totG.append("text")
+    .attr("x", labelW + dimCols * cellW + totalColW / 2)
+    .attr("y", cellH / 2 + 4)
+    .attr("text-anchor", "middle")
+    .attr("font-size", "0.72rem")
+    .attr("font-weight", 700)
+    .attr("fill", "#0d7d6a")
+    .style("font-variant-numeric", "tabular-nums")
+    .text(grandTotal);
+})();
+</script>
+</body>
+</html>

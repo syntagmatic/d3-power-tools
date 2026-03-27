@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Skill Constellation — which skills appear together in blocks</title>
+<style>
+  :root {
+    --bg: #1a1a2e;
+    --text: #e0e0e0;
+    --text-muted: #8888aa;
+    --font: system-ui, -apple-system, sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    overflow: hidden;
+  }
+  h1 {
+    position: absolute;
+    top: 20px; left: 24px;
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--text-muted);
+    z-index: 10;
+    line-height: 1.4;
+  }
+  h1 span { color: var(--text); font-weight: 600; }
+  .legend {
+    position: absolute;
+    bottom: 20px; left: 24px;
+    font-size: 11px;
+    color: var(--text-muted);
+    z-index: 10;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 18px;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .legend-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: rgba(20, 20, 40, 0.95);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text);
+    display: none;
+    z-index: 100;
+    backdrop-filter: blur(4px);
+  }
+  .tooltip .name { font-weight: 600; font-size: 13px; }
+  .tooltip .cat { color: var(--text-muted); }
+  svg text { user-select: none; }
+</style>
+</head>
+<body>
+<h1><span>Skill Constellation</span><br>which skills appear together in blocks</h1>
+<div class="legend" id="legend"></div>
+<div class="tooltip" id="tooltip"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+const skills = [
+  {name:"annotation",lines:406,category:"Making it legible"},
+  {name:"brushing",lines:735,category:"Seeing patterns"},
+  {name:"canvas",lines:396,category:"Making it work"},
+  {name:"canvas-accessibility",lines:341,category:"Making it legible"},
+  {name:"cartography",lines:575,category:"Seeing place"},
+  {name:"color",lines:329,category:"Making it legible"},
+  {name:"data-gathering",lines:177,category:"Before you render"},
+  {name:"data-table",lines:168,category:"Making it legible"},
+  {name:"distributions",lines:406,category:"Seeing patterns"},
+  {name:"edge-bundling",lines:237,category:"Seeing structure"},
+  {name:"force",lines:286,category:"Seeing structure"},
+  {name:"hierarchy-interaction",lines:184,category:"Seeing structure"},
+  {name:"hierarchy-layouts",lines:175,category:"Seeing structure"},
+  {name:"linked-views",lines:304,category:"Seeing patterns"},
+  {name:"motion",lines:633,category:"Seeing change"},
+  {name:"navigation",lines:352,category:"Making it work"},
+  {name:"network",lines:172,category:"Seeing structure"},
+  {name:"parallel-coordinates",lines:452,category:"Seeing patterns"},
+  {name:"responsive",lines:309,category:"Making it work"},
+  {name:"scales",lines:308,category:"Making it legible"},
+  {name:"shape-morphing",lines:216,category:"Seeing change"},
+  {name:"small-multiples",lines:228,category:"Before you render"},
+  {name:"sparkcharts",lines:340,category:"Before you render"},
+  {name:"time-series",lines:420,category:"Seeing change"},
+  {name:"visual-texture",lines:210,category:"Making it legible"},
+  {name:"webgl",lines:385,category:"Making it work"}
+];
+
+const edges = [
+  {source:"brushing",target:"distributions",weight:4},
+  {source:"brushing",target:"linked-views",weight:3},
+  {source:"brushing",target:"parallel-coordinates",weight:3},
+  {source:"brushing",target:"sparkcharts",weight:2},
+  {source:"annotation",target:"color",weight:4},
+  {source:"annotation",target:"distributions",weight:4},
+  {source:"annotation",target:"motion",weight:4},
+  {source:"annotation",target:"responsive",weight:4},
+  {source:"annotation",target:"small-multiples",weight:4},
+  {source:"annotation",target:"time-series",weight:4},
+  {source:"canvas",target:"navigation",weight:4},
+  {source:"canvas",target:"webgl",weight:3},
+  {source:"canvas-accessibility",target:"data-table",weight:4},
+  {source:"color",target:"distributions",weight:4},
+  {source:"color",target:"motion",weight:4},
+  {source:"color",target:"network",weight:4},
+  {source:"color",target:"responsive",weight:4},
+  {source:"color",target:"scales",weight:3},
+  {source:"data-table",target:"sparkcharts",weight:5},
+  {source:"edge-bundling",target:"force",weight:2},
+  {source:"edge-bundling",target:"hierarchy-layouts",weight:2},
+  {source:"edge-bundling",target:"network",weight:2},
+  {source:"force",target:"network",weight:3},
+  {source:"hierarchy-interaction",target:"hierarchy-layouts",weight:3},
+  {source:"hierarchy-interaction",target:"motion",weight:2},
+  {source:"hierarchy-layouts",target:"motion",weight:2},
+  {source:"motion",target:"shape-morphing",weight:2},
+  {source:"navigation",target:"responsive",weight:2},
+  {source:"scales",target:"time-series",weight:2}
+];
+
+// Count blocks per skill from the manifest data (pre-computed)
+// Each skill appears in roughly lines/20 blocks, but let's use co-occurrence degree as proxy
+const blockCount = {};
+skills.forEach(s => { blockCount[s.name] = 0; });
+// Count from edges: each edge means both skills appeared in weight blocks together
+// For node size, count total block appearances (approximate from edge weights + solo appearances)
+const skillDegree = {};
+skills.forEach(s => { skillDegree[s.name] = 0; });
+edges.forEach(e => {
+  skillDegree[e.source] += e.weight;
+  skillDegree[e.target] += e.weight;
+});
+// Approximate block count: degree / avg-edges-per-block, floor at 2
+skills.forEach(s => {
+  s.blockCount = Math.max(2, Math.round(skillDegree[s.name] / 2.5) + 2);
+});
+
+const categories = [...new Set(skills.map(s => s.category))];
+// Tol muted palette (7 colors)
+const tolMuted = ["#332288","#88CCEE","#44AA99","#117733","#999933","#CC6677","#AA4499"];
+const catColor = d3.scaleOrdinal().domain(categories).range(tolMuted);
+
+const width = window.innerWidth;
+const height = window.innerHeight;
+
+const rScale = d3.scaleSqrt()
+  .domain([0, d3.max(skills, d => d.blockCount)])
+  .range([8, 25]);
+
+const edgeWidthScale = d3.scaleLinear().domain([1, 5]).range([0.8, 3.5]);
+
+// Build legend
+const legendEl = document.getElementById("legend");
+categories.forEach(cat => {
+  const item = document.createElement("div");
+  item.className = "legend-item";
+  item.innerHTML = `<div class="legend-dot" style="background:${catColor(cat)}"></div>${cat}`;
+  legendEl.appendChild(item);
+});
+
+// Create SVG
+const svg = d3.select("body").append("svg")
+  .attr("width", width)
+  .attr("height", height);
+
+svg.append("title").text("Skill Constellation — force-directed network of D3 skill co-occurrences");
+
+// Definitions for glow
+const defs = svg.append("defs");
+const filter = defs.append("filter").attr("id", "glow");
+filter.append("feGaussianBlur").attr("stdDeviation", 3).attr("result", "blur");
+const merge = filter.append("feMerge");
+merge.append("feMergeNode").attr("in", "blur");
+merge.append("feMergeNode").attr("in", "SourceGraphic");
+
+// Build simulation data
+const nodes = skills.map(s => ({...s, id: s.name}));
+const nodeMap = new Map(nodes.map(n => [n.id, n]));
+const links = edges.map(e => ({
+  source: e.source,
+  target: e.target,
+  weight: e.weight
+}));
+
+const simulation = d3.forceSimulation(nodes)
+  .force("link", d3.forceLink(links).id(d => d.id).distance(d => 120 / d.weight))
+  .force("charge", d3.forceManyBody().strength(-200))
+  .force("center", d3.forceCenter(width / 2, height / 2))
+  .force("collide", d3.forceCollide(d => rScale(d.blockCount) + 4));
+
+// Links
+const linkGroup = svg.append("g");
+const linkEls = linkGroup.selectAll("line")
+  .data(links)
+  .join("line")
+    .attr("stroke", "rgba(255,255,255,0.12)")
+    .attr("stroke-width", d => edgeWidthScale(d.weight));
+
+// Node groups
+const nodeGroup = svg.append("g");
+const nodeEls = nodeGroup.selectAll("g")
+  .data(nodes)
+  .join("g")
+    .attr("cursor", "grab")
+    .call(d3.drag()
+      .on("start", dragstarted)
+      .on("drag", dragged)
+      .on("end", dragended));
+
+nodeEls.append("circle")
+  .attr("r", d => rScale(d.blockCount))
+  .attr("fill", d => catColor(d.category))
+  .attr("fill-opacity", 0.85)
+  .attr("stroke", d => d3.color(catColor(d.category)).brighter(0.8))
+  .attr("stroke-width", 1.5)
+  .attr("filter", "url(#glow)");
+
+// Labels: only show for large nodes
+nodeEls.append("text")
+  .text(d => d.name)
+  .attr("x", d => rScale(d.blockCount) + 5)
+  .attr("y", 3)
+  .attr("font-size", "11px")
+  .attr("fill", d => rScale(d.blockCount) > 12 ? "rgba(255,255,255,0.7)" : "transparent")
+  .attr("font-family", "var(--font)")
+  .attr("class", "label")
+  .attr("data-always", d => rScale(d.blockCount) > 12 ? "true" : "false");
+
+// Tooltip
+const tooltip = document.getElementById("tooltip");
+
+nodeEls
+  .on("mouseenter", function(event, d) {
+    tooltip.style.display = "block";
+    tooltip.innerHTML = `<div class="name">${d.name}</div>
+      <div class="cat">${d.category}</div>
+      <div>${d.lines} lines &middot; ~${d.blockCount} blocks</div>`;
+    // Show label on small nodes
+    d3.select(this).select("text").attr("fill", "rgba(255,255,255,0.9)");
+    // Highlight connected edges
+    linkEls.attr("stroke", l =>
+      (l.source.id === d.id || l.target.id === d.id)
+        ? "rgba(255,255,255,0.5)" : "rgba(255,255,255,0.04)")
+      .attr("stroke-width", l =>
+        (l.source.id === d.id || l.target.id === d.id)
+          ? edgeWidthScale(l.weight) * 1.5 : edgeWidthScale(l.weight));
+    // Fade unconnected nodes
+    const connected = new Set();
+    connected.add(d.id);
+    links.forEach(l => {
+      if (l.source.id === d.id) connected.add(l.target.id);
+      if (l.target.id === d.id) connected.add(l.source.id);
+    });
+    nodeEls.select("circle").attr("fill-opacity", n => connected.has(n.id) ? 0.9 : 0.15);
+  })
+  .on("mousemove", function(event) {
+    tooltip.style.left = (event.pageX + 14) + "px";
+    tooltip.style.top = (event.pageY - 10) + "px";
+  })
+  .on("mouseleave", function(event, d) {
+    tooltip.style.display = "none";
+    d3.select(this).select("text").attr("fill",
+      d3.select(this).select("text").attr("data-always") === "true"
+        ? "rgba(255,255,255,0.7)" : "transparent");
+    linkEls
+      .attr("stroke", "rgba(255,255,255,0.12)")
+      .attr("stroke-width", l => edgeWidthScale(l.weight));
+    nodeEls.select("circle").attr("fill-opacity", 0.85);
+  });
+
+simulation.on("tick", () => {
+  linkEls
+    .attr("x1", d => d.source.x)
+    .attr("y1", d => d.source.y)
+    .attr("x2", d => d.target.x)
+    .attr("y2", d => d.target.y);
+  nodeEls.attr("transform", d => `translate(${d.x},${d.y})`);
+});
+
+function dragstarted(event, d) {
+  if (!event.active) simulation.alphaTarget(0.3).restart();
+  d.fx = d.x;
+  d.fy = d.y;
+  d3.select(this).attr("cursor", "grabbing");
+}
+
+function dragged(event, d) {
+  d.fx = event.x;
+  d.fy = event.y;
+}
+
+function dragended(event, d) {
+  if (!event.active) simulation.alphaTarget(0);
+  d.fx = null;
+  d.fy = null;
+  d3.select(this).attr("cursor", "grab");
+}
+
+// Resize
+window.addEventListener("resize", () => {
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  svg.attr("width", w).attr("height", h);
+  simulation.force("center", d3.forceCenter(w / 2, h / 2));
+  simulation.alpha(0.3).restart();
+});
+</script>
+</body>
+</html>
