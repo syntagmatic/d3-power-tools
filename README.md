@@ -6,6 +6,74 @@ Skills for building advanced D3.js visualizations. Each one captures the judgmen
 
 Each skill is a `SKILL.md` file — patterns, code, and pitfalls for a specific visualization domain. Skills load automatically based on what you're building. They produce self-contained HTML files with inline JS/CSS. No build tools, no frameworks — just vanilla JS + D3 v7.
 
+## Install
+
+Each skill is a folder with a `SKILL.md` file and optional examples and scripts. AI coding tools auto-discover skills from specific directories — install by symlinking or copying the skills you want.
+
+### Claude Code
+
+```bash
+# All skills (symlink the whole directory)
+ln -s /path/to/d3-power-tools/skills .claude/skills
+
+# Or individual skills
+mkdir -p .claude/skills
+ln -s /path/to/d3-power-tools/skills/cartography .claude/skills/cartography
+```
+
+Skills live in `.claude/skills/` at project or user (`~/.claude/skills/`) scope. Claude reads the `description` frontmatter in each `SKILL.md` and loads the right skill automatically when your prompt matches — ask for a treemap and the `hierarchy-layouts` skill activates.
+
+### Gemini CLI
+
+```bash
+# All skills
+ln -s /path/to/d3-power-tools/skills .gemini/skills
+
+# Or individual skills
+mkdir -p .gemini/skills
+ln -s /path/to/d3-power-tools/skills/force .gemini/skills/force
+```
+
+Skills live in `.gemini/skills/` at project or user (`~/.gemini/skills/`) scope. Same auto-activation based on `description` frontmatter.
+
+### Antigravity
+
+```bash
+# All skills
+ln -s /path/to/d3-power-tools/skills .agent/skills
+
+# Or individual skills
+mkdir -p .agent/skills
+ln -s /path/to/d3-power-tools/skills/color .agent/skills/color
+```
+
+Skills live in `.agent/skills/` at project or user (`~/.gemini/antigravity/skills/`) scope.
+
+### Other tools and manual use
+
+The skills are plain markdown. Any tool that reads structured context files can use them — point it at `skills/<name>/SKILL.md`. Humans can read them directly; that's the point.
+
+**Skill folder structure:**
+```
+skills/cartography/
+├── SKILL.md           # The skill itself (required)
+├── examples/          # Working HTML files you can open in a browser
+│   ├── choropleth.html
+│   └── globe.html
+└── scripts/           # Reusable JS (referenced from SKILL.md)
+    └── projection-picker.js
+```
+
+The `SKILL.md` frontmatter follows the emerging cross-tool standard:
+```yaml
+---
+name: cartography
+description: "Build maps with D3.js — projections, TopoJSON, choropleth, ..."
+---
+```
+
+The `name` identifies the skill. The `description` tells the tool when to activate it. Everything after the frontmatter is the skill content: judgment calls, code patterns, and pitfalls.
+
 ## Skills
 
 ### Seeing patterns
@@ -102,11 +170,11 @@ Skills for testing, evaluating, and improving other skills. The compound tool.
 
 **[skill-eval](meta/skill-eval/SKILL.md)** — Evaluate skill effectiveness with before/after comparisons.
 
+**[adversarial-eval](meta/adversarial-eval/SKILL.md)** — Calibrate adversarial agents with blind evaluation protocol and inter-rater reliability checks.
+
 **[metamorphic-tester](meta/metamorphic-tester/SKILL.md)** — Validate math and logic via visual invariants. Scaling, permutation, and subset relations to catch silent bugs.
 
 **[visual-critic](meta/visual-critic/SKILL.md)** — Audit design quality and "taste." Typographic hierarchy, 8px grid, WCAG accessibility, and visual logic.
-
-**[robustness-contract](meta/robustness-contract/SKILL.md)** — Pre-negotiate behavior for edge cases. "Data of Death" defense (nulls, outliers, cardinality) and interaction state machines.
 
 **[perceptual-red-team](meta/perceptual-red-team/SKILL.md)** — Audit for cognitive overload. Working memory limits, "Chart Fatigue," hairball detection, and congruence in animation.
 

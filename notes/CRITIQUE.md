@@ -112,6 +112,22 @@ The visual critic was scoring blocks ~2-3 points too high and conflating accessi
 
 Remaining gaps: block 21 still scores too high (4 vs 1-2); tech demos (32, 39) still score too low. The static screenshot limitation is a factor — animated morphs and interactive hit detection can't be fully evaluated from a single frame.
 
+### 2026-03-27 — Introspection Trap
+
+You're building inward when the project needs to face outward.
+
+Look at the recent trajectory: adversarial audit, calibrate adversarial agents, self-visualization blocks, introspection blocks, unused skill combinations. You're using the skills to examine the skills. The last 30+ commits are meta-work — evaluating, auditing, calibrating, and visualizing the project itself.
+
+Meanwhile: **nobody can use this yet.**
+
+There's no answer to the most basic question a person (or model) would have: "I want to make a visualization. How do I use a skill?" The README doesn't explain it. There's no entry point. The 113 blocks are demonstrations to yourself. The adversarial agents evaluate quality — but quality for whom?
+
+The WHY.md is beautiful. It says the deepest success is "when someone uses a skill to build something the skill's author wouldn't have built." But there's no path to that moment. No distribution, no discovery, no onboarding.
+
+You have 26 deeply-researched skills and 12 meta-skills for inspecting them. The ratio is telling. You've been sharpening the knife and then building tools to measure the knife's sharpness and then visualizing those measurements with the knife.
+
+The obvious thing: **ship it to someone who isn't you.**
+
 ### 2026-03-21 → 2026-03-23 — Skill Expansion & Infrastructure
 - **3 new skills:** `annotation` (768 lines), `distributions` (855 lines), `small-multiples` (642 lines). All three were high/medium priority items from IDEAS.md.
 - **Block generator:** 32 animated D3 compositions in `blocks/generator.html` — demonstrates cross-skill composition at scale.
