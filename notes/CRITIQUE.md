@@ -87,6 +87,31 @@ Analysis of 34,196 real D3 blocks from Blockbuilder Search reveals which D3 modu
 - **158/158 tests pass** after expansion.
 - **Total: 8,744 lines across 26 skills** (up from ~7,200 pre-expansion).
 
+### 2026-03-26 — Visual Critic Recalibration
+
+The visual critic was scoring blocks ~2-3 points too high and conflating accessibility compliance with visual design quality. Blocks without ARIA got punished (block 2, a nice SPLOM, scored 4); blocks with ARIA got inflated (block 9 scored 7 for having `role="img"`). Meanwhile, visually broken blocks got rationalized — block 21 (blue-on-blue choropleth with invisible states) scored 7 because the critic interpreted the bug as a "bold design choice."
+
+**Changes to `meta/visual-critic/SKILL.md`:**
+- Removed accessibility scoring entirely — ARIA, keyboard nav, and screen reader support belong to separate agents
+- Added screenshot-based evaluation as the primary method (code review alone misses layout bugs)
+- Recalibrated scoring scale: generic-but-working = 4-5, not 7. Concrete anchors at each tier.
+- Added "broken means broken, not bold" gate — if the data encoding is invisible, score 1-2 regardless of code quality
+- Added separate scoring criteria for tech demos (morphing galleries, hit-detection demos)
+- Created `meta/adversarial-eval/` skill documenting the blind evaluation protocol
+
+**Calibration results (two blind container runs):**
+
+| Block | Kai | Before rewrite | After rewrite |
+|-------|:---:|:--------------:|:-------------:|
+| 02 linked scatterplot | 7-8 | 4 | 7 |
+| 03 violin orchestra | 2-3 | 6 | 3 |
+| 05 crossfilter flights | 5-6 | 4 | 5 |
+| 21 US choropleth | 1-2 | 5 | 4 |
+| 32 shape morphing | 7-8 | 3 | 4 |
+| 39 quadtree hit detection | 6+ | 3 | 4 |
+
+Remaining gaps: block 21 still scores too high (4 vs 1-2); tech demos (32, 39) still score too low. The static screenshot limitation is a factor — animated morphs and interactive hit detection can't be fully evaluated from a single frame.
+
 ### 2026-03-21 → 2026-03-23 — Skill Expansion & Infrastructure
 - **3 new skills:** `annotation` (768 lines), `distributions` (855 lines), `small-multiples` (642 lines). All three were high/medium priority items from IDEAS.md.
 - **Block generator:** 32 animated D3 compositions in `blocks/generator.html` — demonstrates cross-skill composition at scale.
