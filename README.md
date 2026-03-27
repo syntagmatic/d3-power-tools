@@ -51,7 +51,7 @@ Skills live in `.agent/skills/` at project or user (`~/.gemini/antigravity/skill
 
 ### Other tools and manual use
 
-The skills are plain markdown. Any tool that reads structured context files can use them — point it at `skills/<name>/SKILL.md`. Humans can read them directly; that's the point.
+The skills are plain markdown. Any tool that reads structured context files can use them — point it at `skills/<name>/SKILL.md`.
 
 **Skill folder structure:**
 ```
