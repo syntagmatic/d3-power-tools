@@ -7,6 +7,18 @@
 - [ ] Voronoi & Delaunay — interactive nearest-neighbor lookup, Voronoi diagrams as tooltip regions, Voronoi treemaps, Delaunay triangulation, clipped Voronoi cells
 - [ ] Live & streaming data — append-only charts with sliding window, circular buffers, WebSocket integration, `requestAnimationFrame`-gated updates, graceful reconnection
 
+## Self-Visualization Blocks
+
+Visualizations of d3-power-tools itself, using the skills to explore the project's own structure.
+
+- [ ] **Skill dependency graph** — cross-references between skills as a force-directed network or chord diagram (`network`, `force`, `edge-bundling`)
+- [ ] **Block × skill matrix** — which blocks exercise which skills, as an adjacency matrix or heatmap. Data from `manifest.json` (`network`, `color`)
+- [ ] **Skill size treemap** — line counts as area, grouped by category (`hierarchy-layouts`)
+- [ ] **Adversarial audit scorecard** — per-block × per-agent score matrix as a diverging heatmap (`color`, `scales`)
+- [ ] **Test coverage map** — tests per skill linked to examples, sparkline of coverage depth (`linked-views`, `sparkcharts`)
+
+---
+
 ## New Skill Ideas
 
 - **Text & labels** — force-based label placement, occlusion culling, text wrapping in constrained shapes, curved text on arcs, automatic abbreviation
