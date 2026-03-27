@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Regional Manufacturing DNA</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: #fafaf8;
+    color: #2a2a2a;
+    padding: 20px 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  h1 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin-bottom: 4px;
+  }
+  .subtitle {
+    font-size: 0.88rem;
+    color: #777;
+    margin-bottom: 16px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    width: 100%;
+    max-width: 1000px;
+  }
+  .panel {
+    background: #fff;
+    border: 1px solid #e8e8e4;
+    border-radius: 6px;
+    padding: 10px 6px 4px;
+    position: relative;
+  }
+  .panel-title {
+    font-size: 0.82rem;
+    font-weight: 700;
+    text-align: center;
+    margin-bottom: 2px;
+  }
+  .panel-badge {
+    font-size: 0.72rem;
+    color: #888;
+    text-align: center;
+    margin-bottom: 4px;
+    min-height: 1.1em;
+  }
+  .panel-container {
+    position: relative;
+  }
+  canvas { display: block; }
+  svg.axes-overlay {
+    position: absolute;
+    top: 0; left: 0;
+    pointer-events: all;
+  }
+</style>
+</head>
+<body>
+<h1>Regional Manufacturing DNA</h1>
+<div class="subtitle">200 cars across 4 manufacturing regions — brush any axis to filter all panels</div>
+<div class="grid" id="grid"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// Dimensions per axis
+const dims = [
+  { key: "hp", label: "Horsepower", domain: [80, 400] },
+  { key: "weight", label: "Weight (lb)", domain: [2000, 5000] },
+  { key: "mpg", label: "MPG", domain: [12, 55] },
+  { key: "price", label: "Price ($K)", domain: [15, 90] },
+  { key: "accel", label: "0-60 (s)", domain: [4, 16] },
+  { key: "disp", label: "Displ. (L)", domain: [1.0, 6.5] }
+];
+
+// Region colors — Tol muted
+const regionMeta = [
+  { name: "European", n: 50, color: "#332288", hp: [100, 280], wt: [2200, 3800], mpg: [22, 48], price: [25, 85], accel: [5, 12], disp: [1.2, 4.0] },
+  { name: "American", n: 50, color: "#CC6677", hp: [150, 400], wt: [3000, 5000], mpg: [14, 30], price: [20, 75], accel: [4.5, 10], disp: [2.5, 6.5] },
+  { name: "Japanese", n: 50, color: "#44AA99", hp: [90, 300], wt: [2000, 3600], mpg: [25, 55], price: [15, 55], accel: [6, 14], disp: [1.0, 3.5] },
+  { name: "Korean", n: 50, color: "#DDCC77", hp: [85, 250], wt: [2200, 3800], mpg: [22, 45], price: [15, 45], accel: [6, 15], disp: [1.2, 3.2] }
+];
+
+// Generate data
+function randBetween(a, b) { return a + Math.random() * (b - a); }
+const allCars = [];
+regionMeta.forEach(rm => {
+  for (let i = 0; i < rm.n; i++) {
+    const hp = randBetween(rm.hp[0], rm.hp[1]);
+    const wt = randBetween(rm.wt[0], rm.wt[1]);
+    // Correlated: heavier -> more hp, less mpg
+    const mpgBase = randBetween(rm.mpg[0], rm.mpg[1]);
+    const mpg = Math.max(rm.mpg[0], Math.min(rm.mpg[1], mpgBase - (hp - 150) * 0.04 + (Math.random() - 0.5) * 6));
+    const price = randBetween(rm.price[0], rm.price[1]);
+    const accel = randBetween(rm.accel[0], rm.accel[1]);
+    const disp = randBetween(rm.disp[0], rm.disp[1]);
+    allCars.push({ region: rm.name, hp, weight: wt, mpg, price, accel, disp });
+  }
+});
+
+// Shared scales (y) — all panels use same scales
+const yScales = {};
+dims.forEach(d => {
+  yScales[d.key] = d3.scaleLinear().domain(d.domain).range([0, 1]); // normalized 0-1
+});
+
+// Brush state: key -> [normalized min, normalized max] or null
+const brushExtents = {};
+dims.forEach(d => brushExtents[d.key] = null);
+
+const dispatch = d3.dispatch("brush");
+
+// Panel dimensions
+const pw = 480, ph = 240;
+const pm = { top: 8, right: 24, bottom: 24, left: 24 };
+const plotW = pw - pm.left - pm.right;
+const plotH = ph - pm.top - pm.bottom;
+const axisSpacing = plotW / (dims.length - 1);
+
+const dpr = window.devicePixelRatio || 1;
+
+// Build panels
+const panels = [];
+const grid = document.getElementById("grid");
+
+regionMeta.forEach((rm, ri) => {
+  const regionCars = allCars.filter(c => c.region === rm.name);
+
+  const panel = document.createElement("div");
+  panel.className = "panel";
+
+  const title = document.createElement("div");
+  title.className = "panel-title";
+  title.style.color = rm.color;
+  title.textContent = rm.name;
+  panel.appendChild(title);
+
+  const badge = document.createElement("div");
+  badge.className = "panel-badge";
+  badge.id = `badge-${ri}`;
+  badge.textContent = `Showing ${rm.n} of ${rm.n}`;
+  panel.appendChild(badge);
+
+  const cont = document.createElement("div");
+  cont.className = "panel-container";
+  cont.style.width = pw + "px";
+  cont.style.height = ph + "px";
+  cont.style.maxWidth = "100%";
+
+  const canvas = document.createElement("canvas");
+  canvas.width = pw * dpr;
+  canvas.height = ph * dpr;
+  canvas.style.width = pw + "px";
+  canvas.style.height = ph + "px";
+  cont.appendChild(canvas);
+
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  // SVG overlay for axes and brushes
+  const svg = d3.create("svg")
+    .attr("class", "axes-overlay")
+    .attr("width", pw)
+    .attr("height", ph)
+    .attr("viewBox", `0 0 ${pw} ${ph}`);
+
+  svg.append("title").text(`Parallel coordinates for ${rm.name} region`);
+
+  // Draw axes
+  dims.forEach((dim, di) => {
+    const x = pm.left + di * axisSpacing;
+    const yScale = d3.scaleLinear().domain(dim.domain).range([plotH + pm.top, pm.top]);
+
+    const showTicks = (ri % 2 === 0 && di === 0) || (ri % 2 === 1 && di === dims.length - 1) || true;
+
+    const axisG = svg.append("g").attr("transform", `translate(${x},0)`);
+    axisG.append("line")
+      .attr("y1", pm.top).attr("y2", pm.top + plotH)
+      .attr("stroke", "#ccc").attr("stroke-width", 1);
+
+    if (showTicks) {
+      const axis = d3.axisLeft(yScale).ticks(4).tickSize(3);
+      const ag = axisG.call(axis);
+      ag.select(".domain").remove();
+      ag.selectAll(".tick text").attr("fill", "#888").style("font-size", "9px").attr("dx", -2);
+      ag.selectAll(".tick line").attr("stroke", "#bbb");
+    }
+
+    // Axis label
+    axisG.append("text")
+      .attr("y", pm.top - 6)
+      .attr("text-anchor", "middle")
+      .attr("fill", "#666")
+      .style("font-size", "9px")
+      .style("font-weight", "600")
+      .text(dim.label);
+
+    // Brush
+    const brush = d3.brushY()
+      .extent([[-12, pm.top], [12, pm.top + plotH]])
+      .on("brush end", (event) => {
+        if (event.selection) {
+          const [y0, y1] = event.selection;
+          const n0 = (y0 - pm.top) / plotH;
+          const n1 = (y1 - pm.top) / plotH;
+          brushExtents[dim.key] = [n0, n1];
+        } else {
+          brushExtents[dim.key] = null;
+        }
+        dispatch.call("brush");
+      });
+
+    axisG.append("g").attr("class", "brush").call(brush);
+  });
+
+  cont.appendChild(svg.node());
+  panel.appendChild(cont);
+  grid.appendChild(panel);
+
+  panels.push({ rm, ri, regionCars, canvas, ctx, badge });
+});
+
+// Check if a car passes all brush filters
+function carPasses(car) {
+  for (const dim of dims) {
+    const ext = brushExtents[dim.key];
+    if (!ext) continue;
+    const norm = yScales[dim.key](car[dim.key]);
+    if (norm < ext[0] || norm > ext[1]) return false;
+  }
+  return true;
+}
+
+// Draw lines on canvas
+function drawPanel(p) {
+  const { rm, regionCars, ctx } = p;
+  ctx.clearRect(0, 0, pw, ph);
+
+  let showing = 0;
+
+  // Two passes: faded then highlighted
+  [false, true].forEach(highlighted => {
+    regionCars.forEach(car => {
+      const passes = carPasses(car);
+      if (highlighted !== passes) return;
+      if (passes) showing++;
+
+      ctx.beginPath();
+      dims.forEach((dim, di) => {
+        const x = pm.left + di * axisSpacing;
+        const norm = yScales[dim.key](car[dim.key]);
+        const y = pm.top + norm * plotH;
+        if (di === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+
+      if (passes) {
+        ctx.strokeStyle = rm.color + "88";
+        ctx.lineWidth = 1.2;
+      } else {
+        ctx.strokeStyle = "rgba(180,180,180,0.03)";
+        ctx.lineWidth = 0.5;
+      }
+      ctx.stroke();
+    });
+  });
+
+  const badgeEl = document.getElementById(`badge-${p.ri}`);
+  const anyBrush = dims.some(d => brushExtents[d.key] !== null);
+  badgeEl.textContent = anyBrush
+    ? `Showing ${Math.round(showing / 2)} of ${rm.n}`
+    : `Showing ${rm.n} of ${rm.n}`;
+}
+
+function drawAll() {
+  panels.forEach(drawPanel);
+}
+
+dispatch.on("brush", drawAll);
+drawAll();
+</script>
+</body>
+</html>

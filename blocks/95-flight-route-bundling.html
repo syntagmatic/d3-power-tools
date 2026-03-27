@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flight Route Bundling</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px 16px;
+    min-height: 100vh;
+  }
+  h1 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: #f0f0f0;
+    margin-bottom: 4px;
+  }
+  .subtitle {
+    font-size: 0.88rem;
+    color: #8899aa;
+    margin-bottom: 12px;
+  }
+  #viz-container {
+    position: relative;
+    width: 100%;
+    max-width: 960px;
+  }
+  canvas, #overlay-svg {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%;
+    height: 100%;
+  }
+  #overlay-svg { pointer-events: all; }
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 10px 20px;
+    background: rgba(255,255,255,0.06);
+    border-radius: 6px;
+    margin-top: 8px;
+    width: 100%;
+    max-width: 960px;
+  }
+  .controls label {
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: #99aabb;
+    white-space: nowrap;
+  }
+  .controls input[type=range] {
+    flex: 1;
+    accent-color: #e85d04;
+  }
+  .tension-val {
+    font-size: 0.82rem;
+    color: #e85d04;
+    font-weight: 700;
+    min-width: 32px;
+  }
+  .legend {
+    display: flex;
+    gap: 14px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+    width: 100%;
+    max-width: 960px;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 0.75rem;
+    color: #99aabb;
+  }
+  .legend-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: rgba(10,10,30,0.94);
+    color: #fff;
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 0.78rem;
+    line-height: 1.4;
+    white-space: nowrap;
+    opacity: 0;
+    transition: opacity 0.12s;
+    border: 1px solid rgba(232,93,4,0.4);
+  }
+</style>
+</head>
+<body>
+<h1>Flight Route Bundling</h1>
+<div class="subtitle">50 airports, ~200 routes grouped by region</div>
+<div id="viz-container"></div>
+<div class="controls">
+  <label>Bundle Tension</label>
+  <input type="range" id="tension-slider" min="0" max="1" step="0.02" value="0.85">
+  <span class="tension-val" id="tension-val">0.85</span>
+</div>
+<div class="legend" id="legend"></div>
+<div class="tooltip" id="tooltip"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+import * as topojson from "https://cdn.jsdelivr.net/npm/topojson-client@3/+esm";
+
+const width = 960, height = 560;
+const container = document.getElementById("viz-container");
+container.style.width = width + "px";
+container.style.height = height + "px";
+container.style.maxWidth = "100%";
+container.style.aspectRatio = `${width}/${height}`;
+
+// Tol muted palette (6 regions)
+const regionColors = {
+  "NE": "#332288",
+  "SE": "#88CCEE",
+  "MW": "#44AA99",
+  "SW": "#DDCC77",
+  "NW": "#CC6677",
+  "West Coast": "#AA4499"
+};
+
+const regionNames = ["NE", "SE", "MW", "SW", "NW", "West Coast"];
+
+// Legend
+const legend = document.getElementById("legend");
+regionNames.forEach(r => {
+  legend.innerHTML += `<span class="legend-item"><span class="legend-dot" style="background:${regionColors[r]}"></span>${r}</span>`;
+});
+
+// Generate airports
+const airports = [];
+const regionCenters = {
+  "NE": [-74, 41], "SE": [-84, 33], "MW": [-90, 42],
+  "SW": [-110, 33], "NW": [-117, 47], "West Coast": [-121, 37]
+};
+
+const airportNames = [
+  "JFK","BOS","PHL","DCA","BDL","PIT","BWI","RDU",
+  "ATL","MIA","MCO","CLT","JAX","TPA","MSY","BNA",
+  "ORD","DTW","MSP","STL","CLE","IND","MKE","CMH",
+  "PHX","DEN","DFW","IAH","SAT","ABQ","AUS","ELP",
+  "SEA","PDX","SLC","BOI","GEG","FAI","BIL","MFR",
+  "LAX","SFO","SAN","OAK","SMF","SJC","ONT","BUR",
+  "RNO","LAS"
+];
+
+const regionAssign = [
+  "NE","NE","NE","NE","NE","NE","NE","NE",
+  "SE","SE","SE","SE","SE","SE","SE","SE",
+  "MW","MW","MW","MW","MW","MW","MW","MW",
+  "SW","SW","SW","SW","SW","SW","SW","SW",
+  "NW","NW","NW","NW","NW","NW","NW","NW",
+  "West Coast","West Coast","West Coast","West Coast","West Coast","West Coast","West Coast","West Coast",
+  "West Coast","SW"
+];
+
+const rng = d3.randomUniform(-4, 4);
+for (let i = 0; i < 50; i++) {
+  const region = regionAssign[i];
+  const [cx, cy] = regionCenters[region];
+  airports.push({
+    id: i,
+    name: airportNames[i],
+    region,
+    lon: cx + rng() * 1.5,
+    lat: cy + rng()
+  });
+}
+
+// Generate routes (~200)
+const routes = [];
+const routeSet = new Set();
+function addRoute(a, b) {
+  const key = Math.min(a, b) + "-" + Math.max(a, b);
+  if (!routeSet.has(key) && a !== b) {
+    routeSet.add(key);
+    routes.push({ source: a, target: b });
+  }
+}
+
+// Within-region routes (dense)
+for (const region of regionNames) {
+  const members = airports.filter(a => a.region === region);
+  for (let i = 0; i < members.length; i++) {
+    for (let j = i + 1; j < members.length; j++) {
+      if (Math.random() < 0.55) addRoute(members[i].id, members[j].id);
+    }
+  }
+}
+// Cross-region hub routes
+const hubs = [0, 8, 16, 24, 32, 40]; // One hub per region
+for (let i = 0; i < hubs.length; i++) {
+  for (let j = i + 1; j < hubs.length; j++) {
+    addRoute(hubs[i], hubs[j]);
+  }
+  // Connect hub to a few random airports in other regions
+  for (let k = 0; k < 6; k++) {
+    const t = Math.floor(Math.random() * 50);
+    if (airports[t].region !== airports[hubs[i]].region) addRoute(hubs[i], t);
+  }
+}
+
+// Build hierarchy: root -> regions -> airports
+const hierarchyData = {
+  name: "root",
+  children: regionNames.map(r => ({
+    name: r,
+    children: airports.filter(a => a.region === r).map(a => ({
+      name: a.name,
+      airportId: a.id
+    }))
+  }))
+};
+
+const root = d3.hierarchy(hierarchyData);
+const leaves = root.leaves();
+const idToLeaf = new Map();
+leaves.forEach(leaf => {
+  if (leaf.data.airportId !== undefined) {
+    idToLeaf.set(leaf.data.airportId, leaf);
+  }
+});
+
+// LCA path: leaf -> ancestor -> ... -> LCA -> ... -> ancestor -> leaf
+function lcaPath(a, b) {
+  const aAnc = a.ancestors().reverse();
+  const bAnc = b.ancestors().reverse();
+  let lca = 0;
+  while (lca + 1 < aAnc.length && lca + 1 < bAnc.length && aAnc[lca + 1] === bAnc[lca + 1]) {
+    lca++;
+  }
+  const pathA = aAnc.slice(lca).reverse();
+  const pathB = bAnc.slice(lca + 1);
+  return pathA.concat(pathB);
+}
+
+// Projection
+const projection = d3.geoAlbersUsa().translate([width / 2, height / 2]).scale(1100);
+
+// Assign projected coordinates to airports
+airports.forEach(a => {
+  const p = projection([a.lon, a.lat]);
+  if (p) {
+    a.x = p[0];
+    a.y = p[1];
+  } else {
+    a.x = width / 2;
+    a.y = height / 2;
+  }
+});
+
+// Assign coordinates to hierarchy nodes
+leaves.forEach(leaf => {
+  const ap = airports.find(a => a.id === leaf.data.airportId);
+  if (ap) { leaf.x = ap.x; leaf.y = ap.y; }
+});
+
+// Region centroids for internal nodes
+root.each(node => {
+  if (!node.children) return;
+  const desc = node.leaves();
+  node.x = d3.mean(desc, d => d.x);
+  node.y = d3.mean(desc, d => d.y);
+});
+
+// Build route paths through hierarchy
+const routePaths = routes.map(r => {
+  const la = idToLeaf.get(r.source);
+  const lb = idToLeaf.get(r.target);
+  if (!la || !lb) return null;
+  const path = lcaPath(la, lb);
+  return {
+    source: r.source,
+    target: r.target,
+    points: path.map(n => [n.x, n.y])
+  };
+}).filter(Boolean);
+
+// Count routes per airport
+const routeCount = new Map();
+airports.forEach(a => routeCount.set(a.id, 0));
+routes.forEach(r => {
+  routeCount.set(r.source, (routeCount.get(r.source) || 0) + 1);
+  routeCount.set(r.target, (routeCount.get(r.target) || 0) + 1);
+});
+
+// Load US states for background
+const us = await d3.json("https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json");
+const statesMesh = topojson.mesh(us, us.objects.states);
+const nationMesh = topojson.mesh(us, us.objects.nation);
+const geoPath = d3.geoPath(projection);
+
+// Canvas setup
+const dpr = window.devicePixelRatio || 1;
+const canvas = document.createElement("canvas");
+canvas.width = width * dpr;
+canvas.height = height * dpr;
+canvas.style.width = width + "px";
+canvas.style.height = height + "px";
+container.appendChild(canvas);
+const ctx = canvas.getContext("2d");
+ctx.scale(dpr, dpr);
+
+// SVG overlay
+const svg = d3.select(container).append("svg")
+  .attr("id", "overlay-svg")
+  .attr("viewBox", `0 0 ${width} ${height}`)
+  .attr("preserveAspectRatio", "xMidYMid meet");
+
+svg.append("title").text("Flight Route Bundling — 50 airports, ~200 routes with hierarchical edge bundling");
+
+// Draw airport dots on SVG
+const dots = svg.selectAll("circle.airport")
+  .data(airports)
+  .join("circle")
+    .attr("class", "airport")
+    .attr("cx", d => d.x)
+    .attr("cy", d => d.y)
+    .attr("r", d => 3 + Math.sqrt(routeCount.get(d.id)) * 1.2)
+    .attr("fill", d => regionColors[d.region])
+    .attr("stroke", "#1a1a2e")
+    .attr("stroke-width", 1.2)
+    .style("cursor", "pointer");
+
+const tooltip = d3.select("#tooltip");
+
+let hoveredAirport = null;
+
+dots
+  .on("mouseenter", (event, d) => {
+    hoveredAirport = d.id;
+    drawRoutes();
+    tooltip.style("opacity", 1).html(
+      `<strong>${d.name}</strong><br>Region: ${d.region}<br>Routes: ${routeCount.get(d.id)}`
+    );
+    d3.select(event.target).attr("r", d => 5 + Math.sqrt(routeCount.get(d.id)) * 1.5)
+      .attr("stroke", "#e85d04").attr("stroke-width", 2);
+  })
+  .on("mousemove", (event) => {
+    tooltip.style("left", (event.pageX + 14) + "px").style("top", (event.pageY - 30) + "px");
+  })
+  .on("mouseleave", (event, d) => {
+    hoveredAirport = null;
+    drawRoutes();
+    tooltip.style("opacity", 0);
+    d3.select(event.target).attr("r", d => 3 + Math.sqrt(routeCount.get(d.id)) * 1.2)
+      .attr("stroke", "#1a1a2e").attr("stroke-width", 1.2);
+  });
+
+let tension = 0.85;
+
+function drawRoutes() {
+  ctx.save();
+  ctx.clearRect(0, 0, width, height);
+
+  // Background
+  ctx.fillStyle = "#1a1a2e";
+  ctx.fillRect(0, 0, width, height);
+
+  // Draw state borders
+  ctx.beginPath();
+  geoPath.context(ctx)(statesMesh);
+  ctx.strokeStyle = "rgba(255,255,255,0.08)";
+  ctx.lineWidth = 0.5;
+  ctx.stroke();
+
+  // Nation outline
+  ctx.beginPath();
+  geoPath.context(ctx)(nationMesh);
+  ctx.strokeStyle = "rgba(255,255,255,0.15)";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Draw routes using bundle curve
+  const line = d3.line().curve(d3.curveBundle.beta(tension));
+
+  routePaths.forEach(rp => {
+    const isHighlighted = hoveredAirport !== null &&
+      (rp.source === hoveredAirport || rp.target === hoveredAirport);
+    const isFaded = hoveredAirport !== null && !isHighlighted;
+
+    ctx.beginPath();
+    line.context(ctx)(rp.points);
+
+    if (isHighlighted) {
+      ctx.strokeStyle = "rgba(232, 93, 4, 0.7)";
+      ctx.lineWidth = 2;
+    } else if (isFaded) {
+      ctx.strokeStyle = "rgba(102, 119, 136, 0.04)";
+      ctx.lineWidth = 0.5;
+    } else {
+      ctx.strokeStyle = "rgba(102, 119, 136, 0.15)";
+      ctx.lineWidth = 0.8;
+    }
+    ctx.stroke();
+  });
+
+  ctx.restore();
+}
+
+// Tension slider
+const tensionSlider = document.getElementById("tension-slider");
+const tensionVal = document.getElementById("tension-val");
+tensionSlider.addEventListener("input", (e) => {
+  tension = +e.target.value;
+  tensionVal.textContent = tension.toFixed(2);
+  drawRoutes();
+});
+
+drawRoutes();
+</script>
+</body>
+</html>

@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Earthquake Depth Globe</title>
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;background:#1a1a2e;color:#e0e0e0;display:flex;flex-direction:column;align-items:center;padding:20px 24px}
+h1{font-size:22px;font-weight:600;letter-spacing:-.3px;margin-bottom:4px;color:#f0ece4}
+.subtitle{font-size:13px;color:#8a8a9a;margin-bottom:16px}
+.container{display:flex;gap:16px;width:100%;max-width:1200px}
+.globe-panel{flex:0 0 50%;position:relative}
+.globe-panel canvas{border-radius:50%;cursor:grab}
+.globe-panel canvas:active{cursor:grabbing}
+.right-panel{flex:0 0 50%;display:flex;flex-direction:column;gap:12px}
+.panel-title{font-size:13px;font-weight:600;color:#b0b0c0;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px}
+.scatter-panel,.ridge-panel{background:#22223a;border-radius:8px;padding:12px 16px}
+.legend{display:flex;gap:16px;justify-content:center;margin-top:12px;font-size:11px;color:#8a8a9a}
+.legend-item{display:flex;align-items:center;gap:4px}
+.legend-swatch{width:12px;height:12px;border-radius:2px}
+svg text{fill:#c0c0d0}
+.brush .selection{fill:rgba(255,255,255,0.15);stroke:#fff;stroke-width:1}
+</style>
+</head>
+<body>
+<h1>Earthquake Depth Globe</h1>
+<p class="subtitle">500 synthetic earthquakes along tectonic boundaries — drag to rotate, brush scatter to filter</p>
+<div class="container">
+  <div class="globe-panel">
+    <canvas id="globe"></canvas>
+  </div>
+  <div class="right-panel">
+    <div class="scatter-panel">
+      <div class="panel-title">Depth vs Magnitude</div>
+      <svg id="scatter"></svg>
+    </div>
+    <div class="ridge-panel">
+      <div class="panel-title">Depth Distribution by Zone</div>
+      <svg id="ridgeline"></svg>
+    </div>
+  </div>
+</div>
+<div class="legend" id="legend"></div>
+
+<script type="module">
+// --- DATA GENERATION ---
+const zones = [
+  {name:"Ring of Fire",count:200},
+  {name:"Mid-Atlantic Ridge",count:80},
+  {name:"Himalayan Belt",count:60},
+  {name:"East African Rift",count:40},
+  {name:"Other",count:120}
+];
+const zoneColors = {
+  "Ring of Fire":"#ee8866",
+  "Mid-Atlantic Ridge":"#77aadd",
+  "Himalayan Belt":"#eedd88",
+  "East African Rift":"#99ddff",
+  "Other":"#bbcc33"
+};
+
+function randNorm(mu,sigma){
+  let u=0,v=0;
+  while(u===0)u=Math.random();
+  while(v===0)v=Math.random();
+  return mu+sigma*Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);
+}
+function clamp(v,lo,hi){return Math.max(lo,Math.min(hi,v))}
+function powerLaw(min,max,alpha){
+  const u=Math.random();
+  return min*Math.pow(1-u+u*Math.pow(max/min,1-alpha),1/(1-alpha));
+}
+
+function genDepth(){
+  if(Math.random()<0.65){
+    return clamp(Math.abs(randNorm(20,25)),0,70);
+  } else {
+    return clamp(randNorm(400,120),100,700);
+  }
+}
+
+const ringOfFirePts=[
+  ()=>[randNorm(36,4),randNorm(140,3)],  // Japan
+  ()=>[randNorm(12,5),randNorm(125,4)],  // Philippines
+  ()=>[randNorm(-5,6),randNorm(115,8)],  // Indonesia
+  ()=>[randNorm(45,12),randNorm(-125,5)],// US west coast
+  ()=>[randNorm(-22,10),randNorm(-70,3)],// Chile
+  ()=>[randNorm(55,5),randNorm(-160,10)],// Alaska/Aleutians
+  ()=>[randNorm(-38,5),randNorm(176,2)], // New Zealand
+  ()=>[randNorm(15,5),randNorm(-90,5)],  // Central America
+];
+const midAtlanticPts=[
+  ()=>[randNorm(40,20),randNorm(-30,5)],
+  ()=>[randNorm(-10,15),randNorm(-14,4)],
+  ()=>[randNorm(65,5),randNorm(-18,3)],  // Iceland
+];
+const himalayanPts=[
+  ()=>[randNorm(28,3),randNorm(85,5)],   // Nepal
+  ()=>[randNorm(34,4),randNorm(55,8)],   // Iran
+  ()=>[randNorm(39,2),randNorm(35,5)],   // Turkey
+];
+const riftPts=[
+  ()=>[randNorm(-2,8),randNorm(36,3)],
+  ()=>[randNorm(10,4),randNorm(42,3)],   // Ethiopia
+];
+
+function genQuake(zone){
+  let lat,lon;
+  if(zone==="Ring of Fire"){
+    const fn=ringOfFirePts[Math.floor(Math.random()*ringOfFirePts.length)];
+    [lat,lon]=fn();
+  } else if(zone==="Mid-Atlantic Ridge"){
+    const fn=midAtlanticPts[Math.floor(Math.random()*midAtlanticPts.length)];
+    [lat,lon]=fn();
+  } else if(zone==="Himalayan Belt"){
+    const fn=himalayanPts[Math.floor(Math.random()*himalayanPts.length)];
+    [lat,lon]=fn();
+  } else if(zone==="East African Rift"){
+    const fn=riftPts[Math.floor(Math.random()*riftPts.length)];
+    [lat,lon]=fn();
+  } else {
+    lat=randNorm(0,40);
+    lon=randNorm(0,100);
+  }
+  lat=clamp(lat,-85,85);
+  lon=((lon+180)%360+360)%360-180;
+  const magnitude=clamp(powerLaw(2,9,2.5),2,9);
+  const depth=genDepth();
+  return {lat,lon,magnitude,depth,zone};
+}
+
+const quakes=[];
+for(const z of zones){
+  for(let i=0;i<z.count;i++) quakes.push(genQuake(z.name));
+}
+
+// --- DISPATCH ---
+const dispatch = d3.dispatch("brushScatter","hoverGlobe","clearHover");
+
+// --- DEPTH COLOR ---
+const depthColor = d3.scaleSequential(t=>d3.interpolateYlOrRd(1-t)).domain([0,700]);
+// shallow=YlOrRd(1)=dark red... we want shallow=yellow, deep=purple
+// Actually reverse: shallow=warm, deep=cool
+const depthColorFn = d => {
+  const t = d / 700; // 0=shallow, 1=deep
+  return d3.interpolateRgb("#f7e44d","#6a0572")(t);
+};
+
+// --- GLOBE ---
+const globeCanvas = document.getElementById("globe");
+const parentW = document.querySelector(".globe-panel").getBoundingClientRect().width;
+const size = Math.min(parentW, 500);
+globeCanvas.width = size * 2;
+globeCanvas.height = size * 2;
+globeCanvas.style.width = size + "px";
+globeCanvas.style.height = size + "px";
+const ctx = globeCanvas.getContext("2d");
+ctx.scale(2, 2);
+
+const projection = d3.geoOrthographic()
+  .scale(size / 2 - 10)
+  .translate([size / 2, size / 2])
+  .clipAngle(90);
+
+const path = d3.geoPath(projection, ctx);
+
+// Inline simplified continent outlines (approximate polygons)
+const land = {type:"FeatureCollection",features:[
+  // North America
+  {type:"Feature",geometry:{type:"Polygon",coordinates:[[[-130,50],[-125,60],[-110,68],[-95,72],[-80,72],[-65,60],[-55,48],[-65,43],[-75,35],[-82,25],[-90,18],[-95,16],[-100,20],[-105,22],[-115,30],[-120,35],[-125,45],[-130,50]]]}},
+  // Central America & Caribbean
+  {type:"Feature",geometry:{type:"Polygon",coordinates:[[[-95,18],[-90,18],[-85,15],[-82,10],[-78,8],[-80,7],[-85,10],[-90,14],[-95,18]]]}},
+  // South America
+  {type:"Feature",geometry:{type:"Polygon",coordinates:[[[-80,10],[-75,12],[-65,10],[-55,5],[-45,0],[-35,-5],[-35,-15],[-40,-22],[-48,-28],[-55,-33],[-58,-38],[-68,-52],[-72,-48],[-75,-42],[-72,-30],[-70,-18],[-75,-5],[-78,2],[-80,10]]]}},
+  // Europe
+  {type:"Feature",geometry:{type:"Polygon",coordinates:[[[-10,36],[0,38],[5,43],[0,48],[-5,48],[2,52],[5,54],[10,55],[12,58],[18,60],[25,60],[30,62],[28,70],[20,70],[15,68],[10,63],[5,60],[0,55],[-5,50],[-10,44],[-10,36]]]}},
+  // Africa
+  {type:"Feature",geometry:{type:"Polygon",coordinates:[[[-15,30],[-5,36],[10,37],[12,33],[25,32],[30,30],[35,30],[42,12],[50,2],[42,-5],[40,-12],[35,-25],[30,-33],[22,-35],[18,-30],[12,-18],[8,-5],[5,5],[0,5],[-5,5],[-10,7],[-17,12],[-17,20],[-15,25],[-15,30]]]}},
+  // Asia (mainland)
+  {type:"Feature",geometry:{type:"Polygon",coordinates:[[[30,35],[35,36],[40,38],[50,40],[55,42],[60,42],[65,40],[68,38],[72,35],[75,30],[78,28],[80,22],[82,18],[85,22],[90,25],[95,22],[100,18],[102,15],[105,20],[110,22],[115,25],[120,30],[125,35],[130,38],[135,42],[140,45],[142,50],[135,55],[125,55],[120,60],[100,65],[80,70],[70,72],[60,68],[50,55],[42,45],[35,40],[30,35]]]}},
+  // Japan/Korea
+  {type:"Feature",geometry:{type:"Polygon",coordinates:[[[130,31],[132,34],[135,35],[137,38],[140,40],[142,43],[145,45],[144,42],[141,38],[138,35],[135,33],[130,31]]]}},
+  // SE Asia islands (simplified)
+  {type:"Feature",geometry:{type:"Polygon",coordinates:[[[100,5],[105,2],[108,-2],[112,-5],[115,-8],[118,-5],[120,-2],[118,2],[115,5],[110,4],[105,5],[100,5]]]}},
+  // Australia
+  {type:"Feature",geometry:{type:"Polygon",coordinates:[[[115,-15],[120,-14],[130,-12],[135,-12],[140,-15],[145,-15],[150,-18],[152,-25],[150,-30],[148,-35],[145,-38],[140,-38],[135,-35],[130,-32],[125,-33],[118,-34],[115,-32],[113,-26],[114,-22],[115,-15]]]}},
+  // Greenland
+  {type:"Feature",geometry:{type:"Polygon",coordinates:[[[-55,60],[-50,62],[-45,65],[-40,68],[-25,72],[-18,76],[-20,80],[-30,82],[-45,82],[-55,80],[-58,76],[-55,70],[-55,60]]]}},
+  // India/Sri Lanka
+  {type:"Feature",geometry:{type:"Polygon",coordinates:[[[68,24],[72,22],[75,18],[78,14],[80,10],[80,15],[78,20],[75,24],[72,26],[68,24]]]}},
+  // Indonesia eastern
+  {type:"Feature",geometry:{type:"Polygon",coordinates:[[[125,-5],[128,-4],[132,-2],[135,-3],[138,-6],[140,-8],[138,-5],[135,-2],[130,-3],[125,-5]]]}},
+  // New Zealand
+  {type:"Feature",geometry:{type:"Polygon",coordinates:[[[168,-35],[172,-34],[175,-37],[178,-38],[178,-42],[175,-44],[172,-45],[170,-43],[168,-40],[168,-35]]]}},
+]};
+
+
+const magScale = d3.scaleSqrt().domain([2, 9]).range([2, 12]);
+
+let highlighted = new Set();
+let hoveredIdx = -1;
+
+function drawGlobe() {
+  ctx.clearRect(0, 0, size, size);
+
+  // Ocean
+  ctx.beginPath();
+  path({type:"Sphere"});
+  ctx.fillStyle = "#d4e4f7";
+  ctx.fill();
+
+  // Land
+  ctx.beginPath();
+  path(land);
+  ctx.fillStyle = "#e8e4df";
+  ctx.fill();
+  ctx.strokeStyle = "#c8c4bf";
+  ctx.lineWidth = 0.5;
+  ctx.stroke();
+
+  // Graticule
+  ctx.beginPath();
+  path(d3.geoGraticule()());
+  ctx.strokeStyle = "rgba(0,0,0,0.08)";
+  ctx.lineWidth = 0.5;
+  ctx.stroke();
+
+  // Quakes
+  const hasHighlight = highlighted.size > 0;
+  quakes.forEach((q, i) => {
+    const coords = projection([q.lon, q.lat]);
+    if (!coords) return;
+    const d = d3.geoDistance([q.lon, q.lat], projection.invert([size/2, size/2]));
+    if (d > Math.PI / 2) return;
+
+    const r = magScale(q.magnitude);
+    const isH = highlighted.has(i);
+    const isHov = i === hoveredIdx;
+
+    ctx.beginPath();
+    ctx.arc(coords[0], coords[1], r, 0, 2 * Math.PI);
+
+    if (hasHighlight && !isH) {
+      ctx.fillStyle = "rgba(100,100,100,0.15)";
+    } else {
+      ctx.fillStyle = depthColorFn(q.depth);
+      ctx.globalAlpha = isHov ? 1 : 0.75;
+    }
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    if (isHov) {
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  });
+}
+
+drawGlobe();
+
+// Versor drag rotation
+let v0, r0, q0;
+function versor(e) {
+  const l = e[0] * Math.PI / 180, p = e[1] * Math.PI / 180;
+  return [Math.cos(p) * Math.cos(l), Math.cos(p) * Math.sin(l), Math.sin(p)];
+}
+function cross(a, b) {
+  return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+}
+function dot(a, b) { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+function quaternionFromTo(a, b) {
+  const w = cross(a, b);
+  return [dot(a, b), w[0], w[1], w[2]];
+}
+function quaternionMultiply(a, b) {
+  return [
+    a[0]*b[0]-a[1]*b[1]-a[2]*b[2]-a[3]*b[3],
+    a[0]*b[1]+a[1]*b[0]+a[2]*b[3]-a[3]*b[2],
+    a[0]*b[2]-a[2]*b[0]+a[3]*b[1]-a[1]*b[3],
+    a[0]*b[3]+a[3]*b[0]+a[1]*b[2]-a[2]*b[1]
+  ];
+}
+function eulerFromQuaternion(q) {
+  const [w, x, y, z] = q;
+  return [
+    Math.atan2(2*(w*z+x*y), 1-2*(y*y+z*z)) * 180/Math.PI,
+    Math.asin(Math.max(-1,Math.min(1, 2*(w*y-z*x)))) * 180/Math.PI,
+    Math.atan2(2*(w*x+y*z), 1-2*(x*x+y*y)) * 180/Math.PI
+  ];
+}
+
+d3.select(globeCanvas).call(d3.drag()
+  .on("start", function(event) {
+    const p = projection.invert([event.x, event.y]);
+    if (!p) return;
+    v0 = versor(p);
+    const rot = projection.rotate();
+    r0 = rot;
+    q0 = [1, 0, 0, 0]; // identity
+    // Store initial rotation as quaternion components
+  })
+  .on("drag", function(event) {
+    const p = projection.invert([event.x, event.y]);
+    if (!p || !v0) return;
+    const v1 = versor(p);
+    const q1 = quaternionFromTo(v0, v1);
+    // Simple rotation: just update lambda and phi directly
+    const dx = event.dx;
+    const dy = event.dy;
+    const rot = projection.rotate();
+    projection.rotate([rot[0] + dx * 0.5, rot[1] - dy * 0.5, rot[2]]);
+    drawGlobe();
+  })
+);
+
+// Hover on globe
+d3.select(globeCanvas).on("mousemove", function(event) {
+  const rect = globeCanvas.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top;
+  const p = projection.invert([x, y]);
+  if (!p) { hoveredIdx = -1; drawGlobe(); return; }
+
+  let closest = -1, minDist = Infinity;
+  quakes.forEach((q, i) => {
+    const d = d3.geoDistance([q.lon, q.lat], p);
+    const coords = projection([q.lon, q.lat]);
+    if (!coords) return;
+    const gd = d3.geoDistance(p, projection.invert([size/2, size/2]));
+    if (gd > Math.PI/2) return;
+    if (d < minDist && d < 0.05) { minDist = d; closest = i; }
+  });
+
+  if (closest !== hoveredIdx) {
+    hoveredIdx = closest;
+    drawGlobe();
+    dispatch.call("hoverGlobe", null, closest);
+  }
+}).on("mouseleave", () => {
+  hoveredIdx = -1;
+  drawGlobe();
+  dispatch.call("clearHover");
+});
+
+// --- SCATTER ---
+const scatterSvg = d3.select("#scatter");
+const sm = {top:20,right:16,bottom:36,left:50};
+const sw = 520 - sm.left - sm.right;
+const sh = 220 - sm.top - sm.bottom;
+scatterSvg.attr("width", sw + sm.left + sm.right).attr("height", sh + sm.top + sm.bottom);
+scatterSvg.append("title").text("Earthquake depth vs magnitude scatter plot");
+const sg = scatterSvg.append("g").attr("transform",`translate(${sm.left},${sm.top})`);
+
+const sx = d3.scaleLinear().domain([2,9]).range([0,sw]);
+const sy = d3.scaleLinear().domain([0,700]).range([0,sh]); // inverted: deep at bottom
+
+sg.append("g").attr("transform",`translate(0,${sh})`).call(d3.axisBottom(sx).ticks(7))
+  .append("text").attr("x",sw/2).attr("y",30).attr("fill","#8a8a9a").attr("text-anchor","middle").attr("font-size",11).text("Magnitude");
+sg.append("g").call(d3.axisLeft(sy).ticks(6))
+  .append("text").attr("transform","rotate(-90)").attr("x",-sh/2).attr("y",-38).attr("fill","#8a8a9a").attr("text-anchor","middle").attr("font-size",11).text("Depth (km)");
+
+const dots = sg.selectAll("circle").data(quakes).join("circle")
+  .attr("cx",d=>sx(d.magnitude))
+  .attr("cy",d=>sy(d.depth))
+  .attr("r",3)
+  .attr("fill",d=>depthColorFn(d.depth))
+  .attr("opacity",0.7)
+  .attr("stroke","none");
+
+// Brush on scatter
+const brush = d3.brush().extent([[0,0],[sw,sh]]).on("brush end", function(event) {
+  if (!event.selection) {
+    highlighted = new Set();
+    dispatch.call("brushScatter", null, highlighted);
+    dots.attr("opacity",0.7).attr("r",3);
+    drawGlobe();
+    return;
+  }
+  const [[x0,y0],[x1,y1]] = event.selection;
+  highlighted = new Set();
+  quakes.forEach((q,i) => {
+    const cx = sx(q.magnitude), cy = sy(q.depth);
+    if (cx>=x0 && cx<=x1 && cy>=y0 && cy<=y1) highlighted.add(i);
+  });
+  dots.attr("opacity",(d,i)=>highlighted.size===0||highlighted.has(i)?0.8:0.1)
+      .attr("r",(d,i)=>highlighted.has(i)?4:2);
+  dispatch.call("brushScatter", null, highlighted);
+  drawGlobe();
+});
+sg.append("g").call(brush);
+
+// Hover globe → highlight scatter dot
+dispatch.on("hoverGlobe.scatter", idx => {
+  dots.attr("stroke", (d,i)=>i===idx?"#fff":"none")
+      .attr("stroke-width", (d,i)=>i===idx?2:0);
+});
+dispatch.on("clearHover.scatter", () => {
+  dots.attr("stroke","none");
+});
+
+// --- RIDGELINE ---
+const ridgeSvg = d3.select("#ridgeline");
+const rm = {top:10,right:16,bottom:30,left:110};
+const rw = 520 - rm.left - rm.right;
+const rowH = 36;
+const rh = zones.length * rowH;
+ridgeSvg.attr("width", rw + rm.left + rm.right).attr("height", rh + rm.top + rm.bottom);
+ridgeSvg.append("title").text("Ridgeline plot of earthquake depth distribution by tectonic zone");
+const rg = ridgeSvg.append("g").attr("transform",`translate(${rm.left},${rm.top})`);
+
+const rx = d3.scaleLinear().domain([0,700]).range([0,rw]);
+rg.append("g").attr("transform",`translate(0,${rh})`).call(d3.axisBottom(rx).ticks(7))
+  .append("text").attr("x",rw/2).attr("y",24).attr("fill","#8a8a9a").attr("text-anchor","middle").attr("font-size",11).text("Depth (km)");
+
+const kde = (kernel, thresholds, data) => thresholds.map(t => [t, d3.mean(data, d => kernel(t - d))]);
+const epanechnikov = bw => v => Math.abs(v/=bw)<=1 ? 0.75*(1-v*v)/bw : 0;
+const thresholds = d3.range(0, 700, 5);
+
+zones.forEach((z, zi) => {
+  const data = quakes.filter(q => q.zone === z.name).map(q => q.depth);
+  const density = kde(epanechnikov(40), thresholds, data);
+  const maxD = d3.max(density, d => d[1]) || 1;
+  const yScale = d3.scaleLinear().domain([0, maxD]).range([rowH - 2, 0]);
+
+  const area = d3.area()
+    .x(d => rx(d[0]))
+    .y0(rowH - 2)
+    .y1(d => yScale(d[1]))
+    .curve(d3.curveBasis);
+
+  const row = rg.append("g").attr("transform", `translate(0,${zi * rowH})`).attr("class",`ridge-${zi}`);
+
+  row.append("path")
+    .datum(density)
+    .attr("d", area)
+    .attr("fill", zoneColors[z.name])
+    .attr("fill-opacity", 0.4)
+    .attr("stroke", zoneColors[z.name])
+    .attr("stroke-width", 1.5);
+
+  row.append("text")
+    .attr("x", -8)
+    .attr("y", rowH / 2 + 4)
+    .attr("text-anchor", "end")
+    .attr("font-size", 11)
+    .attr("fill", zoneColors[z.name])
+    .text(z.name);
+});
+
+// Brush scatter → highlight ridgeline
+dispatch.on("brushScatter.ridge", (hl) => {
+  if (hl.size === 0) {
+    zones.forEach((z, zi) => {
+      rg.select(`.ridge-${zi} path`).attr("fill-opacity", 0.4).attr("stroke-width", 1.5);
+    });
+    return;
+  }
+  const activeZones = new Set();
+  hl.forEach(i => activeZones.add(quakes[i].zone));
+  zones.forEach((z, zi) => {
+    const active = activeZones.has(z.name);
+    rg.select(`.ridge-${zi} path`)
+      .attr("fill-opacity", active ? 0.6 : 0.1)
+      .attr("stroke-width", active ? 2 : 0.5);
+  });
+});
+
+// Legend
+const legendEl = document.getElementById("legend");
+legendEl.innerHTML = '<span style="color:#8a8a9a;margin-right:8px">Depth:</span>' +
+  [0, 175, 350, 525, 700].map(d =>
+    `<span class="legend-item"><span class="legend-swatch" style="background:${depthColorFn(d)}"></span>${d}km</span>`
+  ).join("") +
+  '<span style="margin-left:16px;color:#8a8a9a">Zones:</span>' +
+  zones.map(z =>
+    `<span class="legend-item"><span class="legend-swatch" style="background:${zoneColors[z.name]}"></span>${z.name}</span>`
+  ).join("");
+</script>
+</body>
+</html>

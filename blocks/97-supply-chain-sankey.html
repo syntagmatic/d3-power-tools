@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Supply Chain Flows</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: #fafaf8;
+    color: #2a2a2a;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px 16px;
+    min-height: 100vh;
+  }
+  h1 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin-bottom: 4px;
+  }
+  .subtitle {
+    font-size: 0.88rem;
+    color: #777;
+    margin-bottom: 12px;
+  }
+  .controls {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+  .controls button {
+    padding: 5px 14px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    background: #fff;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .controls button:hover { background: #f0f0f0; }
+  .controls button.active { background: #2a2a2a; color: #fff; border-color: #2a2a2a; }
+  #sankey-svg {
+    width: 100%;
+    max-width: 1000px;
+    display: block;
+  }
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: rgba(20,20,40,0.92);
+    color: #fff;
+    padding: 8px 12px;
+    border-radius: 5px;
+    font-size: 0.78rem;
+    line-height: 1.4;
+    opacity: 0;
+    transition: opacity 0.15s;
+    max-width: 250px;
+  }
+  .node-label {
+    font-size: 10px;
+    fill: #444;
+    font-weight: 500;
+    pointer-events: none;
+  }
+  .level-label {
+    font-size: 11px;
+    fill: #999;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+</style>
+</head>
+<body>
+<h1>Supply Chain Flows</h1>
+<div class="subtitle">Raw Materials to Global Markets — hover products or click markets to trace supply chains</div>
+<div class="controls">
+  <button id="btn-pause">Pause Particles</button>
+  <button id="btn-reset">Reset Highlight</button>
+</div>
+<svg id="sankey-svg"></svg>
+<div class="tooltip" id="tooltip"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+import { sankey as d3Sankey, sankeyLinkHorizontal } from "https://cdn.jsdelivr.net/npm/d3-sankey@0.12/+esm";
+
+const width = 1000, height = 540;
+const margin = { top: 40, right: 120, bottom: 20, left: 120 };
+
+// Level colors (Tol muted palette)
+const levelColors = ["#332288", "#44AA99", "#CC6677", "#DDCC77"];
+const levelNames = ["Raw Materials", "Components", "Products", "Markets"];
+
+// Node definitions
+const rawMats = ["Iron Ore", "Copper", "Lithium", "Silicon", "Rubber", "Petroleum", "Rare Earth", "Aluminum"];
+const components = ["Steel", "Wire", "Battery Cell", "Chip", "Tire", "Plastic", "Motor", "Display", "Frame", "PCB", "Sensor", "Glass"];
+const products = ["Sedan", "SUV", "Electric Car", "Smartphone", "Laptop", "Solar Panel", "Wind Turbine", "Robot"];
+const markets = ["North America", "Europe", "Asia Pacific", "Latin America", "Africa"];
+
+const allNames = [...rawMats, ...components, ...products, ...markets];
+const nodes = allNames.map((name, i) => {
+  let level;
+  if (i < 8) level = 0;
+  else if (i < 20) level = 1;
+  else if (i < 28) level = 2;
+  else level = 3;
+  return { name, level };
+});
+
+const nameToIdx = new Map(allNames.map((n, i) => [n, i]));
+const idx = n => nameToIdx.get(n);
+
+// Links: raw -> components (physically plausible)
+const links = [];
+function link(s, t, v) { links.push({ source: idx(s), target: idx(t), value: v }); }
+
+// Iron Ore -> Steel, Frame
+link("Iron Ore", "Steel", 80); link("Iron Ore", "Frame", 30);
+// Copper -> Wire, PCB, Motor
+link("Copper", "Wire", 40); link("Copper", "PCB", 25); link("Copper", "Motor", 20);
+// Lithium -> Battery Cell
+link("Lithium", "Battery Cell", 60);
+// Silicon -> Chip, Sensor, Glass
+link("Silicon", "Chip", 50); link("Silicon", "Sensor", 20); link("Silicon", "Glass", 15);
+// Rubber -> Tire, Plastic
+link("Rubber", "Tire", 40); link("Rubber", "Plastic", 15);
+// Petroleum -> Plastic, Tire
+link("Petroleum", "Plastic", 45); link("Petroleum", "Tire", 10);
+// Rare Earth -> Motor, Display, Sensor
+link("Rare Earth", "Motor", 25); link("Rare Earth", "Display", 20); link("Rare Earth", "Sensor", 15);
+// Aluminum -> Frame, Glass
+link("Aluminum", "Frame", 35); link("Aluminum", "Glass", 20);
+
+// Components -> Products
+link("Steel", "Sedan", 25); link("Steel", "SUV", 30); link("Steel", "Wind Turbine", 20);
+link("Wire", "Sedan", 8); link("Wire", "Electric Car", 15); link("Wire", "Robot", 10);
+link("Battery Cell", "Electric Car", 40); link("Battery Cell", "Smartphone", 8); link("Battery Cell", "Laptop", 8);
+link("Chip", "Smartphone", 20); link("Chip", "Laptop", 15); link("Chip", "Robot", 10); link("Chip", "Electric Car", 5);
+link("Tire", "Sedan", 12); link("Tire", "SUV", 18); link("Tire", "Electric Car", 10);
+link("Plastic", "Sedan", 10); link("Plastic", "Smartphone", 8); link("Plastic", "Laptop", 12); link("Plastic", "Solar Panel", 10);
+link("Motor", "Electric Car", 20); link("Motor", "Wind Turbine", 15); link("Motor", "Robot", 10);
+link("Display", "Smartphone", 12); link("Display", "Laptop", 8);
+link("Frame", "SUV", 15); link("Frame", "Sedan", 10); link("Frame", "Solar Panel", 20); link("Frame", "Wind Turbine", 15);
+link("PCB", "Smartphone", 10); link("PCB", "Laptop", 8); link("PCB", "Robot", 7);
+link("Sensor", "Electric Car", 8); link("Sensor", "Robot", 15); link("Sensor", "Wind Turbine", 5);
+link("Glass", "Smartphone", 5); link("Glass", "Solar Panel", 20); link("Glass", "Laptop", 5);
+
+// Products -> Markets
+link("Sedan", "North America", 25); link("Sedan", "Europe", 15); link("Sedan", "Asia Pacific", 20); link("Sedan", "Latin America", 5);
+link("SUV", "North America", 30); link("SUV", "Europe", 10); link("SUV", "Asia Pacific", 15); link("SUV", "Latin America", 5); link("SUV", "Africa", 3);
+link("Electric Car", "North America", 25); link("Electric Car", "Europe", 30); link("Electric Car", "Asia Pacific", 35); link("Electric Car", "Latin America", 5);
+link("Smartphone", "North America", 15); link("Smartphone", "Europe", 12); link("Smartphone", "Asia Pacific", 25); link("Smartphone", "Latin America", 8); link("Smartphone", "Africa", 5);
+link("Laptop", "North America", 12); link("Laptop", "Europe", 10); link("Laptop", "Asia Pacific", 18); link("Laptop", "Latin America", 5); link("Laptop", "Africa", 3);
+link("Solar Panel", "North America", 12); link("Solar Panel", "Europe", 15); link("Solar Panel", "Asia Pacific", 18); link("Solar Panel", "Africa", 5);
+link("Wind Turbine", "North America", 12); link("Wind Turbine", "Europe", 20); link("Wind Turbine", "Asia Pacific", 15); link("Wind Turbine", "Africa", 5);
+link("Robot", "North America", 10); link("Robot", "Europe", 8); link("Robot", "Asia Pacific", 20); link("Robot", "Latin America", 4);
+
+// Build Sankey
+const sankeyGen = d3Sankey()
+  .nodeId(d => d.index)
+  .nodeWidth(14)
+  .nodePadding(10)
+  .nodeSort(null)
+  .extent([[margin.left, margin.top], [width - margin.right, height - margin.bottom]]);
+
+const graph = sankeyGen({
+  nodes: nodes.map((d, i) => ({ ...d, index: i })),
+  links: links.map(d => ({ ...d }))
+});
+
+// Build adjacency for tracing
+function traceBackward(nodeIdx) {
+  const visited = new Set([nodeIdx]);
+  const visitedLinks = new Set();
+  const queue = [nodeIdx];
+  while (queue.length) {
+    const cur = queue.shift();
+    graph.links.forEach((l, li) => {
+      if (l.target.index === cur && !visited.has(l.source.index)) {
+        visited.add(l.source.index);
+        visitedLinks.add(li);
+        queue.push(l.source.index);
+      }
+    });
+  }
+  return { nodes: visited, links: visitedLinks };
+}
+
+function traceForward(nodeIdx) {
+  const visited = new Set([nodeIdx]);
+  const visitedLinks = new Set();
+  const queue = [nodeIdx];
+  while (queue.length) {
+    const cur = queue.shift();
+    graph.links.forEach((l, li) => {
+      if (l.source.index === cur && !visited.has(l.target.index)) {
+        visited.add(l.target.index);
+        visitedLinks.add(li);
+        queue.push(l.target.index);
+      }
+    });
+  }
+  return { nodes: visited, links: visitedLinks };
+}
+
+// SVG
+const svg = d3.select("#sankey-svg")
+  .attr("viewBox", `0 0 ${width} ${height}`)
+  .attr("preserveAspectRatio", "xMidYMid meet");
+
+svg.append("title").text("Supply Chain Flows — Sankey diagram from raw materials through components and products to global markets");
+
+// Level labels
+const levelPositions = [0, 1, 2, 3].map(l => {
+  const nodesInLevel = graph.nodes.filter(n => n.level === l);
+  return d3.mean(nodesInLevel, n => (n.x0 + n.x1) / 2);
+});
+
+svg.selectAll("text.level-label")
+  .data(levelNames)
+  .join("text")
+    .attr("class", "level-label")
+    .attr("x", (d, i) => levelPositions[i])
+    .attr("y", 18)
+    .attr("text-anchor", "middle")
+    .text(d => d);
+
+// Links
+const linkPath = sankeyLinkHorizontal();
+
+const linkG = svg.append("g").attr("fill", "none");
+
+const linkPaths = linkG.selectAll("path")
+  .data(graph.links)
+  .join("path")
+    .attr("d", linkPath)
+    .attr("stroke-width", d => Math.max(1, d.width))
+    .attr("stroke", d => {
+      const c = levelColors[d.source.level];
+      return c;
+    })
+    .attr("stroke-opacity", 0.25)
+    .style("mix-blend-mode", "multiply");
+
+// Nodes
+const nodeG = svg.append("g");
+
+const nodeRects = nodeG.selectAll("rect")
+  .data(graph.nodes)
+  .join("rect")
+    .attr("x", d => d.x0)
+    .attr("y", d => d.y0)
+    .attr("width", d => d.x1 - d.x0)
+    .attr("height", d => Math.max(1, d.y1 - d.y0))
+    .attr("fill", d => levelColors[d.level])
+    .attr("rx", 2)
+    .style("cursor", d => d.level >= 2 ? "pointer" : "default");
+
+// Labels
+const labelG = svg.append("g");
+labelG.selectAll("text")
+  .data(graph.nodes)
+  .join("text")
+    .attr("class", "node-label")
+    .attr("x", d => d.level === 3 ? d.x1 + 6 : d.x0 - 6)
+    .attr("y", d => (d.y0 + d.y1) / 2)
+    .attr("dy", "0.35em")
+    .attr("text-anchor", d => d.level === 3 ? "start" : "end")
+    .text(d => d.name);
+
+// Tooltip
+const tooltip = d3.select("#tooltip");
+let highlighted = null;
+
+function setHighlight(trace) {
+  highlighted = trace;
+  if (trace) {
+    linkPaths.transition().duration(300)
+      .attr("stroke-opacity", (d, i) => trace.links.has(i) ? 0.55 : 0.04);
+    nodeRects.transition().duration(300)
+      .attr("opacity", d => trace.nodes.has(d.index) ? 1 : 0.15);
+  } else {
+    linkPaths.transition().duration(300).attr("stroke-opacity", 0.25);
+    nodeRects.transition().duration(300).attr("opacity", 1);
+  }
+}
+
+// Hover products (level 2) to trace backward
+nodeRects.filter(d => d.level === 2)
+  .on("mouseenter", (event, d) => {
+    const trace = traceBackward(d.index);
+    setHighlight(trace);
+    const totalInput = graph.links.filter((l, i) => trace.links.has(i) && l.target.index === d.index)
+      .reduce((s, l) => s + l.value, 0);
+    tooltip.style("opacity", 1).html(
+      `<strong>${d.name}</strong><br>Total input: ${totalInput} units<br><em>Hover to trace supply chain</em>`
+    );
+  })
+  .on("mousemove", (event) => {
+    tooltip.style("left", (event.pageX + 14) + "px").style("top", (event.pageY - 30) + "px");
+  })
+  .on("mouseleave", () => {
+    setHighlight(null);
+    tooltip.style("opacity", 0);
+  });
+
+// Click markets (level 3) to trace all the way back
+nodeRects.filter(d => d.level === 3)
+  .on("click", (event, d) => {
+    const trace = traceBackward(d.index);
+    setHighlight(trace);
+    const totalInput = graph.links.filter((l, i) => trace.links.has(i) && l.target.index === d.index)
+      .reduce((s, l) => s + l.value, 0);
+    tooltip.style("opacity", 1).html(
+      `<strong>${d.name}</strong><br>Total inflow: ${totalInput} units<br><em>Click to trace full supply chain</em>`
+    );
+    tooltip.style("left", (event.pageX + 14) + "px").style("top", (event.pageY - 30) + "px");
+  })
+  .on("mouseenter", (event, d) => {
+    tooltip.style("opacity", 1).html(
+      `<strong>${d.name}</strong><br><em>Click to trace full supply chain</em>`
+    );
+  })
+  .on("mousemove", (event) => {
+    tooltip.style("left", (event.pageX + 14) + "px").style("top", (event.pageY - 30) + "px");
+  })
+  .on("mouseleave", () => {
+    if (!highlighted) tooltip.style("opacity", 0);
+  });
+
+// Reset button
+document.getElementById("btn-reset").addEventListener("click", () => {
+  setHighlight(null);
+  tooltip.style("opacity", 0);
+});
+
+// Particles along links
+const particleG = svg.append("g");
+let paused = false;
+const particles = [];
+const maxParticles = 30;
+
+// Create particle pool
+for (let i = 0; i < maxParticles; i++) {
+  const li = Math.floor(Math.random() * graph.links.length);
+  particles.push({
+    linkIdx: li,
+    t: Math.random(),
+    speed: 0.003 + Math.random() * 0.004
+  });
+}
+
+const particleDots = particleG.selectAll("circle")
+  .data(particles)
+  .join("circle")
+    .attr("r", 2.2)
+    .attr("fill", "#fff")
+    .attr("stroke", d => levelColors[graph.links[d.linkIdx].source.level])
+    .attr("stroke-width", 0.8)
+    .attr("opacity", 0.85)
+    .attr("pointer-events", "none");
+
+function getPointOnLink(link, t) {
+  // Approximate horizontal cubic Bezier of sankeyLinkHorizontal
+  const sx = link.source.x1, sy = link.y0;
+  const tx = link.target.x0, ty = link.y1;
+  const mx = (sx + tx) / 2;
+  // Cubic bezier: S -> (mx, sy) -> (mx, ty) -> T
+  const u = t;
+  const x = (1-u)**3*sx + 3*(1-u)**2*u*mx + 3*(1-u)*u**2*mx + u**3*tx;
+  const y = (1-u)**3*sy + 3*(1-u)**2*u*sy + 3*(1-u)*u**2*ty + u**3*ty;
+  return [x, y];
+}
+
+function animateParticles() {
+  if (!paused) {
+    particles.forEach(p => {
+      p.t += p.speed * (1 + graph.links[p.linkIdx].value * 0.005);
+      if (p.t > 1) {
+        p.t = 0;
+        p.linkIdx = Math.floor(Math.random() * graph.links.length);
+      }
+    });
+
+    particleDots.data(particles)
+      .attr("cx", d => getPointOnLink(graph.links[d.linkIdx], d.t)[0])
+      .attr("cy", d => getPointOnLink(graph.links[d.linkIdx], d.t)[1])
+      .attr("opacity", d => {
+        if (highlighted && !highlighted.links.has(d.linkIdx)) return 0;
+        return 0.85;
+      })
+      .attr("stroke", d => levelColors[graph.links[d.linkIdx].source.level]);
+  }
+  requestAnimationFrame(animateParticles);
+}
+
+animateParticles();
+
+// Pause button
+const pauseBtn = document.getElementById("btn-pause");
+pauseBtn.addEventListener("click", () => {
+  paused = !paused;
+  pauseBtn.textContent = paused ? "Resume Particles" : "Pause Particles";
+  pauseBtn.classList.toggle("active", paused);
+});
+</script>
+</body>
+</html>

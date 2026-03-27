@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sentence Rhythm — a novel in numbers</title>
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;background:#faf9f6;color:#2a2a2a;padding:32px 40px;max-width:1100px;margin:0 auto}
+h1{font-size:26px;font-weight:700;letter-spacing:-.5px;color:#1a1a1a;margin-bottom:2px}
+.subtitle{font-size:14px;color:#888;margin-bottom:24px;font-style:italic}
+table{width:100%;border-collapse:collapse;font-size:13px}
+thead{position:sticky;top:0;z-index:2;background:#faf9f6}
+th{padding:10px 8px;text-align:left;font-weight:600;color:#555;border-bottom:2px solid #ddd;cursor:pointer;user-select:none;white-space:nowrap;font-size:12px;text-transform:uppercase;letter-spacing:.4px}
+th:hover{color:#1a1a1a}
+th .sort-arrow{font-size:10px;margin-left:3px;color:#aaa}
+td{padding:8px 8px;border-bottom:1px solid #eee;vertical-align:middle}
+tr.even td{background:#f5f4f1}
+tr:hover td{background:#eef0f5}
+td.num{text-align:right;font-variant-numeric:tabular-nums;font-family:'SF Mono',Consolas,monospace;font-size:12px}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;color:#fff;letter-spacing:.3px}
+.badge-action{background:#d65d0e}
+.badge-dialogue{background:#458588}
+.badge-descriptive{background:#689d6a}
+.badge-climax{background:#b16286}
+.bold-num{font-weight:700}
+.spark-container{position:relative;display:inline-block}
+.spark-container svg{vertical-align:middle}
+.tooltip{position:fixed;pointer-events:none;background:#333;color:#fff;padding:4px 8px;border-radius:4px;font-size:11px;z-index:100;white-space:nowrap;opacity:0;transition:opacity .15s}
+.median-line{stroke:#e03;stroke-width:1.5;stroke-dasharray:2,2}
+</style>
+</head>
+<body>
+<h1>Sentence Rhythm — a novel in numbers</h1>
+<p class="subtitle">20 chapters of synthetic prose, measured in words per sentence</p>
+<div style="overflow-x:auto">
+<table id="table">
+<thead>
+<tr>
+  <th data-col="chapter" data-type="num">Ch # <span class="sort-arrow"></span></th>
+  <th data-col="type" data-type="str">Type <span class="sort-arrow"></span></th>
+  <th data-col="sentenceCount" data-type="num">Sentences <span class="sort-arrow"></span></th>
+  <th data-col="wordCount" data-type="num">Words <span class="sort-arrow"></span></th>
+  <th data-col="none" style="cursor:default">Rhythm Sparkline</th>
+  <th data-col="none2" style="cursor:default">Distribution</th>
+  <th data-col="avgLen" data-type="num">Avg Length <span class="sort-arrow"></span></th>
+  <th data-col="longest" data-type="num">Longest <span class="sort-arrow"></span></th>
+</tr>
+</thead>
+<tbody id="tbody"></tbody>
+</table>
+</div>
+<div class="tooltip" id="tooltip"></div>
+
+<script type="module">
+// --- DATA GENERATION ---
+function randInt(lo,hi){return Math.floor(Math.random()*(hi-lo+1))+lo}
+function randNorm(mu,sig){let u=0,v=0;while(!u)u=Math.random();while(!v)v=Math.random();return Math.max(1,Math.round(mu+sig*Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v)))}
+
+const typeConfig = {
+  descriptive: {mu:28,sig:10,min:10,max:50,color:"#689d6a",countRange:[50,80]},
+  dialogue:    {mu:16,sig:6,min:5,max:30,color:"#458588",countRange:[60,100]},
+  action:      {mu:10,sig:4,min:3,max:20,color:"#d65d0e",countRange:[60,90]},
+  climax:      {mu:7,sig:3,min:2,max:15,color:"#b16286",countRange:[70,100]},
+};
+
+const chapterTypes = [
+  "descriptive","descriptive","descriptive","descriptive",
+  "dialogue","dialogue","dialogue","dialogue",
+  "action","action","action","action",
+  "descriptive","dialogue","action","climax",
+  "climax","climax","climax",
+  "descriptive"
+];
+
+const chapters = chapterTypes.map((type, i) => {
+  const cfg = typeConfig[type];
+  const n = randInt(cfg.countRange[0], cfg.countRange[1]);
+  const sentences = Array.from({length:n}, () => {
+    let len = randNorm(cfg.mu, cfg.sig);
+    return Math.max(cfg.min, Math.min(cfg.max + randInt(0,5), len));
+  });
+  // Occasionally add outlier long sentence in action/climax
+  if ((type==="action"||type==="climax") && Math.random()>0.5) {
+    sentences[randInt(0,n-1)] = randInt(35,48);
+  }
+  const wordCount = d3.sum(sentences);
+  return {
+    chapter: i + 1,
+    type,
+    sentences,
+    sentenceCount: n,
+    wordCount,
+    avgLen: +(wordCount / n).toFixed(1),
+    longest: d3.max(sentences),
+  };
+});
+
+// --- RENDERING ---
+const tooltip = document.getElementById("tooltip");
+let sortCol = "chapter", sortDir = 1;
+let expandedRow = -1;
+
+function renderTable(data) {
+  const tbody = d3.select("#tbody");
+  const rows = tbody.selectAll("tr")
+    .data(data, d => d.chapter)
+    .join(
+      enter => {
+        const tr = enter.append("tr");
+        tr.append("td").attr("class","num");
+        tr.append("td");
+        tr.append("td").attr("class","num");
+        tr.append("td").attr("class","num");
+        tr.append("td").attr("class","spark-cell");
+        tr.append("td").attr("class","dist-cell");
+        tr.append("td").attr("class","num");
+        tr.append("td").attr("class","num");
+        return tr;
+      },
+      update => update,
+      exit => exit.remove()
+    )
+    .attr("class", (d, i) => i % 2 === 0 ? "" : "even")
+    .each(function(d, idx) {
+      const cells = d3.select(this).selectAll("td");
+      const tr = d3.select(this);
+
+      // Ch #
+      cells.filter((_, i) => i === 0).text(d.chapter);
+
+      // Type badge
+      cells.filter((_, i) => i === 1).html(`<span class="badge badge-${d.type}">${d.type}</span>`);
+
+      // Sentences
+      cells.filter((_, i) => i === 2).text(d.sentenceCount);
+
+      // Words
+      cells.filter((_, i) => i === 3).text(d3.format(",")(d.wordCount));
+
+      // Sparkline
+      const sparkCell = cells.filter((_, i) => i === 4);
+      sparkCell.html("");
+      const isExpanded = expandedRow === d.chapter;
+      const sparkW = 140, sparkH = isExpanded ? 60 : 22;
+      const barW = Math.max(0.8, (sparkW - 2) / d.sentences.length);
+      const maxLen = d3.max(d.sentences);
+      const yS = d3.scaleLinear().domain([0, maxLen]).range([0, sparkH - 2]);
+
+      const svg = sparkCell.append("div").attr("class","spark-container")
+        .append("svg").attr("width", sparkW).attr("height", sparkH)
+        .append("title").text(`Sentence rhythm for chapter ${d.chapter}`).select(function(){return this.parentNode;});
+
+      svg.selectAll("rect").data(d.sentences).join("rect")
+        .attr("x", (s, i) => i * barW + 1)
+        .attr("y", s => sparkH - yS(s) - 1)
+        .attr("width", Math.max(0.5, barW - 0.3))
+        .attr("height", s => yS(s))
+        .attr("fill", typeConfig[d.type].color)
+        .attr("opacity", 0.8);
+
+      // Sparkline hover
+      const sparkDiv = sparkCell.select(".spark-container");
+      sparkDiv.on("mouseenter", () => {
+        expandedRow = d.chapter;
+        renderTable(getCurrentSort());
+      }).on("mouseleave", () => {
+        expandedRow = -1;
+        tooltip.style.opacity = 0;
+        renderTable(getCurrentSort());
+      });
+
+      if (isExpanded) {
+        svg.selectAll("rect")
+          .on("mousemove", function(event, s) {
+            const i = d.sentences.indexOf(s);
+            tooltip.textContent = `Sentence ${Array.from(svg.selectAll("rect")).indexOf(this)+1}: ${s} words`;
+            tooltip.style.opacity = 1;
+            tooltip.style.left = event.clientX + 12 + "px";
+            tooltip.style.top = event.clientY - 20 + "px";
+          })
+          .on("mouseleave", () => { tooltip.style.opacity = 0; });
+      }
+
+      // Distribution (mini violin)
+      const distCell = cells.filter((_, i) => i === 5);
+      distCell.html("");
+      const dW = 80, dH = 22;
+      const dSvg = distCell.append("div").attr("class","spark-container")
+        .append("svg").attr("width", dW).attr("height", dH);
+
+      const kde = (kernel, thr, vals) => thr.map(t => [t, d3.mean(vals, v => kernel(t-v)) || 0]);
+      const epan = bw => v => Math.abs(v/=bw)<=1 ? 0.75*(1-v*v)/bw : 0;
+      const thr = d3.range(0, 55, 1);
+      const density = kde(epan(4), thr, d.sentences);
+      const maxDen = d3.max(density, d=>d[1]) || 1;
+      const dx = d3.scaleLinear().domain([0,55]).range([2,dW-2]);
+      const dy = d3.scaleLinear().domain([0,maxDen]).range([dH/2, 1]);
+
+      const area = d3.area()
+        .x(v=>dx(v[0]))
+        .y0(v=>dH-dy(v[1]))
+        .y1(v=>dy(v[1]))
+        .curve(d3.curveBasis);
+
+      dSvg.append("path").datum(density).attr("d",area)
+        .attr("fill",typeConfig[d.type].color).attr("fill-opacity",0.4)
+        .attr("stroke",typeConfig[d.type].color).attr("stroke-width",1);
+
+      // Median line on hover
+      const med = d3.median(d.sentences);
+      const medLine = dSvg.append("line")
+        .attr("x1",dx(med)).attr("x2",dx(med)).attr("y1",1).attr("y2",dH-1)
+        .attr("class","median-line").attr("opacity",0);
+
+      distCell.select(".spark-container")
+        .on("mouseenter",()=>medLine.attr("opacity",1))
+        .on("mouseleave",()=>medLine.attr("opacity",0));
+
+      // Avg
+      cells.filter((_, i) => i === 6).text(d.avgLen);
+
+      // Longest
+      cells.filter((_, i) => i === 7)
+        .html(d.longest > 40 ? `<span class="bold-num">${d.longest}</span>` : d.longest);
+    });
+
+  // Animate reorder
+  rows.transition().duration(300)
+    .style("opacity", 1);
+}
+
+function getCurrentSort() {
+  const sorted = [...chapters];
+  if (sortCol === "none" || sortCol === "none2") return sorted;
+  const type = document.querySelector(`th[data-col="${sortCol}"]`)?.dataset.type;
+  sorted.sort((a, b) => {
+    let va = a[sortCol], vb = b[sortCol];
+    if (type === "str") return sortDir * (va < vb ? -1 : va > vb ? 1 : 0);
+    return sortDir * (va - vb);
+  });
+  return sorted;
+}
+
+// Sort headers
+d3.selectAll("th").on("click", function() {
+  const col = this.dataset.col;
+  if (col === "none" || col === "none2") return;
+  if (sortCol === col) sortDir *= -1;
+  else { sortCol = col; sortDir = 1; }
+  d3.selectAll("th .sort-arrow").text("");
+  d3.select(this).select(".sort-arrow").text(sortDir === 1 ? "▲" : "▼");
+  renderTable(getCurrentSort());
+});
+
+renderTable(getCurrentSort());
+d3.select('th[data-col="chapter"] .sort-arrow').text("▲");
+</script>
+</body>
+</html>
