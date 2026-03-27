@@ -118,12 +118,13 @@ Skills for testing, evaluating, and improving other skills.
 
 - `meta/idiomatic-d3/` — D3 code style and review: method chaining indentation (2-space new selection, 4-space same), margin convention, .join() data joins with key functions, selection.call() composition, scales-as-functions, reusable chart closure pattern, naming conventions, event handling, import patterns, code review checklist, anti-patterns
 - `meta/cross-skill-composition/` — architectural patterns for combining skills: layer stack (Canvas+SVG+HTML), SVG vs Canvas decision framework, initialization sequence, state architecture (data/view/interaction), dirty-flag rendering, performance budgets, composition archetypes (explorer, narrative, dashboard, spatial, morpher), resize contract, Canvas↔SVG handoff
+- `meta/adversarial-eval/` — calibrate adversarial agents: blind evaluation protocol, context contamination rules, inter-rater reliability
 - `meta/check-skill/` — audit a skill for dangling references, broken code examples, incorrect descriptions
 - `meta/simplify-skill/` — compress and simplify a SKILL.md for clarity and token efficiency
 - `meta/skill-eval/` — evaluate skill effectiveness with before/after comparisons and iterative improvement
 
 #### Adversarial agents
-- `meta/visual-critic/` — evaluate taste, polish, craft: encoding choice, typographic hierarchy, accessibility, data-ink ratio
+- `meta/visual-critic/` — evaluate visual design quality: color harmony, typographic hierarchy, whitespace, data-ink ratio, overall feel (screenshot-based, not accessibility)
 - `meta/deception-detector/` — audit for mathematical deception: lie factor, zero baselines, quantile trap, dual-axis fabrication
 - `meta/interaction-stress-test/` — hunt race conditions: update storms, stale closures, feedback loops, transition handoff conflicts
 - `meta/perceptual-red-team/` — audit cognitive load: working memory limits, animation congruence, spaghetti threshold, chart fatigue

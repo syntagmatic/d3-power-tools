@@ -194,3 +194,5 @@ If the skill says "use a render queue for progressive rendering" but doesn't sho
 ### Baseline Already Knows It
 
 Some things Sonnet already knows well: d3.treemap, d3.forceSimulation, basic transitions, SVG axes. Skills that only document these APIs won't show improvement. The value is in patterns the model wouldn't discover: render queues, color-picking hit detection, spatial keyboard navigation, dirty-flag layer management.
+
+For calibrating adversarial agents (visual-critic, deception-detector, etc.), see `meta/adversarial-eval/`.
