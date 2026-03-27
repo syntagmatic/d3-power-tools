@@ -1,29 +1,15 @@
 # D3 Power Tools — Ideas & Improvements
 
+## Next
+
+- [ ] Review front matter (name, description) across all 27 skills for consistency and trigger accuracy
+- [ ] Voronoi & Delaunay — interactive nearest-neighbor lookup, Voronoi diagrams as tooltip regions, Voronoi treemaps, Delaunay triangulation, clipped Voronoi cells
+- [ ] Live & streaming data — append-only charts with sliding window, circular buffers, WebSocket integration, `requestAnimationFrame`-gated updates, graceful reconnection
+
 ## New Skill Ideas
 
-### High value
-- ~~**Axes & scales**~~ ✅ Built (initial commit)
-- ~~**Annotations & storytelling**~~ ✅ Built as `annotation` (fc08228)
-- ~~**Responsive charts**~~ ✅ Built as `responsive`
-- ~~**Zoom & pan**~~ ✅ Built (initial commit, expanded with SVG-overlay-on-Canvas in 5bdc13d)
-- ~~**Temporal & time-series**~~ ✅ Built as `time-series`
-
-### Considered from Blockbuilder usage data (34K blocks) — declined
-- ~~**Selections**~~ — 95% of blocks, but well-documented territory. `idiomatic-d3` already covers `.join()`, key functions, `.call()` composition. Not enough hard-won insight to justify a standalone skill.
-- ~~**Shapes**~~ — 13% of blocks. Generators, curves, arcs are well-documented in D3 docs. Judgment calls (curve selection, `.defined()`) are already covered where they matter: time-series, hierarchy-layouts, distributions.
-- ~~**Drag & reorder**~~ — 4% of blocks. Patterns are straightforward. Force skill covers drag+simulation. Not deep enough for a standalone skill.
-
-### Medium value
-- ~~**Statistical charts**~~ ✅ Built (fc08228)
-- **Voronoi & Delaunay** — interactive nearest-neighbor lookup, Voronoi diagrams as tooltip regions, Voronoi treemaps, Delaunay triangulation, clipped Voronoi cells
 - **Text & labels** — force-based label placement, occlusion culling, text wrapping in constrained shapes, curved text on arcs, automatic abbreviation
-- ~~**Linked views & coordination**~~ ✅ Built as `linked-views`
-- **Live & streaming data** — append-only charts with sliding window, circular buffers, WebSocket integration, `requestAnimationFrame`-gated updates, graceful reconnection
 - **Export & serialization** — SVG-to-PNG via `OffscreenCanvas`, PDF generation, responsive embed snippets, copy-to-clipboard, SVG optimization
-- ~~**Small multiples & faceting**~~ ✅ Built (fc08228)
-
-### More ideas
 - **Heatmaps & matrices** — calendar heatmaps, correlation matrices, pixel-level Canvas rendering, cell annotations, row/column clustering and reordering
 - **Radial & polar charts** — radar/spider charts, polar area (Nightingale rose), radial bar, wind roses, clock visualizations, circular heatmaps
 - **Waffle & unit charts** — isotype/pictogram grids, proportional unit squares, animated counting transitions, icon arrays, XKCD-style magnitude charts
@@ -37,9 +23,7 @@
 - **Error & uncertainty** — error bars, confidence intervals, gradient uncertainty bands, fan charts, ensemble spaghetti plots, probability density overlays
 - **Stacked area & streamgraph** — stacked area, streamgraph with baseline algorithms (wiggle, silhouette, expand), difference area charts, ThemeRiver, transition between baselines
 - **Clip paths & masks** — reveal animations, viewport clipping, shaped masks, gradient masks, animated clip transitions, sparkline-in-shape patterns
-- ~~**Drag & reorder**~~ — promoted to High Value (Blockbuilder data: 4% of blocks)
 - **Progress & gauges** — radial progress arcs, linear progress bars, goal markers, animated fill, donut gauges, bullet-style gauges (extends sparkcharts bullets)
-- **Histogram & distribution** — binning strategies (`d3.bin` thresholds), overlapping histograms, cumulative distribution, population pyramids, Wilkinson dot plots
 - **Dashboard composition** — CSS grid + D3 coordination, responsive card layout, shared filter controls, coordinated update lifecycle, print-friendly styles
 - **Gesture & touch** — pinch-to-zoom, swipe between states, long-press context menus, multi-touch interaction, momentum/inertial pan, touch-friendly hit target sizing
 - **Isoline & isoband** — marching squares, filled contour bands, topographic/elevation rendering, weather maps, interpolation from irregular points
@@ -57,7 +41,6 @@
 ## Existing Skill Improvements
 
 ### shape-morphing
-- [x] Cross-layout morphing — treemap↔pack↔pie via point resampling (added to SKILL.md)
 - [ ] Canvas shape morphing — point-array polygon rendering, no SVG path dependency
 - [ ] Topology-aware morphing — winding order, hole handling, genus changes (Flubber-style)
 - [ ] Combined morph + stagger — morphing shapes with staggered timing per element
@@ -72,7 +55,7 @@
 - [ ] Momentum/inertial motion — easing into rest, not just eased transitions
 
 ### force
-- [ ] Precomputed layout interpolation — distinguish "force as layout engine" (run to convergence, interpolate snapshots) from "force as animation driver" (live simulation). The precomputed approach avoids jitter in animated transitions between force configs
+- [ ] Precomputed layout interpolation — distinguish "force as layout engine" (run to convergence, interpolate snapshots) from "force as animation driver" (live simulation)
 - [ ] Force-directed label placement — labels that don't overlap, as a custom force or post-simulation pass
 - [ ] Multi-layer forces — applying different force sets to different node subsets simultaneously
 
@@ -122,16 +105,13 @@
 - [ ] Touch adaptation demo (pointer-type-aware interactions)
 
 ### Cross-skill composition
-- [x] Composition guide — `meta/cross-skill-composition/SKILL.md`: layer stack, init sequence, state architecture, performance budgets, 5 archetypes, resize contract
-- [x] SVG ↔ Canvas decision guide — covered in composition skill: decision matrix, hybrid pattern, Canvas→SVG handoff
 - [ ] Additional archetype examples — narrative (scrollytelling), spatial explorer (map+linked panels)
 
 ---
 
 ## Evaluator Suite
 
-- [ ] Run the evaluator feedback loop on the remaining 18 skills (see `temp/eval-queue.json` for progress, `notes/PHILOSOPHY-PASS.md` Phase 2 for the process, `meta/skill-eval/` for prompts)
-- [ ] After all 21 skills pass: review `notes/EVALUATION-LOG.md` holistically — which criteria caught real issues? Which always passed trivially? Which skills needed retries?
+- [ ] Review `notes/archive/EVALUATION-LOG.md` holistically — which criteria caught real issues? Which always passed trivially?
 - [ ] Tighten or cut criteria that never failed — they're not earning their place
 - [ ] Add new criteria discovered via META observations in the evaluation reports
 - [ ] Decide if the evaluator is worth running on every sharpening pass, or only on major rewrites

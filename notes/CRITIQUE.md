@@ -44,52 +44,6 @@ Gemini reviewed the skill collection with a focus on production-readiness: acces
 
 ---
 
-## Quality Audit (2026-03-23)
-
-Full review of all 27 skills, 40 examples, and 145 tests. Ranked by how much each skill encodes **hard-won insight** vs reorganized API docs.
-
-### Tier 1 — Genuinely hand-crafted
-1. **parallel-coordinates** — Color-picking hit detection, opacity scaling, render queue w/ shuffle, Canvas+SVG hybrid. Now also: Inselberg duality reading (crossing patterns → correlation), axis ordering strategies with greedy algorithm, strum brushing geometry. Decision table vs alternatives.
-2. **canvas** — 12 real pitfalls. Progressive render queue, DPR, typed arrays, batch-by-style, quadtree rebuild. Now also: OffscreenCanvas worker bridge with zoom message passing, texture atlas for custom markers, GPU escalation decision table (Canvas 2D → OffscreenCanvas → regl → WebGPU).
-3. **canvas-accessibility** — Solves a problem most skip. Quadtree directional nav, navigation model taxonomy, announce function, DOM mirror. Now also: system preference queries (prefers-reduced-motion, prefers-contrast, forced-colors), forced-colors gap as hard compliance requirement.
-4. **motion** — TransitionManager for mid-flight interruption, FLIP, Canvas timer. Now also: Heer & Robertson perception research (when animation helps vs. small multiples), research-backed duration guidelines, sticky-graphic scrollytelling with scrollama, View Transitions API guidance, CSS scroll-driven animations.
-5. **brushing** — Segment intersection geometry, SelectionManager, linked timing, spatial grid indexing. Now also: 8-scenario selection decision table, brush composition (shift+drag multi-region, union/intersect), Falcon prefetch cross-filtering for O(1) brush updates, progressive reservoir-sampled filtering for 50K+ points.
-6. **color** — Tol palettes, overdraw alpha solver, Brettel/Viénot CVD simulation, bivariate legends, perception pitfalls, dark mode. Now also: OKLCH palette generation (CSS-native + culori), palette selection decision table (Viridis/Cividis/Tol/ColorBrewer/Crameri), APCA contrast with Lc thresholds for chart elements, Crameri scientific colour maps.
-
-### Tier 2 — Strong domain knowledge
-7. **cartography** — Topology operations, bivariate choropleth, bubble maps, hex binning, cartograms, flow maps, geographic labels, Canvas multi-layer, LOD, globe versor. Now also: Snyder's projection selection framework (distortion property → geographic extent → projection family), MapLibre+D3 escalation with geoTransform bridge, PMTiles serverless tiles, dark mode maps (Schiewe 2024).
-8. **force** — Verlet internals, custom forces, 5K cliff, hybrid a11y. Now also: three WebWorker patterns (static/progressive/interactive with drag), d3-force-reuse, "Beyond d3-force" decision table (UMAP, ForceAtlas2, WebCola, stress majorization).
-9. **distributions** — KDE bandwidth, Tukey fences, QQ. Now also: raincloud plots (half-violin + box + strip), letter-value plots with stopping rule (Hofmann/Wickham/Kafadar 2017), sample-size selection flowchart (5 tiers), defensive KDE (clip to data range). Moved from Tier 3 — the selection guidance and composite chart patterns encode real visualization judgment.
-10. **scales** — Time gap via band scale, scale selection. Now also: diverging scale midpoint problem (symmetric vs asymmetric domains), classification scales for choropleths (quantize/quantile/threshold/Jenks decision table + code), the quantile trap warning, scale selection decision framework. Moved from Tier 3 — classification scale guidance is editorial, not API docs.
-11. **linked-views** — Bitmap crossfilter, dispatch, shared selection. Now also: Baldonado's four guidelines (parsimony, complementarity, self-evidence, attention), owned-state pattern for 4+ views, scalability ladder (Array.filter → crossfilter → Falcon → Mosaic/DuckDB-WASM), framework decision rule (Vega-Lite/Plot/Mosaic). Moved from Tier 3 — the Baldonado framing and escalation ladder add real architectural judgment.
-12. **time-series** — Horizon/cycle plots, streaming. Now also: 9-question chart selection table, prediction bands with graduated opacity, semantic temporal zoom (getTemporalLevel), difference area with two-clip approach. Moved from Tier 3 — the selection table and semantic zoom encode visualization judgment beyond API docs.
-13. **annotation** — Now also: highlight-by-desaturation, text hierarchy framework, annotation-as-data (structured JSON with priority filtering), step-sequenced annotations with scrollama, decision flowchart. Moved from Tier 4 — the editorial judgment gap is now addressed (desaturation, text hierarchy, when-to-annotate guidance).
-14. **shape-morphing** — Parametric > resampling > topology hierarchy, bestRotation. Now also: library decision tree (d3-interpolate-path → flubber → polymorph → GSAP MorphSVG).
-15. **data-gathering** — autoType FIPS pitfall, circular buffer, columnar typed arrays. Now also: "When to Escalate Beyond d3.csv" decision table (DuckDB-WASM, hyparquet, apache-arrow), cancellable loading with AbortController, Arrow BigInt pitfall.
-16. **edge-bundling** — LCA paths, Holten reference, layout transitions. Now also: algorithm comparison table (hierarchical vs Edge-Path vs Divided bundling), directional bundling guidance.
-17. **webgl** — Full shaders, instanced rendering, color-picking framebuffer, regl recommendation. Now also: WebGPU status and migration decision table (stay WebGL 2 / luma.gl v9 / raw WebGPU).
-
-### Tier 3 — Competent reference
-18. **visual-texture** — Patterns, perceptual ranking, SVG filters, Canvas atlas. Now also: Julesz texton theory (scientific foundation for pattern limits), canonical 6-pattern accessible set with texton dimensions, Voronoi stippling guidance, CSS Paint API status. Solid scientific grounding but narrower domain than Tier 2.
-19. **responsive** — ResizeObserver, viewBox vs redraw. Now also: container queries for CSS-level adaptation, WCAG 2.2 touch targets (24/44px), prefers-reduced-motion, high-DPI print, decision table. More opinionated than before but still fundamentally web engineering applied to charts.
-20. **hierarchy-layouts** — Validation helpers, layout-switcher. Now also: icicle/flame graph/left-to-right partition variants as coordinate remappings, expanded tiling strategy tradeoffs, Marimekko-as-sliceDice.
-21. **network** — 5 layouts, decision table, validation. Now also: hive plots (deterministic alternative to force), community detection with graphology + Louvain, scaling path (SVG → Canvas → sigma.js → deck.gl).
-22. **hierarchy-interaction** — Zoomable treemap/sunburst/pack. Now also: breadcrumbs as mandatory (not optional), label fitting on zoom, WCAG 2.5.8 touch targets, two-step tap pattern.
-23. **navigation** — Geometric vs semantic zoom, minimap. Now also: LOD state machine with hysteresis bands, scroll-driven animations vs d3-zoom clarification, wheel passthrough at zoom limits.
-
-### Tier 4 — Useful but focused
-24. **small-multiples** — Shared scales, grid math. Now also: facet wrap recipe with column-count formula, Observable Plot fx/fy note. Core domain is inherently simple.
-25. **sparkcharts** — Pattern collection. Now also: KPI card layout recipe, fixed-window vs auto-scaled guidance. Simple domain, well-served.
-26. **data-table** — HTML table patterns with D3 joins. Now also: Ctrl+F gotcha in virtual scrolling, buffer rows, pagination decision guidance. Still a merge candidate with canvas-accessibility for a unified "accessible alternatives" skill.
-
-### Most transformative paths
-1. ~~**Cross-skill composition guide**~~ — Done. `cross-skill-composition` skill added.
-2. ~~**Deepen cartography**~~ — Done. 348→1169 lines. Cartograms, flow maps, hex bins, Canvas architecture, LOD, globe versor.
-3. **Voronoi & Delaunay** — Missing interaction infrastructure. Touches parallel-coords, brushing, canvas, force, time-series.
-4. ~~**Consolidate thin skills**~~ — Partially done. visual-texture deepened to 615 lines (Tier 3), no longer a merge candidate. data-table→canvas-accessibility still open.
-5. ~~**Real data examples**~~ — Partially addressed. `blocks/blockbuilder-explorer.html` loads 34K real blocks from the Blockbuilder dataset. Still only 1 of 48 blocks uses real data.
-6. **Live streaming skill** — time-series covers theory; a working WebSocket example fills a real production gap.
-
 ### Gaps identified from Blockbuilder data (2026-03-25)
 
 Analysis of 34,196 real D3 blocks from Blockbuilder Search reveals which D3 modules practitioners actually use vs. what the skills cover. See `blocks/blockbuilder-explorer.html` for the interactive analysis.
