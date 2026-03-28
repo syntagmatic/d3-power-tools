@@ -19,7 +19,7 @@ Selection and filtering interactions for data-dense visualizations. Modernizes t
 | Cross-view, same dimension | SelectionManager with union mode | Any brush selects |
 | Cross-view, different dimensions | SelectionManager with intersect mode | All brushes must agree |
 
-**Observable Plot note:** Plot's built-in brush interaction handles simple linked brushing. Drop to raw D3 for lasso, intersection brushing, fisheye, or custom composition.
+**Observable Plot note:** Plot's built-in brush handles simple linked brushing. Drop to raw D3 for lasso, intersection brushing, fisheye, or custom composition.
 
 ## Line Intersection Brushing
 
@@ -32,7 +32,6 @@ function segmentsIntersect(p1, p2, p3, p4) {
   const d3 = direction(p1, p2, p3), d4 = direction(p1, p2, p4);
   if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
       ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return true;
-  // Collinear cases
   if (d1 === 0 && onSegment(p3, p4, p1)) return true;
   if (d2 === 0 && onSegment(p3, p4, p2)) return true;
   if (d3 === 0 && onSegment(p1, p2, p3)) return true;
@@ -58,46 +57,11 @@ function intersectionBrush(queryStart, queryEnd, data, dimensions, scales, xPosi
 }
 ```
 
-### Interaction: Drawing the Query Line
+### Interaction
 
-```js
-let queryStart = null;
+Alt+click or right-click starts the query line. On `pointermove`, update the line endpoint and run `intersectionBrush`. On `pointerup`, finalize. Use `setPointerCapture` so the drag works outside the SVG.
 
-svg.on("pointerdown", (event) => {
-  if (!event.altKey && event.button !== 2) return;
-  queryStart = d3.pointer(event);
-  svg.append("line").attr("class", "query-line")
-    .attr("x1", queryStart[0]).attr("y1", queryStart[1])
-    .attr("x2", queryStart[0]).attr("y2", queryStart[1]);
-});
-svg.on("pointermove", (event) => {
-  if (!queryStart) return;
-  const cur = d3.pointer(event);
-  svg.select(".query-line").attr("x2", cur[0]).attr("y2", cur[1]);
-  const selected = intersectionBrush(queryStart, cur, data, dims, scales, xPos);
-  manager.select(selected.map(d => data.indexOf(d)), "intersection");
-});
-svg.on("pointerup", () => { queryStart = null; });
-```
-
-### Web Worker for 10K+ Rows
-
-```js
-// intersection-worker.js -- include segmentsIntersect above
-self.onmessage = ({ data: { queryStart, queryEnd, polylines } }) => {
-  const hits = [];
-  polylines.forEach((pts, i) => {
-    for (let j = 0; j < pts.length - 1; j++)
-      if (segmentsIntersect(pts[j], pts[j + 1], queryStart, queryEnd)) { hits.push(i); break; }
-  });
-  self.postMessage({ selectedIndices: hits });
-};
-
-// main thread
-const worker = new Worker('intersection-worker.js');
-worker.postMessage({ queryStart, queryEnd, polylines });
-worker.onmessage = ({ data: { selectedIndices } }) => manager.select(selectedIndices, "intersection");
-```
+**Web Worker for 10K+ rows:** post `{queryStart, queryEnd, polylines}` to a worker containing `segmentsIntersect`. The worker returns `{selectedIndices}`. This keeps the main thread free during drag.
 
 ## Render Queue
 
@@ -105,7 +69,7 @@ See `canvas` skill for `createRenderQueue`. For brushing: call `cancel()` when s
 
 ## Fisheye Distortion
 
-Distortion formula: distance `d` (normalized to `[0, radius]`) maps through `d*(k+1)/(d*k+1)` where `k` is strength.
+Core formula: distance `d` (normalized to `[0, radius]`) maps through `d*(k+1)/(d*k+1)` where `k` is distortion strength.
 
 ### Cartesian Fisheye (for parallel coordinate axes)
 
@@ -119,28 +83,11 @@ function cartesianFisheye(positions, focus, distortion = 3, radius) {
     return focus + Math.sign(dx) * t * radius;
   });
 }
-container.on("pointermove", (event) => {
-  const distorted = cartesianFisheye(axisPositions, d3.pointer(event)[0]);
-  axisGroups.attr("transform", (d, i) => `translate(${distorted[i]}, 0)`);
-});
-container.on("pointerleave", () => {
-  axisGroups.transition().duration(300)
-    .attr("transform", (d, i) => `translate(${axisPositions[i]}, 0)`);
-});
 ```
 
-### Radial Fisheye (scatterplots, node-link, maps)
+Apply on `pointermove` to axis positions; snap back on `pointerleave` with a 300ms transition.
 
-```js
-function radialFisheye(points, focus, distortion = 3, radius = 200) {
-  return points.map(([x, y]) => {
-    const dx = x - focus[0], dy = y - focus[1], dd = Math.hypot(dx, dy);
-    if (dd >= radius || dd === 0) return [x, y];
-    const t = (dd / radius) * (distortion + 1) / ((dd / radius) * distortion + 1);
-    return [focus[0] + dx * t * radius / dd, focus[1] + dy * t * radius / dd];
-  });
-}
-```
+**Radial fisheye** (scatterplots, node-link, maps): same formula applied to `Math.hypot(dx, dy)` in 2D. Scale `dx`/`dy` by `t * radius / dd` to get the distorted `[x, y]`.
 
 ## Cross-Chart Linking
 
@@ -210,32 +157,9 @@ Use 80ms transitions with `d3.easeExpOut` -- front-loads motion so it feels snap
 
 ## Lasso Selection
 
-Freeform closed-shape selection. Use `d3.polygonContains` from d3-polygon when available; the hand-rolled version below works in Web Workers.
+Freeform closed-shape selection. Shift+click starts drawing, `pointermove` appends points (use `getCoalescedEvents` for smooth paths), `pointerup` closes the polygon and tests containment.
 
 ```js
-let path = [];
-container.on("pointerdown", (event) => {
-  if (!event.shiftKey) return;
-  path = [d3.pointer(event)];
-  container.node().setPointerCapture(event.pointerId); // drag works outside element
-});
-container.on("pointermove", (event) => {
-  if (!path.length) return;
-  const coalesced = event.getCoalescedEvents?.() || [event]; // smooth drawing
-  coalesced.forEach(e => path.push(d3.pointer(e)));
-  drawLassoPath(container, path); // application-provided: SVG path or canvas stroke
-});
-container.on("pointerup", () => {
-  if (!path.length) return;
-  path.push(path[0]); // close polygon
-  const selected = data.reduce((acc, d, i) => { // pointAccessor: d -> [x, y] in pixel space
-    if (pointInPolygon(pointAccessor(d), path)) acc.push(i);
-    return acc;
-  }, []);
-  manager.select(selected, "lasso");
-  path = [];
-});
-
 // Ray-casting point-in-polygon
 function pointInPolygon([x, y], poly) {
   let inside = false;
@@ -248,6 +172,8 @@ function pointInPolygon([x, y], poly) {
 }
 ```
 
+Use `setPointerCapture` so the drag works outside the element. `d3.polygonContains` from d3-polygon is the D3 equivalent when available; the ray-casting version above works in Web Workers.
+
 ## Pointer Events
 
 Always use `pointerdown`/`pointermove`/`pointerup` over mouse events. Key patterns:
@@ -257,34 +183,11 @@ Always use `pointerdown`/`pointermove`/`pointerup` over mouse events. Key patter
 
 ## Keyboard Brush Adjustment
 
-```js
-function keyboardBrush(brushGroup, brushBehavior, dimension, step = 5) {
-  brushGroup.attr("tabindex", 0).attr("role", "slider")
-    .attr("aria-label", `Filter on ${dimension}`);
-  brushGroup.on("keydown", (event) => {
-    const sel = d3.brushSelection(brushGroup.node());
-    if (!sel) return;
-    let [y0, y1] = sel;
-    const delta = event.shiftKey ? step * 5 : step;
-    switch (event.key) {
-      case "ArrowUp":    y0 -= delta; y1 -= delta; break;
-      case "ArrowDown":  y0 += delta; y1 += delta; break;
-      case "ArrowLeft":  y1 -= delta; break;
-      case "ArrowRight": y1 += delta; break;
-      case "Escape":     brushBehavior.move(brushGroup, null); return;
-      default: return;
-    }
-    event.preventDefault();
-    y0 = Math.max(0, y0); y1 = Math.min(height, y1);
-    if (y1 - y0 < 1) return;
-    brushBehavior.move(brushGroup, [y0, y1]);
-  });
-}
-```
+Make brushes keyboard-accessible: set `tabindex="0"` and `role="slider"` on the brush group. Arrow keys move the brush extent (Up/Down shift both handles, Left/Right shrink/expand), Shift multiplies step by 5, Escape clears. Read current extent with `d3.brushSelection(node)`, update with `brushBehavior.move(group, [y0, y1])`.
 
 ## Spatial Indexing for Intersection Testing
 
-For 10K+ rows, partition segments into grid cells. Build once; queries are O(cells touched) vs O(all segments).
+For 10K+ rows, partition segments into grid cells. Build once; queries are O(cells touched) vs O(all segments):
 
 ```js
 function buildSegmentGrid(polylines, cellSize = 50) {
@@ -302,18 +205,9 @@ function buildSegmentGrid(polylines, cellSize = 50) {
   });
   return { grid, cellSize };
 }
-
-function queryGrid({ grid, cellSize }, qStart, qEnd, polylines) {
-  const hits = new Set(), cell = v => Math.floor(v / cellSize);
-  for (let c = cell(Math.min(qStart[0], qEnd[0])); c <= cell(Math.max(qStart[0], qEnd[0])); c++)
-    for (let r = cell(Math.min(qStart[1], qEnd[1])); r <= cell(Math.max(qStart[1], qEnd[1])); r++)
-      for (const { pi, si } of grid.get(`${c},${r}`) || []) {
-        if (!hits.has(pi) && segmentsIntersect(polylines[pi][si], polylines[pi][si + 1], qStart, qEnd))
-          hits.add(pi);
-      }
-  return [...hits];
-}
 ```
+
+Query: iterate grid cells overlapping the query line, test only those segments with `segmentsIntersect`. Collect unique polyline indices in a Set.
 
 ## Brush Composition
 
@@ -335,7 +229,7 @@ brush.on("end", ({ selection, sourceEvent }) => {
 
 ### Cross-View Composition (Union vs. Intersect)
 
-**Union**: selected if in *any* active brush (same-dimension brushes). **Intersect**: selected if in *all* active brushes (the common cross-filtering pattern).
+**Union**: selected if in *any* active brush. **Intersect**: selected if in *all* active brushes (the common cross-filtering pattern).
 
 ```js
 class ComposableSelectionManager extends EventTarget {
@@ -359,7 +253,7 @@ class ComposableSelectionManager extends EventTarget {
 
 ## Scalable Cross-Filtering (Falcon Pattern)
 
-Beyond ~50K rows, the Falcon approach (Moritz & Heer, CHI 2019) makes brush updates O(1) by prefetching aggregation indices. On hover (before brush starts), prefetch a prefix-sum index; during brushing, compute updated counts via constant-time lookups.
+Beyond ~50K rows, the Falcon approach (Moritz & Heer, CHI 2019) makes brush updates O(1) by prefetching aggregation indices. On `pointerenter`, prefetch a prefix-sum index for the hovered view's dimension; during brushing, compute updated counts via constant-time lookups.
 
 ```js
 views.forEach(view => {
@@ -380,27 +274,7 @@ function onBrush(extent) {
 
 The [falcon-vis](https://github.com/cmudig/falcon-vis) library provides a ready-made DuckDB-WASM/Arrow implementation.
 
-### Progressive Filtering for Item Views
-
-For 50K+ point scatter views, test a reservoir sample (~2K) immediately, then full-scan on idle:
-
-```js
-const sample = reservoirSample(data.length, 2000);
-let idleId;
-brush.on("brush", ({ selection }) => {
-  if (!selection) return;
-  const [[x0, y0], [x1, y1]] = selection;
-  const inBox = i => { const px = xScale(data[i].x), py = yScale(data[i].y); return px >= x0 && px <= x1 && py >= y0 && py <= y1; };
-  manager.select(sample.filter(inBox), "scatter"); // instant approximate
-  cancelIdleCallback(idleId);
-  idleId = requestIdleCallback(() => {
-    const full = []; for (let i = 0; i < data.length; i++) if (inBox(i)) full.push(i);
-    manager.select(full, "scatter"); // exact when idle
-  });
-});
-```
-
-On `brush.end`, run the full scan synchronously for an exact final selection.
+**Progressive filtering for item views (50K+ scatter):** test a reservoir sample (~2K) immediately for instant approximate feedback, then full-scan on `requestIdleCallback` for exact results. On `brush.end`, run the full scan synchronously.
 
 ## Performance at Scale
 
