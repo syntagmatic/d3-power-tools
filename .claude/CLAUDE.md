@@ -162,7 +162,7 @@ Skills for testing, evaluating, and improving other skills.
 - `meta/cross-skill-composition/` — architectural patterns for combining skills: layer stack (Canvas+SVG+HTML), SVG vs Canvas decision framework, initialization sequence, state architecture (data/view/interaction), dirty-flag rendering, performance budgets, composition archetypes (explorer, narrative, dashboard, spatial, morpher), resize contract, Canvas↔SVG handoff
 - `meta/adversarial-eval/` — calibrate auditing skills: blind evaluation protocol, context contamination rules, inter-rater reliability
 - `meta/check-skill/` — audit a skill for dangling references, broken code examples, incorrect descriptions
-- `meta/simplify-skill/` — compress and simplify a SKILL.md for clarity and token efficiency
+- `meta/sharpen-tool/` — compress and simplify a SKILL.md for clarity and token efficiency
 - `meta/skill-eval/` — evaluate skill effectiveness with before/after comparisons and iterative improvement
 
 #### Auditing skills

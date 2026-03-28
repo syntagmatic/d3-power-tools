@@ -1,6 +1,6 @@
 ---
-name: simplify-skill
-description: "Compress and simplify a D3 power-tools SKILL.md for clarity and token efficiency. Use this skill when the user says 'simplify skill', 'compress skill', 'shorten skill', or wants to reduce a SKILL.md's line count while preserving all teaching value."
+name: sharpen-tool
+description: "Compress and simplify a D3 power-tools SKILL.md for clarity and token efficiency. Use this skill when the user says 'sharpen', 'simplify skill', 'compress skill', 'shorten skill', or wants to reduce a SKILL.md's line count while preserving all teaching value."
 ---
 
 # Simplify Skill

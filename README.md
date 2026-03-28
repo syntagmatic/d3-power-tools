@@ -166,7 +166,7 @@ Skills for testing, evaluating, and improving other skills. The compound tool.
 
 **[check-skill](meta/check-skill/SKILL.md)** — Audit a skill for dangling references and broken examples.
 
-**[simplify-skill](meta/simplify-skill/SKILL.md)** — Compress a SKILL.md for clarity and token efficiency.
+**[sharpen-tool](meta/sharpen-tool/SKILL.md)** — Compress a SKILL.md for clarity and token efficiency.
 
 **[skill-eval](meta/skill-eval/SKILL.md)** — Evaluate skill effectiveness with before/after comparisons.
 
