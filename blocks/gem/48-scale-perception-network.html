@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scale Choice Distorts Network Perception</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f9f9f9;
+            color: #333;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .container {
+            background-color: white;
+            padding: 24px;
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+            width: 800px;
+            position: relative;
+        }
+
+        h1 {
+            font-size: 24px;
+            font-weight: 700;
+            margin: 0 0 8px 0;
+            color: #1a1a1a;
+            text-align: center;
+        }
+
+        p.subtitle {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 24px;
+            text-align: center;
+            max-width: 600px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .controls {
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 12px;
+        }
+
+        select {
+            padding: 8px 12px;
+            font-size: 14px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+            background-color: white;
+            cursor: pointer;
+        }
+
+        #viz-container {
+            display: flex;
+            gap: 20px;
+        }
+
+        #network-svg {
+            background-color: #fff;
+            border: 1px solid #eee;
+            border-radius: 4px;
+        }
+
+        .sidebar {
+            width: 180px;
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+
+        .legend-section {
+            font-size: 12px;
+        }
+
+        .legend-title {
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: #444;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .annotation {
+            background-color: #fef9c3;
+            border-left: 4px solid #facc15;
+            padding: 12px;
+            font-size: 13px;
+            line-height: 1.4;
+            margin-top: 20px;
+            color: #854d0e;
+        }
+
+        .tooltip {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.85);
+            color: white;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            pointer-events: none;
+            opacity: 0;
+            z-index: 100;
+            transition: opacity 0.2s;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+        }
+
+        .node {
+            cursor: pointer;
+            stroke-width: 1.5px;
+            transition: stroke 0.2s, stroke-width 0.2s;
+        }
+
+        .link {
+            stroke-opacity: 0.4;
+            transition: stroke-opacity 0.2s;
+        }
+
+        .highlight-node {
+            stroke: #000 !important;
+            stroke-width: 3px !important;
+        }
+
+        .highlight-link {
+            stroke-opacity: 0.9 !important;
+            stroke: #333 !important;
+        }
+
+        .dimmed {
+            opacity: 0.1 !important;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Scale Choice Distorts Network Perception</h1>
+    <p class="subtitle">Visualizing the impact of influence encoding. Linear scaling emphasizes outliers, while Log scaling compresses power dynamics, altering our perception of community structure.</p>
+
+    <div class="controls">
+        <label for="scale-select">Radius Scale Type:</label>
+        <select id="scale-select">
+            <option value="linear">Linear</option>
+            <option value="sqrt" selected>Square Root (Area-Accurate)</option>
+            <option value="log">Logarithmic</option>
+        </select>
+    </div>
+
+    <div id="viz-container">
+        <svg id="network-svg" width="600" height="600"></svg>
+        
+        <div class="sidebar">
+            <div class="legend-section" id="size-legend">
+                <div class="legend-title">Influence (Size)</div>
+                <svg id="size-legend-svg" width="160" height="80"></svg>
+            </div>
+            
+            <div class="legend-section" id="color-legend">
+                <div class="legend-title">Sentiment (Color)</div>
+                <svg id="color-legend-svg" width="160" height="40"></svg>
+                <div style="display: flex; justify-content: space-between; margin-top: 4px;">
+                    <span>Negative</span>
+                    <span>Positive</span>
+                </div>
+            </div>
+
+            <div class="legend-section" id="edge-legend">
+                <div class="legend-title">Interaction Frequency</div>
+                <svg id="edge-legend-svg" width="160" height="60"></svg>
+            </div>
+
+            <div id="annotation-box" class="annotation">
+                <strong>Current Scale: Sqrt</strong><br>
+                Radii are proportional to the square root of influence. This represents influence as visual area, providing a balanced view of the network hierarchy.
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="tooltip" class="tooltip"></div>
+
+<script>
+    // Configuration
+    const width = 600;
+    const height = 600;
+    const radiusRange = [3, 30];
+
+    // 1. Generate Data
+    const nodeCount = 60;
+    const communityCount = 5;
+    const nodes = [];
+    const groups = Array.from({length: communityCount}, (_, i) => i);
+    
+    // Right-skewed influence (5 to 500)
+    for (let i = 0; i < nodeCount; i++) {
+        nodes.push({
+            id: i,
+            name: `User ${i + 1}`,
+            group: Math.floor(Math.random() * communityCount),
+            influence: Math.pow(Math.random(), 3) * 495 + 5,
+            sentiment: Math.random() * 2 - 1, // -1 to +1
+            degree: 0
+        });
+    }
+
+    const links = [];
+    const linkCount = 120;
+    while (links.length < linkCount) {
+        const source = nodes[Math.floor(Math.random() * nodeCount)];
+        const target = nodes[Math.floor(Math.random() * nodeCount)];
+        
+        if (source.id === target.id) continue;
+        if (links.some(l => (l.source === source.id && l.target === target.id) || (l.source === target.id && l.target === source.id))) continue;
+        
+        // 70% within-community
+        const sameGroup = source.group === target.group;
+        if (!sameGroup && Math.random() < 0.7) continue;
+
+        links.push({
+            source: source.id,
+            target: target.id,
+            frequency: Math.floor(Math.random() * 50) + 1
+        });
+        
+        source.degree++;
+        target.degree++;
+    }
+
+    // 2. Setup Scales
+    const colorScale = d3.scaleDiverging()
+        .domain([-1, 0, 1])
+        .interpolator(d3.interpolateRgbBasis(["#4477AA", "#f5f5f5", "#EE6677"]));
+
+    const edgeWidthScale = d3.scalePow()
+        .exponent(0.5)
+        .domain([1, 50])
+        .range([0.5, 4]);
+
+    const influenceExtent = d3.extent(nodes, d => d.influence);
+
+    const getRadiusScale = (type) => {
+        switch(type) {
+            case 'linear':
+                return d3.scaleLinear().domain(influenceExtent).range(radiusRange);
+            case 'sqrt':
+                return d3.scaleSqrt().domain(influenceExtent).range(radiusRange);
+            case 'log':
+                return d3.scaleLog().domain(influenceExtent).range(radiusRange);
+        }
+    };
+
+    let currentScaleType = 'sqrt';
+    let radiusScale = getRadiusScale(currentScaleType);
+
+    // 3. Force Simulation
+    const simulation = d3.forceSimulation(nodes)
+        .force("link", d3.forceLink(links).id(d => d.id).distance(40))
+        .force("charge", d3.forceManyBody().strength(-80))
+        .force("center", d3.forceCenter(width / 2, height / 2))
+        .force("collision", d3.forceCollide().radius(d => radiusScale(d.influence) + 2));
+
+    const svg = d3.select("#network-svg");
+    const g = svg.append("g");
+
+    // Zooming
+    svg.call(d3.zoom()
+        .scaleExtent([0.2, 5])
+        .on("zoom", (event) => g.attr("transform", event.transform)));
+
+    const link = g.append("g")
+        .selectAll(".link")
+        .data(links)
+        .join("line")
+        .attr("class", "link")
+        .attr("stroke", "#999")
+        .attr("stroke-width", d => edgeWidthScale(d.frequency));
+
+    const node = g.append("g")
+        .selectAll(".node")
+        .data(nodes)
+        .join("circle")
+        .attr("class", "node")
+        .attr("r", d => radiusScale(d.influence))
+        .attr("fill", d => colorScale(d.sentiment))
+        .attr("stroke", "#fff");
+
+    // 4. Interactions
+    const tooltip = d3.select("#tooltip");
+
+    node.on("mouseover", (event, d) => {
+        const neighbors = new Set();
+        neighbors.add(d.id);
+        links.forEach(l => {
+            if (l.source.id === d.id) neighbors.add(l.target.id);
+            if (l.target.id === d.id) neighbors.add(l.source.id);
+        });
+
+        node.classed("dimmed", n => !neighbors.has(n.id))
+            .classed("highlight-node", n => n.id === d.id);
+        
+        link.classed("dimmed", l => l.source.id !== d.id && l.target.id !== d.id)
+            .classed("highlight-link", l => l.source.id === d.id || l.target.id === d.id);
+
+        tooltip.transition().duration(200).style("opacity", 1);
+        tooltip.html(`
+            <strong>${d.name}</strong><br/>
+            Group: ${d.group + 1}<br/>
+            Influence: ${d.influence.toFixed(1)}<br/>
+            Sentiment: ${d.sentiment.toFixed(2)}<br/>
+            Connections: ${d.degree}
+        `)
+        .style("left", (event.pageX + 10) + "px")
+        .style("top", (event.pageY - 20) + "px");
+    })
+    .on("mousemove", (event) => {
+        tooltip.style("left", (event.pageX + 10) + "px")
+               .style("top", (event.pageY - 20) + "px");
+    })
+    .on("mouseout", () => {
+        node.classed("dimmed", false).classed("highlight-node", false);
+        link.classed("dimmed", false).classed("highlight-link", false);
+        tooltip.transition().duration(200).style("opacity", 0);
+    });
+
+    simulation.on("tick", () => {
+        link
+            .attr("x1", d => d.source.x)
+            .attr("y1", d => d.source.y)
+            .attr("x2", d => d.target.x)
+            .attr("y2", d => d.target.y);
+
+        node
+            .attr("cx", d => d.x)
+            .attr("cy", d => d.y);
+    });
+
+    // 5. Update Scaling
+    d3.select("#scale-select").on("change", function() {
+        currentScaleType = this.value;
+        radiusScale = getRadiusScale(currentScaleType);
+        
+        // Transition nodes
+        node.transition()
+            .duration(800)
+            .attr("r", d => radiusScale(d.influence));
+
+        // Update collision force and reheat
+        simulation.force("collision").radius(d => radiusScale(d.influence) + 2);
+        simulation.alpha(0.3).restart();
+
+        updateLegend();
+        updateAnnotation();
+    });
+
+    // 6. Legends
+    function updateLegend() {
+        const sizeSvg = d3.select("#size-legend-svg");
+        sizeSvg.selectAll("*").remove();
+
+        const values = [influenceExtent[0], (influenceExtent[1] + influenceExtent[0]) / 2, influenceExtent[1]];
+        const spacing = 50;
+
+        sizeSvg.selectAll("circle")
+            .data(values)
+            .join("circle")
+            .attr("cx", (d, i) => 20 + i * spacing)
+            .attr("cy", 40)
+            .attr("r", d => radiusScale(d))
+            .attr("fill", "#ccc")
+            .attr("stroke", "#666");
+
+        sizeSvg.selectAll("text")
+            .data(values)
+            .join("text")
+            .attr("x", (d, i) => 20 + i * spacing)
+            .attr("y", 75)
+            .attr("text-anchor", "middle")
+            .attr("font-size", "10px")
+            .text(d => Math.round(d));
+    }
+
+    function createColorLegend() {
+        const colorSvg = d3.select("#color-legend-svg");
+        const grad = colorSvg.append("defs").append("linearGradient")
+            .attr("id", "grad")
+            .attr("x1", "0%").attr("x2", "100%");
+
+        const stops = d3.range(-1, 1.1, 0.2);
+        grad.selectAll("stop")
+            .data(stops)
+            .join("stop")
+            .attr("offset", d => `${(d + 1) * 50}%`)
+            .attr("stop-color", d => colorScale(d));
+
+        colorSvg.append("rect")
+            .attr("width", 160)
+            .attr("height", 15)
+            .attr("fill", "url(#grad)");
+    }
+
+    function createEdgeLegend() {
+        const edgeSvg = d3.select("#edge-legend-svg");
+        const values = [5, 25, 50];
+        
+        const g = edgeSvg.selectAll("g")
+            .data(values)
+            .join("g")
+            .attr("transform", (d, i) => `translate(0, ${i * 18 + 10})`);
+
+        g.append("line")
+            .attr("x1", 0).attr("x2", 40)
+            .attr("y1", 0).attr("y2", 0)
+            .attr("stroke", "#999")
+            .attr("stroke-width", d => edgeWidthScale(d));
+
+        g.append("text")
+            .attr("x", 50)
+            .attr("y", 4)
+            .attr("font-size", "10px")
+            .text(d => `Freq: ${d}`);
+    }
+
+    function updateAnnotation() {
+        const box = d3.select("#annotation-box");
+        let text = "";
+        switch(currentScaleType) {
+            case 'linear':
+                text = "<strong>Current Scale: Linear</strong><br>Radii are directly proportional to influence. Outliers (influence ~500) dominate the visual field, making the network appear very centralized around a few hubs.";
+                break;
+            case 'sqrt':
+                text = "<strong>Current Scale: Sqrt</strong><br>Radii are proportional to the square root of influence. This represents influence as visual area, providing a balanced view of the network hierarchy.";
+                break;
+            case 'log':
+                text = "<strong>Current Scale: Logarithmic</strong><br>Radii are proportional to log(influence). This severely compresses differences, making low-influence nodes appear nearly as large as the most influential ones.";
+                break;
+        }
+        box.html(text);
+    }
+
+    updateLegend();
+    createColorLegend();
+    createEdgeLegend();
+    updateAnnotation();
+
+</script>
+</body>
+</html>

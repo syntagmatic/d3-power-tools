@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>US Domestic Migration Flows</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #fdfdfd; color: #333; overflow: hidden; }
+  #container { width: 100vw; height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  h1 { font-size: 24px; font-weight: 300; margin-top: 20px; letter-spacing: -0.5px; }
+  svg { max-width: 100%; max-height: calc(100vh - 80px); }
+  
+  .us-outline { fill: #f0f0f0; stroke: #d0d0d0; stroke-width: 1; }
+  .flow-path { fill: none; pointer-events: none; transition: opacity 0.3s; }
+  .flow-path.inactive { opacity: 0.05 !important; }
+  .flow-path.active { opacity: 0.8 !important; }
+  
+  .city-node { cursor: pointer; stroke: #fff; stroke-width: 1.5px; transition: r 0.2s, stroke-width 0.2s; }
+  .city-node:hover { stroke: #333; stroke-width: 2px; }
+  .city-label { font-size: 11px; fill: #555; pointer-events: none; font-weight: 500; text-shadow: 0 1px 2px #fff; }
+  
+  .tooltip {
+    position: absolute; pointer-events: none; background: rgba(255, 255, 255, 0.95);
+    color: #222; padding: 10px; border-radius: 6px; font-size: 13px;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.1); border: 1px solid #ddd;
+    opacity: 0; transition: opacity 0.2s; z-index: 10; line-height: 1.4;
+  }
+  .tooltip-title { font-weight: 700; border-bottom: 1px solid #eee; margin-bottom: 5px; padding-bottom: 2px; }
+  .tooltip-stat { font-family: monospace; }
+  
+  @keyframes flowDash {
+    to { stroke-dashoffset: -20; }
+  }
+</style>
+</head>
+<body>
+<div id="container">
+  <h1>US Domestic Migration Flows</h1>
+  <div id="chart"></div>
+</div>
+<div class="tooltip" id="tooltip"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+const width = 960;
+const height = 600;
+
+const cities = [
+  { name: "NYC", coords: [-74.006, 40.7128] },
+  { name: "LA", coords: [-118.2437, 34.0522] },
+  { name: "Chicago", coords: [-87.6298, 41.8781] },
+  { name: "Houston", coords: [-95.3698, 29.7604] },
+  { name: "Phoenix", coords: [-112.074, 33.4484] },
+  { name: "Philadelphia", coords: [-75.1652, 39.9526] },
+  { name: "San Antonio", coords: [-98.4936, 29.4241] },
+  { name: "San Diego", coords: [-117.1611, 32.7157] },
+  { name: "Dallas", coords: [-96.797, 32.7767] },
+  { name: "Seattle", coords: [-122.3321, 47.6062] },
+  { name: "Denver", coords: [-104.9903, 39.7392] },
+  { name: "Miami", coords: [-80.1918, 25.7617] }
+];
+
+// Generate 25 directed flows
+const seed = 123;
+let rng = d3.randomLcg(seed);
+const flows = [];
+for (let i = 0; i < 25; i++) {
+  let sourceIdx = Math.floor(rng() * cities.length);
+  let targetIdx = Math.floor(rng() * cities.length);
+  while (targetIdx === sourceIdx) targetIdx = Math.floor(rng() * cities.length);
+  
+  flows.push({
+    source: cities[sourceIdx].name,
+    target: cities[targetIdx].name,
+    volume: Math.floor(rng() * 49000) + 1000
+  });
+}
+
+// Calculate Net Migration
+cities.forEach(c => {
+  c.inflow = flows.filter(f => f.target === c.name).reduce((sum, f) => sum + f.volume, 0);
+  c.outflow = flows.filter(f => f.source === c.name).reduce((sum, f) => sum + f.volume, 0);
+  c.net = c.inflow - c.outflow;
+  c.topSources = flows.filter(f => f.target === c.name).sort((a,b) => b.volume - a.volume).slice(0, 3);
+  c.topTargets = flows.filter(f => f.source === c.name).sort((a,b) => b.volume - a.volume).slice(0, 3);
+});
+
+const projection = d3.geoAlbersUsa().scale(1100).translate([width / 2, height / 2]);
+const path = d3.geoPath().projection(projection);
+
+const svg = d3.select("#chart").append("svg")
+    .attr("viewBox", `0 0 ${width} ${height}`)
+    .attr("width", width)
+    .attr("height", height);
+
+// Markers for arrows
+svg.append("defs").selectAll("marker")
+  .data(["blue", "red"])
+  .join("marker")
+    .attr("id", d => `arrow-${d}`)
+    .attr("viewBox", "0 -5 10 10")
+    .attr("refX", 18)
+    .attr("refY", 0)
+    .attr("markerWidth", 5)
+    .attr("markerHeight", 5)
+    .attr("orient", "auto")
+    .append("path")
+    .attr("d", "M0,-5L10,0L0,5")
+    .attr("fill", d => d === "blue" ? "#3b82f6" : "#ef4444")
+    .attr("opacity", 0.6);
+
+// Projection for city coordinates
+cities.forEach(c => c.point = projection(c.coords));
+
+const gMap = svg.append("g");
+const gFlows = svg.append("g");
+const gNodes = svg.append("g");
+
+const tooltip = d3.select("#tooltip");
+
+// Load US Map (simplified GeoJSON from previous block inspiration)
+d3.json("https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json").then(us => {
+  const states = topojson.feature(us, us.objects.states);
+  
+  gMap.selectAll("path")
+    .data(states.features)
+    .join("path")
+    .attr("class", "us-outline")
+    .attr("d", path);
+
+  // Draw Flows
+  const flowScale = d3.scaleLinear().domain([1000, 50000]).range([1, 6]);
+  
+  const flowSelection = gFlows.selectAll(".flow-path")
+    .data(flows)
+    .join("path")
+    .attr("class", "flow-path")
+    .attr("d", d => {
+      const source = cities.find(c => c.name === d.source).point;
+      const target = cities.find(c => c.name === d.target).point;
+      const dx = target[0] - source[0],
+            dy = target[1] - source[1],
+            dr = Math.sqrt(dx * dx + dy * dy) * 1.5; // Curvature
+      return `M${source[0]},${source[1]}A${dr},${dr} 0 0,1 ${target[0]},${target[1]}`;
+    })
+    .attr("stroke", d => {
+      const source = cities.find(c => c.name === d.source);
+      return source.net >= 0 ? "#3b82f6" : "#ef4444";
+    })
+    .attr("stroke-width", d => flowScale(d.volume))
+    .attr("opacity", 0.3)
+    .attr("stroke-dasharray", "5,5")
+    .attr("marker-end", d => {
+      const source = cities.find(c => c.name === d.source);
+      return `url(#arrow-${source.net >= 0 ? "blue" : "red"})`;
+    })
+    .style("animation", (_, i) => `flowDash 2s linear infinite`)
+    .style("animation-delay", () => `${rng() * -2}s`);
+
+  // Draw Cities
+  const radiusScale = d3.scaleSqrt().domain([0, d3.max(cities, c => Math.abs(c.net))]).range([4, 15]);
+
+  const nodeSelection = gNodes.selectAll(".city-group")
+    .data(cities)
+    .join("g")
+    .attr("class", "city-group")
+    .attr("transform", d => `translate(${d.point[0]},${d.point[1]})`);
+
+  nodeSelection.append("circle")
+    .attr("class", "city-node")
+    .attr("r", d => radiusScale(Math.abs(d.net)))
+    .attr("fill", d => d.net >= 0 ? "#3b82f6" : "#ef4444")
+    .on("mouseover", (event, d) => {
+      flowSelection.classed("inactive", f => f.source !== d.name && f.target !== d.name)
+                   .classed("active", f => f.source === d.name || f.target === d.name);
+      
+      tooltip.style("opacity", 1)
+        .html(`
+          <div class="tooltip-title">${d.name}</div>
+          <div>Net Migration: <span class="tooltip-stat" style="color: ${d.net >= 0 ? '#1d4ed8' : '#b91c1c'}">${d.net > 0 ? '+' : ''}${d.net.toLocaleString()}</span></div>
+          <div style="margin-top: 8px; font-size: 11px; color: #666;">Top Sources:</div>
+          ${d.topSources.map(s => `<div style="font-size: 11px;">• ${s.source}: ${s.volume.toLocaleString()}</div>`).join('')}
+          <div style="margin-top: 4px; font-size: 11px; color: #666;">Top Destinations:</div>
+          ${d.topTargets.map(t => `<div style="font-size: 11px;">• ${t.target}: ${t.volume.toLocaleString()}</div>`).join('')}
+        `);
+    })
+    .on("mousemove", (event) => {
+      tooltip.style("left", (event.pageX + 15) + "px")
+             .style("top", (event.pageY - 20) + "px");
+    })
+    .on("mouseout", () => {
+      flowSelection.classed("inactive", false).classed("active", false);
+      tooltip.style("opacity", 0);
+    });
+
+  nodeSelection.append("text")
+    .attr("class", "city-label")
+    .attr("dy", d => radiusScale(Math.abs(d.net)) + 12)
+    .attr("text-anchor", "middle")
+    .text(d => d.name);
+
+});
+</script>
+<script src="https://cdn.jsdelivr.net/npm/topojson@3"></script>
+</body>
+</html>

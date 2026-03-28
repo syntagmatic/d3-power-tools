@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Expandable Edge Bundle</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #fff;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        #container {
+            position: relative;
+        }
+        canvas, svg {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+        .node {
+            cursor: pointer;
+        }
+        .leaf-node {
+            cursor: default;
+        }
+        .label {
+            font-size: 10px;
+            fill: #333;
+            pointer-events: none;
+            user-select: none;
+        }
+        .internal-label {
+            font-size: 11px;
+            font-weight: bold;
+            fill: #000;
+        }
+        .tooltip {
+            position: absolute;
+            padding: 8px 12px;
+            background: rgba(0, 0, 0, 0.8);
+            color: #fff;
+            border-radius: 4px;
+            pointer-events: none;
+            font-size: 12px;
+            z-index: 100;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+    </style>
+</head>
+<body>
+    <div id="container"></div>
+    <div class="tooltip" id="tooltip"></div>
+
+    <script>
+        const width = 960;
+        const height = 960;
+        const radius = width / 2;
+        const innerRadius = radius - 160;
+
+        const container = d3.select("#container")
+            .style("width", width + "px")
+            .style("height", height + "px");
+
+        const canvas = container.append("canvas")
+            .attr("width", width * devicePixelRatio)
+            .attr("height", height * devicePixelRatio)
+            .style("width", width + "px")
+            .style("height", height + "px");
+        
+        const ctx = canvas.node().getContext("2d");
+        ctx.scale(devicePixelRatio, devicePixelRatio);
+
+        const svg = container.append("svg")
+            .attr("width", width)
+            .attr("height", height)
+            .append("g")
+            .attr("transform", `translate(${width / 2},${height / 2})`);
+
+        const tooltip = d3.select("#tooltip");
+
+        // Colors: Paul Tol's Bright
+        const tolBright = ["#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE", "#AA3377", "#BBBBBB"];
+        const colorScale = d3.scaleOrdinal(tolBright);
+
+        // Data Generation
+        function generateData() {
+            const nodes = [{ id: "root", parent: null }];
+            const modules = 6;
+            for (let i = 0; i < modules; i++) {
+                const moduleId = `M${i}`;
+                nodes.push({ id: moduleId, parent: "root" });
+                const submodules = 3 + Math.floor(Math.random() * 3);
+                for (let j = 0; j < submodules; j++) {
+                    const subId = `${moduleId}.S${j}`;
+                    nodes.push({ id: subId, parent: moduleId });
+                    const components = 2 + Math.floor(Math.random() * 4);
+                    for (let k = 0; k < components; k++) {
+                        const compId = `${subId}.C${k}`;
+                        nodes.push({ id: compId, parent: subId });
+                    }
+                }
+            }
+
+            const leaves = nodes.filter(n => !nodes.some(child => child.parent === n.id));
+            const links = [];
+            const numLinks = 80;
+            for (let i = 0; i < numLinks; i++) {
+                const source = leaves[Math.floor(Math.random() * leaves.length)].id;
+                let target = leaves[Math.floor(Math.random() * leaves.length)].id;
+                while (target === source) {
+                    target = leaves[Math.floor(Math.random() * leaves.length)].id;
+                }
+                links.push({ source, target });
+            }
+            return { nodes, links };
+        }
+
+        const { nodes: rawNodes, links: rawLinks } = generateData();
+
+        const root = d3.stratify()
+            .id(d => d.id)
+            .parentId(d => d.parent)(rawNodes);
+
+        // Initial setup
+        root.each(d => {
+            d._children = null;
+            d.x = 0;
+            d.y = 0;
+            d.x0 = 0; // Animation source x (angle)
+            d.y0 = 0; // Animation source y (radius)
+        });
+
+        const cluster = d3.cluster()
+            .size([2 * Math.PI, innerRadius]);
+
+        const line = d3.lineRadial()
+            .curve(d3.curveBundle.beta(0.15))
+            .radius(d => d.y)
+            .angle(d => d.x);
+
+        let hoverNode = null;
+
+        function update(source) {
+            cluster(root);
+
+            const nodes = root.descendants();
+            const visibleNodes = nodes.filter(d => d.depth > 0 && (d.parent === root || d.parent.children));
+            
+            // For animation, we need to handle nodes entering/exiting
+            // But we'll do a custom timer interpolation for everything
+            // To make it smooth, we store the target x, y
+            nodes.forEach(d => {
+                d.targetX = d.x;
+                d.targetY = d.y;
+                // If a node is collapsed, its children move to the node's position
+                let p = d;
+                while (p.parent && !p.parent.children) {
+                    p = p.parent;
+                    d.targetX = p.x;
+                    d.targetY = p.y;
+                }
+            });
+
+            // Start animation
+            const duration = 500;
+            const timer = d3.timer(elapsed => {
+                const t = Math.min(1, d3.easeCubicInOut(elapsed / duration));
+                
+                nodes.forEach(d => {
+                    d.currentX = d.x0 + (d.targetX - d.x0) * t;
+                    d.currentY = d.y0 + (d.targetY - d.y0) * t;
+                });
+
+                render(t === 1);
+
+                if (t === 1) {
+                    timer.stop();
+                    nodes.forEach(d => {
+                        d.x0 = d.targetX;
+                        d.y0 = d.targetY;
+                        d.x = d.targetX;
+                        d.y = d.targetY;
+                    });
+                }
+            });
+        }
+
+        function getVisibleLeaf(node) {
+            let p = node;
+            while (p.parent && p.parent.children && !p.parent.children.includes(p)) {
+                p = p.parent;
+            }
+            // If parent is collapsed, find the collapsed ancestor
+            let curr = node;
+            let lastVisible = node;
+            while (curr.parent) {
+                if (curr.parent.children && curr.parent.children.includes(curr)) {
+                    lastVisible = curr;
+                } else {
+                    // Ancestor is collapsed
+                    return lastVisible.parent;
+                }
+                curr = curr.parent;
+            }
+            return lastVisible;
+        }
+
+        // More robust visible ancestor finder
+        function findVisibleNode(node) {
+            let curr = node;
+            while (curr.parent) {
+                if (curr.parent.children && curr.parent.children.includes(curr)) {
+                    return curr;
+                }
+                curr = curr.parent;
+            }
+            return curr; // Should be root if everything else fails
+        }
+
+        function render(isFinal = false) {
+            ctx.clearRect(0, 0, width, height);
+            ctx.save();
+            ctx.translate(width / 2, height / 2);
+
+            // Aggregate links
+            const linkMap = new Map();
+
+            rawLinks.forEach(l => {
+                const s = findVisibleNode(root.find(d => d.id === l.source));
+                const t = findVisibleNode(root.find(d => d.id === l.target));
+                if (s === t) return;
+
+                const key = s.id < t.id ? `${s.id}-${t.id}` : `${t.id}-${s.id}`;
+                if (!linkMap.has(key)) {
+                    linkMap.set(key, { s, t, count: 0 });
+                }
+                const entry = linkMap.get(key);
+                entry.count++;
+            });
+
+            const drawLine = d3.line()
+                .curve(d3.curveBundle.beta(0.15))
+                .x(d => d.currentY * Math.cos(d.currentX - Math.PI / 2))
+                .y(d => d.currentY * Math.sin(d.currentX - Math.PI / 2))
+                .context(ctx);
+
+            // Draw background edges
+            linkMap.forEach((entry, key) => {
+                const isHighlighted = hoverNode && (entry.s.id === hoverNode.id || entry.t.id === hoverNode.id || 
+                    (hoverNode.leaves().some(leaf => entry.s.id === leaf.id || entry.t.id === leaf.id)));
+                
+                if (hoverNode) {
+                    ctx.globalAlpha = isHighlighted ? 0.8 : 0.05;
+                    ctx.strokeStyle = isHighlighted ? "#4477AA" : "#999";
+                } else {
+                    ctx.globalAlpha = 1;
+                    ctx.strokeStyle = "rgba(0, 0, 0, 0.25)";
+                }
+
+                ctx.lineWidth = Math.sqrt(entry.count);
+                ctx.beginPath();
+                const path = entry.s.path(entry.t);
+                drawLine(path);
+                ctx.stroke();
+            });
+            ctx.restore();
+
+            // Render SVG Nodes and Labels
+            const nodes = root.descendants().filter(d => d.depth > 0);
+            const visibleNodes = nodes.filter(d => {
+                return d.parent && d.parent.children && d.parent.children.includes(d);
+            });
+
+            const nodeBind = svg.selectAll("g.node-group")
+                .data(visibleNodes, d => d.id)
+                .join(
+                    enter => {
+                        const g = enter.append("g").attr("class", "node-group");
+                        g.append("circle");
+                        g.append("text").attr("class", "node-symbol");
+                        g.append("text").attr("class", "label");
+                        return g;
+                    },
+                    update => update,
+                    exit => exit.remove()
+                );
+
+            nodeBind.attr("transform", d => `rotate(${d.currentX * 180 / Math.PI - 90}) translate(${d.currentY},0)`);
+
+            nodeBind.each(function(d) {
+                const g = d3.select(this);
+                const isLeaf = !d.children && !d._children;
+                const isCollapsed = !!d._children;
+
+                g.select("circle")
+                    .attr("r", isLeaf ? 3 : 5)
+                    .attr("fill", isLeaf ? colorScale(d.parent.id) : (isCollapsed ? "#333" : "#666"))
+                    .attr("stroke", isCollapsed ? "#000" : "none")
+                    .attr("stroke-width", 1)
+                    .on("click", (event) => {
+                        if (isLeaf) return;
+                        event.stopPropagation();
+                        if (d.children) {
+                            d._children = d.children;
+                            d.children = null;
+                        } else {
+                            d.children = d._children;
+                            d._children = null;
+                        }
+                        update(d);
+                    })
+                    .on("mouseover", (event) => {
+                        hoverNode = d;
+                        tooltip.style("opacity", 1)
+                            .html(`<strong>${d.id}</strong><br>${isLeaf ? "Leaf" : (isCollapsed ? "Collapsed" : "Expanded")}`)
+                            .style("left", (event.pageX + 10) + "px")
+                            .style("top", (event.pageY - 10) + "px");
+                        render(true);
+                    })
+                    .on("mouseout", () => {
+                        hoverNode = null;
+                        tooltip.style("opacity", 0);
+                        render(true);
+                    });
+
+                g.select(".node-symbol")
+                    .attr("text-anchor", "middle")
+                    .attr("dy", ".35em")
+                    .attr("fill", "#fff")
+                    .attr("font-size", "8px")
+                    .style("pointer-events", "none")
+                    .text(isCollapsed ? "+" : "");
+
+                // Leaf Labels
+                if (isLeaf) {
+                    const leaves = root.leaves();
+                    const leafIndex = leaves.indexOf(d);
+                    const prevLeaf = leaves[leafIndex - 1];
+                    const nextLeaf = leaves[leafIndex + 1];
+                    let angleDiff = 0.05;
+                    if (prevLeaf && nextLeaf) angleDiff = (nextLeaf.x - prevLeaf.x) / 2;
+                    else if (nextLeaf) angleDiff = nextLeaf.x - d.x;
+                    else if (prevLeaf) angleDiff = d.x - prevLeaf.x;
+                    
+                    const arcSpacing = d.y * angleDiff;
+                    const labelText = d.id.split('.').pop();
+                    const labelWidth = labelText.length * 6;
+
+                    const showLabel = arcSpacing > labelWidth || hoverNode === d;
+
+                    g.select(".label")
+                        .attr("dx", d.currentX < Math.PI ? 8 : -8)
+                        .attr("dy", ".31em")
+                        .attr("text-anchor", d.currentX < Math.PI ? "start" : "end")
+                        .attr("transform", d.currentX < Math.PI ? null : "rotate(180)")
+                        .attr("opacity", showLabel ? 1 : 0)
+                        .text(showLabel ? labelText : "");
+                } else {
+                    g.select(".label").text("");
+                }
+            });
+
+            // Internal Labels for Modules (depth 1)
+            const moduleData = visibleNodes.filter(d => d.depth === 1);
+            
+            svg.selectAll("defs").data([0]).join("defs");
+            const defs = svg.select("defs");
+
+            defs.selectAll("path.module-path")
+                .data(moduleData, d => d.id)
+                .join("path")
+                .attr("class", "module-path")
+                .attr("id", d => "path-" + d.id.replace(/\W/g, "-"))
+                .attr("d", d => {
+                    const r = d.currentY * 0.7;
+                    const startAngle = d.currentX - 0.2;
+                    const endAngle = d.currentX + 0.2;
+                    const x0 = r * Math.cos(startAngle - Math.PI / 2);
+                    const y0 = r * Math.sin(startAngle - Math.PI / 2);
+                    const x1 = r * Math.cos(endAngle - Math.PI / 2);
+                    const y1 = r * Math.sin(endAngle - Math.PI / 2);
+                    return `M ${x0} ${y0} A ${r} ${r} 0 0 1 ${x1} ${y1}`;
+                });
+
+            const moduleLabels = svg.selectAll("text.internal-label")
+                .data(moduleData, d => d.id + "-label")
+                .join(
+                    enter => {
+                        const t = enter.append("text").attr("class", "internal-label");
+                        t.append("textPath");
+                        return t;
+                    },
+                    update => update,
+                    exit => exit.remove()
+                );
+            
+            moduleLabels.select("textPath")
+                .attr("xlink:href", d => "#path-" + d.id.replace(/\W/g, "-"))
+                .attr("startOffset", "50%")
+                .attr("text-anchor", "middle")
+                .style("font-weight", "bold")
+                .text(d => d.id);
+        }
+
+        // Initialize positions
+        cluster(root);
+        root.each(d => {
+            d.x0 = d.x;
+            d.y0 = d.y;
+            d.currentX = d.x;
+            d.currentY = d.y;
+        });
+
+        update(root);
+
+    </script>
+</body>
+</html>

@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Accessible Hive Plot</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    :root {
+      --bg-color: #ffffff;
+      --text-color: #333333;
+      --source-color: #4477AA; /* Tol Blue */
+      --connector-color: #228833; /* Tol Green */
+      --sink-color: #EE6677; /* Tol Red */
+      --edge-color: #999999;
+      --focus-ring-outer: #000000;
+      --focus-ring-inner: #ffffff;
+    }
+
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      background-color: var(--bg-color);
+      color: var(--text-color);
+      margin: 0;
+      padding: 20px;
+    }
+
+    #container {
+      position: relative;
+      width: 600px;
+      height: 600px;
+    }
+
+    svg {
+      width: 100%;
+      height: 100%;
+      overflow: visible;
+    }
+
+    .axis-line {
+      stroke: #cccccc;
+      stroke-width: 2px;
+      stroke-linecap: round;
+    }
+
+    .edge {
+      fill: none;
+      stroke: var(--edge-color);
+      stroke-opacity: 0.3;
+      stroke-width: 1px;
+      pointer-events: none;
+      transition: stroke-opacity 0.2s, stroke-width 0.2s;
+    }
+
+    .edge.active {
+      stroke-opacity: 0.8;
+      stroke-width: 2px;
+    }
+
+    .node {
+      cursor: pointer;
+      stroke: white;
+      stroke-width: 1px;
+      transition: r 0.2s, stroke-width 0.2s;
+    }
+
+    .node:focus {
+      outline: none;
+    }
+
+    .focus-ring {
+      fill: none;
+      stroke: var(--focus-ring-outer);
+      stroke-width: 3px;
+      pointer-events: none;
+      visibility: hidden;
+    }
+
+    .focus-ring-inner {
+      fill: none;
+      stroke: var(--focus-ring-inner);
+      stroke-width: 1.5px;
+      pointer-events: none;
+      visibility: hidden;
+    }
+
+    .node.focused ~ .focus-ring,
+    .node:focus ~ .focus-ring {
+      visibility: visible;
+    }
+    .node.focused ~ .focus-ring-inner,
+    .node:focus ~ .focus-ring-inner {
+      visibility: visible;
+    }
+
+    .node.dimmed {
+      opacity: 0.2;
+    }
+
+    .edge.dimmed {
+      stroke-opacity: 0.05;
+    }
+
+    #legend {
+      margin-top: 20px;
+      display: flex;
+      gap: 20px;
+      font-size: 0.9rem;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .swatch {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+    }
+
+    #instructions {
+      margin-top: 15px;
+      padding: 10px 20px;
+      background: #f5f5f5;
+      border-radius: 4px;
+      font-size: 0.85rem;
+      max-width: 500px;
+      text-align: center;
+    }
+
+    #announcer {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border-width: 0;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Accessible Hive Plot</h1>
+
+  <div id="container">
+    <div id="announcer" aria-live="polite"></div>
+    <svg id="viz" role="application" aria-label="Network Hive Plot with 3 axes: Sources, Connectors, and Sinks" tabindex="0">
+      <g id="main-group" transform="translate(300, 300)"></g>
+    </svg>
+  </div>
+
+  <div id="legend">
+    <div class="legend-item"><span class="swatch" style="background: var(--source-color)"></span> Sources</div>
+    <div class="legend-item"><span class="swatch" style="background: var(--connector-color)"></span> Connectors</div>
+    <div class="legend-item"><span class="swatch" style="background: var(--sink-color)"></span> Sinks</div>
+  </div>
+
+  <div id="instructions">
+    <strong>Instructions:</strong> Tab to enter the visualization. Use <strong>Left/Right</strong> to switch axes and <strong>Up/Down</strong> to navigate nodes. Press <strong>Enter</strong> to select and highlight connections, and <strong>Escape</strong> to clear selection.
+  </div>
+
+  <script>
+    const width = 600, height = 600;
+    const innerRadius = 60, outerRadius = 260;
+    
+    // 1. Generate Data
+    const roles = ["source", "connector", "sink"];
+    const counts = [30, 25, 25];
+    const nodes = [];
+    const roleMap = { source: 0, connector: 1, sink: 2 };
+    
+    counts.forEach((count, i) => {
+      const role = roles[i];
+      for (let j = 0; j < count; j++) {
+        nodes.push({
+          id: `${role.charAt(0).toUpperCase()}-${String(j + 1).padStart(2, '0')}`,
+          role: role,
+          metric: Math.floor(Math.random() * 101),
+          degree: 0,
+          indexOnAxis: 0 // Will be set after sorting
+        });
+      }
+    });
+
+    const edges = [];
+    const sources = nodes.filter(n => n.role === "source");
+    const connectors = nodes.filter(n => n.role === "connector");
+    const sinks = nodes.filter(n => n.role === "sink");
+
+    // S -> C edges (~70)
+    for (let i = 0; i < 70; i++) {
+      const s = sources[Math.floor(Math.random() * sources.length)];
+      const c = connectors[Math.floor(Math.random() * connectors.length)];
+      edges.push({ source: s, target: c });
+      s.degree++; c.degree++;
+    }
+
+    // C -> K edges (~40)
+    for (let i = 0; i < 40; i++) {
+      const c = connectors[Math.floor(Math.random() * connectors.length)];
+      const k = sinks[Math.floor(Math.random() * sinks.length)];
+      edges.push({ source: c, target: k });
+      c.degree++; k.degree++;
+    }
+
+    // Shortcuts S -> K (~10)
+    for (let i = 0; i < 10; i++) {
+      const s = sources[Math.floor(Math.random() * sources.length)];
+      const k = sinks[Math.floor(Math.random() * sinks.length)];
+      edges.push({ source: s, target: k });
+      s.degree++; k.degree++;
+    }
+
+    // 2. Setup Scales and Layout
+    const angleScale = d3.scaleOrdinal()
+      .domain(roles)
+      .range([0, 2 * Math.PI / 3, 4 * Math.PI / 3]);
+
+    const radiusScale = d3.scaleLinear()
+      .domain([0, 100])
+      .range([innerRadius, outerRadius]);
+
+    const colorScale = d3.scaleOrdinal()
+      .domain(roles)
+      .range(["#4477AA", "#228833", "#EE6677"]);
+
+    // Organize nodes by axis and sort them for navigation
+    const nodesByAxis = roles.map(role => 
+      nodes.filter(n => n.role === role)
+           .sort((a, b) => a.metric - b.metric)
+    );
+    
+    nodesByAxis.forEach(axisNodes => {
+      axisNodes.forEach((n, i) => n.indexOnAxis = i);
+    });
+
+    // 3. Rendering
+    const g = d3.select("#main-group");
+
+    // Draw axes
+    g.selectAll(".axis-line")
+      .data(roles)
+      .enter()
+      .append("line")
+      .attr("class", "axis-line")
+      .attr("x1", 0)
+      .attr("y1", 0)
+      .attr("x2", d => Math.cos(angleScale(d) - Math.PI / 2) * outerRadius)
+      .attr("y2", d => Math.sin(angleScale(d) - Math.PI / 2) * outerRadius);
+
+    // Draw edges using Quadratic Bezier
+    function link(d) {
+      const a1 = angleScale(d.source.role) - Math.PI / 2;
+      const r1 = radiusScale(d.source.metric);
+      const a2 = angleScale(d.target.role) - Math.PI / 2;
+      const r2 = radiusScale(d.target.metric);
+      
+      const x1 = Math.cos(a1) * r1;
+      const y1 = Math.sin(a1) * r1;
+      const x2 = Math.cos(a2) * r2;
+      const y2 = Math.sin(a2) * r2;
+
+      // Control point is at the average angle with an offset radius
+      let midAngle = (a1 + a2) / 2;
+      // Handle the wraparound case for S-K (0 to 240 degrees)
+      if (Math.abs(a1 - a2) > Math.PI) {
+        midAngle += Math.PI;
+      }
+      
+      const cpRadius = Math.max(r1, r2) * 1.2;
+      const cpx = Math.cos(midAngle) * cpRadius;
+      const cpy = Math.sin(midAngle) * cpRadius;
+
+      return `M${x1},${y1} Q${cpx},${cpy} ${x2},${y2}`;
+    }
+
+    const edgeElements = g.append("g")
+      .attr("class", "edges-group")
+      .selectAll(".edge")
+      .data(edges)
+      .enter()
+      .append("path")
+      .attr("class", "edge")
+      .attr("d", link);
+
+    const nodeGroups = g.selectAll(".node-group")
+      .data(nodes)
+      .enter()
+      .append("g")
+      .attr("class", "node-group")
+      .attr("transform", d => {
+        const a = angleScale(d.role) - Math.PI / 2;
+        const r = radiusScale(d.metric);
+        return `translate(${Math.cos(a) * r}, ${Math.sin(a) * r})`;
+      });
+
+    const nodeElements = nodeGroups.append("circle")
+      .attr("class", "node")
+      .attr("r", 5)
+      .attr("fill", d => colorScale(d.role))
+      .on("mouseenter", (e, d) => highlight(d))
+      .on("mouseleave", () => clearHighlight())
+      .on("click", (e, d) => select(d));
+
+    // Focus rings
+    nodeGroups.append("circle")
+      .attr("class", "focus-ring")
+      .attr("r", 8);
+
+    nodeGroups.append("circle")
+      .attr("class", "focus-ring-inner")
+      .attr("r", 6.5);
+
+    // 4. Interactivity State
+    let currentAxisIdx = 0;
+    let currentNodeIdx = -1;
+    let selectedNode = null;
+
+    const announcer = d3.select("#announcer");
+    const svg = d3.select("#viz");
+
+    function highlight(d) {
+      if (!d) return;
+      
+      nodeElements.classed("dimmed", n => n !== d && !isNeighbor(d, n));
+      edgeElements.classed("active", e => e.source === d || e.target === d)
+                  .classed("dimmed", e => e.source !== d && e.target !== d);
+      
+      const neighborCount = edges.filter(e => e.source === d || e.target === d).length;
+      announcer.text(`${d.id}, ${d.role} axis, metric ${d.metric}, ${neighborCount} connections`);
+    }
+
+    function isNeighbor(a, b) {
+      return edges.some(e => 
+        (e.source === a && e.target === b) || 
+        (e.source === b && e.target === a)
+      );
+    }
+
+    function clearHighlight() {
+      if (selectedNode) {
+        highlight(selectedNode);
+        return;
+      }
+      nodeElements.classed("dimmed", false);
+      edgeElements.classed("active", false).classed("dimmed", false);
+    }
+
+    function select(d) {
+      if (selectedNode === d) {
+        selectedNode = null;
+        clearHighlight();
+      } else {
+        selectedNode = d;
+        highlight(d);
+      }
+    }
+
+    function updateFocus() {
+      const node = nodesByAxis[currentAxisIdx][currentNodeIdx];
+      nodeElements.classed("focused", n => n === node);
+      highlight(node);
+    }
+
+    // 5. Keyboard Navigation
+    svg.on("keydown", (e) => {
+      switch (e.key) {
+        case "ArrowRight":
+          currentAxisIdx = (currentAxisIdx + 1) % 3;
+          if (currentNodeIdx === -1) currentNodeIdx = 0;
+          currentNodeIdx = Math.min(currentNodeIdx, nodesByAxis[currentAxisIdx].length - 1);
+          updateFocus();
+          e.preventDefault();
+          break;
+        case "ArrowLeft":
+          currentAxisIdx = (currentAxisIdx + 2) % 3;
+          if (currentNodeIdx === -1) currentNodeIdx = 0;
+          currentNodeIdx = Math.min(currentNodeIdx, nodesByAxis[currentAxisIdx].length - 1);
+          updateFocus();
+          e.preventDefault();
+          break;
+        case "ArrowUp":
+          if (currentNodeIdx === -1) currentNodeIdx = 0;
+          else currentNodeIdx = Math.min(currentNodeIdx + 1, nodesByAxis[currentAxisIdx].length - 1);
+          updateFocus();
+          e.preventDefault();
+          break;
+        case "ArrowDown":
+          if (currentNodeIdx === -1) currentNodeIdx = 0;
+          else currentNodeIdx = Math.max(currentNodeIdx - 1, 0);
+          updateFocus();
+          e.preventDefault();
+          break;
+        case "Enter":
+          if (currentNodeIdx !== -1) {
+            select(nodesByAxis[currentAxisIdx][currentNodeIdx]);
+          }
+          e.preventDefault();
+          break;
+        case "Escape":
+          selectedNode = null;
+          currentNodeIdx = -1;
+          nodeElements.classed("focused", false);
+          clearHighlight();
+          e.preventDefault();
+          break;
+        case "Tab":
+          if (currentNodeIdx === -1) {
+            currentAxisIdx = 0;
+            currentNodeIdx = 0;
+            updateFocus();
+          }
+          break;
+      }
+    });
+
+  </script>
+</body>
+</html>

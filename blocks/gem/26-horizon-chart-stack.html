@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Server CPU Usage Horizon Chart</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f8f9fa;
+            color: #333;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .container {
+            width: 100%;
+            max-width: 1000px;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        }
+        h1 {
+            font-size: 1.5rem;
+            margin-bottom: 20px;
+            text-align: center;
+            color: #2c3e50;
+        }
+        .chart-svg {
+            width: 100%;
+            height: auto;
+            overflow: visible;
+        }
+        .axis-label {
+            font-size: 12px;
+            fill: #666;
+        }
+        .server-label {
+            font-size: 12px;
+            font-weight: 600;
+            fill: #444;
+            dominant-baseline: middle;
+        }
+        .tooltip {
+            position: absolute;
+            background: rgba(255, 255, 255, 0.95);
+            border: 1px solid #ddd;
+            padding: 10px;
+            border-radius: 4px;
+            pointer-events: none;
+            font-size: 12px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: none;
+            z-index: 10;
+        }
+        .tooltip-time {
+            font-weight: bold;
+            border-bottom: 1px solid #eee;
+            margin-bottom: 5px;
+            padding-bottom: 2px;
+        }
+        .tooltip-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 15px;
+            margin-bottom: 2px;
+        }
+        .tooltip-value {
+            font-family: monospace;
+            font-weight: bold;
+        }
+        .hover-line {
+            stroke: #e74c3c;
+            stroke-width: 1px;
+            stroke-dasharray: 2,2;
+            pointer-events: none;
+        }
+        .band-group rect.bg {
+            fill: #fdfdfd;
+        }
+        .band-group:nth-child(even) rect.bg {
+            fill: #f5f5f5;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Server CPU Usage — 24 Hour Horizon View</h1>
+    <div id="chart"></div>
+</div>
+<div id="tooltip" class="tooltip"></div>
+
+<script>
+    const margin = {top: 20, right: 30, bottom: 40, left: 100};
+    const width = 900 - margin.left - margin.right;
+    const bandHeight = 50;
+    const nServers = 8;
+    const height = (bandHeight * nServers);
+
+    const svg = d3.select("#chart")
+        .append("svg")
+        .attr("viewBox", `0 0 ${width + margin.left + margin.right} ${height + margin.top + margin.bottom}`)
+        .attr("class", "chart-svg")
+        .append("g")
+        .attr("transform", `translate(${margin.left},${margin.top})`);
+
+    // Data generation
+    const n = 1440; // 24 hours * 60 minutes
+    const startTime = new Date(2026, 2, 27, 0, 0, 0);
+    const times = d3.range(n).map(i => new Date(startTime.getTime() + i * 60000));
+
+    const servers = d3.range(nServers).map(i => {
+        const baseline = 20 + Math.random() * 40;
+        const values = new Float64Array(n);
+        
+        // Base noise and trend
+        let current = baseline;
+        for (let t = 0; t < n; t++) {
+            current += (Math.random() - 0.5) * 4;
+            current = d3.max([10, d3.min([90, current])]);
+            values[t] = current;
+        }
+
+        // Correlated spikes
+        // Servers 1-3 (index 0, 1, 2) around hour 14
+        if (i < 3) {
+            const peak = 14 * 60;
+            for (let t = 0; t < n; t++) {
+                const dist = Math.abs(t - peak);
+                if (dist < 90) {
+                    values[t] += (100 - values[t]) * Math.exp(-Math.pow(dist/30, 2)) * 0.8;
+                }
+            }
+        }
+        // Servers 5-7 (index 4, 5, 6) around hour 9
+        if (i >= 4 && i < 7) {
+            const peak = 9 * 60;
+            for (let t = 0; t < n; t++) {
+                const dist = Math.abs(t - peak);
+                if (dist < 90) {
+                    values[t] += (100 - values[t]) * Math.exp(-Math.pow(dist/30, 2)) * 0.8;
+                }
+            }
+        }
+
+        // Individual random spikes
+        for (let s = 0; s < 3; s++) {
+            const peak = Math.random() * n;
+            for (let t = 0; t < n; t++) {
+                const dist = Math.abs(t - peak);
+                if (dist < 40) {
+                    values[t] += (100 - values[t]) * Math.exp(-Math.pow(dist/15, 2)) * 0.5;
+                }
+            }
+        }
+
+        return {
+            id: i,
+            name: `Server-${i + 1}`,
+            values: values
+        };
+    });
+
+    const x = d3.scaleTime()
+        .domain([times[0], times[n-1]])
+        .range([0, width]);
+
+    const step = 100 / 3;
+    const y = d3.scaleLinear()
+        .domain([0, step])
+        .range([bandHeight, 0]);
+
+    const colors = ["#deebf7", "#9ecae1", "#3182bd"]; // Lightest, medium, darkest blue
+
+    const area = d3.area()
+        .x((d, i) => x(times[i]))
+        .y0(bandHeight)
+        .y1(d => y(d));
+
+    // Draw background stripes
+    svg.selectAll(".bg")
+        .data(servers)
+        .enter()
+        .append("rect")
+        .attr("class", "bg")
+        .attr("x", -margin.left)
+        .attr("y", (d, i) => i * bandHeight)
+        .attr("width", width + margin.left)
+        .attr("height", bandHeight)
+        .attr("fill", (d, i) => i % 2 === 0 ? "#fff" : "#f9f9f9");
+
+    // Draw horizon bands
+    const serverGroups = svg.selectAll(".server-group")
+        .data(servers)
+        .enter()
+        .append("g")
+        .attr("class", "server-group")
+        .attr("transform", (d, i) => `translate(0, ${i * bandHeight})`);
+
+    serverGroups.each(function(server) {
+        const g = d3.select(this);
+        
+        // Create 3 layers
+        for (let b = 0; b < 3; b++) {
+            const layerData = server.values.map(v => Math.max(0, Math.min(step, v - b * step)));
+            g.append("path")
+                .datum(layerData)
+                .attr("fill", colors[b])
+                .attr("d", area);
+        }
+
+        // Server label
+        g.append("text")
+            .attr("class", "server-label")
+            .attr("x", -10)
+            .attr("y", bandHeight / 2)
+            .attr("text-anchor", "end")
+            .text(server.name);
+    });
+
+    // X-Axis
+    const xAxis = d3.axisBottom(x)
+        .ticks(d3.utcHour.every(2))
+        .tickFormat(d3.utcFormat("%H:%M"));
+
+    svg.append("g")
+        .attr("transform", `translate(0, ${height})`)
+        .call(xAxis)
+        .attr("class", "axis-label");
+
+    // Interaction elements
+    const hoverLine = svg.append("line")
+        .attr("class", "hover-line")
+        .attr("y1", 0)
+        .attr("y2", height)
+        .attr("x1", 0)
+        .attr("x2", 0)
+        .style("opacity", 0);
+
+    const tooltip = d3.select("#tooltip");
+
+    const bisect = d3.bisector(d => d).left;
+
+    svg.append("rect")
+        .attr("width", width)
+        .attr("height", height)
+        .attr("fill", "transparent")
+        .on("pointermove", (event) => {
+            const [mx, my] = d3.pointer(event);
+            const date = x.invert(mx);
+            const i = bisect(times, date);
+            
+            if (i >= 0 && i < n) {
+                const xPos = x(times[i]);
+                hoverLine.attr("x1", xPos).attr("x2", xPos).style("opacity", 1);
+                
+                let tooltipHtml = `<div class="tooltip-time">${d3.utcFormat("%H:%M")(times[i])}</div>`;
+                servers.forEach(s => {
+                    tooltipHtml += `
+                        <div class="tooltip-row">
+                            <span>${s.name}</span>
+                            <span class="tooltip-value">${s.values[i].toFixed(1)}%</span>
+                        </div>
+                    `;
+                });
+                
+                tooltip.style("display", "block")
+                    .html(tooltipHtml)
+                    .style("left", (event.pageX + 15) + "px")
+                    .style("top", (event.pageY - 10) + "px");
+            }
+        })
+        .on("pointerleave", () => {
+            hoverLine.style("opacity", 0);
+            tooltip.style("display", "none");
+        });
+
+</script>
+</body>
+</html>

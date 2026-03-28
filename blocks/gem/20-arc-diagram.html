@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Arc Diagram - Character Co-occurrences</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: #f8f9fa;
+      color: #212529;
+    }
+    .header {
+      padding: 20px 30px 10px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 1.5rem;
+      font-weight: 700;
+    }
+    .info {
+      margin-top: 5px;
+      font-size: 0.9rem;
+      color: #6c757d;
+    }
+    #chart {
+      width: 100vw;
+      height: calc(100vh - 100px);
+    }
+    .node-label {
+      font-size: 11px;
+      fill: #495057;
+      pointer-events: none;
+    }
+    .brush-label {
+      font-size: 14px;
+      font-weight: 600;
+      fill: #343a40;
+    }
+    .node {
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Character Co-occurrence Arc Diagram</h1>
+    <div class="info" id="stats">Hover a character to explore connections. Brush the axis to filter by chapter.</div>
+  </div>
+  <div id="chart"></div>
+
+  <script type="module">
+    import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+    // --- Configuration ---
+    const margin = { top: 50, right: 60, bottom: 80, left: 60 };
+    const width = window.innerWidth;
+    const height = window.innerHeight - 120;
+    const baselineY = height - margin.bottom;
+
+    // --- Data Generation ---
+    const seed = 123;
+    const rng = d3.randomLcg(seed);
+    const randInt = (min, max) => Math.floor(rng() * (max - min + 1)) + min;
+
+    const names = [
+      "Aria", "Bastien", "Cora", "Dante", "Elena", "Finn", "Gia", "Hugo", "Isla", "Julian",
+      "Kira", "Leon", "Mina", "Nico", "Olivia", "Phoebe", "Quentin", "Rhea", "Silas", "Tessa",
+      "Umar", "Vera", "Wyatt", "Xander", "Yara", "Zane", "Amara", "Bram", "Celia", "Dorian"
+    ];
+
+    const nodes = names.map((name, i) => ({
+      id: i,
+      name,
+      chapter_first_appearance: randInt(1, 25),
+      importance: randInt(1, 10)
+    }));
+
+    // Sort nodes by first appearance for the x-axis mapping
+    nodes.sort((a, b) => a.chapter_first_appearance - b.chapter_first_appearance || a.id - b.id);
+
+    // Create a map for easy index lookup
+    const nodeMap = new Map(nodes.map((d, i) => [d.id, i]));
+
+    const edges = [];
+    const edgeSet = new Set();
+    while (edges.length < 80) {
+      const uId = randInt(0, 29);
+      const vId = randInt(0, 29);
+      if (uId === vId) continue;
+
+      const source = Math.min(uId, vId);
+      const target = Math.max(uId, vId);
+      const key = `${source}-${target}`;
+      if (edgeSet.has(key)) continue;
+
+      const charU = nodes.find(d => d.id === source);
+      const charV = nodes.find(d => d.id === target);
+
+      const chapterDiff = Math.abs(charU.chapter_first_appearance - charV.chapter_first_appearance);
+      // Probability of edge decreases with chapter distance
+      const prob = Math.exp(-chapterDiff / 8);
+      if (rng() < prob || edges.length < 40) { // Ensure at least some edges
+        edgeSet.add(key);
+        // Weight: higher if chapters are closer
+        const baseWeight = Math.max(1, 20 - chapterDiff);
+        const weight = Math.min(20, Math.max(1, baseWeight + randInt(-3, 3)));
+        edges.push({ source, target, weight });
+      }
+    }
+
+    // Build adjacency for interactions
+    const adj = d3.group(edges, d => d.source);
+    const adjRev = d3.group(edges, d => d.target);
+    const getConnections = (id) => {
+      const out = (adj.get(id) || []).map(e => e.target);
+      const inc = (adjRev.get(id) || []).map(e => e.source);
+      return new Set([...out, ...inc]);
+    };
+
+    // --- Scales ---
+    const xScale = d3.scaleLinear()
+      .domain([1, 25])
+      .range([margin.left, width - margin.right]);
+
+    const radiusScale = d3.scaleLinear()
+      .domain([1, 10])
+      .range([3, 10]);
+
+    const weightToWidth = d3.scaleLinear()
+      .domain([1, 20])
+      .range([1, 3]);
+
+    const weightToHeight = d3.scaleLinear()
+      .domain([1, 20])
+      .range([20, baselineY - margin.top]);
+
+    // Tol Bright Palette (Sequential use)
+    const tolBright = ["#4477AA", "#66CCEE", "#228833", "#CCBB44", "#EE6677", "#AA3377", "#BBBBBB"];
+    const colorScale = d3.scaleQuantize()
+      .domain([1, 25])
+      .range(tolBright);
+
+    // --- SVG Setup ---
+    const svg = d3.select("#chart")
+      .append("svg")
+      .attr("width", width)
+      .attr("height", height)
+      .attr("viewBox", [0, 0, width, height]);
+
+    const arcGroup = svg.append("g").attr("class", "arcs");
+    const nodeGroup = svg.append("g").attr("class", "nodes");
+    const labelGroup = svg.append("g").attr("class", "labels");
+    const brushGroup = svg.append("g").attr("class", "brush");
+
+    // --- Arcs ---
+    const arcs = arcGroup.selectAll("path")
+      .data(edges)
+      .join("path")
+      .attr("fill", "none")
+      .attr("stroke", d => {
+        const u = nodes.find(n => n.id === d.source);
+        const v = nodes.find(n => n.id === d.target);
+        return colorScale(Math.min(u.chapter_first_appearance, v.chapter_first_appearance));
+      })
+      .attr("stroke-width", d => weightToWidth(d.weight))
+      .attr("stroke-opacity", 0.4)
+      .attr("d", d => {
+        const u = nodes.find(n => n.id === d.source);
+        const v = nodes.find(n => n.id === d.target);
+        const x1 = xScale(u.chapter_first_appearance);
+        const x2 = xScale(v.chapter_first_appearance);
+        const h = weightToHeight(d.weight);
+        const cx = (x1 + x2) / 2;
+        // Quadratic bezier for semicircular appearance with variable height
+        // Control point y = baselineY - 2*h ensures peak is at baselineY - h
+        return `M ${x1},${baselineY} Q ${cx},${baselineY - 2 * h} ${x2},${baselineY}`;
+      });
+
+    // --- Nodes ---
+    const nodeCircles = nodeGroup.selectAll("circle")
+      .data(nodes)
+      .join("circle")
+      .attr("class", "node")
+      .attr("cx", d => xScale(d.chapter_first_appearance))
+      .attr("cy", baselineY)
+      .attr("r", d => radiusScale(d.importance))
+      .attr("fill", d => colorScale(d.chapter_first_appearance))
+      .attr("stroke", "#fff")
+      .attr("stroke-width", 1.5);
+
+    // --- Labels ---
+    labelGroup.selectAll("text")
+      .data(nodes.filter(d => d.importance > 7))
+      .join("text")
+      .attr("class", "node-label")
+      .attr("x", d => xScale(d.chapter_first_appearance))
+      .attr("y", baselineY + 20)
+      .attr("text-anchor", "middle")
+      .attr("dominant-baseline", "hanging")
+      .text(d => d.name);
+
+    // --- Axis ---
+    const axis = d3.axisBottom(xScale)
+      .ticks(25)
+      .tickFormat(d => `Ch ${d}`);
+
+    svg.append("g")
+      .attr("transform", `translate(0, ${baselineY})`)
+      .call(axis)
+      .call(g => g.select(".domain").attr("stroke", "#dee2e6"))
+      .call(g => g.selectAll(".tick line").attr("stroke", "#dee2e6"))
+      .call(g => g.selectAll(".tick text").attr("fill", "#adb5bd").style("font-size", "10px"));
+
+    // --- Interaction ---
+    const statsLabel = d3.select("#stats");
+    const brushInfo = svg.append("text")
+      .attr("class", "brush-label")
+      .attr("x", margin.left)
+      .attr("y", margin.top - 10);
+
+    nodeCircles.on("mouseenter", function(event, d) {
+      const connectedIds = getConnections(d.id);
+      
+      arcs.transition().duration(200)
+        .attr("stroke-opacity", e => (e.source === d.id || e.target === d.id) ? 1.0 : 0.05);
+      
+      nodeCircles.transition().duration(200)
+        .attr("opacity", n => (n.id === d.id || connectedIds.has(n.id)) ? 1 : 0.3);
+
+      statsLabel.text(`${d.name} — ${connectedIds.size} connection${connectedIds.size !== 1 ? 's' : ''}`);
+    }).on("mouseleave", function() {
+      arcs.transition().duration(200).attr("stroke-opacity", 0.4);
+      nodeCircles.transition().duration(200).attr("opacity", 1);
+      statsLabel.text("Hover a character to explore connections. Brush the axis to filter by chapter.");
+    });
+
+    // --- Brush ---
+    const brush = d3.brushX()
+      .extent([[margin.left, baselineY - 10], [width - margin.right, baselineY + 40]])
+      .on("brush end", brushed);
+
+    brushGroup.call(brush);
+
+    function brushed(event) {
+      const selection = event.selection;
+      if (!selection) {
+        arcs.attr("visibility", "visible");
+        brushInfo.text("");
+        return;
+      }
+
+      const [x0, x1] = selection.map(xScale.invert);
+      const ch0 = Math.ceil(x0);
+      const ch1 = Math.floor(x1);
+
+      let count = 0;
+      arcs.attr("visibility", d => {
+        const u = nodes.find(n => n.id === d.source);
+        const v = nodes.find(n => n.id === d.target);
+        const inRange = u.chapter_first_appearance >= x0 && u.chapter_first_appearance <= x1 &&
+                        v.chapter_first_appearance >= x0 && v.chapter_first_appearance <= x1;
+        if (inRange) count++;
+        return inRange ? "visible" : "hidden";
+      });
+
+      brushInfo.text(`Chapters ${ch0}–${ch1}: ${count} connections`);
+    }
+
+  </script>
+</body>
+</html>

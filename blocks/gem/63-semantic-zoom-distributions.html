@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Semantic Zoom Distributions</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { 
+    font-family: system-ui, -apple-system, sans-serif; 
+    background: #fdfdfd; 
+    color: #333; 
+    overflow: hidden;
+    width: 100vw;
+    height: 100vh;
+  }
+  #container {
+    width: 100%;
+    height: 100%;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    padding: 16px 24px;
+    background: white;
+    border-bottom: 1px solid #eee;
+    z-index: 10;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  h1 { font-size: 18px; font-weight: 600; color: #111; }
+  #badge {
+    background: #4477AA;
+    color: white;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    transition: background 0.3s;
+  }
+  #viz {
+    flex-grow: 1;
+    cursor: grab;
+  }
+  #viz:active { cursor: grabbing; }
+  .axis text { font-size: 10px; fill: #888; }
+  .axis path, .axis line { stroke: #eee; }
+  .contour { stroke: none; opacity: 0.8; }
+  .hexagon { stroke: #fff; stroke-width: 0.5px; }
+  .point { stroke: #fff; stroke-width: 0.5px; }
+  .label { 
+    font-size: 8px; 
+    fill: #333; 
+    pointer-events: none; 
+    text-anchor: middle;
+    font-weight: 500;
+  }
+  .hidden { opacity: 0; pointer-events: none; }
+  .visible { opacity: 1; }
+</style>
+</head>
+<body>
+
+<div id="container">
+  <header>
+    <h1>Semantic Distribution Explorer</h1>
+    <div id="badge">Overview | 2000 points</div>
+  </header>
+  <div id="viz"></div>
+</div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+import { hexbin } from "https://cdn.skypack.dev/d3-hexbin@0.2.2";
+
+// --- Configuration & Constants ---
+const CLUSTER_DEFS = [
+  { name: "Cluster A", color: "#4477AA", center: [0.3, 0.3], sigma: 0.12 },
+  { name: "Cluster B", color: "#EE6677", center: [0.7, 0.4], sigma: 0.10 },
+  { name: "Cluster C", color: "#228833", center: [0.5, 0.7], sigma: 0.15 }
+];
+
+const MODES = {
+  OVERVIEW: "Overview",
+  MEDIUM: "Hexbin",
+  HIGH: "Points"
+};
+
+let width, height;
+let currentMode = MODES.OVERVIEW;
+let transform = d3.zoomIdentity;
+
+// --- Data Generation ---
+const data = Array.from({ length: 2000 }, (_, i) => {
+  const cluster = CLUSTER_DEFS[i % 3];
+  const [cx, cy] = cluster.center;
+  const s = cluster.sigma;
+  
+  // Box-Muller transform for normal distribution
+  const u1 = Math.random(), u2 = Math.random();
+  const z0 = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
+  const z1 = Math.sqrt(-2.0 * Math.log(u1)) * Math.sin(2.0 * Math.PI * u2);
+  
+  return {
+    id: i,
+    cluster: cluster.name,
+    color: cluster.color,
+    x: cx + z0 * s,
+    y: cy + z1 * s,
+    label: `P-${i}`
+  };
+});
+
+// --- Setup ---
+const svg = d3.select("#viz").append("svg")
+  .attr("width", "100%")
+  .attr("height", "100%");
+
+const g = svg.append("g");
+
+const layers = {
+  contours: g.append("g").attr("class", "layer-contours"),
+  hexbins: g.append("g").attr("class", "layer-hexbins"),
+  points: g.append("g").attr("class", "layer-points")
+};
+
+const badge = d3.select("#badge");
+
+const x = d3.scaleLinear().domain([0, 1]);
+const y = d3.scaleLinear().domain([0, 1]);
+
+// --- Zoom Behavior ---
+const zoom = d3.zoom()
+  .scaleExtent([1, 50])
+  .on("zoom", zoomed);
+
+svg.call(zoom);
+
+function zoomed(e) {
+  transform = e.transform;
+  const k = transform.k;
+  
+  // LOD Hysteresis Logic
+  let nextMode = currentMode;
+  
+  if (currentMode === MODES.OVERVIEW) {
+    if (k >= 3) nextMode = MODES.MEDIUM;
+  } else if (currentMode === MODES.MEDIUM) {
+    if (k < 1.5) nextMode = MODES.OVERVIEW;
+    else if (k >= 12) nextMode = MODES.HIGH;
+  } else if (currentMode === MODES.HIGH) {
+    if (k < 6) nextMode = MODES.MEDIUM;
+  }
+  
+  if (nextMode !== currentMode) {
+    currentMode = nextMode;
+    updateLayers(true);
+  } else {
+    updateLayers(false);
+  }
+  
+  updateBadge(k);
+}
+
+function updateBadge(k) {
+  badge.text(`${currentMode} | k=${k.toFixed(1)} | 2000 points`)
+    .style("background", currentMode === MODES.OVERVIEW ? "#4477AA" : 
+                        currentMode === MODES.MEDIUM ? "#228833" : "#EE6677");
+}
+
+function updateLayers(modeChanged) {
+  const k = transform.k;
+  const tx = transform.rescaleX(x);
+  const ty = transform.rescaleY(y);
+
+  const duration = modeChanged ? 300 : 0;
+
+  // Toggle Visibility
+  layers.contours.transition().duration(duration).style("opacity", currentMode === MODES.OVERVIEW ? 1 : 0);
+  layers.hexbins.transition().duration(duration).style("opacity", currentMode === MODES.MEDIUM ? 1 : 0);
+  layers.points.transition().duration(duration).style("opacity", currentMode === MODES.HIGH ? 1 : 0);
+
+  if (currentMode === MODES.OVERVIEW) {
+    renderContours(tx, ty);
+  } else if (currentMode === MODES.MEDIUM) {
+    renderHexbins(tx, ty);
+  } else if (currentMode === MODES.HIGH) {
+    renderPoints(tx, ty);
+  }
+}
+
+function renderContours(tx, ty) {
+  const density = d3.contourDensity()
+    .x(d => tx(d.x))
+    .y(d => ty(d.y))
+    .size([width, height])
+    .bandwidth(30)
+    .thresholds(10)(data);
+
+  const maxVal = d3.max(density, d => d.value);
+  const color = d3.scaleSequential(d3.interpolateBlues).domain([0, maxVal]);
+
+  const u = layers.contours.selectAll("path").data(density);
+  u.enter().append("path")
+    .attr("class", "contour")
+    .merge(u)
+    .attr("d", d3.geoPath())
+    .attr("fill", d => color(d.value));
+  u.exit().remove();
+}
+
+function renderHexbins(tx, ty) {
+  const hb = hexbin()
+    .radius(15)
+    .extent([[0, 0], [width, height]]);
+
+  const hexData = hb(data.map(d => {
+    const px = tx(d.x), py = ty(d.y);
+    return [px, py];
+  }));
+
+  const maxLen = d3.max(hexData, d => d.length);
+  const color = d3.scaleSequential(d3.interpolateYlGnBu).domain([0, maxLen]);
+
+  const u = layers.hexbins.selectAll("path").data(hexData);
+  u.enter().append("path")
+    .attr("class", "hexagon")
+    .merge(u)
+    .attr("d", d => hb.hexagon())
+    .attr("transform", d => `translate(${d.x},${d.y})`)
+    .attr("fill", d => color(d.length));
+  u.exit().remove();
+}
+
+function renderPoints(tx, ty) {
+  const k = transform.k;
+  
+  // Selection for circles
+  const circles = layers.points.selectAll("circle").data(data, d => d.id);
+  circles.enter().append("circle")
+    .attr("class", "point")
+    .attr("r", 4)
+    .attr("fill", d => d.color)
+    .merge(circles)
+    .attr("cx", d => tx(d.x))
+    .attr("cy", d => ty(d.y));
+  circles.exit().remove();
+
+  // Selection for labels
+  const labels = layers.points.selectAll("text").data(data, d => d.id);
+  labels.enter().append("text")
+    .attr("class", "label")
+    .attr("dy", -6)
+    .merge(labels)
+    .attr("x", d => tx(d.x))
+    .attr("y", d => ty(d.y))
+    .text(d => d.label)
+    .style("display", k >= 12 ? "block" : "none");
+  labels.exit().remove();
+}
+
+// --- Resize Handling ---
+const container = document.getElementById("viz");
+const observer = new ResizeObserver(entries => {
+  for (let entry of entries) {
+    const { width: w, height: h } = entry.contentRect;
+    if (w < 500) return; // Constraint
+    width = w;
+    height = h;
+    
+    x.range([0, width]);
+    y.range([0, height]);
+    
+    // Maintain zoom on resize
+    svg.call(zoom.transform, transform);
+    updateLayers(true);
+  }
+});
+observer.observe(container);
+
+</script>
+</body>
+</html>

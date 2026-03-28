@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Score Distribution Ridgeline - Before & After Calibration</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #fcfcfc;
+            --text-color: #222;
+            --grid-color: #eee;
+            --before-color: #ff7f0e;
+            --after-color: #1f77b4;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 2rem;
+        }
+
+        #container {
+            width: 100%;
+            max-width: 900px;
+        }
+
+        .title {
+            font-size: 1.5rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+            text-align: center;
+        }
+
+        .subtitle {
+            font-size: 1rem;
+            color: #666;
+            margin-bottom: 2rem;
+            text-align: center;
+        }
+
+        .ridge-group path {
+            stroke-width: 1.5;
+            mix-blend-mode: multiply;
+        }
+
+        .ridge-group .before {
+            fill: var(--before-color);
+            stroke: var(--before-color);
+            fill-opacity: 0.3;
+        }
+
+        .ridge-group .after {
+            fill: var(--after-color);
+            stroke: var(--after-color);
+            fill-opacity: 0.5;
+        }
+
+        .axis-label {
+            font-size: 0.8rem;
+            font-weight: 500;
+            fill: #555;
+        }
+
+        .tick text {
+            fill: #888;
+            font-size: 0.75rem;
+        }
+
+        .legend {
+            display: flex;
+            justify-content: center;
+            gap: 2rem;
+            margin-top: 1rem;
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .swatch {
+            width: 12px;
+            height: 12px;
+            border-radius: 2px;
+        }
+
+        .tooltip {
+            position: absolute;
+            background: rgba(255, 255, 255, 0.95);
+            border: 1px solid #ddd;
+            padding: 8px 12px;
+            border-radius: 4px;
+            pointer-events: none;
+            font-size: 0.8rem;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+
+        .controls {
+            margin-bottom: 1.5rem;
+            display: flex;
+            gap: 1rem;
+        }
+
+        button {
+            background: #fff;
+            border: 1px solid #ddd;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            transition: all 0.2s;
+        }
+
+        button:hover {
+            border-color: #999;
+            background: #f9f9f9;
+        }
+
+        button.active {
+            background: #222;
+            color: #fff;
+            border-color: #222;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="container">
+        <div class="title">Score Distributions: Calibration Impact</div>
+        <div class="subtitle">Comparing raw scores vs. calibrated model performance across 8 evaluation tasks</div>
+        
+        <div class="controls">
+            <button id="btn-both" class="active">Show Both</button>
+            <button id="btn-before">Before Only</button>
+            <button id="btn-after">After Only</button>
+        </div>
+
+        <div id="viz"></div>
+
+        <div class="legend">
+            <div class="legend-item">
+                <div class="swatch" style="background: var(--before-color); opacity: 0.4;"></div>
+                <span>Before Calibration</span>
+            </div>
+            <div class="legend-item">
+                <div class="swatch" style="background: var(--after-color); opacity: 0.6;"></div>
+                <span>After Calibration</span>
+            </div>
+        </div>
+    </div>
+
+    <div id="tooltip" class="tooltip"></div>
+
+    <script>
+        // 1. Data Generation
+        const tasks = [
+            "Reasoning", "Coding", "Mathematics", "Instruction Following", 
+            "Creative Writing", "Summarization", "Data Extraction", "Nuance Detection"
+        ];
+
+        // Seeded random for reproducible "authentic" looking data
+        const random = d3.randomLcg(0.89);
+        const normal = d3.randomNormal.source(random);
+
+        const generateData = () => {
+            const data = [];
+            tasks.forEach((task, i) => {
+                const n = 150 + Math.floor(random() * 100);
+                
+                // "Before" distribution: often wider, maybe lower mean, slightly skewed
+                const beforeBase = 45 + random() * 20;
+                const beforeStd = 8 + random() * 12;
+                
+                // "After" distribution: tighter, shifted higher, more peaked
+                const afterBase = beforeBase + 10 + random() * 10;
+                const afterStd = 4 + random() * 6;
+
+                const beforeScores = Array.from({length: n}, () => 
+                    Math.max(0, Math.min(100, normal(beforeBase, beforeStd)()))
+                );
+                const afterScores = Array.from({length: n}, () => 
+                    Math.max(0, Math.min(100, normal(afterBase, afterStd)()))
+                );
+
+                data.push({
+                    task,
+                    before: beforeScores,
+                    after: afterScores,
+                    medianBefore: d3.median(beforeScores),
+                    medianAfter: d3.median(afterScores)
+                });
+            });
+            return data;
+        };
+
+        const rawData = generateData();
+
+        // 2. KDE logic
+        function kernelGaussian(v) {
+            return Math.exp(-v * v / 2) / Math.sqrt(2 * Math.PI);
+        }
+
+        function kernelDensityEstimator(kernel, x) {
+            return function(sample) {
+                return x.map(v => [v, d3.mean(sample, d => kernel((v - d) / bandwidth(sample))) / bandwidth(sample)]);
+            };
+        }
+
+        function bandwidth(values) {
+            const std = d3.deviation(values);
+            const iqr = d3.quantile(values, 0.75) - d3.quantile(values, 0.25);
+            return 0.9 * Math.min(std, iqr / 1.34) * Math.pow(values.length, -0.2);
+        }
+
+        // 3. Visualization Setup
+        const margin = {top: 40, right: 30, bottom: 40, left: 150};
+        const width = 900 - margin.left - margin.right;
+        const height = 500 - margin.top - margin.bottom;
+
+        const svg = d3.select("#viz")
+            .append("svg")
+            .attr("viewBox", `0 0 ${width + margin.left + margin.right} ${height + margin.top + margin.bottom}`)
+            .append("g")
+            .attr("transform", `translate(${margin.left},${margin.top})`);
+
+        const x = d3.scaleLinear()
+            .domain([0, 100])
+            .range([0, width]);
+
+        const yName = d3.scaleBand()
+            .domain(tasks)
+            .range([0, height])
+            .paddingInner(1);
+
+        // Add X axis
+        svg.append("g")
+            .attr("transform", `translate(0,${height})`)
+            .call(d3.axisBottom(x).tickSize(-height).tickPadding(10))
+            .call(g => g.select(".domain").remove())
+            .call(g => g.selectAll(".tick line").attr("stroke", "#eee"));
+
+        // Add X axis label
+        svg.append("text")
+            .attr("class", "axis-label")
+            .attr("x", width / 2)
+            .attr("y", height + 35)
+            .attr("text-anchor", "middle")
+            .text("Performance Score (0-100)");
+
+        // 4. Compute Densities
+        const xTicks = d3.range(0, 100.5, 0.5);
+        const kde = kernelDensityEstimator(kernelGaussian, xTicks);
+
+        const processedData = rawData.map(d => ({
+            ...d,
+            densityBefore: kde(d.before),
+            densityAfter: kde(d.after)
+        }));
+
+        const maxDensity = d3.max(processedData, d => 
+            Math.max(d3.max(d.densityBefore, v => v[1]), d3.max(d.densityAfter, v => v[1]))
+        );
+
+        // Ridge vertical scale
+        const overlap = 0.8;
+        const ridgeHeight = (height / tasks.length) * (1 + overlap);
+        const yDensity = d3.scaleLinear()
+            .domain([0, maxDensity])
+            .range([0, ridgeHeight]);
+
+        const area = d3.area()
+            .curve(d3.curveBasis)
+            .x(d => x(d[0]))
+            .y0(0)
+            .y1(d => -yDensity(d[1]));
+
+        const line = d3.line()
+            .curve(d3.curveBasis)
+            .x(d => x(d[0]))
+            .y(d => -yDensity(d[1]));
+
+        // 5. Render Ridges
+        const ridges = svg.selectAll(".ridge-group")
+            .data(processedData)
+            .enter()
+            .append("g")
+            .attr("class", "ridge-group")
+            .attr("transform", d => `translate(0, ${yName(d.task) + yName.step() / 2})`);
+
+        // Task labels
+        ridges.append("text")
+            .attr("x", -10)
+            .attr("y", 0)
+            .attr("dy", "0.35em")
+            .attr("text-anchor", "end")
+            .attr("font-size", "0.85rem")
+            .attr("font-weight", "600")
+            .attr("fill", "#444")
+            .text(d => d.task);
+
+        // Before Paths
+        const beforeArea = ridges.append("path")
+            .datum(d => d.densityBefore)
+            .attr("class", "before area")
+            .attr("d", area);
+
+        const beforeLine = ridges.append("path")
+            .datum(d => d.densityBefore)
+            .attr("class", "before line")
+            .attr("fill", "none")
+            .attr("d", line);
+
+        // After Paths
+        const afterArea = ridges.append("path")
+            .datum(d => d.densityAfter)
+            .attr("class", "after area")
+            .attr("d", area);
+
+        const afterLine = ridges.append("path")
+            .datum(d => d.densityAfter)
+            .attr("class", "after line")
+            .attr("fill", "none")
+            .attr("d", line);
+
+        // 6. Tooltips and Interactivity
+        const tooltip = d3.select("#tooltip");
+
+        ridges.on("mousemove", function(event, d) {
+            const [mx, my] = d3.pointer(event);
+            const score = Math.round(x.invert(mx));
+            
+            tooltip
+                .style("opacity", 1)
+                .style("left", (event.pageX + 15) + "px")
+                .style("top", (event.pageY - 28) + "px")
+                .html(`
+                    <strong>${d.task}</strong><br/>
+                    Before Median: ${d.medianBefore.toFixed(1)}<br/>
+                    After Median: ${d.medianAfter.toFixed(1)}<br/>
+                    Score at cursor: ~${score}
+                `);
+        }).on("mouseout", function() {
+            tooltip.style("opacity", 0);
+        });
+
+        // 7. Controls
+        d3.select("#btn-both").on("click", function() {
+            updateView("both", this);
+        });
+        d3.select("#btn-before").on("click", function() {
+            updateView("before", this);
+        });
+        d3.select("#btn-after").on("click", function() {
+            updateView("after", this);
+        });
+
+        function updateView(mode, btn) {
+            d3.selectAll("button").classed("active", false);
+            d3.select(btn).classed("active", true);
+
+            const duration = 750;
+
+            if (mode === "both") {
+                ridges.selectAll(".before").transition().duration(duration).style("opacity", 1);
+                ridges.selectAll(".after").transition().duration(duration).style("opacity", 1);
+            } else if (mode === "before") {
+                ridges.selectAll(".before").transition().duration(duration).style("opacity", 1);
+                ridges.selectAll(".after").transition().duration(duration).style("opacity", 0);
+            } else if (mode === "after") {
+                ridges.selectAll(".before").transition().duration(duration).style("opacity", 0);
+                ridges.selectAll(".after").transition().duration(duration).style("opacity", 1);
+            }
+        }
+
+    </script>
+</body>
+</html>

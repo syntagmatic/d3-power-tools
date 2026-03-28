@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGL Animated Treemap - 5000 Leaves</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #1a1a1a;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            color: #eee;
+        }
+        canvas {
+            display: block;
+        }
+        #controls {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        button {
+            background: #444;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: background 0.2s;
+        }
+        button:hover {
+            background: #666;
+        }
+        button.active {
+            background: #CC6677;
+        }
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 5;
+        }
+        #breadcrumb {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            font-size: 14px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 8px 12px;
+            border-radius: 4px;
+            border-left: 4px solid #CC6677;
+        }
+        #fps {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            font-family: monospace;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 4px 8px;
+            border-radius: 4px;
+            color: #00ff00;
+        }
+        .label {
+            fill: white;
+            font-size: 10px;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <button id="toggle-revenue" class="active">Revenue</button>
+        <button id="toggle-headcount">Headcount</button>
+        <span id="stat-label" style="font-size: 12px; opacity: 0.8;">Showing Revenue</span>
+    </div>
+    <div id="fps">FPS: 60</div>
+    <div id="breadcrumb">Hover over a cell to explore</div>
+    <canvas id="webgl-canvas"></canvas>
+    <svg id="overlay"></svg>
+
+    <script id="vs" type="x-shader/x-vertex">
+        #version 300 es
+        in vec2 a_quad;      // unit quad [0, 1]
+        in vec2 a_pos;       // top-left position [x0, y0]
+        in vec2 a_size;      // dimensions [w, h]
+        in vec4 a_color;     // rect color
+
+        uniform vec2 u_resolution;
+        
+        out vec4 v_color;
+        out vec2 v_uv;
+
+        void main() {
+            vec2 pixelPos = a_pos + a_quad * a_size;
+            vec2 clipPos = (pixelPos / u_resolution) * 2.0 - 1.0;
+            gl_Position = vec4(clipPos.x, -clipPos.y, 0.0, 1.0);
+            
+            v_color = a_color;
+            v_uv = a_quad;
+        }
+    </script>
+
+    <script id="fs" type="x-shader/x-vertex">
+        #version 300 es
+        precision highp float;
+        
+        in vec4 v_color;
+        in vec2 v_uv;
+        out vec4 fragColor;
+
+        void main() {
+            // Dark border (0.5px equivalent)
+            // We use a simple edge detection based on UV.
+            // Since we don't have the pixel size of the rect here easily,
+            // we'll assume a slight inset for the border.
+            float border = 0.02; 
+            float edge = step(border, v_uv.x) * step(border, v_uv.y) * 
+                         step(border, 1.0 - v_uv.x) * step(border, 1.0 - v_uv.y);
+            
+            vec4 borderColor = vec4(0.0, 0.0, 0.0, 0.4);
+            fragColor = mix(borderColor, v_color, edge);
+        }
+    </script>
+
+    <script>
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+        const dpr = window.devicePixelRatio || 1;
+
+        // Tol Muted Palette (8 colors)
+        const palette = ["#CC6677", "#332288", "#DDCC77", "#117733", "#88CCEE", "#882255", "#44AA99", "#999933"];
+
+        // 1. Data Generation
+        function generateData() {
+            const categories = d3.range(8).map(i => ({
+                name: `Category ${String.fromCharCode(65 + i)}`,
+                color: palette[i],
+                children: d3.range(2).map(j => ({
+                    name: `Sub ${i}-${j}`,
+                    children: []
+                }))
+            }));
+
+            let totalLeaves = 0;
+            categories.forEach(cat => {
+                cat.children.forEach(sub => {
+                    const leafCount = Math.floor(5000 / 16); // ~312 leaves per sub
+                    for (let k = 0; k < leafCount; k++) {
+                        sub.children.push({
+                            name: `Leaf ${totalLeaves++}`,
+                            revenue: 10000 + Math.random() * 4990000,
+                            headcount: 5 + Math.random() * 4995,
+                            catColor: cat.color,
+                            catName: cat.name,
+                            subName: sub.name
+                        });
+                    }
+                });
+            });
+
+            return { name: "Root", children: categories };
+        }
+
+        const data = generateData();
+        const root = d3.hierarchy(data);
+
+        // 2. Compute Layouts
+        const treemap = d3.treemap()
+            .size([width, height])
+            .paddingInner(0)
+            .tile(d3.treemapSquarify);
+
+        // Layout 1: Revenue
+        root.sum(d => d.revenue).sort((a, b) => b.value - a.value);
+        treemap(root);
+        const leaves = root.leaves();
+        const layout0 = leaves.map(d => ({ x0: d.x0, y0: d.y0, x1: d.x1, y1: d.y1 }));
+
+        // Layout 2: Headcount
+        // Use resquarify for stability if possible, but the prompt says squarify.
+        // We'll pre-calculate both.
+        root.sum(d => d.headcount).sort((a, b) => b.value - a.value);
+        treemap(root);
+        const layout1 = leaves.map(d => ({ x0: d.x0, y0: d.y0, x1: d.x1, y1: d.y1 }));
+
+        // 3. WebGL Initialization
+        const canvas = document.getElementById('webgl-canvas');
+        canvas.width = width * dpr;
+        canvas.height = height * dpr;
+        canvas.style.width = `${width}px`;
+        canvas.style.height = `${height}px`;
+
+        const gl = canvas.getContext('webgl2', { antialias: true });
+        if (!gl) alert("WebGL 2 not supported");
+
+        function createShader(gl, type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                console.error(gl.getShaderInfoLog(shader));
+                gl.deleteShader(shader);
+                return null;
+            }
+            return shader;
+        }
+
+        const vsSource = document.getElementById('vs').text.trim();
+        const fsSource = document.getElementById('fs').text.trim();
+        const vertexShader = createShader(gl, gl.VERTEX_SHADER, vsSource);
+        const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
+
+        const program = gl.createProgram();
+        gl.attachShader(program, vertexShader);
+        gl.attachShader(program, fragmentShader);
+        gl.linkProgram(program);
+        gl.useProgram(program);
+
+        const n = leaves.length;
+        const posData = new Float32Array(n * 2);
+        const sizeData = new Float32Array(n * 2);
+        const colorData = new Float32Array(n * 4);
+
+        // Initialize with Layout 0
+        leaves.forEach((d, i) => {
+            posData[i * 2] = layout0[i].x0;
+            posData[i * 2 + 1] = layout0[i].y0;
+            sizeData[i * 2] = layout0[i].x1 - layout0[i].x0;
+            sizeData[i * 2 + 1] = layout0[i].y1 - layout0[i].y0;
+            const c = d3.rgb(d.data.catColor);
+            colorData[i * 4] = c.r / 255;
+            colorData[i * 4 + 1] = c.g / 255;
+            colorData[i * 4 + 2] = c.b / 255;
+            colorData[i * 4 + 3] = 1.0;
+        });
+
+        const vao = gl.createVertexArray();
+        gl.bindVertexArray(vao);
+
+        // Unit quad
+        const quadBuf = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0,0, 1,0, 1,1, 0,0, 1,1, 0,1]), gl.STATIC_DRAW);
+        const quadLoc = gl.getAttribLocation(program, "a_quad");
+        gl.enableVertexAttribArray(quadLoc);
+        gl.vertexAttribPointer(quadLoc, 2, gl.FLOAT, false, 0, 0);
+
+        // Instance positions
+        const posBuf = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+        gl.bufferData(gl.ARRAY_BUFFER, posData, gl.DYNAMIC_DRAW);
+        const posLoc = gl.getAttribLocation(program, "a_pos");
+        gl.enableVertexAttribArray(posLoc);
+        gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+        gl.vertexAttribDivisor(posLoc, 1);
+
+        // Instance sizes
+        const sizeBuf = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, sizeBuf);
+        gl.bufferData(gl.ARRAY_BUFFER, sizeData, gl.DYNAMIC_DRAW);
+        const sizeLoc = gl.getAttribLocation(program, "a_size");
+        gl.enableVertexAttribArray(sizeLoc);
+        gl.vertexAttribPointer(sizeLoc, 2, gl.FLOAT, false, 0, 0);
+        gl.vertexAttribDivisor(sizeLoc, 1);
+
+        // Instance colors
+        const colorBuf = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, colorBuf);
+        gl.bufferData(gl.ARRAY_BUFFER, colorData, gl.STATIC_DRAW);
+        const colorLoc = gl.getAttribLocation(program, "a_color");
+        gl.enableVertexAttribArray(colorLoc);
+        gl.vertexAttribPointer(colorLoc, 4, gl.FLOAT, false, 0, 0);
+        gl.vertexAttribDivisor(colorLoc, 1);
+
+        const resLoc = gl.getUniformLocation(program, "u_resolution");
+        gl.uniform2f(resLoc, width, height);
+
+        gl.viewport(0, 0, canvas.width, canvas.height);
+        gl.clearColor(0.1, 0.1, 0.1, 1.0);
+
+        function draw() {
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, n);
+        }
+
+        // 4. Animation & Interaction
+        let currentTarget = 0; // 0 for Revenue, 1 for Headcount
+        let transitionProgress = 0;
+        let isTransitioning = false;
+        let startTime = 0;
+        const duration = 800;
+
+        const fpsEl = document.getElementById('fps');
+        let frameCount = 0;
+        let lastFpsUpdate = performance.now();
+
+        function updateFPS() {
+            frameCount++;
+            const now = performance.now();
+            if (now - lastFpsUpdate > 1000) {
+                fpsEl.textContent = `FPS: ${Math.round(frameCount * 1000 / (now - lastFpsUpdate))}`;
+                frameCount = 0;
+                lastFpsUpdate = now;
+            }
+        }
+
+        function animate(time) {
+            updateFPS();
+            if (isTransitioning) {
+                const elapsed = time - startTime;
+                const t = Math.min(1, elapsed / duration);
+                const easedT = d3.easeCubicInOut(t);
+
+                // Lerp in JS
+                const source = currentTarget === 1 ? layout0 : layout1;
+                const target = currentTarget === 1 ? layout1 : layout0;
+
+                for (let i = 0; i < n; i++) {
+                    const s = source[i];
+                    const g = target[i];
+                    posData[i * 2] = s.x0 + (g.x0 - s.x0) * easedT;
+                    posData[i * 2 + 1] = s.y0 + (g.y0 - s.y0) * easedT;
+                    sizeData[i * 2] = (s.x1 - s.x0) + ((g.x1 - g.x0) - (s.x1 - s.x0)) * easedT;
+                    sizeData[i * 2 + 1] = (s.y1 - s.y0) + ((g.y1 - g.y0) - (s.y1 - s.y0)) * easedT;
+                }
+
+                // bufferSubData
+                gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+                gl.bufferSubData(gl.ARRAY_BUFFER, 0, posData);
+                gl.bindBuffer(gl.ARRAY_BUFFER, sizeBuf);
+                gl.bufferSubData(gl.ARRAY_BUFFER, 0, sizeData);
+
+                if (t >= 1) {
+                    isTransitioning = false;
+                }
+            }
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        requestAnimationFrame(animate);
+
+        // UI Controls
+        const btnRev = document.getElementById('toggle-revenue');
+        const btnHead = document.getElementById('toggle-headcount');
+        const statLabel = document.getElementById('stat-label');
+
+        function toggle(target) {
+            if (currentTarget === target) return;
+            currentTarget = target;
+            isTransitioning = true;
+            startTime = performance.now();
+            
+            btnRev.classList.toggle('active', target === 0);
+            btnHead.classList.toggle('active', target === 1);
+            statLabel.textContent = `Showing ${target === 0 ? 'Revenue' : 'Headcount'}`;
+        }
+
+        btnRev.onclick = () => toggle(0);
+        btnHead.onclick = () => toggle(1);
+
+        // Hover Interaction
+        // Use a quadtree for fast lookups. We'll index by current position.
+        const breadcrumb = document.getElementById('breadcrumb');
+        const formatMoney = d3.format("$,.0f");
+        const formatCount = d3.format(",.0f");
+
+        d3.select(canvas).on("mousemove", (event) => {
+            const [mx, my] = d3.pointer(event);
+            
+            // Linear search for leaves since it's only 5000 and we have the exact rects
+            // In a real production app with 1M points, use a quadtree.
+            let found = null;
+            // Iterate in current visual state or target state? 
+            // Better to iterate through the data and check bounds.
+            for (let i = 0; i < n; i++) {
+                const x0 = posData[i * 2];
+                const y0 = posData[i * 2 + 1];
+                const w = sizeData[i * 2];
+                const h = sizeData[i * 2 + 1];
+                if (mx >= x0 && mx <= x0 + w && my >= y0 && my <= y0 + h) {
+                    found = leaves[i];
+                    break;
+                }
+            }
+
+            if (found) {
+                const d = found.data;
+                breadcrumb.innerHTML = `
+                    <div style="font-weight:bold; color:${d.catColor}">${d.catName} > ${d.subName}</div>
+                    <div>${d.name}: <b>${formatMoney(d.revenue)}</b> revenue | <b>${formatCount(d.headcount)}</b> headcount</div>
+                `;
+                breadcrumb.style.borderLeftColor = d.catColor;
+            } else {
+                breadcrumb.textContent = "Hover over a cell to explore";
+                breadcrumb.style.borderLeftColor = "#CC6677";
+            }
+        });
+
+    </script>
+</body>
+</html>

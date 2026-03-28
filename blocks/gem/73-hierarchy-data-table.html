@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hierarchy Data Table</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --tol-blue: #4477AA;
+            --hover-bg: #f5faff;
+            --stripe-bg: #fafafa;
+            --border-color: #eee;
+            --text-color: #333;
+            --muted-color: #888;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            font-size: 13px;
+            color: var(--text-color);
+            margin: 20px;
+            background: #fff;
+        }
+
+        .controls {
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        #search-input {
+            padding: 6px 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            width: 240px;
+            font-size: 13px;
+        }
+
+        .table-container {
+            max-height: 80vh;
+            overflow-y: auto;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            table-layout: fixed;
+        }
+
+        thead {
+            position: sticky;
+            top: 0;
+            background: #fff;
+            z-index: 10;
+            box-shadow: 0 1px 0 var(--border-color);
+        }
+
+        th {
+            text-align: left;
+            padding: 10px 12px;
+            font-weight: 600;
+            border-bottom: 2px solid var(--border-color);
+            cursor: pointer;
+            user-select: none;
+            white-space: nowrap;
+            background: #fff;
+        }
+
+        th:hover {
+            background: #f9f9f9;
+        }
+
+        th.num { text-align: right; }
+
+        th .sort-indicator {
+            display: inline-block;
+            width: 12px;
+            margin-left: 4px;
+            color: #aaa;
+        }
+
+        th[aria-sort="ascending"] .sort-indicator::after { content: "↑"; color: var(--text-color); }
+        th[aria-sort="descending"] .sort-indicator::after { content: "↓"; color: var(--text-color); }
+
+        tbody tr {
+            border-bottom: 1px solid var(--border-color);
+            transition: background 0.1s;
+        }
+
+        tbody tr:nth-child(even) { background-color: var(--stripe-bg); }
+        tbody tr:hover { background-color: var(--hover-bg); }
+
+        td {
+            padding: 0; /* Handled by internal div for animation */
+            overflow: hidden;
+            vertical-align: middle;
+        }
+
+        .cell-content {
+            padding: 8px 12px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            height: 16px;
+            line-height: 16px;
+        }
+
+        td.num .cell-content {
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .name-cell {
+            display: flex;
+            align-items: center;
+        }
+
+        .toggle-icon {
+            display: inline-block;
+            width: 16px;
+            margin-right: 4px;
+            cursor: pointer;
+            text-align: center;
+            color: #888;
+            font-size: 9px;
+        }
+
+        .folder-name { font-weight: bold; }
+
+        .spark-bar {
+            background: #eee;
+            height: 10px;
+            width: 60px;
+            display: inline-block;
+            vertical-align: middle;
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .spark-bar-fill {
+            background: var(--tol-blue);
+            height: 100%;
+        }
+
+        .donut-svg { vertical-align: middle; }
+    </style>
+</head>
+<body>
+
+    <div class="controls">
+        <input type="text" id="search-input" placeholder="Search files and folders...">
+        <div id="status-text" style="color: #666;"></div>
+    </div>
+
+    <div class="table-container">
+        <table id="hierarchy-table">
+            <thead>
+                <tr>
+                    <th data-key="name" style="width: 35%;">Name <span class="sort-indicator"></span></th>
+                    <th data-key="size" class="num" style="width: 15%;">Size <span class="sort-indicator"></span></th>
+                    <th data-key="proportion" style="width: 100px;">Proportion</th>
+                    <th data-key="share" style="width: 60px;">Share</th>
+                    <th data-key="files" class="num" style="width: 10%;">Files <span class="sort-indicator"></span></th>
+                    <th data-key="modified" style="width: 20%;">Modified <span class="sort-indicator"></span></th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <script>
+        // --- Data Generation ---
+        function generateData() {
+            const folders = ["Documents", "Photos", "Projects", "Library", "System", "Downloads"];
+            const subfolders = ["Drafts", "Archive", "2024", "2025", "Work", "Personal", "Backup", "Templates"];
+            const extensions = [".txt", ".pdf", ".jpg", ".png", ".js", ".html", ".css", ".md", ".json", ".zip"];
+            
+            let idCounter = 0;
+            
+            function createNode(name, type, depth) {
+                const node = {
+                    id: idCounter++,
+                    name: name,
+                    type: type,
+                    modified: new Date(Date.now() - Math.random() * 1e10)
+                };
+                
+                if (type === "folder") {
+                    node.children = [];
+                    const numChildren = depth === 0 ? 6 : (depth === 1 ? 4 + Math.floor(Math.random() * 5) : 0);
+                    if (depth < 2) {
+                        for (let i = 0; i < numChildren; i++) {
+                            const childName = depth === 0 ? folders[i] : subfolders[i % subfolders.length] + "_" + (i+1);
+                            node.children.push(createNode(childName, "folder", depth + 1));
+                        }
+                    }
+                    const numFiles = 3 + Math.floor(Math.random() * 8);
+                    for (let i = 0; i < numFiles; i++) {
+                        const fileName = "file_" + (i+1) + extensions[Math.floor(Math.random() * extensions.length)];
+                        node.children.push(createNode(fileName, "file", depth + 1));
+                    }
+                } else {
+                    node.size_bytes = 1024 + Math.floor(Math.random() * 500 * 1024 * 1024);
+                }
+                return node;
+            }
+            
+            const rawData = createNode("/", "folder", 0);
+            const root = d3.hierarchy(rawData);
+            root.eachAfter(d => {
+                if (d.data.type === "file") {
+                    d.value = d.data.size_bytes;
+                    d.fileCount = 0;
+                } else {
+                    d.value = d3.sum(d.children || [], c => c.value);
+                    d.fileCount = d3.sum(d.children || [], c => c.data.type === "file" ? 1 : c.fileCount);
+                }
+                d.data.size_bytes = d.value;
+                d.data.file_count = d.fileCount;
+            });
+            return root;
+        }
+
+        const root = generateData();
+        let sortKey = "name", sortOrder = "asc", searchQuery = "";
+        
+        root.each(d => { d.expanded = (d.depth === 0); });
+
+        const dateFormat = d3.timeFormat("%Y-%m-%d %H:%M");
+        function formatBytes(bytes) {
+            if (bytes === 0) return "0 B";
+            const k = 1024, sizes = ["B", "KB", "MB", "GB"], i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+        }
+
+        const tbody = d3.select("tbody");
+
+        function update() {
+            function sortRecursive(node) {
+                if (node.children) {
+                    node.children.sort((a, b) => {
+                        if (a.data.type !== b.data.type) return a.data.type === "folder" ? -1 : 1;
+                        let va, vb;
+                        if (sortKey === "name") { va = a.data.name.toLowerCase(); vb = b.data.name.toLowerCase(); }
+                        else if (sortKey === "size") { va = a.value; vb = b.value; }
+                        else if (sortKey === "files") { va = a.fileCount; vb = b.fileCount; }
+                        else if (sortKey === "modified") { va = a.data.modified; vb = b.data.modified; }
+                        const res = d3.ascending(va, vb);
+                        return sortOrder === "asc" ? res : -res;
+                    });
+                    node.children.forEach(sortRecursive);
+                }
+            }
+            sortRecursive(root);
+
+            if (searchQuery) {
+                const q = searchQuery.toLowerCase();
+                root.each(d => { d.match = d.data.name.toLowerCase().includes(q); d.forceOpen = false; });
+                root.each(d => { if (d.match) d.ancestors().forEach(a => { if (a !== d) { a.expanded = true; a.forceOpen = true; } }); });
+            }
+
+            let nodes = [];
+            function traverse(node) {
+                nodes.push(node);
+                if (node.expanded && node.children) {
+                    node.children.forEach(c => {
+                        if (!searchQuery || c.match || c.forceOpen || c.ancestors().some(a => a.match)) traverse(c);
+                        else if (c.descendants().some(d => d.match)) traverse(c);
+                    });
+                }
+            }
+            traverse(root);
+
+            const rows = tbody.selectAll("tr").data(nodes, d => d.data.id);
+
+            const rowsEnter = rows.enter().append("tr")
+                .style("opacity", 0)
+                .on("click", (e, d) => { if (d.data.type === "folder") { d.expanded = !d.expanded; update(); } });
+
+            rowsEnter.transition().duration(200).style("opacity", 1);
+            rows.exit().transition().duration(200).style("opacity", 0).remove();
+
+            const rowsCombined = rowsEnter.merge(rows);
+            rowsCombined.each(function(d) {
+                const tr = d3.select(this);
+                tr.selectAll("td").remove();
+
+                const nameTd = tr.append("td");
+                const nameCell = nameTd.append("div").attr("class", "cell-content name-cell")
+                    .style("padding-left", (d.depth * 20 + 12) + "px");
+                if (d.data.type === "folder") {
+                    nameCell.append("span").attr("class", "toggle-icon").text(d.expanded ? "▼" : "▶");
+                    nameCell.append("span").attr("class", "folder-name").text(d.data.name);
+                } else {
+                    nameCell.append("span").attr("class", "toggle-icon").style("opacity", 0).text("▶");
+                    nameCell.append("span").text(d.data.name);
+                }
+
+                tr.append("td").attr("class", "num").append("div").attr("class", "cell-content").text(formatBytes(d.value));
+
+                const propTd = tr.append("td");
+                const propDiv = propTd.append("div").attr("class", "cell-content");
+                const ratio = d.parent ? d.value / d.parent.value : 1;
+                propDiv.append("div").attr("class", "spark-bar").append("div").attr("class", "spark-bar-fill").style("width", (ratio * 100) + "%");
+
+                const shareTd = tr.append("td");
+                const shareDiv = shareTd.append("div").attr("class", "cell-content");
+                const svg = shareDiv.append("svg").attr("width", 16).attr("height", 16).attr("class", "donut-svg");
+                const arc = d3.arc().innerRadius(4).outerRadius(8).startAngle(0);
+                svg.append("path").attr("transform", "translate(8,8)").attr("d", d3.arc().innerRadius(4).outerRadius(8).startAngle(0).endAngle(2*Math.PI)).attr("fill", "#eee");
+                svg.append("path").attr("transform", "translate(8,8)").attr("d", arc.endAngle(ratio * 2 * Math.PI)).attr("fill", "var(--tol-blue)");
+
+                tr.append("td").attr("class", "num").append("div").attr("class", "cell-content").text(d.data.type === "folder" ? d.fileCount : "—");
+                tr.append("td").append("div").attr("class", "cell-content").text(dateFormat(d.data.modified));
+            });
+
+            d3.select("#status-text").text(`Showing ${nodes.length} items`);
+        }
+
+        d3.selectAll("th").on("click", function() {
+            const key = d3.select(this).attr("data-key");
+            if (!key || key === "proportion" || key === "share") return;
+            if (sortKey === key) sortOrder = sortOrder === "asc" ? "desc" : "asc";
+            else { sortKey = key; sortOrder = "asc"; }
+            d3.selectAll("th").attr("aria-sort", "none");
+            d3.select(this).attr("aria-sort", sortOrder === "asc" ? "ascending" : "descending");
+            update();
+        });
+
+        d3.select("#search-input").on("input", function() { searchQuery = this.value; update(); });
+
+        update();
+        d3.select('th[data-key="name"]').attr("aria-sort", "ascending");
+    </script>
+</body>
+</html>

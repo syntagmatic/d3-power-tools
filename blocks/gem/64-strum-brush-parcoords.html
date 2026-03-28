@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Strum Brush Parallel Coordinates</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      margin: 20px;
+      background: #fcfcfc;
+      color: #333;
+    }
+    #container {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+    }
+    .counter {
+      font-size: 14px;
+      font-weight: 500;
+    }
+    .legend {
+      display: flex;
+      gap: 15px;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 12px;
+    }
+    .legend-color {
+      width: 12px;
+      height: 12px;
+      border-radius: 2px;
+    }
+    #parcoords-container {
+      position: relative;
+      height: 350px;
+      border: 1px solid #eee;
+      background: white;
+    }
+    canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      pointer-events: none;
+    }
+    svg.parcoords-svg {
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+    .axis line, .axis path {
+      stroke: #ccc;
+    }
+    .axis text {
+      fill: #666;
+      font-size: 10px;
+      user-select: none;
+    }
+    .axis-label {
+      font-size: 11px;
+      font-weight: bold;
+      fill: #333;
+      text-anchor: middle;
+    }
+    .strum-line {
+      stroke: #EE6677; /* Tol Red */
+      stroke-width: 2px;
+      pointer-events: none;
+    }
+    .strum-handle {
+      fill: #EE6677;
+      cursor: move;
+    }
+    .strum-rect {
+      fill: rgba(238, 102, 119, 0.1);
+      cursor: pointer;
+    }
+    #bottom-row {
+      display: flex;
+      gap: 20px;
+      align-items: flex-start;
+    }
+    #scatterplot-container {
+      width: 400px;
+      height: 300px;
+      border: 1px solid #eee;
+      background: white;
+      position: relative;
+    }
+    .scatter-msg {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: #999;
+      font-style: italic;
+      text-align: center;
+      font-size: 14px;
+    }
+    .scatter-dot {
+      stroke-width: 0.5px;
+      stroke: #fff;
+    }
+  </style>
+</head>
+<body>
+
+<div id="container">
+  <div class="header">
+    <div class="counter" id="selection-counter">Selected 2,000 of 2,000 (100%)</div>
+    <div class="legend" id="legend"></div>
+  </div>
+
+  <div id="parcoords-container">
+    <canvas id="bg-canvas"></canvas>
+    <canvas id="fg-canvas"></canvas>
+    <svg class="parcoords-svg" id="parcoords-svg"></svg>
+  </div>
+
+  <div id="bottom-row">
+    <div id="scatterplot-container">
+      <div id="scatter-message" class="scatter-msg">Alt+Click-Drag between axes to create a strum brush</div>
+      <svg id="scatter-svg" width="400" height="300"></svg>
+    </div>
+    <div style="flex: 1; font-size: 13px; color: #666; line-height: 1.5;">
+      <strong>Strum Brushing:</strong><br>
+      Hold <strong>Alt</strong> and drag between two adjacent axes to define an angular selection line. 
+      Only data lines passing through the strum between those axes will be selected. 
+      Multiple strums perform an intersection (AND) selection. 
+      Click a strum line to remove it.
+    </div>
+  </div>
+</div>
+
+<script>
+  // CONFIG
+  const n = 2000;
+  const dims = ["efficiency", "cost", "weight", "reliability", "power", "speed", "emissions", "lifespan"];
+  const types = ["Utility", "Sport", "Luxury", "Cargo"];
+  const typeColors = ["#4477AA", "#EE6677", "#228833", "#CCBB44"]; // Tol bright
+  const margin = { top: 40, right: 40, bottom: 20, left: 40 };
+  const scatterMargin = { top: 20, right: 20, bottom: 40, left: 50 };
+
+  // DATA GENERATION
+  const data = Array.from({ length: n }, (_, i) => {
+    const tIdx = i % 4;
+    const d = { id: i, type: types[tIdx] };
+    const base = Math.random();
+    dims.forEach(dim => {
+      let val = Math.random();
+      // Realistic correlations
+      if (dim === "power" || dim === "speed") val = 0.4 * base + 0.6 * Math.random();
+      if (dim === "weight" || dim === "cost") val = 0.5 * base + 0.5 * Math.random();
+      if (dim === "efficiency" || dim === "emissions") val = 0.7 * (1 - base) + 0.3 * Math.random();
+      d[dim] = val * 100;
+    });
+    return d;
+  });
+
+  // SCALES
+  const width = document.getElementById('parcoords-container').clientWidth;
+  const height = 350;
+  const innerWidth = width - margin.left - margin.right;
+  const innerHeight = height - margin.top - margin.bottom;
+
+  const x = d3.scalePoint().domain(dims).range([0, innerWidth]);
+  const y = {};
+  dims.forEach(dim => {
+    y[dim] = d3.scaleLinear().domain([0, 100]).range([innerHeight, 0]);
+  });
+
+  const color = d3.scaleOrdinal().domain(types).range(typeColors);
+
+  // DOM ELEMENTS
+  const bgCtx = setupCanvas("bg-canvas");
+  const fgCtx = setupCanvas("fg-canvas");
+  const svg = d3.select("#parcoords-svg").attr("width", width).attr("height", height);
+  const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+  const scatterSvg = d3.select("#scatter-svg");
+  const scatterG = scatterSvg.append("g").attr("transform", `translate(${scatterMargin.left},${scatterMargin.top})`);
+  const scatterWidth = 400 - scatterMargin.left - scatterMargin.right;
+  const scatterHeight = 300 - scatterMargin.top - scatterMargin.bottom;
+
+  // STATE
+  let strums = []; // { id, x1, y1, x2, y2, dim1, dim2 }
+  let selected = data;
+  let activeStrum = null;
+
+  // INITIAL RENDER
+  renderLegend();
+  renderAxes();
+  renderCanvas(bgCtx, data, 0.04);
+  updateSelection();
+
+  // INTERACTION
+  let dragStart = null;
+  svg.on("mousedown", function(event) {
+    if (event.altKey) {
+      const [mx, my] = d3.pointer(event, g.node());
+      // Find which gap it's in
+      const dIdx = findGap(mx);
+      if (dIdx !== -1) {
+        dragStart = { x: mx, y: my, dim1: dims[dIdx], dim2: dims[dIdx+1] };
+        activeStrum = { 
+          id: Date.now(), 
+          x1: mx, y1: my, x2: mx, y2: my, 
+          dim1: dims[dIdx], dim2: dims[dIdx+1] 
+        };
+      }
+    }
+  });
+
+  svg.on("mousemove", function(event) {
+    if (dragStart) {
+      const [mx, my] = d3.pointer(event, g.node());
+      activeStrum.x2 = mx;
+      activeStrum.y2 = my;
+      renderStrums();
+      updateSelection();
+    }
+  });
+
+  svg.on("mouseup", function() {
+    if (dragStart) {
+      if (Math.hypot(activeStrum.x1 - activeStrum.x2, activeStrum.y1 - activeStrum.y2) > 5) {
+        strums.push(activeStrum);
+      }
+      dragStart = null;
+      renderStrums();
+      updateSelection();
+    }
+  });
+
+  function findGap(mx) {
+    for (let i = 0; i < dims.length - 1; i++) {
+      const x1 = x(dims[i]);
+      const x2 = x(dims[i+1]);
+      if (mx >= x1 && mx <= x2) return i;
+    }
+    return -1;
+  }
+
+  function setupCanvas(id) {
+    const canvas = document.getElementById(id);
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    canvas.style.width = width + "px";
+    canvas.style.height = height + "px";
+    const ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+    return ctx;
+  }
+
+  function renderLegend() {
+    const legend = d3.select("#legend");
+    types.forEach(t => {
+      const item = legend.append("div").attr("class", "legend-item");
+      item.append("div").attr("class", "legend-color").style("background", color(t));
+      item.append("span").text(t);
+    });
+  }
+
+  function renderAxes() {
+    dims.forEach(dim => {
+      const axisG = g.append("g")
+        .attr("class", "axis")
+        .attr("transform", `translate(${x(dim)},0)`)
+        .call(d3.axisLeft(y[dim]).ticks(5));
+      
+      axisG.append("text")
+        .attr("class", "axis-label")
+        .attr("y", -15)
+        .text(dim);
+    });
+  }
+
+  function renderCanvas(ctx, renderData, opacity) {
+    ctx.clearRect(0, 0, width, height);
+    ctx.lineWidth = 1;
+    ctx.lineJoin = "round";
+    
+    // Group by type for batched rendering
+    const grouped = d3.groups(renderData, d => d.type);
+    
+    ctx.save();
+    ctx.translate(margin.left, margin.top);
+    
+    grouped.forEach(([type, items]) => {
+      ctx.strokeStyle = color(type);
+      ctx.globalAlpha = opacity;
+      ctx.beginPath();
+      items.forEach(d => {
+        dims.forEach((dim, i) => {
+          const px = x(dim);
+          const py = y[dim](d[dim]);
+          if (i === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        });
+      });
+      ctx.stroke();
+    });
+    
+    ctx.restore();
+  }
+
+  function renderStrums() {
+    const strumGs = g.selectAll(".strum-g").data(strums, d => d.id);
+    
+    strumGs.exit().remove();
+    
+    const enter = strumGs.enter().append("g").attr("class", "strum-g");
+    
+    enter.append("line").attr("class", "strum-line");
+    enter.append("circle").attr("class", "strum-handle strum-h1").attr("r", 4);
+    enter.append("circle").attr("class", "strum-handle strum-h2").attr("r", 4);
+    enter.append("rect").attr("class", "strum-rect");
+
+    const all = enter.merge(strumGs);
+    
+    all.select(".strum-line")
+      .attr("x1", d => d.x1).attr("y1", d => d.y1)
+      .attr("x2", d => d.x2).attr("y2", d => d.y2);
+    
+    all.select(".strum-h1").attr("cx", d => d.x1).attr("cy", d => d.y1);
+    all.select(".strum-h2").attr("cx", d => d.x2).attr("cy", d => d.y2);
+    
+    all.select(".strum-rect")
+      .attr("x", d => Math.min(d.x1, d.x2) - 5)
+      .attr("y", d => Math.min(d.y1, d.y2) - 5)
+      .attr("width", d => Math.abs(d.x1 - d.x2) + 10)
+      .attr("height", d => Math.abs(d.y1 - d.y2) + 10)
+      .style("opacity", 0)
+      .on("click", (event, d) => {
+        strums = strums.filter(s => s.id !== d.id);
+        renderStrums();
+        updateSelection();
+      });
+
+    // Temp strum
+    g.selectAll(".temp-strum").remove();
+    if (dragStart && activeStrum) {
+      g.append("line")
+        .attr("class", "strum-line temp-strum")
+        .attr("x1", activeStrum.x1).attr("y1", activeStrum.y1)
+        .attr("x2", activeStrum.x2).attr("y2", activeStrum.y2);
+    }
+  }
+
+  function updateSelection() {
+    const activeStrums = activeStrum && dragStart ? [...strums, activeStrum] : strums;
+    
+    if (activeStrums.length === 0) {
+      selected = data;
+    } else {
+      selected = data.filter(d => {
+        // Must intersect ALL strums
+        return activeStrums.every(strum => {
+          const axX1 = x(strum.dim1);
+          const axX2 = x(strum.dim2);
+          const ya = y[strum.dim1](d[strum.dim1]);
+          const yb = y[strum.dim2](d[strum.dim2]);
+          return intersectsStrum(axX1, axX2, ya, yb, strum);
+        });
+      });
+    }
+
+    const pct = ((selected.length / n) * 100).toFixed(1);
+    document.getElementById("selection-counter").innerText = `Selected ${selected.length.toLocaleString()} of ${n.toLocaleString()} (${pct}%)`;
+
+    renderCanvas(fgCtx, selected, selected.length === n ? 0.04 : 1.0);
+    // If we have any strums, fade background even more
+    if (activeStrums.length > 0) {
+        renderCanvas(bgCtx, data, 0.02);
+    } else {
+        renderCanvas(bgCtx, data, 0.04);
+        fgCtx.clearRect(0,0,width,height);
+    }
+
+    updateScatterplot(activeStrums);
+  }
+
+  function intersectsStrum(axX1, axX2, ya, yb, strum) {
+    const cross = (ux, uy, vx, vy) => ux * vy - uy * vx;
+    const d1 = cross(strum.x2 - strum.x1, strum.y2 - strum.y1, axX1 - strum.x1, ya - strum.y1);
+    const d2 = cross(strum.x2 - strum.x1, strum.y2 - strum.y1, axX2 - strum.x1, yb - strum.y1);
+    const d3 = cross(axX2 - axX1, yb - ya, strum.x1 - axX1, strum.y1 - ya);
+    const d4 = cross(axX2 - axX1, yb - ya, strum.x2 - axX1, strum.y2 - ya);
+    return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+           ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+  }
+
+  function updateScatterplot(activeStrums) {
+    const msg = document.getElementById("scatter-message");
+    if (activeStrums.length === 0) {
+      msg.style.display = "block";
+      scatterG.selectAll("*").remove();
+      return;
+    }
+    msg.style.display = "none";
+
+    const last = activeStrums[activeStrums.length - 1];
+    const dimX = last.dim1;
+    const dimY = last.dim2;
+
+    const sx = d3.scaleLinear().domain([0, 100]).range([0, scatterWidth]);
+    const sy = d3.scaleLinear().domain([0, 100]).range([scatterHeight, 0]);
+
+    scatterG.selectAll(".axis").remove();
+    scatterG.append("g").attr("class", "axis").attr("transform", `translate(0,${scatterHeight})`).call(d3.axisBottom(sx).ticks(5));
+    scatterG.append("g").attr("class", "axis").call(d3.axisLeft(sy).ticks(5));
+    
+    scatterG.selectAll(".axis-label").remove();
+    scatterG.append("text").attr("class", "axis-label").attr("x", scatterWidth/2).attr("y", scatterHeight + 35).style("text-anchor", "middle").text(dimX);
+    scatterG.append("text").attr("class", "axis-label").attr("transform", "rotate(-90)").attr("x", -scatterHeight/2).attr("y", -35).style("text-anchor", "middle").text(dimY);
+
+    const dots = scatterG.selectAll(".scatter-dot").data(selected, d => d.id);
+    
+    dots.exit().remove();
+    
+    dots.enter().append("circle")
+      .attr("class", "scatter-dot")
+      .attr("r", 3)
+      .merge(dots)
+      .attr("cx", d => sx(d[dimX]))
+      .attr("cy", d => sy(d[dimY]))
+      .attr("fill", d => color(d.type));
+  }
+
+  window.addEventListener("resize", () => {
+    // Basic resize - ideally would recalculate everything
+  });
+
+</script>
+
+</body>
+</html>

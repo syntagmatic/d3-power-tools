@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>83-community-detection-table</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #ffffff;
+            --text-color: #1a1a1a;
+            --border-color: #e5e7eb;
+            --hover-color: #f3f4f6;
+            --header-bg: #f9fafb;
+            --highlight-bg: #fef9c3;
+        }
+
+        body {
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        #header {
+            padding: 1rem;
+            border-bottom: 1px solid var(--border-color);
+            background: var(--header-bg);
+            z-index: 10;
+        }
+
+        h1 { margin: 0; font-size: 1.25rem; }
+        #summary { font-size: 0.9rem; color: #6b7280; margin-top: 0.25rem; }
+
+        #container {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        #network-panel {
+            flex: 0 0 55%;
+            position: relative;
+            background: #fafafa;
+            border-right: 1px solid var(--border-color);
+        }
+
+        #table-panel {
+            flex: 0 0 45%;
+            overflow-y: auto;
+            position: relative;
+        }
+
+        svg { width: 100%; height: 100%; }
+
+        .hull { fill-opacity: 0.08; stroke-linejoin: round; pointer-events: none; transition: fill-opacity 0.2s; }
+        .node { stroke: #fff; stroke-width: 1.5px; cursor: pointer; transition: stroke-width 0.2s, stroke 0.2s; }
+        .link { stroke: #999; stroke-opacity: 0.3; }
+        .node:hover { stroke: #333; }
+
+        table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+        thead { position: sticky; top: 0; background: var(--header-bg); z-index: 5; box-shadow: 0 1px 0 var(--border-color); }
+        th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border-color); }
+        th { font-weight: 600; cursor: pointer; user-select: none; }
+        th:hover { background: var(--hover-color); }
+        
+        tr.group-header { background: #f3f4f6; cursor: pointer; font-weight: bold; }
+        tr.group-header:hover { background: #e5e7eb; }
+        tr.node-row:nth-child(even) { background: #f9fafb; }
+        tr.node-row:hover { background: var(--hover-color); }
+        tr.highlighted { background: var(--highlight-bg) !important; }
+
+        .comm-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+
+        .highlight-node { stroke: #000 !important; stroke-width: 3px !important; }
+        .active-hull { fill-opacity: 0.2 !important; }
+
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+    </style>
+</head>
+<body>
+
+<div id="header">
+    <h1>Community Detection & Network Explorer</h1>
+    <div id="summary">Calculating network metrics...</div>
+</div>
+
+<div id="container">
+    <div id="network-panel"></div>
+    <div id="table-panel">
+        <table id="data-table">
+            <thead>
+                <tr>
+                    <th data-sort="id">Name</th>
+                    <th data-sort="degree">Degree</th>
+                    <th data-sort="betweenness">Betweenness</th>
+                    <th data-sort="community">Community</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+(function() {
+    // 1. Data Generation
+    const communitySizes = [25, 22, 20, 18, 15];
+    const n = communitySizes.reduce((a, b) => a + b, 0);
+    const nodes = [];
+    const communityMap = [];
+    
+    communitySizes.forEach((size, c) => {
+        for (let i = 0; i < size; i++) {
+            const id = `Node_${c}_${i}`;
+            nodes.push({ id, community: c, degree: 0, betweenness: 0 });
+            communityMap.push(c);
+        }
+    });
+
+    const edges = [];
+    const m_target = 250;
+    const internalRatio = 0.75;
+    
+    // Generate ~250 edges
+    const possibleEdges = [];
+    for (let i = 0; i < n; i++) {
+        for (let j = i + 1; j < n; j++) {
+            const sameComm = nodes[i].community === nodes[j].community;
+            possibleEdges.push({ source: i, target: j, sameComm });
+        }
+    }
+
+    const internalEdges = possibleEdges.filter(d => d.sameComm);
+    const externalEdges = possibleEdges.filter(d => !d.sameComm);
+
+    d3.shuffle(internalEdges);
+    d3.shuffle(externalEdges);
+
+    const m_internal = Math.floor(m_target * internalRatio);
+    const m_external = m_target - m_internal;
+
+    const selectedEdges = [
+        ...internalEdges.slice(0, m_internal),
+        ...externalEdges.slice(0, m_external)
+    ].map(d => ({
+        source: nodes[d.source].id,
+        target: nodes[d.target].id,
+        sourceIdx: d.source,
+        targetIdx: d.target
+    }));
+
+    // 2. Compute Metrics
+    // Degree
+    const adj = Array.from({ length: n }, () => []);
+    selectedEdges.forEach(e => {
+        nodes[e.sourceIdx].degree++;
+        nodes[e.targetIdx].degree++;
+        adj[e.sourceIdx].push(e.targetIdx);
+        adj[e.targetIdx].push(e.sourceIdx);
+    });
+
+    // Approximate Betweenness (Brandes-lite from 20 sources)
+    const sources = d3.shuffle(d3.range(n)).slice(0, 20);
+    sources.forEach(s => {
+        const stack = [];
+        const pred = Array.from({ length: n }, () => []);
+        const dist = Array(n).fill(-1);
+        const count = Array(n).fill(0);
+        const delta = Array(n).fill(0);
+
+        dist[s] = 0;
+        count[s] = 1;
+        const queue = [s];
+
+        while (queue.length > 0) {
+            const v = queue.shift();
+            stack.push(v);
+            adj[v].forEach(w => {
+                if (dist[w] < 0) {
+                    dist[w] = dist[v] + 1;
+                    queue.push(w);
+                }
+                if (dist[w] === dist[v] + 1) {
+                    count[w] += count[v];
+                    pred[w].push(v);
+                }
+            });
+        }
+
+        while (stack.length > 0) {
+            const w = stack.pop();
+            pred[w].forEach(v => {
+                delta[v] += (count[v] / count[w]) * (1 + delta[w]);
+            });
+            if (w !== s) nodes[w].betweenness += delta[w];
+        }
+    });
+    // Normalize slightly for "approximate" feel
+    nodes.forEach(d => d.betweenness /= sources.length);
+
+    // Modularity Q
+    let Q = 0;
+    const m = selectedEdges.length;
+    nodes.forEach(nodeI => {
+        nodes.forEach(nodeJ => {
+            if (nodeI.community === nodeJ.community) {
+                const Aij = adj[nodes.indexOf(nodeI)].includes(nodes.indexOf(nodeJ)) ? 1 : 0;
+                Q += (Aij - (nodeI.degree * nodeJ.degree) / (2 * m));
+            }
+        });
+    });
+    Q /= (2 * m);
+
+    d3.select("#summary").text(`5 communities, ${n} nodes, ${m} edges. Modularity: ${Q.toFixed(3)}`);
+
+    // 3. Layout & Setup
+    const dispatch = d3.dispatch("highlightNode", "highlightCommunity", "clear");
+    const networkPanel = d3.select("#network-panel");
+    const width = networkPanel.node().clientWidth;
+    const height = networkPanel.node().clientHeight;
+
+    const svg = networkPanel.append("svg")
+        .attr("viewBox", [0, 0, width, height]);
+
+    const gHulls = svg.append("g").attr("class", "hulls-layer");
+    const gLinks = svg.append("g").attr("class", "links-layer");
+    const gNodes = svg.append("g").attr("class", "nodes-layer");
+
+    const color = (c) => `oklch(65% 0.15 ${c * 72 + 30})`;
+    const sizeScale = d3.scaleSqrt().domain([0, d3.max(nodes, d => d.degree)]).range([3, 10]);
+
+    // 4. Force Simulation
+    const simulation = d3.forceSimulation(nodes)
+        .force("link", d3.forceLink(selectedEdges).id(d => d.id).distance(d => d.source.community === d.target.community ? 30 : 80))
+        .force("charge", d3.forceManyBody().strength(-15))
+        .force("center", d3.forceCenter(width / 2, height / 2))
+        .force("collide", d3.forceCollide(6))
+        .on("tick", ticked);
+
+    const link = gLinks.selectAll("line")
+        .data(selectedEdges)
+        .join("line")
+        .attr("class", "link");
+
+    const node = gNodes.selectAll("circle")
+        .data(nodes)
+        .join("circle")
+        .attr("class", "node")
+        .attr("r", d => sizeScale(d.degree))
+        .attr("fill", d => color(d.community))
+        .on("click", (event, d) => {
+            event.stopPropagation();
+            dispatch.call("highlightNode", null, d.id, true);
+        })
+        .call(d3.drag()
+            .on("start", dragstarted)
+            .on("drag", dragged)
+            .on("end", dragended));
+
+    const hullData = Array.from({ length: 5 }, (_, i) => ({ community: i, points: [] }));
+    const hulls = gHulls.selectAll("path")
+        .data(hullData)
+        .join("path")
+        .attr("class", "hull")
+        .attr("fill", d => color(d.community));
+
+    function ticked() {
+        link
+            .attr("x1", d => d.source.x)
+            .attr("y1", d => d.source.y)
+            .attr("x2", d => d.target.x)
+            .attr("y2", d => d.target.y);
+
+        node
+            .attr("cx", d => d.x)
+            .attr("cy", d => d.y);
+
+        // Update hulls
+        hullData.forEach(h => {
+            const commNodes = nodes.filter(d => d.community === h.community);
+            h.points = commNodes.map(d => [d.x, d.y]);
+        });
+
+        hulls.attr("d", d => {
+            if (d.points.length < 3) return null;
+            const hull = d3.polygonHull(d.points);
+            return hull ? `M${hull.join("L")}Z` : null;
+        });
+    }
+
+    svg.on("click", () => dispatch.call("clear"));
+
+    // 5. Table Implementation
+    let sortConfig = { key: 'community', direction: 'asc' };
+    
+    function renderTable() {
+        const tbody = d3.select("#data-table tbody");
+        tbody.selectAll("*").remove();
+
+        const grouped = d3.groups(nodes, d => d.community);
+        
+        grouped.sort((a, b) => d3.ascending(a[0], b[0]));
+
+        grouped.forEach(([commId, commNodes]) => {
+            // Sort within group
+            commNodes.sort((a, b) => {
+                const aVal = a[sortConfig.key];
+                const bVal = b[sortConfig.key];
+                const modifier = sortConfig.direction === 'asc' ? 1 : -1;
+                if (typeof aVal === 'string') return modifier * aVal.localeCompare(bVal);
+                return modifier * (aVal - bVal);
+            });
+
+            const headerRow = tbody.append("tr")
+                .attr("class", "group-header")
+                .on("click", (e) => {
+                    e.stopPropagation();
+                    dispatch.call("highlightCommunity", null, commId);
+                });
+            
+            headerRow.append("td")
+                .attr("colspan", 4)
+                .text(`Community ${commId} (${commNodes.length} nodes)`);
+
+            commNodes.forEach(n => {
+                const row = tbody.append("tr")
+                    .attr("class", "node-row")
+                    .attr("id", `row-${n.id.replace(/_/g, '-')}`)
+                    .on("click", (e) => {
+                        e.stopPropagation();
+                        dispatch.call("highlightNode", null, n.id, false);
+                    });
+
+                row.append("td").text(n.id);
+                row.append("td").text(n.degree);
+                row.append("td").text(n.betweenness.toFixed(3));
+                row.append("td").html(`<span class="comm-dot" style="background:${color(n.community)}"></span>Comm ${n.community}`);
+            });
+        });
+    }
+
+    d3.selectAll("th[data-sort]").on("click", function() {
+        const key = d3.select(this).attr("data-sort");
+        if (sortConfig.key === key) {
+            sortConfig.direction = sortConfig.direction === 'asc' ? 'desc' : 'asc';
+        } else {
+            sortConfig.key = key;
+            sortConfig.direction = 'asc';
+        }
+        renderTable();
+    });
+
+    renderTable();
+
+    // 6. Linked Interactions
+    dispatch.on("highlightNode", (nodeId, fromTable) => {
+        // Clear previous
+        node.classed("highlight-node", false).attr("r", d => sizeScale(d.degree));
+        d3.selectAll(".node-row").classed("highlighted", false);
+        hulls.classed("active-hull", false);
+
+        // Highlight node
+        const target = node.filter(d => d.id === nodeId);
+        target.classed("highlight-node", true).attr("r", d => sizeScale(d.degree) * 1.5);
+        
+        // Highlight row
+        const rowId = `row-${nodeId.replace(/_/g, '-')}`;
+        const row = d3.select(`#${rowId}`);
+        row.classed("highlighted", true);
+
+        if (fromTable) {
+            const rowNode = row.node();
+            if (rowNode) rowNode.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+    });
+
+    dispatch.on("highlightCommunity", (commId) => {
+        // Clear previous
+        node.classed("highlight-node", false).attr("r", d => sizeScale(d.degree));
+        d3.selectAll(".node-row").classed("highlighted", false);
+        hulls.classed("active-hull", false);
+
+        // Highlight hull
+        hulls.filter(d => d.community === commId).classed("active-hull", true);
+
+        // Highlight nodes
+        node.filter(d => d.community === commId)
+            .classed("highlight-node", true);
+
+        // Highlight rows
+        d3.selectAll(".node-row").filter(function() {
+            const d = d3.select(this).datum();
+            // Since we re-render table, we don't have easy access to data on rows 
+            // unless we bind it. Let's fix that in renderTable.
+        });
+        // Actually simpler:
+        const communityNodes = nodes.filter(d => d.community === commId);
+        communityNodes.forEach(n => {
+            const rowId = `row-${n.id.replace(/_/g, '-')}`;
+            d3.select(`#${rowId}`).classed("highlighted", true);
+        });
+    });
+
+    dispatch.on("clear", () => {
+        node.classed("highlight-node", false).attr("r", d => sizeScale(d.degree));
+        d3.selectAll(".node-row").classed("highlighted", false);
+        hulls.classed("active-hull", false);
+    });
+
+    // Drag functions
+    function dragstarted(event) {
+        if (!event.active) simulation.alphaTarget(0.3).restart();
+        event.subject.fx = event.subject.x;
+        event.subject.fy = event.subject.y;
+    }
+
+    function dragged(event) {
+        event.subject.fx = event.x;
+        event.subject.fy = event.y;
+    }
+
+    function dragended(event) {
+        if (!event.active) simulation.alphaTarget(0);
+        event.subject.fx = null;
+        event.subject.fy = null;
+    }
+
+})();
+</script>
+</body>
+</html>

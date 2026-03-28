@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Temperature Distribution: City Orchestra</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #fcfcfc;
+            color: #333;
+            display: flex;
+            justify-content: center;
+        }
+        #chart-container {
+            width: 100%;
+            max-width: 1200px;
+            margin: 20px;
+        }
+        .city-label {
+            font-weight: 600;
+            font-size: 14px;
+            fill: #555;
+        }
+        .month-label {
+            font-size: 13px;
+            fill: #777;
+            text-anchor: middle;
+        }
+        .temp-label {
+            font-size: 11px;
+            fill: #999;
+        }
+        .axis-line {
+            stroke: #eee;
+            stroke-width: 1;
+        }
+        .legend-text {
+            font-size: 12px;
+            fill: #666;
+        }
+    </style>
+</head>
+<body>
+    <div id="chart-container">
+        <div id="legend"></div>
+        <div id="vis"></div>
+    </div>
+
+    <script>
+        const config = {
+            width: 1200,
+            height: 800,
+            margin: { top: 60, right: 20, bottom: 40, left: 80 },
+            cellPadding: 10,
+            bandwidth: 2.2,
+            tempDomain: [0, 120],
+            colors: {
+                "2010s": "#4477AA",
+                "2020s": "#EE6677"
+            }
+        };
+
+        const cities = [
+            { name: "Oslo", base: 45, amplitude: 22 },
+            { name: "London", base: 55, amplitude: 16 },
+            { name: "Rome", base: 65, amplitude: 18 },
+            { name: "Cairo", base: 78, amplitude: 16 },
+            { name: "Mumbai", base: 82, amplitude: 6 },
+            { name: "Singapore", base: 84, amplitude: 2 }
+        ];
+
+        const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+        // Data generation
+        function generateData() {
+            const data = [];
+            const random = d3.randomNormal.source(d3.randomLcg(42));
+            
+            cities.forEach(city => {
+                months.forEach((month, mIndex) => {
+                    // Peak in July (index 6)
+                    const seasonalShift = Math.sin((mIndex - 3) / 12 * 2 * Math.PI) * city.amplitude;
+                    const mean2010s = city.base + seasonalShift;
+                    const mean2020s = mean2010s + 3.5; // Significant warming for visualization
+                    
+                    const vals2010s = Array.from({length: 32}, () => random(mean2010s, 5.5)());
+                    const vals2020s = Array.from({length: 32}, () => random(mean2020s, 5.5)());
+                    
+                    data.push({ city: city.name, month, decade: "2010s", values: vals2010s });
+                    data.push({ city: city.name, month, decade: "2020s", values: vals2020s });
+                });
+            });
+            return data;
+        }
+
+        const rawData = generateData();
+
+        // KDE logic
+        function kernelEpanechnikov(k) {
+            return v => Math.abs(v /= k) <= 1 ? 0.75 * (1 - v * v) / k : 0;
+        }
+
+        function kernelDensityEstimator(kernel, x) {
+            return function(sample) {
+                return x.map(function(v) {
+                    return [v, d3.mean(sample, function(d) { return kernel(v - d); })];
+                });
+            };
+        }
+
+        const xTicks = d3.ticks(config.tempDomain[0], config.tempDomain[1], 80);
+        const kde = kernelDensityEstimator(kernelEpanechnikov(config.bandwidth), xTicks);
+
+        const processedData = rawData.map(d => ({
+            ...d,
+            density: kde(d.values)
+        }));
+
+        // Layout calculations
+        const innerWidth = config.width - config.margin.left - config.margin.right;
+        const innerHeight = config.height - config.margin.top - config.margin.bottom;
+        
+        const xStep = innerWidth / 12;
+        const yStep = innerHeight / 6;
+
+        const yScale = d3.scaleLinear()
+            .domain(config.tempDomain)
+            .range([yStep - config.cellPadding, config.cellPadding]);
+
+        // Find max density for shared horizontal scale
+        const maxDensity = d3.max(processedData, d => d3.max(d.density, p => p[1]));
+        const densityScale = d3.scaleLinear()
+            .domain([0, maxDensity])
+            .range([0, xStep / 2 - 4]);
+
+        const svg = d3.select("#vis")
+            .append("svg")
+            .attr("viewBox", `0 0 ${config.width} ${config.height}`)
+            .style("width", "100%")
+            .style("height", "auto");
+
+        const g = svg.append("g")
+            .attr("transform", `translate(${config.margin.left},${config.margin.top})`);
+
+        // Legend
+        const legend = svg.append("g")
+            .attr("transform", `translate(${config.width / 2 - 60}, 30)`);
+
+        ["2010s", "2020s"].forEach((d, i) => {
+            const lg = legend.append("g")
+                .attr("transform", `translate(${i * 80}, 0)`);
+            lg.append("rect")
+                .attr("width", 12)
+                .attr("height", 12)
+                .attr("rx", 2)
+                .attr("fill", config.colors[d]);
+            lg.append("text")
+                .attr("x", 18)
+                .attr("y", 10)
+                .attr("class", "legend-text")
+                .text(d);
+        });
+
+        // Column Labels (Months)
+        g.selectAll(".month-label")
+            .data(months)
+            .enter()
+            .append("text")
+            .attr("class", "month-label")
+            .attr("x", (d, i) => i * xStep + xStep / 2)
+            .attr("y", -15)
+            .text(d => d);
+
+        // Grid lines and City Labels
+        cities.forEach((city, i) => {
+            const row = g.append("g")
+                .attr("transform", `translate(0, ${i * yStep})`);
+
+            row.append("text")
+                .attr("class", "city-label")
+                .attr("x", -70)
+                .attr("y", yStep / 2 + 5)
+                .text(city.name);
+
+            row.append("line")
+                .attr("class", "axis-line")
+                .attr("x1", 0)
+                .attr("y1", yStep)
+                .attr("x2", innerWidth)
+                .attr("y2", yStep);
+        });
+
+        // Far left temperature axis
+        const tempAxis = d3.axisLeft(yScale)
+            .ticks(5)
+            .tickSize(-innerWidth)
+            .tickFormat(d => d + "°F");
+
+        const axisG = g.append("g")
+            .attr("class", "temp-axis")
+            .call(tempAxis);
+
+        axisG.selectAll(".tick line").attr("stroke", "#f0f0f0");
+        axisG.selectAll(".tick text").attr("class", "temp-label").attr("dx", -5);
+        axisG.select(".domain").remove();
+
+        // Render Violins
+        const areaLeft = d3.area()
+            .x0(0)
+            .x1(d => -densityScale(d[1]))
+            .y(d => yScale(d[0]))
+            .curve(d3.curveBasis);
+
+        const areaRight = d3.area()
+            .x0(0)
+            .x1(d => densityScale(d[1]))
+            .y(d => yScale(d[0]))
+            .curve(d3.curveBasis);
+
+        const cellGroup = g.selectAll(".cell")
+            .data(d3.group(processedData, d => d.city, d => d.month))
+            .enter()
+            .append("g")
+            .attr("transform", (d, i) => `translate(0, ${i * yStep})`);
+
+        cities.forEach((city, cityIdx) => {
+            months.forEach((month, monthIdx) => {
+                const cell = g.append("g")
+                    .attr("transform", `translate(${monthIdx * xStep + xStep / 2}, ${cityIdx * yStep})`);
+
+                const decade2010s = processedData.find(d => d.city === city.name && d.month === month && d.decade === "2010s");
+                const decade2020s = processedData.find(d => d.city === city.name && d.month === month && d.decade === "2020s");
+
+                cell.append("path")
+                    .datum(decade2010s.density)
+                    .attr("d", areaLeft)
+                    .attr("fill", config.colors["2010s"])
+                    .attr("fill-opacity", 0.85);
+
+                cell.append("path")
+                    .datum(decade2020s.density)
+                    .attr("d", areaRight)
+                    .attr("fill", config.colors["2020s"])
+                    .attr("fill-opacity", 0.85);
+            });
+        });
+
+    </script>
+</body>
+</html>

@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Nutrient Treemap Explorer</title>
+    <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+    <style>
+        :root {
+            --bg: #fdfdfd;
+            --text: #2c3e50;
+            --muted: #7f8c8d;
+            --border: #ecf0f1;
+            --accent: #3498db;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+        header {
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 12px;
+        }
+        h1 {
+            font-size: 24px;
+            margin: 0 0 4px 0;
+            font-weight: 700;
+        }
+        .description {
+            font-size: 14px;
+            color: var(--muted);
+            margin: 0;
+        }
+        .controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 13px;
+        }
+        .breadcrumb {
+            color: var(--muted);
+        }
+        .breadcrumb span {
+            cursor: pointer;
+            color: var(--accent);
+            font-weight: 500;
+        }
+        .breadcrumb span:hover {
+            text-decoration: underline;
+        }
+        .viz-container {
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+        #treemap-container {
+            width: 100%;
+            height: 400px;
+            position: relative;
+            background: #fff;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        }
+        #parcoords-container {
+            width: 100%;
+            height: 300px;
+            position: relative;
+            background: #fff;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        }
+        .treemap-node rect {
+            stroke: #fff;
+            stroke-width: 1px;
+            transition: opacity 0.3s;
+        }
+        .treemap-node text {
+            font-size: 11px;
+            font-weight: 600;
+            fill: #fff;
+            text-shadow: 0 1px 2px rgba(0,0,0,0.4);
+            pointer-events: none;
+        }
+        .parcoords-axis path,
+        .parcoords-axis line {
+            fill: none;
+            stroke: #ccc;
+            shape-rendering: crispEdges;
+        }
+        .parcoords-axis text {
+            font-size: 10px;
+            fill: #666;
+        }
+        .axis-label {
+            font-size: 11px;
+            font-weight: 700;
+            fill: #333;
+            text-anchor: middle;
+        }
+        .tooltip {
+            position: absolute;
+            pointer-events: none;
+            background: rgba(255, 255, 255, 0.95);
+            border: 1px solid #ddd;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            opacity: 0;
+            z-index: 1000;
+            transition: opacity 0.2s;
+        }
+        .tooltip strong {
+            display: block;
+            margin-bottom: 4px;
+            font-size: 14px;
+        }
+        .nutrient-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 4px 12px;
+        }
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+        }
+        svg {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+        .dimmed {
+            opacity: 0.15 !important;
+        }
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>Nutrient Treemap Explorer</h1>
+    <p class="description">Food groups and individual foods sized by calories. Click to zoom, brush axes to filter.</p>
+</header>
+
+<div class="controls">
+    <div class="breadcrumb" id="breadcrumb">
+        <span id="root-crumb">All Foods</span>
+    </div>
+    <div id="stats" style="color: var(--muted);">Showing 54 items</div>
+</div>
+
+<div class="viz-container">
+    <div id="treemap-container"></div>
+    <div id="parcoords-container">
+        <canvas id="pc-canvas-bg"></canvas>
+        <canvas id="pc-canvas-fg"></canvas>
+        <svg id="pc-svg"></svg>
+    </div>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+/**
+ * DATA DEFINITION
+ */
+const foods = [
+  {name:"Apple",group:"Fruits",calories:52,protein:0.3,fat:0.2,carbs:14,fiber:2.4,sugar:10},
+  {name:"Banana",group:"Fruits",calories:89,protein:1.1,fat:0.3,carbs:23,fiber:2.6,sugar:12},
+  {name:"Orange",group:"Fruits",calories:47,protein:0.9,fat:0.1,carbs:12,fiber:2.4,sugar:9},
+  {name:"Strawberry",group:"Fruits",calories:32,protein:0.7,fat:0.3,carbs:8,fiber:2,sugar:5},
+  {name:"Avocado",group:"Fruits",calories:160,protein:2,fat:15,carbs:9,fiber:7,sugar:0.7},
+  {name:"Mango",group:"Fruits",calories:60,protein:0.8,fat:0.4,carbs:15,fiber:1.6,sugar:14},
+  {name:"Grapes",group:"Fruits",calories:69,protein:0.7,fat:0.2,carbs:18,fiber:0.9,sugar:16},
+  {name:"Blueberry",group:"Fruits",calories:57,protein:0.7,fat:0.3,carbs:14,fiber:2.4,sugar:10},
+  {name:"Broccoli",group:"Vegetables",calories:34,protein:2.8,fat:0.4,carbs:7,fiber:2.6,sugar:1.7},
+  {name:"Spinach",group:"Vegetables",calories:23,protein:2.9,fat:0.4,carbs:3.6,fiber:2.2,sugar:0.4},
+  {name:"Carrot",group:"Vegetables",calories:41,protein:0.9,fat:0.2,carbs:10,fiber:2.8,sugar:5},
+  {name:"Potato",group:"Vegetables",calories:77,protein:2,fat:0.1,carbs:17,fiber:2.2,sugar:0.8},
+  {name:"Kale",group:"Vegetables",calories:49,protein:4.3,fat:0.9,carbs:9,fiber:3.6,sugar:2.3},
+  {name:"Tomato",group:"Vegetables",calories:18,protein:0.9,fat:0.2,carbs:3.9,fiber:1.2,sugar:2.6},
+  {name:"Bell Pepper",group:"Vegetables",calories:31,protein:1,fat:0.3,carbs:6,fiber:2.1,sugar:4.2},
+  {name:"Sweet Potato",group:"Vegetables",calories:86,protein:1.6,fat:0.1,carbs:20,fiber:3,sugar:4.2},
+  {name:"Rice",group:"Grains",calories:130,protein:2.7,fat:0.3,carbs:28,fiber:0.4,sugar:0.1},
+  {name:"Wheat Bread",group:"Grains",calories:265,protein:9,fat:3.2,carbs:49,fiber:2.7,sugar:5},
+  {name:"Oats",group:"Grains",calories:389,protein:17,fat:7,carbs:66,fiber:11,sugar:1},
+  {name:"Quinoa",group:"Grains",calories:120,protein:4.4,fat:1.9,carbs:21,fiber:2.8,sugar:0.9},
+  {name:"Pasta",group:"Grains",calories:131,protein:5,fat:1.1,carbs:25,fiber:1.8,sugar:0.6},
+  {name:"Corn",group:"Grains",calories:86,protein:3.3,fat:1.4,carbs:19,fiber:2.7,sugar:3.2},
+  {name:"Barley",group:"Grains",calories:123,protein:2.3,fat:0.4,carbs:28,fiber:3.8,sugar:0.3},
+  {name:"Chicken",group:"Proteins",calories:165,protein:31,fat:3.6,carbs:0,fiber:0,sugar:0},
+  {name:"Beef",group:"Proteins",calories:250,protein:26,fat:15,carbs:0,fiber:0,sugar:0},
+  {name:"Salmon",group:"Proteins",calories:208,protein:20,fat:13,carbs:0,fiber:0,sugar:0},
+  {name:"Tofu",group:"Proteins",calories:76,protein:8,fat:4.8,carbs:1.9,fiber:0.3,sugar:0.6},
+  {name:"Eggs",group:"Proteins",calories:155,protein:13,fat:11,carbs:1.1,fiber:0,sugar:1.1},
+  {name:"Lentils",group:"Proteins",calories:116,protein:9,fat:0.4,carbs:20,fiber:8,sugar:1.8},
+  {name:"Shrimp",group:"Proteins",calories:99,protein:24,fat:0.3,carbs:0.2,fiber:0,sugar:0},
+  {name:"Milk",group:"Dairy",calories:42,protein:3.4,fat:1,carbs:5,fiber:0,sugar:5},
+  {name:"Cheese",group:"Dairy",calories:402,protein:25,fat:33,carbs:1.3,fiber:0,sugar:0.5},
+  {name:"Yogurt",group:"Dairy",calories:59,protein:10,fat:0.7,carbs:3.6,fiber:0,sugar:3.2},
+  {name:"Butter",group:"Dairy",calories:717,protein:0.9,fat:81,carbs:0.1,fiber:0,sugar:0.1},
+  {name:"Cream",group:"Dairy",calories:340,protein:2.1,fat:36,carbs:2.8,fiber:0,sugar:2.8},
+  {name:"Cottage Cheese",group:"Dairy",calories:98,protein:11,fat:4.3,carbs:3.4,fiber:0,sugar:2.7},
+  {name:"Almonds",group:"Nuts & Seeds",calories:579,protein:21,fat:50,carbs:22,fiber:12,sugar:4},
+  {name:"Walnuts",group:"Nuts & Seeds",calories:654,protein:15,fat:65,carbs:14,fiber:7,sugar:2.6},
+  {name:"Peanuts",group:"Nuts & Seeds",calories:567,protein:26,fat:49,carbs:16,fiber:9,sugar:4},
+  {name:"Chia Seeds",group:"Nuts & Seeds",calories:486,protein:17,fat:31,carbs:42,fiber:34,sugar:0},
+  {name:"Cashews",group:"Nuts & Seeds",calories:553,protein:18,fat:44,carbs:30,fiber:3.3,sugar:6},
+  {name:"Sunflower Seeds",group:"Nuts & Seeds",calories:584,protein:21,fat:51,carbs:20,fiber:9,sugar:2.6},
+  {name:"Black Beans",group:"Legumes",calories:132,protein:9,fat:0.5,carbs:24,fiber:8.7,sugar:0.3},
+  {name:"Chickpeas",group:"Legumes",calories:164,protein:9,fat:2.6,carbs:27,fiber:8,sugar:4.8},
+  {name:"Kidney Beans",group:"Legumes",calories:127,protein:9,fat:0.5,carbs:22,fiber:6.4,sugar:2},
+  {name:"Soybeans",group:"Legumes",calories:173,protein:17,fat:9,carbs:10,fiber:6,sugar:3},
+  {name:"Green Peas",group:"Legumes",calories:81,protein:5,fat:0.4,carbs:14,fiber:5,sugar:6},
+  {name:"Lima Beans",group:"Legumes",calories:115,protein:8,fat:0.4,carbs:21,fiber:7,sugar:3},
+  {name:"Olive Oil",group:"Oils & Fats",calories:884,protein:0,fat:100,carbs:0,fiber:0,sugar:0},
+  {name:"Coconut Oil",group:"Oils & Fats",calories:862,protein:0,fat:100,carbs:0,fiber:0,sugar:0},
+  {name:"Avocado Oil",group:"Oils & Fats",calories:884,protein:0,fat:100,carbs:0,fiber:0,sugar:0},
+  {name:"Ghee",group:"Oils & Fats",calories:900,protein:0,fat:100,carbs:0,fiber:0,sugar:0},
+  {name:"Flaxseed Oil",group:"Oils & Fats",calories:884,protein:0,fat:100,carbs:0,fiber:0,sugar:0},
+];
+
+const groupColors = {
+  "Fruits":"#88ccee","Vegetables":"#44aa99","Grains":"#ddcc77","Proteins":"#cc6677",
+  "Dairy":"#aa4499","Nuts & Seeds":"#882255","Legumes":"#332288","Oils & Fats":"#999933"
+};
+
+const dimensions = ["calories", "protein", "fat", "carbs", "fiber", "sugar"];
+const dimLabels = {
+    calories: "Calories",
+    protein: "Protein (g)",
+    fat: "Fat (g)",
+    carbs: "Carbs (g)",
+    fiber: "Fiber (g)",
+    sugar: "Sugar (g)"
+};
+
+/**
+ * STATE MANAGEMENT
+ */
+let currentFocus = null; // Node to focus on
+let selectedIds = new Set(); // IDs (names) highlighted by PC brush
+let hoveredId = null; // ID (name) currently hovered
+
+// Build Hierarchy
+const dataHierarchy = d3.hierarchy({
+    name: "root",
+    children: Array.from(d3.group(foods, d => d.group), ([key, value]) => ({
+        name: key,
+        children: value.map(d => ({ ...d, value: d.calories }))
+    }))
+})
+.sum(d => d.value)
+.sort((a, b) => b.value - a.value);
+
+/**
+ * VIZ PARAMETERS
+ */
+const width = document.getElementById('treemap-container').clientWidth;
+const tmHeight = 400;
+const pcHeight = 300;
+const margin = { top: 40, right: 40, bottom: 40, left: 40 };
+
+/**
+ * TREEMAP IMPLEMENTATION
+ */
+const tmContainer = d3.select("#treemap-container");
+const tmSvg = tmContainer.append("svg")
+    .attr("width", width)
+    .attr("height", tmHeight);
+
+const tmX = d3.scaleLinear().rangeRound([0, width]);
+const tmY = d3.scaleLinear().rangeRound([0, tmHeight]);
+
+const treemap = d3.treemap()
+    .size([width, tmHeight])
+    .paddingInner(1)
+    .paddingOuter(d => d.depth === 1 ? 4 : 0)
+    .round(true);
+
+treemap(dataHierarchy);
+
+let currentRoot = dataHierarchy;
+
+function renderTreemap() {
+    const nodes = tmSvg.selectAll(".treemap-node")
+        .data(dataHierarchy.descendants(), d => d.data.name + d.depth);
+
+    const nodesEnter = nodes.enter().append("g")
+        .attr("class", "treemap-node")
+        .attr("transform", d => `translate(${tmX(d.x0)},${tmY(d.y0)})`);
+
+    nodesEnter.append("rect")
+        .attr("width", d => tmX(d.x1) - tmX(d.x0))
+        .attr("height", d => tmY(d.y1) - tmY(d.y0))
+        .attr("fill", d => {
+            if (d.depth === 0) return "none";
+            if (d.depth === 1) return groupColors[d.data.name];
+            return groupColors[d.parent.data.name];
+        })
+        .style("cursor", d => d.depth === 1 ? "zoom-in" : "default")
+        .on("click", (e, d) => {
+            if (d.depth === 1) zoom(d);
+            else if (d.depth === 0) zoom(dataHierarchy);
+        })
+        .on("mouseenter", (e, d) => {
+            if (d.depth === 2) {
+                hoveredId = d.data.name;
+                showTooltip(e, d.data);
+                updatePC();
+            }
+        })
+        .on("mousemove", (e) => {
+            moveTooltip(e);
+        })
+        .on("mouseleave", () => {
+            hoveredId = null;
+            hideTooltip();
+            updatePC();
+        });
+
+    nodesEnter.append("text")
+        .attr("x", 4)
+        .attr("y", 14)
+        .text(d => d.depth === 1 || (d.depth === 2 && (d.x1 - d.x0) > 40) ? d.data.name : "");
+
+    const nodesUpdate = nodes.merge(nodesEnter);
+
+    nodesUpdate.transition().duration(750)
+        .attr("transform", d => `translate(${tmX(d.x0)},${tmY(d.y0)})`);
+
+    nodesUpdate.select("rect").transition().duration(750)
+        .attr("width", d => tmX(d.x1) - tmX(d.x0))
+        .attr("height", d => tmY(d.y1) - tmY(d.y0))
+        .style("opacity", d => {
+            if (d.depth === 0) return 0;
+            // Handle filtering from PC
+            if (selectedIds.size > 0 && d.depth === 2 && !selectedIds.has(d.data.name)) return 0.2;
+            return 1;
+        });
+
+    nodesUpdate.select("text")
+        .attr("opacity", d => {
+            if (currentRoot.depth === 0) {
+                return d.depth === 1 ? 1 : 0;
+            } else {
+                return d.depth === 2 && (tmX(d.x1) - tmX(d.x0)) > 40 ? 1 : 0;
+            }
+        })
+        .text(d => d.data.name);
+}
+
+function zoom(d) {
+    currentRoot = d;
+    tmX.domain([d.x0, d.x1]);
+    tmY.domain([d.y0, d.y1]);
+    
+    updateBreadcrumb();
+    renderTreemap();
+    updatePC();
+    updateStats();
+}
+
+function updateBreadcrumb() {
+    const bc = d3.select("#breadcrumb");
+    bc.html("");
+    
+    if (currentRoot.depth === 0) {
+        bc.append("span").text("All Foods");
+    } else {
+        bc.append("span").text("All Foods")
+            .on("click", () => zoom(dataHierarchy));
+        bc.append("text").text(" › " + currentRoot.data.name);
+    }
+}
+
+document.getElementById('root-crumb').onclick = () => zoom(dataHierarchy);
+
+/**
+ * PARALLEL COORDINATES IMPLEMENTATION
+ */
+const pcContainer = d3.select("#parcoords-container");
+const pcCanvasBg = document.getElementById("pc-canvas-bg");
+const pcCanvasFg = document.getElementById("pc-canvas-fg");
+const pcSvg = d3.select("#pc-svg")
+    .attr("width", width)
+    .attr("height", pcHeight);
+
+[pcCanvasBg, pcCanvasFg].forEach(c => {
+    c.width = width * devicePixelRatio;
+    c.height = pcHeight * devicePixelRatio;
+    c.style.width = width + "px";
+    c.style.height = pcHeight + "px";
+    c.getContext("2d").scale(devicePixelRatio, devicePixelRatio);
+});
+
+const ctxBg = pcCanvasBg.getContext("2d");
+const ctxFg = pcCanvasFg.getContext("2d");
+
+const xPC = d3.scalePoint().domain(dimensions).range([margin.left, width - margin.right]);
+const yScales = {};
+dimensions.forEach(d => {
+    yScales[d] = d3.scaleLinear()
+        .domain([0, d3.max(foods, f => f[d]) * 1.05])
+        .range([pcHeight - margin.bottom, margin.top]);
+});
+
+const brushes = {};
+const brushBehavior = d3.brushY()
+    .extent([[-10, margin.top], [10, pcHeight - margin.bottom]])
+    .on("brush end", brushed);
+
+const axisGroups = pcSvg.selectAll(".parcoords-axis")
+    .data(dimensions)
+    .enter().append("g")
+    .attr("class", "parcoords-axis")
+    .attr("transform", d => `translate(${xPC(d)}, 0)`);
+
+axisGroups.each(function(d) {
+    d3.select(this).call(d3.axisLeft(yScales[d]).ticks(5));
+});
+
+axisGroups.append("text")
+    .attr("class", "axis-label")
+    .attr("y", margin.top - 15)
+    .text(d => dimLabels[d]);
+
+axisGroups.append("g")
+    .attr("class", "brush")
+    .each(function(d) {
+        d3.select(this).call(brushBehavior);
+    });
+
+function brushed({selection}, dimension) {
+    if (selection) {
+        brushes[dimension] = selection.map(yScales[dimension].invert);
+    } else {
+        delete brushes[dimension];
+    }
+    
+    // Update selected IDs
+    selectedIds = new Set();
+    const visibleFoods = getVisibleItems();
+    visibleFoods.forEach(f => {
+        let active = true;
+        for (let dim in brushes) {
+            const [val1, val2] = brushes[dim];
+            const min = Math.min(val1, val2);
+            const max = Math.max(val1, val2);
+            if (f[dim] < min || f[dim] > max) {
+                active = false;
+                break;
+            }
+        }
+        if (active) selectedIds.add(f.name);
+    });
+
+    // If no brushes, clear selection set to show all
+    if (Object.keys(brushes).length === 0) {
+        selectedIds = new Set();
+    }
+
+    updatePC();
+    renderTreemap();
+}
+
+function getVisibleItems() {
+    if (currentRoot.depth === 0) return foods;
+    return foods.filter(f => f.group === currentRoot.data.name);
+}
+
+function updatePC() {
+    ctxBg.clearRect(0, 0, width, pcHeight);
+    ctxFg.clearRect(0, 0, width, pcHeight);
+
+    const visibleItems = getVisibleItems();
+    
+    // Draw background (all items in current focus, dimmed if filtered)
+    visibleItems.forEach(d => {
+        const isSelected = selectedIds.size === 0 || selectedIds.has(d.name);
+        const isHovered = hoveredId === d.name;
+        
+        const ctx = isHovered ? ctxFg : (isSelected ? ctxFg : ctxBg);
+        
+        ctx.beginPath();
+        if (isHovered) {
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = "#333";
+            ctx.globalAlpha = 1;
+        } else if (isSelected) {
+            ctx.lineWidth = 1.2;
+            ctx.strokeStyle = groupColors[d.group];
+            ctx.globalAlpha = 0.6;
+        } else {
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = "#ddd";
+            ctx.globalAlpha = 0.2;
+        }
+
+        dimensions.forEach((dim, i) => {
+            const x = xPC(dim);
+            const y = yScales[dim](d[dim]);
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+    });
+}
+
+function updateStats() {
+    const items = getVisibleItems();
+    d3.select("#stats").text(`Showing ${items.length} items`);
+}
+
+/**
+ * TOOLTIP
+ */
+const tt = d3.select("#tooltip");
+function showTooltip(e, d) {
+    tt.style("opacity", 1)
+      .html(`
+        <strong>${d.name}</strong>
+        <div class="nutrient-grid">
+            <span>Cal: ${d.calories}</span>
+            <span>Prot: ${d.protein}g</span>
+            <span>Fat: ${d.fat}g</span>
+            <span>Carb: ${d.carbs}g</span>
+            <span>Fib: ${d.fiber}g</span>
+            <span>Sug: ${d.sugar}g</span>
+        </div>
+      `);
+    moveTooltip(e);
+}
+function moveTooltip(e) {
+    tt.style("left", (e.pageX + 15) + "px")
+      .style("top", (e.pageY - 20) + "px");
+}
+function hideTooltip() {
+    tt.style("opacity", 0);
+}
+
+// Initial Render
+renderTreemap();
+updatePC();
+updateBreadcrumb();
+updateStats();
+
+</script>
+</body>
+</html>

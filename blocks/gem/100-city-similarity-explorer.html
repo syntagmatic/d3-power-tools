@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>City Similarity Explorer</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://unpkg.com/topojson-client@3"></script>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --text-color: #f8fafc;
+            --axis-color: #94a3b8;
+            --line-color: #38bdf8;
+            --line-dimmed: rgba(56, 189, 248, 0.1);
+            --line-highlight: #f472b6;
+            --map-land: #1e293b;
+            --map-border: #334155;
+        }
+
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            overflow-x: hidden;
+        }
+
+        h1 {
+            margin: 0 0 10px 0;
+            font-weight: 300;
+            letter-spacing: -0.02em;
+        }
+
+        .description {
+            max-width: 800px;
+            text-align: center;
+            font-size: 0.9rem;
+            color: var(--axis-color);
+            margin-bottom: 30px;
+        }
+
+        #viz-container {
+            width: 1000px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            background: rgba(30, 41, 59, 0.5);
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+        }
+
+        #pc-container {
+            height: 400px;
+            position: relative;
+        }
+
+        #map-container {
+            height: 300px;
+            display: flex;
+            justify-content: center;
+            border-top: 1px solid var(--map-border);
+            padding-top: 20px;
+        }
+
+        .axis line, .axis path {
+            stroke: var(--axis-color);
+            stroke-width: 1px;
+        }
+
+        .axis text {
+            fill: var(--axis-color);
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .axis-label {
+            fill: var(--text-color);
+            font-size: 12px;
+            font-weight: 600;
+            cursor: default;
+        }
+
+        .foreground path {
+            fill: none;
+            stroke: var(--line-color);
+            stroke-width: 1.5px;
+            stroke-opacity: 0.6;
+            transition: stroke-opacity 0.2s, stroke 0.2s;
+        }
+
+        .foreground path.hidden {
+            stroke-opacity: 0;
+            pointer-events: none;
+        }
+
+        .foreground path.highlight {
+            stroke: var(--line-highlight);
+            stroke-width: 3px;
+            stroke-opacity: 1;
+        }
+
+        .city-dot {
+            fill: var(--line-color);
+            stroke: var(--bg-color);
+            stroke-width: 1px;
+            transition: r 0.2s, fill 0.2s;
+        }
+
+        .city-dot.hidden {
+            opacity: 0;
+        }
+
+        .city-dot.highlight {
+            fill: var(--line-highlight);
+            r: 8;
+        }
+
+        #tooltip {
+            position: absolute;
+            background: rgba(15, 23, 42, 0.95);
+            border: 1px solid var(--line-color);
+            padding: 10px;
+            border-radius: 6px;
+            pointer-events: none;
+            opacity: 0;
+            font-size: 12px;
+            z-index: 100;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+
+        .tooltip-title {
+            font-weight: bold;
+            font-size: 14px;
+            margin-bottom: 4px;
+            border-bottom: 1px solid #334155;
+            padding-bottom: 2px;
+            color: var(--line-color);
+        }
+
+        .tooltip-grid {
+            display: grid;
+            grid-template-columns: auto auto;
+            gap: 2px 10px;
+        }
+
+        .brush .selection {
+            fill: var(--line-color);
+            fill-opacity: 0.2;
+            stroke: var(--line-color);
+            stroke-width: 1px;
+        }
+
+        .land {
+            fill: var(--map-land);
+        }
+
+        .borders {
+            fill: none;
+            stroke: var(--map-border);
+            stroke-width: 0.5px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>City Similarity Explorer</h1>
+    <p class="description">
+        Analyze 40 global cities across 6 dimensions. <strong>Brush along the axes</strong> to filter the dataset. 
+        Uncover statistical twins: which distant cities share your preferred balance of population, climate, and cost?
+    </p>
+
+    <div id="viz-container">
+        <div id="pc-container"></div>
+        <div id="map-container"></div>
+    </div>
+
+    <div id="tooltip"></div>
+
+    <script>
+        // 40 World Cities Data
+        const cities = [
+            { name: "New York", pop: 8.8, density: 10700, elev: 10, temp: 12.7, rain: 1200, cost: 100, lat: 40.71, lon: -74.01 },
+            { name: "Tokyo", pop: 14.0, density: 6150, elev: 40, temp: 15.8, rain: 1530, cost: 85, lat: 35.68, lon: 139.76 },
+            { name: "London", pop: 9.0, density: 5660, elev: 15, temp: 11.3, rain: 600, cost: 92, lat: 51.51, lon: -0.12 },
+            { name: "Mumbai", pop: 20.4, density: 21000, elev: 14, temp: 27.2, rain: 2200, cost: 30, lat: 19.07, lon: 72.87 },
+            { name: "Mexico City", pop: 9.2, density: 6000, elev: 2240, temp: 17.5, rain: 840, cost: 45, lat: 19.43, lon: -99.13 },
+            { name: "Sao Paulo", pop: 12.3, density: 7900, elev: 760, temp: 20.2, rain: 1450, cost: 48, lat: -23.55, lon: -46.63 },
+            { name: "Cairo", pop: 10.0, density: 19300, elev: 23, temp: 22.1, rain: 25, cost: 35, lat: 30.04, lon: 31.23 },
+            { name: "Lagos", pop: 14.8, density: 13000, elev: 10, temp: 27.0, rain: 1500, cost: 40, lat: 6.52, lon: 3.37 },
+            { name: "Shanghai", pop: 26.3, density: 3800, elev: 4, temp: 16.7, rain: 1100, cost: 70, lat: 31.23, lon: 121.47 },
+            { name: "Sydney", pop: 5.3, density: 430, elev: 3, temp: 18.5, rain: 1200, cost: 88, lat: -33.86, lon: 151.21 },
+            { name: "Moscow", pop: 12.5, density: 4800, elev: 150, temp: 5.8, rain: 700, cost: 55, lat: 55.75, lon: 37.61 },
+            { name: "Paris", pop: 2.1, density: 21000, elev: 35, temp: 12.3, rain: 640, cost: 95, lat: 48.85, lon: 2.35 },
+            { name: "Berlin", pop: 3.7, density: 4100, elev: 34, temp: 10.3, rain: 570, cost: 75, lat: 52.52, lon: 13.40 },
+            { name: "Rome", pop: 2.8, density: 2200, elev: 21, temp: 15.8, rain: 800, cost: 80, lat: 41.90, lon: 12.49 },
+            { name: "Madrid", pop: 3.3, density: 5300, elev: 650, temp: 15.0, rain: 450, cost: 78, lat: 40.41, lon: -3.70 },
+            { name: "Buenos Aires", pop: 3.0, density: 15000, elev: 25, temp: 17.6, rain: 1200, cost: 42, lat: -34.60, lon: -58.38 },
+            { name: "Santiago", pop: 5.6, density: 9600, elev: 520, temp: 14.4, rain: 300, cost: 50, lat: -33.44, lon: -70.66 },
+            { name: "Bogota", pop: 7.4, density: 4500, elev: 2640, temp: 13.5, rain: 800, cost: 38, lat: 4.71, lon: -74.07 },
+            { name: "Lima", pop: 9.7, density: 3000, elev: 150, temp: 18.5, rain: 15, cost: 44, lat: -12.04, lon: -77.04 },
+            { name: "Bangkok", pop: 10.5, density: 5300, elev: 1.5, temp: 28.1, rain: 1650, cost: 52, lat: 13.75, lon: 100.50 },
+            { name: "Jakarta", pop: 10.5, density: 16000, elev: 8, temp: 27.5, rain: 1800, cost: 46, lat: -6.20, lon: 106.84 },
+            { name: "Manila", pop: 13.9, density: 19000, elev: 16, temp: 27.3, rain: 2000, cost: 43, lat: 14.59, lon: 120.98 },
+            { name: "Seoul", pop: 9.7, density: 16000, elev: 38, temp: 12.5, rain: 1400, cost: 82, lat: 37.56, lon: 126.97 },
+            { name: "Beijing", pop: 21.5, density: 1300, elev: 43, temp: 12.9, rain: 570, cost: 68, lat: 39.90, lon: 116.40 },
+            { name: "New Delhi", pop: 16.7, density: 11000, elev: 210, temp: 25.0, rain: 800, cost: 28, lat: 28.61, lon: 77.20 },
+            { name: "Karachi", pop: 14.9, density: 4000, elev: 10, temp: 26.0, rain: 250, cost: 25, lat: 24.86, lon: 67.00 },
+            { name: "Istanbul", pop: 15.4, density: 2500, elev: 40, temp: 14.5, rain: 800, cost: 32, lat: 41.00, lon: 28.97 },
+            { name: "Tehran", pop: 9.1, density: 11000, elev: 1200, temp: 17.5, rain: 230, cost: 34, lat: 35.68, lon: 51.38 },
+            { name: "Kinshasa", pop: 14.3, density: 14000, elev: 240, temp: 25.3, rain: 1400, cost: 38, lat: -4.44, lon: 15.26 },
+            { name: "Johannesburg", pop: 5.6, density: 3400, elev: 1750, temp: 16.0, rain: 700, cost: 40, lat: -26.20, lon: 28.04 },
+            { name: "Nairobi", pop: 4.4, density: 6300, elev: 1795, temp: 19.0, rain: 1000, cost: 36, lat: -1.29, lon: 36.82 },
+            { name: "Casablanca", pop: 3.4, density: 8700, elev: 20, temp: 18.0, rain: 400, cost: 38, lat: 33.57, lon: -7.58 },
+            { name: "Toronto", pop: 2.9, density: 4300, elev: 76, temp: 9.4, rain: 830, cost: 84, lat: 43.65, lon: -79.38 },
+            { name: "Chicago", pop: 2.7, density: 4600, elev: 180, temp: 10.5, rain: 940, cost: 88, lat: 41.87, lon: -87.62 },
+            { name: "Los Angeles", pop: 3.9, density: 3100, elev: 87, temp: 18.6, rain: 380, cost: 96, lat: 34.05, lon: -118.24 },
+            { name: "San Francisco", pop: 0.8, density: 7200, elev: 16, temp: 14.5, rain: 600, cost: 110, lat: 37.77, lon: -122.41 },
+            { name: "Vancouver", pop: 0.7, density: 5400, elev: 2, temp: 11.0, rain: 1100, cost: 90, lat: 49.28, lon: -123.12 },
+            { name: "Melbourne", pop: 5.0, density: 500, elev: 31, temp: 16.2, rain: 650, cost: 86, lat: -37.81, lon: 144.96 },
+            { name: "Auckland", pop: 1.6, density: 1500, elev: 1, temp: 15.5, rain: 1200, cost: 85, lat: -36.84, lon: 174.76 },
+            { name: "Singapore", pop: 5.7, density: 8300, elev: 15, temp: 27.6, rain: 2300, cost: 98, lat: 1.35, lon: 103.81 }
+        ];
+
+        const dims = [
+            { key: "pop", label: "Population (M)", domain: [0, 30] },
+            { key: "density", label: "Density (/km²)", domain: [0, 25000] },
+            { key: "elev", label: "Elevation (m)", domain: [0, 3000] },
+            { key: "temp", label: "Avg Temp (°C)", domain: [0, 30] },
+            { key: "rain", label: "Rainfall (mm)", domain: [0, 2500] },
+            { key: "cost", label: "Cost Index", domain: [0, 120] }
+        ];
+
+        // Layout Constants
+        const pcMargin = { top: 50, right: 50, bottom: 20, left: 50 };
+        const pcWidth = 1000 - pcMargin.left - pcMargin.right;
+        const pcHeight = 400 - pcMargin.top - pcMargin.bottom;
+
+        const mapMargin = { top: 10, right: 10, bottom: 10, left: 10 };
+        const mapWidth = 800 - mapMargin.left - mapMargin.right;
+        const mapHeight = 300 - mapMargin.top - mapMargin.bottom;
+
+        // --- Parallel Coordinates Setup ---
+        const pcSvg = d3.select("#pc-container").append("svg")
+            .attr("width", pcWidth + pcMargin.left + pcMargin.right)
+            .attr("height", pcHeight + pcMargin.top + pcMargin.bottom)
+            .append("g")
+            .attr("transform", `translate(${pcMargin.left},${pcMargin.top})`);
+
+        const x = d3.scalePoint()
+            .range([0, pcWidth])
+            .padding(0)
+            .domain(dims.map(d => d.key));
+
+        const y = {};
+        dims.forEach(d => {
+            y[d.key] = d3.scaleLinear()
+                .domain(d.domain)
+                .range([pcHeight, 0]);
+        });
+
+        // Line Generator
+        const line = d3.line();
+
+        function path(d) {
+            return line(dims.map(p => [x(p.key), y[p.key](d[p.key])]));
+        }
+
+        // --- Map Setup ---
+        const mapSvg = d3.select("#map-container").append("svg")
+            .attr("width", mapWidth + mapMargin.left + mapMargin.right)
+            .attr("height", mapHeight + mapMargin.top + mapMargin.bottom)
+            .append("g")
+            .attr("transform", `translate(${mapMargin.left},${mapMargin.top})`);
+
+        const projection = d3.geoEqualEarth()
+            .fitSize([mapWidth, mapHeight], { type: "Sphere" });
+
+        const geoPath = d3.geoPath(projection);
+
+        // --- State Management ---
+        const filters = {};
+        let activeCities = cities;
+
+        // --- Tooltip Setup ---
+        const tooltip = d3.select("#tooltip");
+
+        // --- Render functions ---
+
+        async function init() {
+            // Load and render world map
+            const world = await d3.json("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json");
+            
+            mapSvg.append("path")
+                .datum({ type: "Sphere" })
+                .attr("class", "borders")
+                .attr("d", geoPath)
+                .style("stroke-opacity", 0.3);
+
+            mapSvg.append("path")
+                .datum(topojson.feature(world, world.objects.land))
+                .attr("class", "land")
+                .attr("d", geoPath);
+
+            mapSvg.append("path")
+                .datum(topojson.mesh(world, world.objects.countries, (a, b) => a !== b))
+                .attr("class", "borders")
+                .attr("d", geoPath);
+
+            // Render PC background lines (static)
+            const background = pcSvg.append("g")
+                .attr("class", "background")
+                .selectAll("path")
+                .data(cities)
+                .enter().append("path")
+                .attr("d", path)
+                .style("fill", "none")
+                .style("stroke", "rgba(56, 189, 248, 0.05)")
+                .style("stroke-width", "1px");
+
+            // Render PC foreground lines
+            const foreground = pcSvg.append("g")
+                .attr("class", "foreground")
+                .selectAll("path")
+                .data(cities)
+                .enter().append("path")
+                .attr("d", path)
+                .attr("id", (d, i) => `line-${i}`)
+                .on("mouseenter", (e, d) => highlightCity(d))
+                .on("mouseleave", clearHighlight);
+
+            // Render Map dots
+            const dots = mapSvg.append("g")
+                .attr("class", "dots")
+                .selectAll("circle")
+                .data(cities)
+                .enter().append("circle")
+                .attr("class", "city-dot")
+                .attr("id", (d, i) => `dot-${i}`)
+                .attr("cx", d => projection([d.lon, d.lat])[0])
+                .attr("cy", d => projection([d.lon, d.lat])[1])
+                .attr("r", 4)
+                .on("mouseenter", (e, d) => highlightCity(d))
+                .on("mouseleave", clearHighlight);
+
+            // Render PC Axes
+            const g = pcSvg.selectAll(".axis")
+                .data(dims)
+                .enter().append("g")
+                .attr("class", "axis")
+                .attr("transform", d => `translate(${x(d.key)})`);
+
+            g.append("g")
+                .each(function(d) { d3.select(this).call(d3.axisLeft(y[d.key]).ticks(5)); })
+                .append("text")
+                .attr("class", "axis-label")
+                .style("text-anchor", "middle")
+                .attr("y", -15)
+                .text(d => d.label);
+
+            // Add Brushing
+            g.append("g")
+                .attr("class", "brush")
+                .each(function(d) {
+                    d3.select(this).call(d3.brushY()
+                        .extent([[-10, 0], [10, pcHeight]])
+                        .on("brush", (event) => brushed(event, d.key))
+                        .on("end", (event) => brushed(event, d.key))
+                    );
+                });
+
+            update();
+        }
+
+        function brushed(event, dimension) {
+            const selection = event.selection;
+            if (selection === null) {
+                delete filters[dimension];
+            } else {
+                const [y1, y0] = selection.map(y[dimension].invert);
+                filters[dimension] = [y0, y1];
+            }
+            update();
+        }
+
+        function update() {
+            activeCities = cities.filter(d => {
+                return Object.entries(filters).every(([dim, [min, max]]) => {
+                    return d[dim] >= min && d[dim] <= max;
+                });
+            });
+
+            const activeSet = new Set(activeCities);
+
+            pcSvg.selectAll(".foreground path")
+                .classed("hidden", d => !activeSet.has(d));
+
+            mapSvg.selectAll(".city-dot")
+                .classed("hidden", d => !activeSet.has(d));
+        }
+
+        function highlightCity(d) {
+            const idx = cities.indexOf(d);
+            
+            d3.selectAll(".foreground path").classed("highlight", false);
+            d3.select(`#line-${idx}`).classed("highlight", true).raise();
+
+            d3.selectAll(".city-dot").classed("highlight", false);
+            d3.select(`#dot-${idx}`).classed("highlight", true).raise();
+
+            tooltip.style("opacity", 1)
+                .html(`
+                    <div class="tooltip-title">${d.name}</div>
+                    <div class="tooltip-grid">
+                        <span>Pop:</span> <span>${d.pop}M</span>
+                        <span>Density:</span> <span>${d.density.toLocaleString()}</span>
+                        <span>Elev:</span> <span>${d.elev}m</span>
+                        <span>Temp:</span> <span>${d.temp}°C</span>
+                        <span>Rain:</span> <span>${d.rain}mm</span>
+                        <span>Cost:</span> <span>${d.cost}</span>
+                    </div>
+                `);
+            
+            moveTooltip(d3.event || window.event);
+        }
+
+        function clearHighlight() {
+            d3.selectAll(".foreground path").classed("highlight", false);
+            d3.selectAll(".city-dot").classed("highlight", false);
+            tooltip.style("opacity", 0);
+        }
+
+        function moveTooltip(e) {
+            const [mx, my] = d3.pointer(e, document.body);
+            tooltip.style("left", (mx + 20) + "px")
+                   .style("top", (my - 20) + "px");
+        }
+
+        window.addEventListener('mousemove', (e) => {
+            if (tooltip.style("opacity") == "1") moveTooltip(e);
+        });
+
+        init();
+    </script>
+</body>
+</html>

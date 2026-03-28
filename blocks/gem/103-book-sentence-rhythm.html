@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Book Sentence Rhythm</title>
+<link rel="stylesheet" href="../../style/d3-power-tools.css">
+<style>
+  :root {
+    --color-spark: var(--color-cat-1);
+    --color-violin: var(--color-cat-2);
+  }
+  body { padding: var(--sp-6) var(--sp-10); max-width: 1000px; margin: 0 auto; }
+  header { margin-bottom: var(--sp-8); }
+  h1 { margin-bottom: var(--sp-1); }
+  .subtitle { color: var(--color-text-muted); font-size: 14px; }
+  
+  table { margin-top: var(--sp-4); }
+  th { white-space: nowrap; }
+  td { height: 60px; }
+  
+  .num { font-weight: 500; }
+  .spark-cell { width: 300px; padding: 0 var(--sp-3); position: relative; }
+  .violin-cell { width: 180px; padding: 0 var(--sp-3); }
+  
+  .spark-svg, .violin-svg { display: block; overflow: visible; }
+  
+  .spark-line { fill: none; stroke: var(--color-spark); stroke-width: 1.5; stroke-linejoin: round; }
+  .spark-area { fill: var(--color-spark); opacity: 0.1; }
+  .spark-dot { fill: var(--color-spark); stroke: var(--color-bg); stroke-width: 1; }
+  .spark-hover-line { stroke: var(--color-text-faint); stroke-dasharray: 2,2; pointer-events: none; }
+  
+  .violin-path { fill: var(--color-violin); opacity: 0.4; stroke: var(--color-violin); stroke-width: 1; }
+  .violin-median { stroke: var(--color-text); stroke-width: 1.5; }
+  .violin-iqr { stroke: var(--color-text); stroke-width: 4; stroke-linecap: round; opacity: 0.2; }
+  
+  .tooltip {
+    position: fixed;
+    background: var(--color-tooltip-bg);
+    border: 1px solid var(--color-tooltip-border);
+    padding: var(--sp-2) var(--sp-3);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-lg);
+    font-size: 12px;
+    pointer-events: none;
+    max-width: 250px;
+    z-index: 1000;
+  }
+  
+  tr.highlight td { background: var(--color-hover-bg); }
+  
+  .controls { margin-top: var(--sp-4); display: flex; align-items: center; gap: var(--sp-4); }
+  .legend { display: flex; gap: var(--sp-4); font-size: 12px; color: var(--color-text-muted); }
+  .legend-item { display: flex; align-items: center; gap: var(--sp-1); }
+  .legend-color { width: 12px; height: 12px; border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Book Sentence Rhythm</h1>
+  <div class="subtitle">Synthetic novel analysis: 20 chapters sorted by average sentence length.</div>
+  
+  <div class="controls">
+    <div class="legend">
+      <div class="legend-item"><div class="legend-color" style="background: var(--color-spark)"></div> Sentence Sequence</div>
+      <div class="legend-item"><div class="legend-color" style="background: var(--color-violin)"></div> Length Distribution</div>
+    </div>
+  </div>
+</header>
+
+<table id="novel-table">
+  <thead>
+    <tr>
+      <th style="width: 80px">Chapter</th>
+      <th class="num" style="width: 100px">Words</th>
+      <th class="num" style="width: 80px">Avg Len</th>
+      <th class="spark-cell">Sentence Length Rhythm (Sparkline)</th>
+      <th class="violin-cell">Distribution (Violin)</th>
+    </tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+<div id="tooltip" class="tooltip" style="display: none;"></div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+// ── Data Generation ──────────────────────────────────────────────────
+function generateNovel() {
+  const chapters = [];
+  const styles = [
+    { name: "Terse", avg: 8, std: 3, count: 60 },
+    { name: "Balanced", avg: 15, std: 6, count: 45 },
+    { name: "Flowing", avg: 25, std: 10, count: 35 },
+    { name: "Staccato", avg: 5, std: 2, count: 80 },
+    { name: "Ornate", avg: 35, std: 15, count: 25 }
+  ];
+
+  for (let i = 1; i <= 20; i++) {
+    const style = styles[Math.floor(Math.random() * styles.length)];
+    const sentenceCount = Math.floor(style.count * (0.8 + Math.random() * 0.4));
+    
+    // Generate sentence lengths with some local "rhythm" (autocorrelation)
+    const sentenceLengths = [];
+    let currentLen = style.avg;
+    for (let j = 0; j < sentenceCount; j++) {
+      // Random walk with mean reversion
+      const drift = (style.avg - currentLen) * 0.1;
+      const noise = (Math.random() - 0.5) * style.std * 2;
+      currentLen = Math.max(1, Math.round(currentLen + drift + noise));
+      sentenceLengths.push(currentLen);
+    }
+
+    const wordCount = d3.sum(sentenceLengths);
+    const avgLen = d3.mean(sentenceLengths);
+    const maxLen = d3.max(sentenceLengths);
+    const maxIdx = sentenceLengths.indexOf(maxLen);
+
+    chapters.push({
+      id: i,
+      sentenceLengths,
+      wordCount,
+      avgLen,
+      maxLen,
+      maxIdx
+    });
+  }
+
+  // Sort by average sentence length as requested
+  chapters.sort((a, b) => a.avgLen - b.avgLen);
+  return chapters;
+}
+
+const data = generateNovel();
+
+// ── Shared Scales & Constants ───────────────────────────────────────
+const sparkW = 280, sparkH = 40;
+const violinW = 160, violinH = 40;
+const globalMaxLen = d3.max(data, d => d.maxLen);
+
+// KDE implementation
+function kernelDensityEstimator(kernel, x) {
+  return function(sample) {
+    return x.map(function(v) {
+      return [v, d3.mean(sample, function(d) { return kernel(v - d); })];
+    });
+  };
+}
+function kernelEpanechnikov(k) {
+  return function(v) {
+    return Math.abs(v /= k) <= 1 ? 0.75 * (1 - v * v) / k : 0;
+  };
+}
+
+// ── Table Rendering ─────────────────────────────────────────────────
+const tbody = d3.select("#novel-table tbody");
+const tooltip = d3.select("#tooltip");
+
+const rows = tbody.selectAll("tr")
+  .data(data)
+  .join("tr");
+
+rows.append("td")
+  .text(d => `Ch. ${d.id}`);
+
+rows.append("td")
+  .attr("class", "num")
+  .text(d => d3.format(",")(d.wordCount));
+
+rows.append("td")
+  .attr("class", "num")
+  .text(d => d.avgLen.toFixed(1));
+
+// ── Sparkline Rendering ─────────────────────────────────────────────
+const sparkCell = rows.append("td").attr("class", "spark-cell");
+
+sparkCell.each(function(d) {
+  const container = d3.select(this);
+  const svg = container.append("svg")
+    .attr("width", sparkW)
+    .attr("height", sparkH)
+    .attr("class", "spark-svg");
+
+  const x = d3.scaleLinear()
+    .domain([0, d.sentenceLengths.length - 1])
+    .range([5, sparkW - 5]);
+
+  // Shared Y domain for comparability across chapters
+  const y = d3.scaleLinear()
+    .domain([0, globalMaxLen])
+    .range([sparkH - 5, 5]);
+
+  const line = d3.line()
+    .x((_, i) => x(i))
+    .y(v => y(v))
+    .curve(d3.curveMonotoneX);
+
+  const area = d3.area()
+    .x((_, i) => x(i))
+    .y0(sparkH)
+    .y1(v => y(v))
+    .curve(d3.curveMonotoneX);
+
+  svg.append("path")
+    .datum(d.sentenceLengths)
+    .attr("class", "spark-area")
+    .attr("d", area);
+
+  svg.append("path")
+    .datum(d.sentenceLengths)
+    .attr("class", "spark-line")
+    .attr("d", line);
+
+  // Intersection markers for hover
+  const hoverG = svg.append("g").style("display", "none");
+  hoverG.append("line").attr("class", "spark-hover-line").attr("y1", 0).attr("y2", sparkH);
+  const hoverDot = hoverG.append("circle").attr("class", "spark-dot").attr("r", 3.5);
+
+  svg.append("rect")
+    .attr("width", sparkW)
+    .attr("height", sparkH)
+    .attr("fill", "transparent")
+    .on("mousemove", function(event) {
+      const [mx] = d3.pointer(event);
+      const i = Math.round(x.invert(mx));
+      const val = d.sentenceLengths[i];
+      
+      if (val !== undefined) {
+        hoverG.style("display", null);
+        hoverG.attr("transform", `translate(${x(i)},0)`);
+        hoverDot.attr("cy", y(val));
+        
+        const isLongest = i === d.maxIdx;
+        const msg = isLongest 
+          ? `<strong>Longest Sentence: ${val} words</strong><br/>` 
+          : `Sentence ${i + 1}: ${val} words<br/>`;
+          
+        tooltip.style("display", "block")
+          .html(`${msg}<span style="color: var(--color-text-faint)">${generateLorem(val)}</span>`)
+          .style("left", (event.clientX + 15) + "px")
+          .style("top", (event.clientY - 20) + "px");
+      }
+    })
+    .on("mouseleave", () => {
+      hoverG.style("display", "none");
+      tooltip.style("display", "none");
+    });
+});
+
+// ── Violin Plot Rendering ───────────────────────────────────────────
+const violinCell = rows.append("td").attr("class", "violin-cell");
+
+violinCell.each(function(d) {
+  const container = d3.select(this);
+  const svg = container.append("svg")
+    .attr("width", violinW)
+    .attr("height", violinH)
+    .attr("class", "violin-svg");
+
+  const x = d3.scaleLinear()
+    .domain([0, globalMaxLen])
+    .range([5, violinW - 5]);
+
+  // Compute KDE
+  const thresholds = d3.range(0, globalMaxLen + 1, 2);
+  const kde = kernelDensityEstimator(kernelEpanechnikov(7), thresholds);
+  const density = kde(d.sentenceLengths);
+  const maxDensity = d3.max(density, p => p[1]);
+
+  const y = d3.scaleLinear()
+    .domain([0, maxDensity])
+    .range([0, violinH / 2 - 2]);
+
+  const area = d3.area()
+    .x(p => x(p[0]))
+    .y0(p => violinH / 2 - y(p[1]))
+    .y1(p => violinH / 2 + y(p[1]))
+    .curve(d3.curveBasis);
+
+  svg.append("path")
+    .datum(density)
+    .attr("class", "violin-path")
+    .attr("d", area);
+
+  // Add inner box plot components
+  const q1 = d3.quantile(d.sentenceLengths, 0.25);
+  const median = d3.quantile(d.sentenceLengths, 0.5);
+  const q3 = d3.quantile(d.sentenceLengths, 0.75);
+
+  svg.append("line")
+    .attr("class", "violin-iqr")
+    .attr("x1", x(q1))
+    .attr("x2", x(q3))
+    .attr("y1", violinH / 2)
+    .attr("y2", violinH / 2);
+
+  svg.append("circle")
+    .attr("class", "violin-median")
+    .attr("cx", x(median))
+    .attr("cy", violinH / 2)
+    .attr("r", 2)
+    .attr("fill", "var(--color-text)");
+});
+
+// ── Helpers ──────────────────────────────────────────────────────────
+function generateLorem(wordCount) {
+  const words = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua ut enim ad minim veniam quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur excepteur sint occaecat cupidatat non proident sunt in culpa qui officia deserunt mollit anim id est laborum".split(" ");
+  let result = [];
+  for (let i = 0; i < wordCount; i++) {
+    result.push(words[Math.floor(Math.random() * words.length)]);
+  }
+  const sentence = result.join(" ");
+  return sentence.charAt(0).toUpperCase() + sentence.slice(1) + ".";
+}
+</script>
+
+</body>
+</html>

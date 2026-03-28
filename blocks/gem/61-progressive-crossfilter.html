@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Progressive Crossfilter</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 20px; background: #f8f9fa; color: #333; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 1200px; margin: 0 auto; }
+        .panel { background: white; border: 1px solid #ddd; border-radius: 8px; padding: 15px; position: relative; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        .panel h2 { margin-top: 0; margin-bottom: 10px; font-size: 14px; color: #555; text-transform: uppercase; letter-spacing: 0.5px; }
+        .chart-container { position: relative; width: 100%; height: 260px; }
+        canvas, svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+        .brush .selection { fill: #4a90e2; fill-opacity: 0.3; stroke: #4a90e2; stroke-width: 1px; }
+        .header { display: flex; justify-content: space-between; align-items: flex-end; max-width: 1200px; margin: 0 auto 20px auto; }
+        .header h1 { margin: 0 0 5px 0; font-size: 24px; }
+        .stats { font-size: 13px; background: #fff; padding: 10px 15px; border: 1px solid #ddd; border-radius: 6px; display: flex; gap: 20px; align-items: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        .stat-group { display: flex; flex-direction: column; }
+        .stat-value { font-weight: bold; color: #4a90e2; font-size: 14px; }
+        button { padding: 6px 16px; border: none; background: #4a90e2; color: white; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 13px; transition: background 0.2s; }
+        button:hover { background: #357abd; }
+        .axis text { font-size: 11px; fill: #666; }
+        .axis path, .axis line { stroke: #d0d0d0; }
+        .tick line { opacity: 0.5; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h1>Progressive Crossfilter</h1>
+            <div style="font-size: 13px; color: #666;">100,000 Records • Progressive Filtering • Precomputed Timeline</div>
+        </div>
+        <div class="stats">
+            <div class="stat-group">
+                <span style="color:#888; font-size:11px;">RECORDS</span>
+                <span><span id="count-display" class="stat-value">100,000</span> / 100,000</span>
+            </div>
+            <div class="stat-group">
+                <span style="color:#888; font-size:11px;">LATENCY</span>
+                <span><span id="latency-prog" class="stat-value">0.0</span>ms (prog) | <span id="latency-full" class="stat-value">0.0</span>ms (full)</span>
+            </div>
+            <button id="reset-btn">Reset</button>
+        </div>
+    </div>
+    <div class="grid">
+        <div class="panel" id="panel-scatter">
+            <h2>Amount vs Quantity (Scatter)</h2>
+            <div class="chart-container" id="container-scatter">
+                <canvas id="scatter-canvas"></canvas>
+                <svg id="scatter-svg"></svg>
+            </div>
+        </div>
+        <div class="panel" id="panel-hist">
+            <h2>Amount Distribution</h2>
+            <div class="chart-container" id="container-hist">
+                <svg id="hist-svg"></svg>
+            </div>
+        </div>
+        <div class="panel" id="panel-bar">
+            <h2>Category Counts</h2>
+            <div class="chart-container" id="container-bar">
+                <svg id="bar-svg"></svg>
+            </div>
+        </div>
+        <div class="panel" id="panel-timeline">
+            <h2>Daily Orders</h2>
+            <div class="chart-container" id="container-timeline">
+                <svg id="timeline-svg"></svg>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- 1. Data Generation ---
+        const N = 100000;
+        const categories = ["Electronics", "Food", "Clothing", "Toys", "Home", "Beauty"];
+        // Tol bright palette
+        const colors = ["#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE", "#AA3377"];
+        
+        const data = new Array(N);
+        for(let i=0; i<N; i++) {
+            const catIdx = Math.floor(Math.random() * 6);
+            const category = categories[catIdx];
+            
+            let mu = category === "Electronics" ? 6 : 4.5;
+            let sigma = 0.8;
+            let amount = Math.exp(mu + sigma * (Math.random() + Math.random() + Math.random() - 1.5));
+            amount = Math.max(5, Math.min(5000, amount));
+            
+            let qtyBase = category === "Food" ? 10 : 3;
+            let quantity = Math.max(1, Math.min(20, Math.floor(qtyBase + (Math.random() * 8 - 4))));
+            
+            data[i] = {
+                date: Math.floor(Math.random() * 365),
+                amount: amount,
+                category: catIdx,
+                quantity: quantity,
+                age: Math.floor(18 + Math.random() * 62),
+                filtered: true
+            };
+        }
+
+        // Pre-shuffle for representative progressive sampling
+        d3.shuffle(data);
+
+        // --- 2. Setup Dimensions & Scales ---
+        const containerWidth = document.querySelector('.chart-container').clientWidth;
+        const width = containerWidth;
+        const height = 260;
+        const margin = {top: 15, right: 20, bottom: 35, left: 45};
+        const innerWidth = width - margin.left - margin.right;
+        const innerHeight = height - margin.top - margin.bottom;
+
+        // Scales
+        const xScaleScatter = d3.scaleLog().domain([5, 5000]).range([0, innerWidth]);
+        const yScaleScatter = d3.scaleLinear().domain([0, 21]).range([innerHeight, 0]);
+
+        const logThresholds = d3.range(31).map(i => Math.exp(Math.log(5) + i / 30 * (Math.log(5000) - Math.log(5))));
+        const binGenerator = d3.bin().value(d => d.amount).domain([5, 5000]).thresholds(logThresholds);
+        const bins = binGenerator(data);
+        
+        const xScaleHist = d3.scaleLog().domain([5, 5000]).range([0, innerWidth]);
+        const yScaleHist = d3.scaleLinear().range([innerHeight, 0]);
+
+        const xScaleBar = d3.scaleBand().domain(categories).range([0, innerWidth]).padding(0.2);
+        const yScaleBar = d3.scaleLinear().range([innerHeight, 0]);
+
+        const xScaleTime = d3.scaleLinear().domain([0, 364]).range([0, innerWidth]);
+        const yScaleTime = d3.scaleLinear().range([innerHeight, 0]);
+
+        // --- 3. DOM & Canvas Setup ---
+        const canvas = document.getElementById('scatter-canvas');
+        canvas.width = width * window.devicePixelRatio;
+        canvas.height = height * window.devicePixelRatio;
+        const ctx = canvas.getContext('2d');
+        ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+        ctx.translate(margin.left, margin.top);
+
+        const svgScatter = d3.select('#scatter-svg').attr('viewBox', `0 0 ${width} ${height}`)
+            .append('g').attr('transform', `translate(${margin.left},${margin.top})`);
+        
+        const svgHist = d3.select('#hist-svg').attr('viewBox', `0 0 ${width} ${height}`)
+            .append('g').attr('transform', `translate(${margin.left},${margin.top})`);
+            
+        const svgBar = d3.select('#bar-svg').attr('viewBox', `0 0 ${width} ${height}`)
+            .append('g').attr('transform', `translate(${margin.left},${margin.top})`);
+            
+        const svgTimeline = d3.select('#timeline-svg').attr('viewBox', `0 0 ${width} ${height}`)
+            .append('g').attr('transform', `translate(${margin.left},${margin.top})`);
+
+        // --- 4. Render Axes & Static Elements ---
+        svgScatter.append('g').attr('transform', `translate(0,${innerHeight})`)
+            .call(d3.axisBottom(xScaleScatter).ticks(5, "~s").tickSizeOuter(0));
+        svgScatter.append('g').call(d3.axisLeft(yScaleScatter).ticks(5).tickSizeOuter(0));
+
+        svgHist.append('g').attr('transform', `translate(0,${innerHeight})`)
+            .call(d3.axisBottom(xScaleHist).ticks(5, "~s").tickSizeOuter(0));
+        const histYAxis = svgHist.append('g');
+
+        svgBar.append('g').attr('transform', `translate(0,${innerHeight})`)
+            .call(d3.axisBottom(xScaleBar).tickSizeOuter(0));
+        const barYAxis = svgBar.append('g');
+
+        svgTimeline.append('g').attr('transform', `translate(0,${innerHeight})`)
+            .call(d3.axisBottom(xScaleTime).tickFormat(d => `Day ${d}`).tickSizeOuter(0));
+        const timeYAxis = svgTimeline.append('g');
+
+        // Chart SVG elements
+        const histBars = svgHist.append('g').selectAll('rect').data(bins).join('rect').attr('fill', '#888');
+        const barRects = svgBar.append('g').selectAll('rect').data(categories).join('rect')
+            .attr('x', d => xScaleBar(d)).attr('width', xScaleBar.bandwidth()).attr('fill', (d, i) => colors[i]);
+        
+        const timeArea = d3.area().x((d, i) => xScaleTime(i)).y0(innerHeight).y1(d => yScaleTime(d)).curve(d3.curveStep);
+        const timePath = svgTimeline.append('path').attr('fill', '#4a90e2');
+
+        // --- 5. Brushes ---
+        const state = { brushes: { scatter: null, hist: null, bar: null, timeline: null } };
+
+        const brushScatter = d3.brush().extent([[0, 0], [innerWidth, innerHeight]]).on("start brush end", e => {
+            if (e.sourceEvent && e.sourceEvent.type === "zoom") return;
+            state.brushes.scatter = e.selection; updateFilterLogic('scatter');
+        });
+        svgScatter.append("g").attr("class", "brush").call(brushScatter);
+
+        const brushHist = d3.brushX().extent([[0, 0], [innerWidth, innerHeight]]).on("start brush end", e => {
+            if (!e.sourceEvent) return;
+            state.brushes.hist = e.selection; updateFilterLogic('hist');
+        });
+        svgHist.append("g").attr("class", "brush").call(brushHist);
+
+        const brushBar = d3.brushX().extent([[0, 0], [innerWidth, innerHeight]]).on("start brush end", e => {
+            if (!e.sourceEvent) return;
+            state.brushes.bar = e.selection; updateFilterLogic('bar');
+        });
+        svgBar.append("g").attr("class", "brush").call(brushBar);
+
+        const brushTimeline = d3.brushX().extent([[0, 0], [innerWidth, innerHeight]]).on("start brush end", e => {
+            if (!e.sourceEvent) return;
+            state.brushes.timeline = e.selection; updateFilterLogic('timeline');
+        });
+        svgTimeline.append("g").attr("class", "brush").call(brushTimeline);
+
+        // --- 6. Precompute Falcon-inspired Timeline Snapshots ---
+        const FALCON_BINS = 256;
+        const falconScale = d3.scaleLog().domain([5, 5000]).range([0, FALCON_BINS - 1]);
+        const falconSnapshots = Array.from({length: 365}, () => new Int32Array(FALCON_BINS));
+        
+        for(let i=0; i<N; i++) {
+            let bin = Math.min(FALCON_BINS - 1, Math.max(0, Math.floor(falconScale(data[i].amount))));
+            falconSnapshots[data[i].date][bin]++;
+        }
+        for(let d=0; d<365; d++) {
+            for(let b=1; b<FALCON_BINS; b++) {
+                falconSnapshots[d][b] += falconSnapshots[d][b-1];
+            }
+        }
+
+        // --- 7. Filtering Logic ---
+        let progTimeout = null;
+
+        function checkFilter(d) {
+            if (state.brushes.scatter) {
+                const [[x0, y0], [x1, y1]] = state.brushes.scatter;
+                const px = xScaleScatter(d.amount), py = yScaleScatter(d.quantity);
+                if (px < x0 || px > x1 || py < y0 || py > y1) return false;
+            }
+            if (state.brushes.hist) {
+                const [x0, x1] = state.brushes.hist;
+                const px = xScaleHist(d.amount);
+                if (px < x0 || px > x1) return false;
+            }
+            if (state.brushes.bar) {
+                const [x0, x1] = state.brushes.bar;
+                const px = xScaleBar(categories[d.category]) + xScaleBar.bandwidth()/2;
+                if (px < x0 || px > x1) return false;
+            }
+            if (state.brushes.timeline) {
+                const [x0, x1] = state.brushes.timeline;
+                const px = xScaleTime(d.date);
+                if (px < x0 || px > x1) return false;
+            }
+            return true;
+        }
+
+        function updateFilterLogic(source) {
+            let t0 = performance.now();
+            const PROG_CHUNK = 10000;
+            let activeCount10k = 0;
+            
+            let fastTimeline = null;
+            let histOnly = state.brushes.hist && !state.brushes.scatter && !state.brushes.bar && !state.brushes.timeline;
+            
+            if (histOnly && (source === 'hist' || source === 'init')) {
+                const [x0, x1] = state.brushes.hist;
+                const minAmt = xScaleHist.invert(x0);
+                const maxAmt = xScaleHist.invert(x1);
+                const b0 = Math.max(0, Math.floor(falconScale(minAmt)) - 1);
+                const b1 = Math.min(FALCON_BINS - 1, Math.floor(falconScale(maxAmt)));
+                
+                fastTimeline = new Int32Array(365);
+                for(let d=0; d<365; d++) {
+                    let c0 = b0 >= 0 ? falconSnapshots[d][b0] : 0;
+                    fastTimeline[d] = falconSnapshots[d][b1] - c0;
+                }
+            } else if (!state.brushes.hist && !state.brushes.scatter && !state.brushes.bar && !state.brushes.timeline) {
+                // No filters, fast timeline is just the total
+                fastTimeline = new Int32Array(365);
+                for(let d=0; d<365; d++) fastTimeline[d] = falconSnapshots[d][FALCON_BINS-1];
+            }
+
+            // Phase 1: Progressive (10k items)
+            for(let i=0; i<PROG_CHUNK; i++) {
+                data[i].filtered = checkFilter(data[i]);
+                if (data[i].filtered) activeCount10k++;
+            }
+            
+            updateVisuals(PROG_CHUNK, activeCount10k, true, fastTimeline);
+            document.getElementById('latency-prog').innerText = (performance.now() - t0).toFixed(1);
+
+            // Phase 2: Full
+            if (progTimeout) clearTimeout(progTimeout);
+            progTimeout = setTimeout(() => {
+                let t1 = performance.now();
+                let activeCountTotal = activeCount10k;
+                for(let i=PROG_CHUNK; i<N; i++) {
+                    data[i].filtered = checkFilter(data[i]);
+                    if (data[i].filtered) activeCountTotal++;
+                }
+                updateVisuals(N, activeCountTotal, false, fastTimeline);
+                document.getElementById('latency-full').innerText = ((performance.now() - t1) + (performance.now() - t0)).toFixed(1);
+            }, 10);
+        }
+
+        // --- 8. Rendering Logic ---
+        function updateVisuals(processedCount, activeCount, isPartial, fastTimeline) {
+            const scaleFactor = N / processedCount;
+            document.getElementById('count-display').innerText = Math.round(activeCount * scaleFactor).toLocaleString();
+            
+            // Scatter (Canvas)
+            ctx.clearRect(-margin.left, -margin.top, canvas.width, canvas.height);
+            for(let i=0; i<processedCount; i++) {
+                let d = data[i];
+                if (d.filtered) {
+                    ctx.fillStyle = colors[d.category];
+                    ctx.globalAlpha = 0.2;
+                    ctx.beginPath();
+                    ctx.arc(xScaleScatter(d.amount), yScaleScatter(d.quantity), 1.5, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+
+            // Aggregations
+            let histCounts = new Int32Array(bins.length);
+            let barCounts = new Int32Array(6);
+            let timeCounts = fastTimeline ? fastTimeline : new Int32Array(365);
+
+            for(let i=0; i<processedCount; i++) {
+                let d = data[i];
+                if (d.filtered) {
+                    for(let b=0; b<bins.length; b++) {
+                        if (d.amount >= bins[b].x0 && d.amount <= bins[b].x1) {
+                            histCounts[b]++;
+                            break;
+                        }
+                    }
+                    barCounts[d.category]++;
+                    if(!fastTimeline) timeCounts[d.date]++;
+                }
+            }
+
+            // Update Histogram
+            let maxHist = d3.max(histCounts) * scaleFactor;
+            yScaleHist.domain([0, maxHist || 1]);
+            histYAxis.call(d3.axisLeft(yScaleHist).ticks(5).tickSizeOuter(0));
+            histBars.data(bins)
+                .attr('x', d => xScaleHist(d.x0) + 1)
+                .attr('width', d => Math.max(1, xScaleHist(d.x1) - xScaleHist(d.x0) - 2))
+                .attr('y', (d, i) => yScaleHist(histCounts[i] * scaleFactor))
+                .attr('height', (d, i) => innerHeight - yScaleHist(histCounts[i] * scaleFactor));
+
+            // Update Bar
+            let maxBar = d3.max(barCounts) * scaleFactor;
+            yScaleBar.domain([0, maxBar || 1]);
+            barYAxis.call(d3.axisLeft(yScaleBar).ticks(5).tickSizeOuter(0));
+            barRects.data(categories)
+                .attr('y', (d, i) => yScaleBar(barCounts[i] * scaleFactor))
+                .attr('height', (d, i) => innerHeight - yScaleBar(barCounts[i] * scaleFactor));
+
+            // Update Timeline
+            let timeData = Array.from(timeCounts, c => fastTimeline ? c : c * scaleFactor);
+            let maxTime = d3.max(timeData);
+            yScaleTime.domain([0, maxTime || 1]);
+            timeYAxis.call(d3.axisLeft(yScaleTime).ticks(5).tickSizeOuter(0));
+            timePath.datum(timeData).attr('d', timeArea);
+        }
+
+        // --- 9. Interactions ---
+        document.getElementById('reset-btn').addEventListener('click', () => {
+            state.brushes = { scatter: null, hist: null, bar: null, timeline: null };
+            svgScatter.select(".brush").call(brushScatter.move, null);
+            svgHist.select(".brush").call(brushHist.move, null);
+            svgBar.select(".brush").call(brushBar.move, null);
+            svgTimeline.select(".brush").call(brushTimeline.move, null);
+            updateFilterLogic('reset');
+        });
+
+        // Initialize
+        updateFilterLogic('init');
+    </script>
+</body>
+</html>

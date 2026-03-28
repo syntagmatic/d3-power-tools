@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Radial Dendrogram Hierarchical Edge Bundling</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #fcfcfc;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            overflow: hidden;
+            height: 100vh;
+        }
+
+        #controls {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            background: rgba(255, 255, 255, 0.9);
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            width: 250px;
+        }
+
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+
+        label {
+            font-size: 14px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        input[type="range"] {
+            width: 100%;
+        }
+
+        .value-display {
+            font-size: 12px;
+            color: #666;
+            text-align: right;
+        }
+
+        #chart-container {
+            position: relative;
+            width: 800px;
+            height: 800px;
+            margin-top: 40px;
+        }
+
+        canvas, svg {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+
+        canvas {
+            pointer-events: none;
+        }
+
+        .node-label {
+            font-size: 8px;
+            fill: #666;
+            cursor: default;
+            pointer-events: none;
+        }
+
+        .node-dot {
+            fill: #bbb;
+            cursor: pointer;
+        }
+
+        .node-dot:hover {
+            fill: #4477AA;
+        }
+
+        .node-highlight {
+            fill: #4477AA;
+            font-weight: bold;
+        }
+
+        .title {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            text-align: right;
+        }
+
+        .title h1 {
+            margin: 0;
+            font-size: 20px;
+            color: #222;
+        }
+
+        .title p {
+            margin: 5px 0 0;
+            font-size: 14px;
+            color: #888;
+        }
+    </style>
+</head>
+<body>
+
+<div id="controls">
+    <div class="control-group">
+        <label for="tension">Bundle Tension</label>
+        <input type="range" id="tension" min="0" max="1" step="0.05" value="0.85">
+        <div class="value-display" id="tension-val">0.85</div>
+    </div>
+</div>
+
+<div class="title">
+    <h1>Software Dependencies</h1>
+    <p>Radial Dendrogram & Edge Bundling</p>
+</div>
+
+<div id="chart-container">
+    <canvas id="edge-canvas"></canvas>
+    <svg id="node-svg"></svg>
+</div>
+
+<script>
+    // --- Configuration ---
+    const width = 800;
+    const height = 800;
+    const radius = 300; // 600px diameter
+    const innerRadius = 220; // Radius for nodes
+    let tension = 0.85;
+
+    const TOL_BLUE = "#4477AA";
+    const EDGE_GRAY = "#999";
+
+    // --- Data Generation ---
+    function generateData() {
+        const root = { name: "root", children: [] };
+        const modules = ["Core", "UI", "Network", "Graphics", "Data", "Security"];
+        
+        modules.forEach((modName, i) => {
+            const module = { name: modName, children: [] };
+            const numSubmodules = Math.floor(Math.random() * 5) + 4; // 4-8
+            
+            for (let j = 0; j < numSubmodules; j++) {
+                const submodule = { name: `Sub${j}`, children: [] };
+                const numFiles = Math.floor(Math.random() * 4) + 2; // 2-5
+                
+                for (let k = 0; k < numFiles; k++) {
+                    submodule.children.push({ 
+                        name: `File_${i}${j}${k}`,
+                        id: `f_${i}_${j}_${k}`
+                    });
+                }
+                module.children.push(submodule);
+            }
+            root.children.push(module);
+        });
+        return root;
+    }
+
+    const rawData = generateData();
+    const hierarchy = d3.hierarchy(rawData);
+    
+    const cluster = d3.cluster()
+        .size([2 * Math.PI, innerRadius]);
+    
+    const root = cluster(hierarchy);
+    const leaves = root.leaves();
+
+    // Cross-module dependencies
+    const connections = [];
+    const numEdges = 80;
+    while (connections.length < numEdges) {
+        const source = leaves[Math.floor(Math.random() * leaves.length)];
+        const target = leaves[Math.floor(Math.random() * leaves.length)];
+        
+        // Find module ancestors (depth 1)
+        const sourceModule = source.ancestors().find(d => d.depth === 1);
+        const targetModule = target.ancestors().find(d => d.depth === 1);
+        
+        if (source !== target && sourceModule !== targetModule) {
+            connections.push({
+                source: source,
+                target: target,
+                path: source.path(target)
+            });
+        }
+    }
+
+    // --- Setup Canvas and SVG ---
+    const canvas = document.getElementById("edge-canvas");
+    canvas.width = width * window.devicePixelRatio;
+    canvas.height = height * window.devicePixelRatio;
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+    const ctx = canvas.getContext("2d");
+    ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+
+    const svg = d3.select("#node-svg")
+        .attr("width", width)
+        .attr("height", height);
+
+    const g = svg.append("g")
+        .attr("transform", `translate(${width / 2}, ${height / 2})`);
+
+    // --- Rendering Functions ---
+    function drawEdges(highlightedNode = null) {
+        ctx.clearRect(0, 0, width, height);
+        ctx.save();
+        ctx.translate(width / 2, height / 2);
+
+        // Update beta based on tension
+        const currentBeta = 1 - tension;
+        const currentLine = d3.lineRadial()
+            .curve(d3.curveBundle.beta(currentBeta))
+            .radius(d => d.y)
+            .angle(d => d.x)
+            .context(ctx);
+
+        const highlightSet = new Set();
+        if (highlightedNode) {
+            connections.forEach(c => {
+                if (c.source === highlightedNode || c.target === highlightedNode) {
+                    highlightSet.add(c);
+                }
+            });
+        }
+
+        // Draw background edges
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = highlightedNode ? "rgba(153, 153, 153, 0.05)" : "rgba(153, 153, 153, 0.3)";
+        
+        connections.forEach(c => {
+            if (!highlightSet.has(c)) {
+                ctx.beginPath();
+                currentLine(c.path);
+                ctx.stroke();
+            }
+        });
+
+        // Draw highlighted edges
+        if (highlightedNode) {
+            ctx.lineWidth = 2.5;
+            ctx.strokeStyle = TOL_BLUE;
+            highlightSet.forEach(c => {
+                ctx.beginPath();
+                currentLine(c.path);
+                ctx.stroke();
+            });
+        }
+
+        ctx.restore();
+    }
+
+    // --- SVG Nodes and Labels ---
+    
+    // Module labels (Ring)
+    const moduleNodes = root.descendants().filter(d => d.depth === 1);
+    const moduleG = g.selectAll(".module-label-group")
+        .data(moduleNodes)
+        .join("g")
+        .attr("class", "module-label-group");
+
+    moduleG.append("text")
+        .attr("class", "module-label")
+        .attr("dy", "0.31em")
+        .attr("transform", d => {
+            const leaves = d.leaves();
+            const minX = d3.min(leaves, l => l.x);
+            const maxX = d3.max(leaves, l => l.x);
+            const avgAngle = (minX + maxX) / 2;
+            const labelRadius = innerRadius + 75;
+            return `rotate(${avgAngle * 180 / Math.PI - 90}) translate(${labelRadius}, 0)${avgAngle >= Math.PI ? " rotate(180)" : ""}`;
+        })
+        .attr("text-anchor", "middle")
+        .style("font-size", "12px")
+        .style("font-weight", "bold")
+        .style("fill", "#333")
+        .style("text-transform", "uppercase")
+        .style("letter-spacing", "1px")
+        .text(d => d.data.name);
+
+    // Leaf nodes
+    const nodeG = g.selectAll(".node")
+        .data(leaves)
+        .join("g")
+        .attr("class", "node")
+        .attr("transform", d => `rotate(${d.x * 180 / Math.PI - 90}) translate(${d.y}, 0)`);
+
+    const nodeDots = nodeG.append("circle")
+        .attr("class", "node-dot")
+        .attr("r", 3)
+        .on("mouseenter", function(event, d) {
+            const targets = new Set();
+            connections.forEach(c => {
+                if (c.source === d) targets.add(c.target);
+                if (c.target === d) targets.add(c.source);
+            });
+
+            d3.select(this).attr("r", 6).style("fill", TOL_BLUE);
+            
+            nodeDots.filter(n => targets.has(n))
+                .attr("r", 5)
+                .style("fill", TOL_BLUE);
+
+            nodeLabels.filter(n => n === d || targets.has(n))
+                .classed("node-highlight", true);
+
+            drawEdges(d);
+        })
+        .on("mouseleave", function() {
+            nodeDots.attr("r", 3).style("fill", null);
+            nodeLabels.classed("node-highlight", false);
+            drawEdges();
+        });
+
+    const nodeLabels = nodeG.append("text")
+        .attr("class", "node-label")
+        .attr("dy", "0.31em")
+        .attr("x", d => d.x < Math.PI ? 8 : -8)
+        .attr("text-anchor", d => d.x < Math.PI ? "start" : "end")
+        .attr("transform", d => d.x >= Math.PI ? "rotate(180)" : null)
+        .text(d => d.data.name);
+
+    // --- Interaction ---
+    const tensionInput = document.getElementById("tension");
+    const tensionVal = document.getElementById("tension-val");
+
+    tensionInput.addEventListener("input", (e) => {
+        tension = parseFloat(e.target.value);
+        tensionVal.textContent = tension.toFixed(2);
+        drawEdges();
+    });
+
+    // Initial Draw
+    drawEdges();
+
+</script>
+</body>
+</html>

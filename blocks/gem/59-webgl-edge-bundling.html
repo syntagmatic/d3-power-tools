@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>WebGL Radial Edge Bundling</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body { margin: 0; background: #fff; font-family: system-ui, -apple-system, sans-serif; overflow: hidden; }
+        #container { position: relative; width: 100vw; height: 100vh; display: flex; align-items: center; justify-content: center; }
+        canvas, svg { position: absolute; pointer-events: none; }
+        svg { pointer-events: auto; }
+        #controls {
+            position: absolute; top: 20px; left: 20px;
+            background: rgba(255, 255, 255, 0.9);
+            padding: 15px; border-radius: 8px; border: 1px solid #ddd;
+            z-index: 100; box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            user-select: none;
+        }
+        .control-group { margin-bottom: 10px; }
+        .control-group:last-child { margin-bottom: 0; }
+        label { display: block; font-size: 12px; color: #666; margin-bottom: 5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+        input[type="range"] { width: 150px; vertical-align: middle; }
+        #beta-val { display: inline-block; width: 30px; text-align: right; font-variant-numeric: tabular-nums; }
+        .label { font-size: 8px; fill: #444; pointer-events: none; }
+        .hover-target { fill: transparent; cursor: pointer; }
+        .module-label { font-size: 14px; font-weight: bold; fill: #222; opacity: 0.5; pointer-events: none; }
+    </style>
+</head>
+<body>
+
+<div id="controls">
+    <div class="control-group">
+        <label>Bundle Tension (Beta)</label>
+        <input type="range" id="beta-slider" min="0" max="1" step="0.05" value="0.85">
+        <span id="beta-val">0.85</span>
+    </div>
+</div>
+
+<div id="container">
+    <canvas id="webgl"></canvas>
+    <svg id="overlay"></svg>
+</div>
+
+<script id="vs" type="x-shader/x-vertex">#version 300 es
+layout(location = 0) in vec3 a_quad; // x, y, u (interpolation)
+layout(location = 1) in vec2 a_p0;
+layout(location = 2) in vec2 a_p1;
+layout(location = 3) in float a_alpha0;
+layout(location = 4) in float a_alpha1;
+layout(location = 5) in float a_visibility;
+
+uniform vec2 u_resolution;
+uniform float u_width;
+
+out float v_alpha;
+out float v_vis;
+
+void main() {
+    vec2 dir = a_p1 - a_p0;
+    float len = length(dir);
+    if (len < 0.0001) {
+        gl_Position = vec4(-2.0, -2.0, 0.0, 1.0);
+        return;
+    }
+    vec2 unit = dir / len;
+    vec2 norm = vec2(-unit.y, unit.x);
+    
+    // a_quad.x is offset across line (-0.5 to 0.5)
+    // a_quad.y is offset along line (0 to 1)
+    vec2 pos = a_p0 + unit * a_quad.y * len + norm * a_quad.x * u_width;
+    
+    // Center in clip space
+    vec2 clip = (pos / u_resolution) * 2.0 - 1.0;
+    clip.y = -clip.y;
+    gl_Position = vec4(clip, 0.0, 1.0);
+    
+    v_alpha = mix(a_alpha0, a_alpha1, a_quad.z);
+    v_vis = a_visibility;
+}
+</script>
+
+<script id="fs" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+in float v_alpha;
+in float v_vis;
+out vec4 fragColor;
+
+void main() {
+    // Highlighted: Tol blue #4477AA (0.267, 0.467, 0.667)
+    // Normal: Gray #999999 (0.6, 0.6, 0.6)
+    vec3 color = v_vis > 0.1 ? vec3(0.267, 0.467, 0.667) : vec3(0.6, 0.6, 0.6);
+    fragColor = vec4(color, v_alpha * v_vis);
+}
+</script>
+
+<script>
+const WIDTH = 800, HEIGHT = 800;
+const RADIUS = 325;
+const SEGMENTS_PER_EDGE = 24;
+
+// 1. Data Generation
+const modules = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta"];
+const dataNodes = [{id: "root", parent: null}];
+modules.forEach(m => dataNodes.push({id: m, parent: "root"}));
+modules.forEach(m => {
+    for (let i = 0; i < 50; i++) {
+        dataNodes.push({id: `${m}.${i}`, parent: m});
+    }
+});
+
+const root = d3.stratify()
+    .id(d => d.id)
+    .parentId(d => d.parent)(dataNodes);
+
+const cluster = d3.cluster()
+    .size([2 * Math.PI, RADIUS - 100]);
+cluster(root);
+
+const leaves = root.leaves();
+const leafMap = new Map(leaves.map(d => [d.id, d]));
+const edges = [];
+for (let i = 0; i < 1200; i++) {
+    const s = leaves[Math.floor(Math.random() * leaves.length)];
+    let t = leaves[Math.floor(Math.random() * leaves.length)];
+    while (t.parent.id === s.parent.id) {
+        t = leaves[Math.floor(Math.random() * leaves.length)];
+    }
+    // Path from source to target
+    const path = s.path(t);
+    edges.push({source: s, target: t, path});
+}
+
+// 2. WebGL Setup
+const canvas = document.querySelector("#webgl");
+canvas.width = WIDTH * window.devicePixelRatio;
+canvas.height = HEIGHT * window.devicePixelRatio;
+canvas.style.width = WIDTH + "px";
+canvas.style.height = HEIGHT + "px";
+
+const gl = canvas.getContext("webgl2", { antialias: true, alpha: true });
+if (!gl) alert("WebGL 2 not supported");
+
+function createShader(gl, type, source) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, source);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+    return s;
+}
+
+const program = gl.createProgram();
+gl.attachShader(program, createShader(gl, gl.VERTEX_SHADER, document.querySelector("#vs").text));
+gl.attachShader(program, createShader(gl, gl.FRAGMENT_SHADER, document.querySelector("#fs").text));
+gl.linkProgram(program);
+gl.useProgram(program);
+
+// Template quad: x in [-0.5, 0.5], y in [0, 1], z as u for alpha interpolation
+const quadData = new Float32Array([
+    -0.5, 0, 0,
+     0.5, 0, 0,
+    -0.5, 1, 1,
+    -0.5, 1, 1,
+     0.5, 0, 0,
+     0.5, 1, 1
+]);
+const quadBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+gl.bufferData(gl.ARRAY_BUFFER, quadData, gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+
+// Instance Data
+const instanceCount = edges.length * SEGMENTS_PER_EDGE;
+const instanceData = new Float32Array(instanceCount * 7); // p0(2), p1(2), a0(1), a1(1), vis(1)
+const instanceBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuf);
+gl.bufferData(gl.ARRAY_BUFFER, instanceData, gl.DYNAMIC_DRAW);
+
+[1, 2, 3, 4, 5].forEach(loc => {
+    gl.enableVertexAttribArray(loc);
+    const size = loc <= 2 ? 2 : 1;
+    const offset = (loc === 1 ? 0 : loc === 2 ? 2 : loc === 3 ? 4 : loc === 4 ? 5 : 6) * 4;
+    gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 7 * 4, offset);
+    gl.vertexAttribDivisor(loc, 1);
+});
+
+const visData = new Float32Array(instanceCount);
+const visBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, visBuf);
+gl.bufferData(gl.ARRAY_BUFFER, visData, gl.DYNAMIC_DRAW);
+gl.enableVertexAttribArray(5);
+gl.vertexAttribPointer(5, 1, gl.FLOAT, false, 0, 0);
+gl.vertexAttribDivisor(5, 1);
+
+// 3. Tapered Alpha Calculation
+function getAlpha(t) {
+    // 0.4 at midpoint (t=0.5), 0.1 at endpoints (t=0,1)
+    return 0.1 + 0.3 * (1.0 - Math.abs(2.0 * t - 1.0));
+}
+
+// 4. Tessellation & Upload
+function updateEdges(beta) {
+    const line = d3.lineRadial()
+        .curve(d3.curveBundle.beta(beta))
+        .radius(d => d.y)
+        .angle(d => d.x);
+
+    let offset = 0;
+    edges.forEach((edge, i) => {
+        const points = [];
+        const context = {
+            moveTo(x, y) { points.push([x, y]); },
+            lineTo(x, y) { points.push([x, y]); },
+            bezierCurveTo(x1, y1, x2, y2, x, y) {
+                const start = points[points.length - 1];
+                const steps = 6;
+                for (let s = 1; s <= steps; s++) {
+                    const t = s / steps;
+                    const mt = 1 - t;
+                    const px = mt*mt*mt*start[0] + 3*mt*mt*t*x1 + 3*mt*t*t*x2 + t*t*t*x;
+                    const py = mt*mt*mt*start[1] + 3*mt*mt*t*y1 + 3*mt*t*t*y2 + t*t*t*y;
+                    points.push([px, py]);
+                }
+            },
+            closePath() {}
+        };
+        line.context(context)(edge.path);
+
+        // Convert to Cartesian and re-sample to fixed segment count
+        const cartesian = points.map(p => [
+            p[1] * Math.cos(p[0] - Math.PI / 2),
+            p[1] * Math.sin(p[0] - Math.PI / 2)
+        ]);
+
+        for (let j = 0; j < SEGMENTS_PER_EDGE; j++) {
+            const t0 = j / SEGMENTS_PER_EDGE;
+            const t1 = (j + 1) / SEGMENTS_PER_EDGE;
+            
+            // Linear interpolation of points for simplicity in fixed segment count
+            const idx0 = t0 * (cartesian.length - 1);
+            const idx1 = t1 * (cartesian.length - 1);
+            const i0 = Math.floor(idx0), f0 = idx0 - i0;
+            const i1 = Math.floor(idx1), f1 = idx1 - i1;
+            
+            const p0x = cartesian[i0][0] * (1-f0) + cartesian[Math.min(i0+1, cartesian.length-1)][0] * f0;
+            const p0y = cartesian[i0][1] * (1-f0) + cartesian[Math.min(i0+1, cartesian.length-1)][1] * f0;
+            const p1x = cartesian[i1][0] * (1-f1) + cartesian[Math.min(i1+1, cartesian.length-1)][0] * f1;
+            const p1y = cartesian[i1][1] * (1-f1) + cartesian[Math.min(i1+1, cartesian.length-1)][1] * f1;
+
+            instanceData[offset * 7 + 0] = p0x;
+            instanceData[offset * 7 + 1] = p0y;
+            instanceData[offset * 7 + 2] = p1x;
+            instanceData[offset * 7 + 3] = p1y;
+            instanceData[offset * 7 + 4] = getAlpha(t0);
+            instanceData[offset * 7 + 5] = getAlpha(t1);
+            // instanceData[offset * 7 + 6] is visibility, set separately
+            offset++;
+        }
+    });
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, instanceData);
+}
+
+// 5. Visibility / Highlight Logic
+function updateVisibility(hoveredNode = null) {
+    const faded = 0.03;
+    const highlight = 0.8;
+    
+    visData.fill(faded);
+    if (hoveredNode) {
+        const affectedLeafIds = new Set(hoveredNode.leaves().map(d => d.id));
+        edges.forEach((edge, i) => {
+            if (affectedLeafIds.has(edge.source.id) || affectedLeafIds.has(edge.target.id)) {
+                for (let j = 0; j < SEGMENTS_PER_EDGE; j++) {
+                    visData[i * SEGMENTS_PER_EDGE + j] = highlight;
+                }
+            }
+        });
+    } else {
+        visData.fill(0.3); // Standard opacity when no hover
+    }
+    
+    gl.bindBuffer(gl.ARRAY_BUFFER, visBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, visData);
+    draw();
+}
+
+function draw() {
+    gl.clearColor(1, 1, 1, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.uniform2f(gl.getUniformLocation(program, "u_resolution"), WIDTH, HEIGHT);
+    gl.uniform1f(gl.getUniformLocation(program, "u_width"), 1.2);
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, instanceCount);
+}
+
+// 6. SVG Overlay
+const svg = d3.select("#overlay")
+    .attr("width", WIDTH)
+    .attr("height", HEIGHT);
+
+const g = svg.append("g")
+    .attr("transform", `translate(${WIDTH/2}, ${HEIGHT/2})`);
+
+// Module labels (background)
+g.selectAll(".module-label")
+    .data(root.children)
+    .join("text")
+    .attr("class", "module-label")
+    .attr("text-anchor", "middle")
+    .attr("dy", "0.35em")
+    .attr("transform", d => {
+        const avgAngle = d3.mean(d.leaves(), l => l.x);
+        const radius = RADIUS - 140;
+        return `rotate(${avgAngle * 180 / Math.PI - 90}) translate(${radius}, 0) rotate(${-(avgAngle * 180 / Math.PI - 90)})`;
+    })
+    .text(d => d.id);
+
+// Leaf labels
+const leafLabels = g.selectAll(".leaf-label")
+    .data(leaves)
+    .join("g")
+    .attr("transform", d => `rotate(${d.x * 180 / Math.PI - 90}) translate(${d.y}, 0)`);
+
+leafLabels.append("text")
+    .attr("class", "label")
+    .attr("dy", "0.31em")
+    .attr("x", d => d.x < Math.PI ? 10 : -10)
+    .attr("text-anchor", d => d.x < Math.PI ? "start" : "end")
+    .attr("transform", d => d.x < Math.PI ? null : "rotate(180)")
+    .text(d => d.id.split(".")[1]);
+
+leafLabels.append("circle")
+    .attr("class", "hover-target")
+    .attr("r", 8)
+    .on("mouseenter", (e, d) => updateVisibility(d))
+    .on("mouseleave", () => updateVisibility(null));
+
+// Interaction with slider
+d3.select("#beta-slider").on("input", function() {
+    const beta = +this.value;
+    d3.select("#beta-val").text(beta.toFixed(2));
+    updateEdges(beta);
+    draw();
+});
+
+// Initial Render
+updateEdges(0.85);
+updateVisibility(null);
+</script>
+
+</body>
+</html>

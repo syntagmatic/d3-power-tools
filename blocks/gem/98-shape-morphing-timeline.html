@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Shape Morphing Timeline</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  :root {
+    --bg: #0f172a;
+    --text: #f1f5f9;
+    --primary: #38bdf8;
+    --secondary: #818cf8;
+    --accent: #f472b6;
+  }
+  body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    overflow: hidden;
+  }
+  .container {
+    width: 90%;
+    max-width: 900px;
+    background: #1e293b;
+    padding: 2rem;
+    border-radius: 1rem;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+    position: relative;
+  }
+  h1 {
+    margin: 0 0 0.5rem 0;
+    font-size: 1.5rem;
+    font-weight: 700;
+    background: linear-gradient(to right, var(--primary), var(--secondary));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .description {
+    font-size: 0.875rem;
+    color: #94a3b8;
+    margin-bottom: 2rem;
+  }
+  .chart-area {
+    position: relative;
+    width: 100%;
+    height: 400px;
+  }
+  .controls {
+    margin-top: 2rem;
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    width: 100%;
+  }
+  #timeline {
+    flex-grow: 1;
+    cursor: pointer;
+    accent-color: var(--primary);
+  }
+  .btn {
+    background: #334155;
+    border: none;
+    color: white;
+    padding: 0.5rem 1rem;
+    border-radius: 0.5rem;
+    cursor: pointer;
+    font-size: 0.875rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    transition: background 0.2s;
+    min-width: 80px;
+    justify-content: center;
+  }
+  .btn:hover {
+    background: #475569;
+  }
+  .labels {
+    display: flex;
+    justify-content: space-between;
+    width: 100%;
+    margin-top: 0.5rem;
+    font-size: 0.75rem;
+    color: #64748b;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .labels span {
+    flex: 1;
+    text-align: center;
+  }
+  .labels span:first-child { text-align: left; }
+  .labels span:last-child { text-align: right; }
+  .active-label {
+    color: var(--primary);
+  }
+  .tooltip {
+    position: absolute;
+    padding: 0.5rem;
+    background: rgba(15, 23, 42, 0.9);
+    border: 1px solid #334155;
+    border-radius: 0.25rem;
+    pointer-events: none;
+    font-size: 0.75rem;
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <h1>Dynamic Data Morphing</h1>
+  <p class="description">Scrub the timeline to transition between Bar, Line, Area, and Scatter representations of the same dataset.</p>
+  
+  <div class="chart-area" id="chart"></div>
+  
+  <div class="controls">
+    <button id="playPause" class="btn">Pause</button>
+    <input type="range" id="timeline" min="0" max="3" step="0.001" value="0">
+  </div>
+  <div class="labels">
+    <span id="label-0">Bar</span>
+    <span id="label-1">Line</span>
+    <span id="label-2">Area</span>
+    <span id="label-3">Scatter</span>
+  </div>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+// --- Configuration ---
+const width = 800;
+const height = 400;
+const margin = { top: 40, right: 40, bottom: 40, left: 40 };
+const innerWidth = width - margin.left - margin.right;
+const innerHeight = height - margin.top - margin.bottom;
+
+const n = 30;
+const nResample = 1024; // Smoothness of the morph
+
+// --- Data Generation ---
+const data = d3.range(n).map(i => {
+  const t = i / (n - 1);
+  // Seasonal wave + trend + some "interesting" spikes
+  const yBase = 40 + 30 * Math.sin(t * Math.PI * 3);
+  const trend = t * 20;
+  const spike = i === 12 ? 25 : (i === 22 ? -15 : 0);
+  return {
+    x: i,
+    y: yBase + trend + spike + (Math.random() - 0.5) * 5
+  };
+});
+
+// --- Scales ---
+const xScale = d3.scaleLinear()
+  .domain([0, n - 1])
+  .range([0, innerWidth]);
+
+const yScale = d3.scaleLinear()
+  .domain([0, 100])
+  .range([innerHeight, 0]);
+
+// --- Path Generators ---
+const barWidth = (innerWidth / n) * 0.8;
+const yBase = innerHeight;
+
+function getBarPath() {
+  let path = `M ${xScale(0) - barWidth / 2},${yBase}`;
+  data.forEach((d, i) => {
+    const x = xScale(d.x);
+    const y = yScale(d.y);
+    path += ` L ${x - barWidth / 2},${y}`;
+    path += ` L ${x + barWidth / 2},${y}`;
+    path += ` L ${x + barWidth / 2},${yBase}`;
+  });
+  path += " Z";
+  return path;
+}
+
+function getLinePath() {
+  // Ribbon version of line
+  let top = `M ${xScale(0)},${yScale(data[0].y) - 1.5}`;
+  for (let i = 1; i < n; i++) {
+    top += ` L ${xScale(data[i].x)},${yScale(data[i].y) - 1.5}`;
+  }
+  let bottom = "";
+  for (let i = n - 1; i >= 0; i--) {
+    bottom += ` L ${xScale(data[i].x)},${yScale(data[i].y) + 1.5}`;
+  }
+  return top + bottom + " Z";
+}
+
+function getAreaPath() {
+  let top = `M ${xScale(0)},${yScale(data[0].y)}`;
+  for (let i = 1; i < n; i++) {
+    top += ` L ${xScale(data[i].x)},${yScale(data[i].y)}`;
+  }
+  let bottom = ` L ${xScale(data[n-1].x)},${yBase} L ${xScale(0)},${yBase}`;
+  return top + bottom + " Z";
+}
+
+function getScatterPath() {
+  let path = "";
+  data.forEach((d, i) => {
+    const x = xScale(d.x);
+    const y = yScale(d.y);
+    const r = 4;
+    // Diamond shape
+    const diamond = ` M ${x-r},${y} L ${x},${y-r} L ${x+r},${y} L ${x},${y+r} Z`;
+    path += diamond;
+  });
+  return path;
+}
+
+// --- Setup SVG ---
+const svg = d3.select("#chart").append("svg")
+  .attr("viewBox", `0 0 ${width} ${height}`)
+  .attr("width", "100%")
+  .attr("height", "100%");
+
+const g = svg.append("g")
+  .attr("transform", `translate(${margin.left},${margin.top})`);
+
+// Axes
+const xAxis = d3.axisBottom(xScale).ticks(n / 2).tickSizeOuter(0);
+const yAxis = d3.axisLeft(yScale).ticks(5).tickSize(-innerWidth);
+
+g.append("g")
+  .attr("transform", `translate(0,${innerHeight})`)
+  .attr("class", "axis axis--x")
+  .call(xAxis);
+
+g.append("g")
+  .attr("class", "axis axis--y")
+  .call(yAxis)
+  .call(g => g.select(".domain").remove())
+  .call(g => g.selectAll(".tick line").attr("stroke", "#334155").attr("stroke-dasharray", "2,2"));
+
+// Styling axes
+svg.selectAll(".axis text").attr("fill", "#64748b");
+svg.selectAll(".axis line").attr("stroke", "#334155");
+
+// --- Resampling ---
+// We need to resample the paths to a fixed number of points
+function resamplePath(pathStr, count) {
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", pathStr);
+  const length = path.getTotalLength();
+  const points = [];
+  for (let i = 0; i < count; i++) {
+    const p = path.getPointAtLength((i * length) / (count - 1));
+    points.push([p.x, p.y]);
+  }
+  return points;
+}
+
+// Since Scatter has subpaths, we handle it specially or use a continuous version
+// Actually, let's make Scatter a continuous path to avoid getPointAtLength subpath issues
+function getContinuousScatterPath() {
+  let path = `M ${xScale(0)},${yBase}`;
+  data.forEach((d, i) => {
+    const x = xScale(d.x);
+    const y = yScale(d.y);
+    const r = 4;
+    // Move to point, draw diamond, move back to point
+    path += ` L ${x},${y} L ${x-r},${y} L ${x},${y-r} L ${x+r},${y} L ${x},${y+r} L ${x-r},${y} L ${x},${y}`;
+  });
+  path += ` L ${xScale(data[n-1].x)},${yBase} Z`;
+  return path;
+}
+
+const paths = [
+  resamplePath(getBarPath(), nResample),
+  resamplePath(getLinePath(), nResample),
+  resamplePath(getAreaPath(), nResample),
+  resamplePath(getContinuousScatterPath(), nResample)
+];
+
+// --- Main Morphing Logic ---
+const morphPath = g.append("path")
+  .attr("fill", "url(#gradient)")
+  .attr("fill-opacity", 0.7)
+  .attr("stroke", "var(--primary)")
+  .attr("stroke-width", 2)
+  .attr("stroke-linejoin", "round");
+
+// Gradient
+const defs = svg.append("defs");
+const gradient = defs.append("linearGradient")
+  .attr("id", "gradient")
+  .attr("x1", "0%").attr("y1", "0%")
+  .attr("x2", "0%").attr("y2", "100%");
+
+gradient.append("stop").attr("offset", "0%").attr("stop-color", "var(--primary)");
+gradient.append("stop").attr("offset", "100%").attr("stop-color", "var(--secondary)");
+
+function updateMorph(t) {
+  const idx = Math.floor(t);
+  const nextIdx = Math.min(idx + 1, paths.length - 1);
+  const localT = t - idx;
+  
+  const currentPoints = paths[idx];
+  const nextPoints = paths[nextIdx];
+  
+  const interpolatedPoints = currentPoints.map((p, i) => {
+    const np = nextPoints[i];
+    return [
+      p[0] * (1 - localT) + np[0] * localT,
+      p[1] * (1 - localT) + np[1] * localT
+    ];
+  });
+  
+  const lineGen = d3.line().curve(d3.curveLinear);
+  morphPath.attr("d", lineGen(interpolatedPoints));
+  
+  // Update labels
+  d3.selectAll(".labels span").classed("active-label", false);
+  d3.select(`#label-${idx}`).classed("active-label", true);
+  if (localT > 0.5) {
+    d3.selectAll(".labels span").classed("active-label", false);
+    d3.select(`#label-${nextIdx}`).classed("active-label", true);
+  }
+}
+
+// --- Interaction ---
+const timeline = d3.select("#timeline");
+timeline.on("input", function() {
+  updateMorph(+this.value);
+});
+
+// Auto-play
+let playing = true;
+let startTime = performance.now();
+let lastT = 0;
+
+function animate(now) {
+  if (playing) {
+    const elapsed = (now - startTime) / 1000;
+    const t = (elapsed * 0.5) % 3; // Cycle every 6 seconds
+    timeline.property("value", t);
+    updateMorph(t);
+    lastT = t;
+  } else {
+    // Just sync
+  }
+  requestAnimationFrame(animate);
+}
+
+d3.select("#playPause").on("click", function() {
+  playing = !playing;
+  if (playing) {
+    // Adjust startTime so we resume from where we were
+    startTime = performance.now() - (lastT / 0.5) * 1000;
+    d3.select(this).text("Pause");
+  } else {
+    d3.select(this).text("Play");
+  }
+});
+
+// Start animation
+updateMorph(0);
+requestAnimationFrame(animate);
+
+// --- Tooltips ---
+const bisect = d3.bisector(d => d.x).left;
+const hoverLine = g.append("line")
+  .attr("stroke", "#475569")
+  .attr("stroke-width", 1)
+  .attr("y1", 0)
+  .attr("y2", innerHeight)
+  .style("opacity", 0);
+
+const tooltip = d3.select("#tooltip");
+
+svg.on("mousemove", function(event) {
+  const [mx, my] = d3.pointer(event);
+  const x0 = xScale.invert(mx - margin.left);
+  const i = bisect(data, x0, 1);
+  const d0 = data[i - 1];
+  const d1 = data[i];
+  if (!d0 || !d1) return;
+  const d = x0 - d0.x > d1.x - x0 ? d1 : d0;
+  
+  hoverLine
+    .attr("x1", xScale(d.x))
+    .attr("x2", xScale(d.x))
+    .style("opacity", 1);
+    
+  tooltip
+    .style("opacity", 1)
+    .style("left", (event.pageX + 15) + "px")
+    .style("top", (event.pageY - 15) + "px")
+    .html(`<strong>Index:</strong> ${d.x}<br><strong>Value:</strong> ${d.y.toFixed(1)}`);
+});
+
+svg.on("mouseleave", () => {
+  hoverLine.style("opacity", 0);
+  tooltip.style("opacity", 0);
+});
+
+</script>
+</body>
+</html>

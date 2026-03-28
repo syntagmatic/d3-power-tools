@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Reduced Motion Linked Dashboard</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg: #fff;
+            --text: #333;
+            --panel-bg: #f9f9f9;
+            --border: #ddd;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 20px;
+            background-color: var(--bg);
+            color: var(--text);
+        }
+
+        .controls {
+            margin-bottom: 20px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        button {
+            padding: 8px 16px;
+            cursor: pointer;
+            background: #eee;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+
+        button:hover { background: #e0e0e0; }
+
+        .dashboard {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+
+        .panel {
+            width: 380px;
+            height: 300px;
+            background: var(--panel-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 10px;
+            position: relative;
+        }
+
+        .panel h3 {
+            margin: 0 0 10px 0;
+            font-size: 14px;
+            text-align: center;
+            color: #666;
+        }
+
+        svg { width: 100%; height: 100%; overflow: visible; }
+
+        .bar { cursor: pointer; stroke-width: 2; transition: outline 0.2s; }
+        .bar:hover { outline: 2px solid #000; }
+        
+        .line { fill: none; stroke-width: 2; }
+        .dot { stroke: #fff; stroke-width: 1; }
+
+        .brush .selection { fill: #000; fill-opacity: 0.1; stroke: #000; stroke-width: 1; }
+
+        .tooltip {
+            position: absolute;
+            pointer-events: none;
+            background: rgba(0,0,0,0.8);
+            color: #fff;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            opacity: 0;
+        }
+
+        /* Reduced Motion Override */
+        @media (prefers-reduced-motion: reduce) {
+            * { transition-duration: 0s !important; animation-duration: 0s !important; }
+        }
+
+        body.force-reduced * {
+            transition-duration: 0s !important;
+            animation-duration: 0s !important;
+        }
+
+        .status-pill {
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            background: #eef;
+            border: 1px solid #ccf;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="controls">
+        <button id="reset-btn">Reset Filters</button>
+        <button id="motion-toggle">Toggle Force Reduced Motion</button>
+        <span class="status-pill" id="motion-status">Motion: Enabled</span>
+    </div>
+
+    <div class="dashboard">
+        <div class="panel" id="bar-panel">
+            <h3>Revenue by Category</h3>
+            <svg id="bar-chart"></svg>
+        </div>
+        <div class="panel" id="line-panel">
+            <h3>Revenue Trend</h3>
+            <svg id="line-chart"></svg>
+        </div>
+        <div class="panel" id="scatter-panel">
+            <h3>Satisfaction vs Volume</h3>
+            <svg id="scatter-chart"></svg>
+        </div>
+    </div>
+
+    <div class="tooltip" id="tooltip"></div>
+
+    <script>
+        // 1. DATA GENERATION
+        const categories = ['A', 'B', 'C', 'D', 'E', 'F'];
+        const tolBright = ["#EE6677", "#228833", "#4477AA", "#CCBB44", "#66CCEE", "#AA3377"];
+        const colorScale = d3.scaleOrdinal().domain(categories).range(tolBright);
+
+        const rawData = Array.from({ length: 200 }, (_, i) => {
+            const cat = categories[Math.floor(Math.random() * categories.length)];
+            return {
+                id: i,
+                category: cat,
+                revenue: 100 + Math.random() * 900,
+                date: Math.floor(Math.random() * 24), // 0-23 months
+                satisfaction: 0.1 + Math.random() * 0.9,
+                volume: 10 + Math.random() * 90
+            };
+        });
+
+        // 2. STATE & DISPATCH
+        const dispatch = d3.dispatch("filter");
+        let filters = {
+            category: null,
+            ids: null
+        };
+
+        const getFilteredData = () => {
+            return rawData.filter(d => {
+                const catMatch = !filters.category || d.category === filters.category;
+                const idMatch = !filters.ids || filters.ids.has(d.id);
+                return catMatch && idMatch;
+            });
+        };
+
+        // 3. MOTION HELPERS
+        let forceReduced = false;
+        const getDuration = () => {
+            const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+            return (prefersReduced || forceReduced) ? 0 : 300;
+        };
+
+        const updateMotionStatus = () => {
+            const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+            const status = (prefersReduced || forceReduced) ? "Motion: Disabled" : "Motion: Enabled";
+            d3.select("#motion-status").text(status);
+        };
+
+        // 4. CHARTS
+        const margin = { top: 20, right: 20, bottom: 40, left: 50 };
+        const width = 380 - margin.left - margin.right;
+        const height = 260 - margin.top - margin.bottom;
+
+        // --- BAR CHART ---
+        const barSvg = d3.select("#bar-chart")
+            .append("g")
+            .attr("transform", `translate(${margin.left},${margin.top})`);
+
+        const barX = d3.scaleBand().domain(categories).range([0, width]).padding(0.2);
+        const barY = d3.scaleLinear().range([height, 0]);
+
+        barSvg.append("g")
+            .attr("transform", `translate(0,${height})`)
+            .call(d3.axisBottom(barX));
+
+        const barYAxis = barSvg.append("g").attr("class", "y-axis");
+
+        const updateBarChart = () => {
+            const data = getFilteredData();
+            const rolled = d3.rollups(data, v => d3.sum(v, d => d.revenue), d => d.category);
+            const rolledMap = new Map(rolled);
+            
+            // Ensure all categories represented
+            const displayData = categories.map(cat => ({
+                category: cat,
+                revenue: rolledMap.get(cat) || 0
+            }));
+
+            barY.domain([0, d3.max(displayData, d => d.revenue) || 1000]).nice();
+            barYAxis.transition().duration(getDuration()).call(d3.axisLeft(barY).ticks(5));
+
+            barSvg.selectAll(".bar")
+                .data(displayData, d => d.category)
+                .join(
+                    enter => enter.append("rect")
+                        .attr("class", "bar")
+                        .attr("x", d => barX(d.category))
+                        .attr("y", height)
+                        .attr("width", barX.bandwidth())
+                        .attr("height", 0)
+                        .attr("fill", d => colorScale(d.category)),
+                    update => update,
+                    exit => exit.remove()
+                )
+                .transition().duration(getDuration())
+                .attr("y", d => barY(d.revenue))
+                .attr("height", d => height - barY(d.revenue))
+                .attr("opacity", d => (filters.category && d.category !== filters.category) ? 0.3 : 1);
+
+            barSvg.selectAll(".bar")
+                .on("click", (e, d) => {
+                    filters.category = (filters.category === d.category) ? null : d.category;
+                    dispatch.call("filter");
+                });
+        };
+
+        // --- LINE CHART ---
+        const lineSvg = d3.select("#line-chart")
+            .append("g")
+            .attr("transform", `translate(${margin.left},${margin.top})`);
+
+        const lineX = d3.scaleLinear().domain([0, 23]).range([0, width]);
+        const lineY = d3.scaleLinear().range([height, 0]);
+
+        lineSvg.append("g")
+            .attr("transform", `translate(0,${height})`)
+            .call(d3.axisBottom(lineX).ticks(6).tickFormat(d => `M${d}`));
+
+        const lineYAxis = lineSvg.append("g").attr("class", "y-axis");
+
+        const lineGen = d3.line()
+            .x(d => lineX(d.month))
+            .y(d => lineY(d.revenue))
+            .curve(d3.curveMonotoneX);
+
+        const updateLineChart = () => {
+            const data = getFilteredData();
+            // Group by category, then by month
+            const grouped = d3.groups(data, d => d.category);
+            const lineData = grouped.map(([cat, values]) => {
+                const monthRoll = d3.rollups(values, v => d3.sum(v, d => d.revenue), d => d.date);
+                monthRoll.sort((a, b) => a[0] - b[0]);
+                return {
+                    category: cat,
+                    values: monthRoll.map(([m, r]) => ({ month: m, revenue: r }))
+                };
+            });
+
+            const maxRev = d3.max(lineData, c => d3.max(c.values, v => v.revenue)) || 1000;
+            lineY.domain([0, maxRev]).nice();
+            lineYAxis.transition().duration(getDuration()).call(d3.axisLeft(lineY).ticks(5));
+
+            lineSvg.selectAll(".line")
+                .data(lineData, d => d.category)
+                .join(
+                    enter => enter.append("path")
+                        .attr("class", "line")
+                        .attr("stroke", d => colorScale(d.category))
+                        .attr("d", d => lineGen(d.values))
+                        .attr("opacity", 0),
+                    update => update,
+                    exit => exit.remove()
+                )
+                .transition().duration(getDuration())
+                .attr("d", d => lineGen(d.values))
+                .attr("opacity", d => (filters.category && d.category !== filters.category) ? 0.1 : 1);
+        };
+
+        // --- SCATTER PLOT ---
+        const scatterSvg = d3.select("#scatter-chart")
+            .append("g")
+            .attr("transform", `translate(${margin.left},${margin.top})`);
+
+        const scatterX = d3.scaleLinear().domain([0, 1]).range([0, width]);
+        const scatterY = d3.scaleLinear().domain([0, 100]).range([height, 0]);
+
+        scatterSvg.append("g")
+            .attr("transform", `translate(0,${height})`)
+            .call(d3.axisBottom(scatterX).ticks(5));
+
+        scatterSvg.append("g")
+            .call(d3.axisLeft(scatterY).ticks(5));
+
+        const brush = d3.brush()
+            .extent([[0, 0], [width, height]])
+            .on("brush end", (event) => {
+                if (event.sourceEvent === null) return; // ignore programmatic
+                if (!event.selection) {
+                    filters.ids = null;
+                } else {
+                    const [[x0, y0], [x1, y1]] = event.selection;
+                    const selected = rawData.filter(d => 
+                        scatterX(d.satisfaction) >= x0 && scatterX(d.satisfaction) <= x1 &&
+                        scatterY(d.volume) >= y0 && scatterY(d.volume) <= y1
+                    );
+                    filters.ids = new Set(selected.map(d => d.id));
+                }
+                dispatch.call("filter");
+            });
+
+        scatterSvg.append("g").attr("class", "brush").call(brush);
+
+        const updateScatterPlot = () => {
+            const data = getFilteredData();
+            const idSet = new Set(data.map(d => d.id));
+
+            scatterSvg.selectAll(".dot")
+                .data(rawData, d => d.id)
+                .join(
+                    enter => enter.append("circle")
+                        .attr("class", "dot")
+                        .attr("r", 4)
+                        .attr("cx", d => scatterX(d.satisfaction))
+                        .attr("cy", d => scatterY(d.volume))
+                        .attr("fill", d => colorScale(d.category)),
+                    update => update,
+                    exit => exit.remove()
+                )
+                .transition().duration(getDuration())
+                .attr("opacity", d => idSet.has(d.id) ? 1 : 0.1)
+                .attr("r", d => idSet.has(d.id) ? 4 : 2);
+        };
+
+        // 5. GLOBAL UPDATE
+        dispatch.on("filter", () => {
+            updateBarChart();
+            updateLineChart();
+            updateScatterPlot();
+        });
+
+        // 6. INITIAL RENDER
+        updateBarChart();
+        updateLineChart();
+        updateScatterPlot();
+        updateMotionStatus();
+
+        // 7. INTERACTION HANDLERS
+        d3.select("#reset-btn").on("click", () => {
+            filters.category = null;
+            filters.ids = null;
+            d3.select(".brush").call(brush.move, null);
+            dispatch.call("filter");
+        });
+
+        d3.select("#motion-toggle").on("click", () => {
+            forceReduced = !forceReduced;
+            d3.body().classList.toggle("force-reduced", forceReduced);
+            updateMotionStatus();
+        });
+
+        // Small shim for d3.body()
+        d3.body = () => document.body;
+
+    </script>
+</body>
+</html>

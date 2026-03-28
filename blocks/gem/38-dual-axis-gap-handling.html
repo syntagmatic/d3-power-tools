@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Weather Station — Temperature & Rainfall (2023-2024)</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --tol-blue: #4477AA;
+            --tol-teal: #44AA99;
+            --heavy-rain: #EE6677;
+            --gap-color: #999999;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background-color: #f8f9fa;
+        }
+        #chart-container {
+            width: 100%;
+            max-width: 800px;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        .title {
+            font-size: 18px;
+            font-weight: 600;
+            text-align: center;
+            margin-bottom: 20px;
+            fill: #333;
+        }
+        .axis-label {
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .temp-line {
+            fill: none;
+            stroke: var(--tol-blue);
+            stroke-width: 2.5;
+            stroke-linejoin: round;
+            stroke-linecap: round;
+        }
+        .temp-line-gap {
+            fill: none;
+            stroke: var(--tol-blue);
+            stroke-width: 1.5;
+            stroke-dasharray: 4,4;
+            opacity: 0.6;
+        }
+        .rain-bar {
+            fill: var(--tol-teal);
+        }
+        .rain-bar-missing {
+            fill: url(#hatch-pattern);
+            stroke: #ccc;
+            stroke-width: 1;
+        }
+        .ref-band {
+            fill: #ADD8E6;
+            fill-opacity: 0.1;
+        }
+        .ref-line {
+            fill: none;
+            stroke: #EE7733;
+            stroke-width: 1.5;
+            stroke-dasharray: 6,3;
+        }
+        .gap-marker {
+            font-size: 10px;
+            fill: var(--gap-color);
+            font-weight: bold;
+        }
+        .broken-axis-zigzag {
+            fill: none;
+            stroke: #333;
+            stroke-width: 1;
+        }
+        .legend-item {
+            font-size: 11px;
+        }
+    </style>
+</head>
+<body>
+    <div id="chart-container">
+        <svg id="chart"></svg>
+    </div>
+
+    <script>
+        // 1. Data Generation
+        function generateData() {
+            const data = [];
+            const startDate = new Date(Date.UTC(2023, 0, 1));
+            const endDate = new Date(Date.UTC(2024, 11, 31));
+            
+            // Temperature Gaps: July 1 to July 21, 2023
+            const tempGapStart = new Date(Date.UTC(2023, 6, 1));
+            const tempGapEnd = new Date(Date.UTC(2023, 6, 21));
+            
+            // Rainfall Gap: October 2023 (simulating "No data" for the month)
+            const rainGapMonth = 9; // Oct
+            const rainGapYear = 2023;
+
+            for (let d = new Date(startDate); d <= endDate; d.setUTCDate(d.getUTCDate() + 1)) {
+                const dayOfYear = (d - new Date(Date.UTC(d.getUTCFullYear(), 0, 0))) / 86400000;
+                const seasonalFactor = Math.sin((dayOfYear - 100) * 2 * Math.PI / 365);
+                
+                let temp = 62.5 + seasonalFactor * 32.5 + (Math.random() - 0.5) * 10;
+                let isTempMissing = d >= tempGapStart && d <= tempGapEnd;
+
+                data.push({
+                    date: new Date(d),
+                    temp: isTempMissing ? null : temp,
+                    dayOfYear: dayOfYear
+                });
+            }
+
+            // Monthly Rainfall
+            const monthlyRain = [];
+            for (let year = 2023; year <= 2024; year++) {
+                for (let month = 0; month < 12; month++) {
+                    const isRainMissing = year === rainGapYear && month === rainGapMonth;
+                    // Spring/Summer higher (Mar-Aug: 2-7)
+                    const baseRain = (month >= 2 && month <= 7) ? 3 : 1;
+                    const value = isRainMissing ? null : baseRain + Math.random() * 5;
+                    
+                    monthlyRain.push({
+                        date: new Date(Date.UTC(year, month, 15)), // Middle of month for plotting
+                        value: value,
+                        month: month,
+                        year: year
+                    });
+                }
+            }
+
+            return { daily: data, monthly: monthlyRain };
+        }
+
+        const { daily, monthly } = generateData();
+
+        // 2. Chart Setup
+        const margin = { top: 60, right: 60, bottom: 50, left: 60 };
+        const width = 800 - margin.left - margin.right;
+        const height = 400 - margin.top - margin.bottom;
+
+        const svg = d3.select("#chart")
+            .attr("viewBox", `0 0 800 400`)
+            .append("g")
+            .attr("transform", `translate(${margin.left},${margin.top})`);
+
+        // Title
+        d3.select("svg").append("text")
+            .attr("x", 400)
+            .attr("y", 30)
+            .attr("text-anchor", "middle")
+            .attr("class", "title")
+            .text("Weather Station — Temperature & Rainfall (2023-2024)");
+
+        // 3. Scales
+        const x = d3.scaleUtc()
+            .domain(d3.extent(daily, d => d.date))
+            .range([0, width]);
+
+        const yTemp = d3.scaleLinear()
+            .domain([25, 100]) // Doesn't start at 0
+            .range([height, 0]);
+
+        const yRain = d3.scaleLinear()
+            .domain([0, 10]) // Monthly max around 8-9
+            .range([height, 0]);
+
+        // 4. Patterns
+        const defs = d3.select("svg").append("defs");
+        defs.append("pattern")
+            .attr("id", "hatch-pattern")
+            .attr("width", 8)
+            .attr("height", 8)
+            .attr("patternUnits", "userSpaceOnUse")
+            .attr("patternTransform", "rotate(45)")
+            .append("line")
+            .attr("x1", 0).attr("y1", 0).attr("x2", 0).attr("y2", 8)
+            .attr("stroke", "#bbb")
+            .attr("stroke-width", 1.5);
+
+        // 5. Reference Bands & Lines
+        // Normal temp range 60-85
+        svg.append("rect")
+            .attr("x", 0)
+            .attr("width", width)
+            .attr("y", yTemp(85))
+            .attr("height", yTemp(60) - yTemp(85))
+            .attr("class", "ref-band");
+
+        svg.append("text")
+            .attr("x", 10)
+            .attr("y", yTemp(85) - 5)
+            .attr("fill", "#4682B4")
+            .attr("font-size", "10px")
+            .text("Normal temperature range (60-85°F)");
+
+        // Heavy rain threshold 6 inches
+        svg.append("line")
+            .attr("x1", 0)
+            .attr("x2", width)
+            .attr("y1", yRain(6))
+            .attr("y2", yRain(6))
+            .attr("class", "ref-line");
+
+        svg.append("text")
+            .attr("x", width - 5)
+            .attr("y", yRain(6) - 5)
+            .attr("text-anchor", "end")
+            .attr("fill", "#EE7733")
+            .attr("font-size", "10px")
+            .text("Heavy rain threshold (6\")");
+
+        // 6. Axes
+        const xAxis = d3.axisBottom(x).ticks(d3.utcMonth.every(3)).tickFormat(d3.utcFormat("%b %Y"));
+        const yAxisTemp = d3.axisLeft(yTemp).ticks(5).tickFormat(d => d + "°F");
+        const yAxisRain = d3.axisRight(yRain).ticks(5).tickFormat(d => d + "\"");
+
+        svg.append("g")
+            .attr("transform", `translate(0,${height})`)
+            .call(xAxis);
+
+        const gTempAxis = svg.append("g")
+            .attr("color", "var(--tol-blue)")
+            .call(yAxisTemp);
+
+        const gRainAxis = svg.append("g")
+            .attr("transform", `translate(${width}, 0)`)
+            .attr("color", "var(--tol-teal)")
+            .call(yAxisRain);
+
+        // Axis Labels
+        gTempAxis.append("text")
+            .attr("transform", "rotate(-90)")
+            .attr("y", -margin.left + 15)
+            .attr("x", -height / 2)
+            .attr("text-anchor", "middle")
+            .attr("class", "axis-label")
+            .attr("fill", "var(--tol-blue)")
+            .text("Temperature (°F)");
+
+        gRainAxis.append("text")
+            .attr("transform", "rotate(-90)")
+            .attr("y", margin.right - 10)
+            .attr("x", -height / 2)
+            .attr("text-anchor", "middle")
+            .attr("class", "axis-label")
+            .attr("fill", "var(--tol-teal)")
+            .text("Rainfall (inches)");
+
+        // Broken axis indicator
+        const zigzag = `M-5,${height} L0,${height-5} L5,${height} L10,${height-5} L15,${height}`;
+        svg.append("path")
+            .attr("d", zigzag)
+            .attr("class", "broken-axis-zigzag")
+            .attr("transform", `translate(-10, 0)`);
+
+        // 7. Rainfall Bars
+        const barWidth = (width / 24) * 0.8;
+        svg.selectAll(".rain-bar")
+            .data(monthly)
+            .enter()
+            .append("rect")
+            .attr("class", d => d.value === null ? "rain-bar-missing" : "rain-bar")
+            .attr("x", d => x(d.date) - barWidth / 2)
+            .attr("y", d => d.value === null ? yRain(10) : yRain(d.value))
+            .attr("width", barWidth)
+            .attr("height", d => d.value === null ? height - yRain(10) : height - yRain(d.value));
+
+        // Missing Month Label
+        monthly.filter(d => d.value === null).forEach(d => {
+            svg.append("text")
+                .attr("x", x(d.date))
+                .attr("y", height - 5)
+                .attr("text-anchor", "middle")
+                .attr("class", "gap-marker")
+                .attr("transform", `rotate(-90, ${x(d.date)}, ${height - 5})`)
+                .text("No data");
+        });
+
+        // 8. Temperature Line
+        const line = d3.line()
+            .defined(d => d.temp !== null)
+            .x(d => x(d.date))
+            .y(d => yTemp(d.temp));
+
+        // Solid segments
+        svg.append("path")
+            .datum(daily)
+            .attr("class", "temp-line")
+            .attr("d", line);
+
+        // Dashed gap segment
+        // Find gap boundaries
+        const gapIndexStart = daily.findIndex((d, i) => i > 0 && daily[i-1].temp !== null && d.temp === null);
+        const gapIndexEnd = daily.findIndex((d, i) => i > 0 && daily[i-1].temp === null && d.temp !== null);
+
+        if (gapIndexStart !== -1 && gapIndexEnd !== -1) {
+            const gapData = [daily[gapIndexStart - 1], daily[gapIndexEnd]];
+            const gapLine = d3.line()
+                .x(d => x(d.date))
+                .y(d => yTemp(d.temp));
+            
+            svg.append("path")
+                .datum(gapData)
+                .attr("class", "temp-line-gap")
+                .attr("d", gapLine);
+
+            // Markers at boundaries
+            [daily[gapIndexStart - 1], daily[gapIndexEnd]].forEach(d => {
+                svg.append("text")
+                    .attr("x", x(d.date))
+                    .attr("y", yTemp(d.temp))
+                    .attr("text-anchor", "middle")
+                    .attr("dominant-baseline", "central")
+                    .attr("fill", "var(--gap-color)")
+                    .attr("font-size", "14px")
+                    .text("×");
+            });
+
+            svg.append("text")
+                .attr("x", x(daily[Math.floor((gapIndexStart + gapIndexEnd)/2)].date))
+                .attr("y", yTemp((daily[gapIndexStart-1].temp + daily[gapIndexEnd].temp)/2) - 10)
+                .attr("text-anchor", "middle")
+                .attr("class", "gap-marker")
+                .text("Sensor offline");
+        }
+
+        // Legend
+        const legend = svg.append("g")
+            .attr("transform", `translate(${width - 120}, -40)`);
+
+        legend.append("line")
+            .attr("x1", 0).attr("x2", 15).attr("y1", 5).attr("y2", 5)
+            .attr("class", "temp-line").style("stroke-width", 2);
+        legend.append("text").attr("x", 20).attr("y", 9).attr("class", "legend-item").text("Temperature");
+
+        legend.append("rect")
+            .attr("x", 0).attr("y", 15).attr("width", 15).attr("height", 10)
+            .attr("class", "rain-bar");
+        legend.append("text").attr("x", 20).attr("y", 24).attr("class", "legend-item").text("Rainfall");
+
+    </script>
+</body>
+</html>

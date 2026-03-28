@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Three Views of One Network</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg: #fff;
+            --text: #333;
+            --muted: #888;
+            --highlight: #000;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            background: var(--bg);
+            color: var(--text);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        header {
+            width: 100%;
+            padding: 20px;
+            text-align: center;
+        }
+        h1 {
+            margin: 0;
+            font-size: 24px;
+            font-weight: 300;
+        }
+        .container {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 10px;
+            max-width: 1200px;
+            padding-bottom: 40px;
+        }
+        .panel {
+            width: 380px;
+            height: 500px;
+            background: #fafafa;
+            border: 1px solid #eee;
+            position: relative;
+            overflow: hidden;
+            border-radius: 4px;
+        }
+        .panel-title {
+            position: absolute;
+            top: 10px;
+            left: 15px;
+            font-size: 12px;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            pointer-events: none;
+        }
+        svg, canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+        .node { stroke: #fff; stroke-width: 1px; cursor: pointer; }
+        .link { fill: none; pointer-events: none; }
+        .label { font-size: 10px; fill: var(--muted); pointer-events: none; }
+        .label.active { fill: var(--highlight); font-weight: bold; }
+        .chord-ribbon { fill-opacity: 0.67; stroke-opacity: 0.5; cursor: pointer; }
+        .chord-group { cursor: pointer; }
+        
+        /* Highlight states */
+        .fade { opacity: 0.1; }
+        .highlight { stroke-width: 2px !important; stroke: #000 !important; opacity: 1 !important; }
+        .highlight-edge { stroke: #000 !important; stroke-opacity: 0.8 !important; stroke-width: 1.5px !important; }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>Three Views of One Network</h1>
+    </header>
+
+    <div class="container">
+        <div id="force-panel" class="panel">
+            <div class="panel-title">Force Layout</div>
+        </div>
+        <div id="bundling-panel" class="panel">
+            <div class="panel-title">Edge Bundling</div>
+        </div>
+        <div id="chord-panel" class="panel">
+            <div class="panel-title">Chord Diagram</div>
+        </div>
+    </div>
+
+    <script>
+        const width = 380;
+        const height = 500;
+        const margin = 40;
+        
+        // Tol Bright Colors
+        const colors = ["#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE"];
+        const groupNames = ["A", "B", "C", "D", "E"];
+        const colorScale = d3.scaleOrdinal().domain(groupNames).range(colors);
+
+        // 1. Data Generation
+        function generateData() {
+            const nodes = [];
+            const groups = groupNames;
+            const nodesPerGroup = 8;
+            
+            groups.forEach((g, gi) => {
+                for (let i = 0; i < nodesPerGroup; i++) {
+                    nodes.push({
+                        id: `${g}${i}`,
+                        name: `Node ${g}${i}`,
+                        group: g,
+                        indexInGroup: i
+                    });
+                }
+            });
+
+            const links = [];
+            const edgeCount = 70;
+            const withinGroupProb = 0.6;
+
+            // Ensure some connectivity within groups
+            groups.forEach(g => {
+                const gNodes = nodes.filter(n => n.group === g);
+                // Create a small ring/chain within group
+                for (let i = 0; i < gNodes.length; i++) {
+                    if (Math.random() < 0.8) {
+                        links.push({
+                            source: gNodes[i].id,
+                            target: gNodes[(i + 1) % gNodes.length].id,
+                            type: 'within'
+                        });
+                    }
+                }
+            });
+
+            // Fill remaining edges
+            while (links.length < edgeCount) {
+                const s = nodes[Math.floor(Math.random() * nodes.length)];
+                const t = nodes[Math.floor(Math.random() * nodes.length)];
+                if (s.id === t.id) continue;
+                
+                const sameGroup = s.group === t.group;
+                if (sameGroup && Math.random() < withinGroupProb) {
+                    links.push({ source: s.id, target: t.id, type: 'within' });
+                } else if (!sameGroup && Math.random() < (1 - withinGroupProb)) {
+                    links.push({ source: s.id, target: t.id, type: 'between' });
+                }
+            }
+
+            return { nodes, links };
+        }
+
+        const data = generateData();
+        const dispatch = d3.dispatch("hover");
+
+        // --- PANEL 1: FORCE LAYOUT ---
+        function initForce(containerId, data) {
+            const svg = d3.select(containerId).append("svg")
+                .attr("width", width)
+                .attr("height", height);
+
+            const gLinks = svg.append("g").attr("class", "links");
+            const gNodes = svg.append("g").attr("class", "nodes");
+
+            const simulation = d3.forceSimulation(data.nodes)
+                .force("link", d3.forceLink(data.links).id(d => d.id).distance(30))
+                .force("charge", d3.forceManyBody().strength(-30))
+                .force("center", d3.forceCenter(width / 2, height / 2))
+                .force("x", d3.forceX(d => {
+                    const angle = (groupNames.indexOf(d.group) / groupNames.length) * 2 * Math.PI;
+                    return width / 2 + Math.cos(angle) * 100;
+                }).strength(0.1))
+                .force("y", d3.forceY(d => {
+                    const angle = (groupNames.indexOf(d.group) / groupNames.length) * 2 * Math.PI;
+                    return height / 2 + Math.sin(angle) * 100;
+                }).strength(0.1));
+
+            const link = gLinks.selectAll("line")
+                .data(data.links)
+                .join("line")
+                .attr("stroke", "#999")
+                .attr("stroke-opacity", 0.3)
+                .attr("stroke-width", 1);
+
+            const node = gNodes.selectAll("circle")
+                .data(data.nodes)
+                .join("circle")
+                .attr("class", "node")
+                .attr("r", 5)
+                .attr("fill", d => colorScale(d.group))
+                .on("mouseenter", (e, d) => dispatch.call("hover", null, { type: "node", id: d.id, group: d.group }))
+                .on("mouseleave", () => dispatch.call("hover", null, null));
+
+            simulation.on("tick", () => {
+                link
+                    .attr("x1", d => d.source.x)
+                    .attr("y1", d => d.source.y)
+                    .attr("x2", d => d.target.x)
+                    .attr("y2", d => d.target.y);
+
+                node
+                    .attr("cx", d => d.x)
+                    .attr("cy", d => d.y);
+            });
+
+            dispatch.on("hover.force", (h) => {
+                if (!h) {
+                    node.classed("fade", false).classed("highlight", false);
+                    link.classed("fade", false).classed("highlight-edge", false);
+                    return;
+                }
+                if (h.type === "node") {
+                    node.classed("fade", d => d.id !== h.id)
+                        .classed("highlight", d => d.id === h.id);
+                    link.classed("fade", d => d.source.id !== h.id && d.target.id !== h.id)
+                        .classed("highlight-edge", d => d.source.id === h.id || d.target.id === h.id);
+                } else if (h.type === "group") {
+                    node.classed("fade", d => d.group !== h.group)
+                        .classed("highlight", false);
+                    link.classed("fade", d => d.source.group !== h.group && d.target.group !== h.group)
+                        .classed("highlight-edge", d => d.source.group === h.group || d.target.group === h.group);
+                }
+            });
+        }
+
+        // --- PANEL 2: EDGE BUNDLING ---
+        function initBundling(containerId, data) {
+            const radius = Math.min(width, height) / 2 - margin;
+            const innerRadius = radius - 40;
+
+            const canvas = d3.select(containerId).append("canvas")
+                .attr("width", width)
+                .attr("height", height);
+            const ctx = canvas.node().getContext("2d");
+
+            const svg = d3.select(containerId).append("svg")
+                .attr("width", width)
+                .attr("height", height);
+            
+            const g = svg.append("g")
+                .attr("transform", `translate(${width / 2}, ${height / 2})`);
+
+            // Build hierarchy
+            const hierarchyData = {
+                id: "root",
+                children: groupNames.map(g => ({
+                    id: g,
+                    children: data.nodes.filter(n => n.group === g).map(n => ({ id: n.id, name: n.name, group: g }))
+                }))
+            };
+
+            const root = d3.hierarchy(hierarchyData);
+            const cluster = d3.cluster().size([2 * Math.PI, innerRadius]);
+            cluster(root);
+
+            const nodesById = new Map(root.leaves().map(d => [d.data.id, d]));
+            const links = data.links.map(l => {
+                const source = nodesById.get(typeof l.source === 'string' ? l.source : l.source.id);
+                const target = nodesById.get(typeof l.target === 'string' ? l.target : l.target.id);
+                return source && target ? source.path(target) : null;
+            }).filter(d => d);
+
+            const line = d3.lineRadial()
+                .curve(d3.curveBundle.beta(0.15))
+                .radius(d => d.y)
+                .angle(d => d.x)
+                .context(ctx);
+
+            function draw(highlight = null) {
+                ctx.clearRect(0, 0, width, height);
+                ctx.save();
+                ctx.translate(width / 2, height / 2);
+                
+                // Draw all links
+                ctx.lineWidth = 1;
+                links.forEach(l => {
+                    const isHighlighted = highlight && (
+                        (highlight.type === "node" && (l[0].data.id === highlight.id || l[l.length - 1].data.id === highlight.id)) ||
+                        (highlight.type === "group" && (l[0].data.group === highlight.group || l[l.length - 1].data.group === highlight.group))
+                    );
+                    
+                    if (!isHighlighted) {
+                        ctx.beginPath();
+                        ctx.strokeStyle = highlight ? "rgba(200, 200, 200, 0.1)" : "rgba(150, 150, 150, 0.2)";
+                        line(l);
+                        ctx.stroke();
+                    }
+                });
+
+                // Draw highlighted links on top
+                if (highlight) {
+                    ctx.lineWidth = 1.5;
+                    ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
+                    links.forEach(l => {
+                        const isHighlighted = (highlight.type === "node" && (l[0].data.id === highlight.id || l[l.length - 1].data.id === highlight.id)) ||
+                                           (highlight.type === "group" && (l[0].data.group === highlight.group || l[l.length - 1].data.group === highlight.group));
+                        if (isHighlighted) {
+                            ctx.beginPath();
+                            line(l);
+                            ctx.stroke();
+                        }
+                    });
+                }
+                ctx.restore();
+            }
+
+            draw();
+
+            const node = g.selectAll(".node")
+                .data(root.leaves())
+                .join("g")
+                .attr("class", "node-group")
+                .attr("transform", d => `rotate(${d.x * 180 / Math.PI - 90}) translate(${d.y},0)`)
+                .on("mouseenter", (e, d) => dispatch.call("hover", null, { type: "node", id: d.data.id, group: d.data.group }))
+                .on("mouseleave", () => dispatch.call("hover", null, null));
+
+            node.append("circle")
+                .attr("class", "node")
+                .attr("r", 4)
+                .attr("fill", d => colorScale(d.data.group));
+
+            node.append("text")
+                .attr("class", "label")
+                .attr("dy", "0.31em")
+                .attr("x", d => d.x < Math.PI ? 6 : -6)
+                .attr("text-anchor", d => d.x < Math.PI ? "start" : "end")
+                .attr("transform", d => d.x >= Math.PI ? "rotate(180)" : null)
+                .text(d => d.data.id);
+
+            dispatch.on("hover.bundling", (h) => {
+                draw(h);
+                if (!h) {
+                    node.classed("fade", false);
+                    node.select("text").classed("active", false);
+                    return;
+                }
+                if (h.type === "node") {
+                    node.classed("fade", d => d.data.id !== h.id);
+                    node.select("text").classed("active", d => d.data.id === h.id);
+                } else if (h.type === "group") {
+                    node.classed("fade", d => d.data.group !== h.group);
+                    node.select("text").classed("active", false);
+                }
+            });
+        }
+
+        // --- PANEL 3: CHORD DIAGRAM ---
+        function initChord(containerId, data) {
+            const svg = d3.select(containerId).append("svg")
+                .attr("width", width)
+                .attr("height", height);
+            
+            const g = svg.append("g")
+                .attr("transform", `translate(${width / 2}, ${height / 2})`);
+
+            // Compute matrix
+            const matrix = Array.from({ length: 5 }, () => Array(5).fill(0));
+            data.links.forEach(l => {
+                const sNode = data.nodes.find(n => n.id === (typeof l.source === 'string' ? l.source : l.source.id));
+                const tNode = data.nodes.find(n => n.id === (typeof l.target === 'string' ? l.target : l.target.id));
+                if (sNode && tNode) {
+                    const si = groupNames.indexOf(sNode.group);
+                    const ti = groupNames.indexOf(tNode.group);
+                    matrix[si][ti]++;
+                    if (si !== ti) matrix[ti][si]++; // Undirected
+                }
+            });
+
+            const chord = d3.chord()
+                .padAngle(0.1)
+                .sortSubgroups(d3.descending);
+
+            const chords = chord(matrix);
+            const outerRadius = Math.min(width, height) / 2 - margin;
+            const innerRadius = outerRadius - 20;
+
+            const arc = d3.arc()
+                .innerRadius(innerRadius)
+                .outerRadius(outerRadius);
+
+            const ribbon = d3.ribbon()
+                .radius(innerRadius);
+
+            const group = g.selectAll(".chord-group")
+                .data(chords.groups)
+                .join("g")
+                .attr("class", "chord-group")
+                .on("mouseenter", (e, d) => dispatch.call("hover", null, { type: "group", group: groupNames[d.index] }))
+                .on("mouseleave", () => dispatch.call("hover", null, null));
+
+            group.append("path")
+                .attr("fill", d => colors[d.index])
+                .attr("stroke", d => d3.rgb(colors[d.index]).darker())
+                .attr("d", arc);
+
+            group.append("text")
+                .each(d => { d.angle = (d.startAngle + d.endAngle) / 2; })
+                .attr("dy", "0.35em")
+                .attr("transform", d => `
+                    rotate(${(d.angle * 180 / Math.PI - 90)})
+                    translate(${outerRadius + 10})
+                    ${d.angle > Math.PI ? "rotate(180)" : ""}
+                `)
+                .attr("text-anchor", d => d.angle > Math.PI ? "end" : "start")
+                .text(d => groupNames[d.index]);
+
+            const ribbons = g.selectAll(".chord-ribbon")
+                .data(chords)
+                .join("path")
+                .attr("class", "chord-ribbon")
+                .attr("d", ribbon)
+                .attr("fill", d => colors[d.source.index])
+                .attr("stroke", d => d3.rgb(colors[d.source.index]).darker())
+                .style("mix-blend-mode", "multiply");
+
+            dispatch.on("hover.chord", (h) => {
+                if (!h) {
+                    group.classed("fade", false);
+                    ribbons.classed("fade", false);
+                    return;
+                }
+                if (h.type === "group") {
+                    const gi = groupNames.indexOf(h.group);
+                    group.classed("fade", d => d.index !== gi);
+                    ribbons.classed("fade", d => d.source.index !== gi && d.target.index !== gi);
+                } else if (h.type === "node") {
+                    const gi = groupNames.indexOf(h.group);
+                    group.classed("fade", d => d.index !== gi);
+                    ribbons.classed("fade", d => d.source.index !== gi && d.target.index !== gi);
+                }
+            });
+        }
+
+        // Initialize all panels
+        initForce("#force-panel", data);
+        initBundling("#bundling-panel", data);
+        initChord("#chord-panel", data);
+
+    </script>
+</body>
+</html>

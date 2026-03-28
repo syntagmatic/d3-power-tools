@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Marginal Strip Plot - Age vs Cholesterol</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f8f9fa;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        .axis-label {
+            font-size: 12px;
+            fill: #444;
+            font-weight: 600;
+        }
+        .regression-line {
+            stroke: #444;
+            stroke-width: 2;
+            stroke-dasharray: 4 4;
+            pointer-events: none;
+        }
+        .regression-label {
+            font-size: 11px;
+            fill: #333;
+            font-weight: bold;
+        }
+        .marginal-bg {
+            fill: #f0f0f0;
+            opacity: 0.3;
+        }
+        .box-rect {
+            fill: #fff;
+            stroke: #333;
+            stroke-width: 1;
+            fill-opacity: 0.7;
+        }
+        .median-line {
+            stroke: #333;
+            stroke-width: 2;
+        }
+        .whisker-line {
+            stroke: #333;
+            stroke-width: 1;
+        }
+        .legend-item {
+            font-size: 11px;
+            cursor: default;
+        }
+        .brush .selection {
+            fill: #000;
+            fill-opacity: 0.05;
+            stroke: #000;
+            stroke-opacity: 0.2;
+        }
+    </style>
+</head>
+<body>
+    <div class="container" id="viz"></div>
+
+    <script>
+        // Dimensions and Margins
+        const scatterWidth = 500;
+        const scatterHeight = 400;
+        const topMarginHeight = 40;
+        const rightMarginWidth = 40;
+        const axisSpace = 50;
+        const padding = 20;
+
+        const width = scatterWidth + rightMarginWidth + axisSpace + padding;
+        const height = scatterHeight + topMarginHeight + axisSpace + padding;
+
+        const svg = d3.select("#viz")
+            .append("svg")
+            .attr("width", width)
+            .attr("height", height);
+
+        const gScatter = svg.append("g")
+            .attr("transform", `translate(${axisSpace}, ${topMarginHeight + padding/2})`);
+        
+        const gTop = svg.append("g")
+            .attr("transform", `translate(${axisSpace}, ${padding/2})`);
+            
+        const gRight = svg.append("g")
+            .attr("transform", `translate(${axisSpace + scatterWidth}, ${topMarginHeight + padding/2})`);
+
+        // Data Generation
+        const n = 250;
+        const random = d3.randomLcg(42);
+        const normal = d3.randomNormal.source(random)();
+        
+        const r = 0.55;
+        const data = Array.from({length: n}, () => {
+            const x_std = normal();
+            const error = normal();
+            const y_std = r * x_std + Math.sqrt(1 - r * r) * error;
+            
+            const age = 45 + x_std * 12; // Age 20-70 range roughly
+            const cholesterol = 225 + y_std * 35; // 150-300 range roughly
+            
+            const score = (x_std + y_std) / 2;
+            let group = "Medium Risk";
+            if (score < -0.6) group = "Low Risk";
+            else if (score > 0.6) group = "High Risk";
+            
+            return {
+                age: Math.max(20, Math.min(70, age)),
+                cholesterol: Math.max(150, Math.min(300, cholesterol)),
+                group: group
+            };
+        });
+
+        // Scales
+        const xScale = d3.scaleLinear()
+            .domain([20, 70])
+            .range([0, scatterWidth]);
+
+        const yScale = d3.scaleLinear()
+            .domain([150, 300])
+            .range([scatterHeight, 0]);
+
+        // Tol Bright Palette: Low, Medium, High
+        const colorScale = d3.scaleOrdinal()
+            .domain(["Low Risk", "Medium Risk", "High Risk"])
+            .range(["#4477AA", "#CCBB44", "#EE6677"]);
+
+        // Axes
+        gScatter.append("g")
+            .attr("transform", `translate(0, ${scatterHeight})`)
+            .call(d3.axisBottom(xScale).ticks(10))
+            .append("text")
+            .attr("class", "axis-label")
+            .attr("x", scatterWidth / 2)
+            .attr("y", 40)
+            .text("Age (years)");
+
+        gScatter.append("g")
+            .call(d3.axisLeft(yScale).ticks(10))
+            .append("text")
+            .attr("class", "axis-label")
+            .attr("transform", "rotate(-90)")
+            .attr("x", -scatterHeight / 2)
+            .attr("y", -40)
+            .text("Cholesterol (mg/dL)");
+
+        // Regression Calculation
+        function getRegression(points) {
+            const n = points.length;
+            if (n < 2) return null;
+            const x_mean = d3.mean(points, d => d.age);
+            const y_mean = d3.mean(points, d => d.cholesterol);
+            const m = d3.sum(points, d => (d.age - x_mean) * (d.cholesterol - y_mean)) / d3.sum(points, d => Math.pow(d.age - x_mean, 2));
+            const b = y_mean - m * x_mean;
+            
+            const ss_tot = d3.sum(points, d => Math.pow(d.cholesterol - y_mean, 2));
+            const ss_res = d3.sum(points, d => Math.pow(d.cholesterol - (m * d.age + b), 2));
+            const r_sq = 1 - (ss_res / ss_tot);
+            
+            return { m, b, r_sq };
+        }
+
+        const reg = getRegression(data);
+
+        // Draw Scatterplot Points
+        const points = gScatter.selectAll("circle")
+            .data(data)
+            .join("circle")
+            .attr("cx", d => xScale(d.age))
+            .attr("cy", d => yScale(d.cholesterol))
+            .attr("r", 4)
+            .attr("fill", d => colorScale(d.group))
+            .attr("fill-opacity", 0.6);
+
+        // Draw Regression Line
+        const regLine = gScatter.append("line")
+            .attr("class", "regression-line")
+            .attr("x1", xScale(20))
+            .attr("y1", yScale(reg.m * 20 + reg.b))
+            .attr("x2", xScale(70))
+            .attr("y2", yScale(reg.m * 70 + reg.b));
+
+        const regLabel = gScatter.append("text")
+            .attr("class", "regression-label")
+            .attr("x", 10)
+            .attr("y", 20)
+            .text(`y = ${reg.m.toFixed(2)}x + ${reg.b.toFixed(1)}, R² = ${reg.r_sq.toFixed(2)}`);
+
+        // Marginal Plots Helpers
+        function computeStats(values) {
+            if (values.length === 0) return null;
+            const sorted = values.sort(d3.ascending);
+            const q1 = d3.quantile(sorted, 0.25);
+            const median = d3.quantile(sorted, 0.5);
+            const q3 = d3.quantile(sorted, 0.75);
+            const iqr = q3 - q1;
+            const min = Math.max(sorted[0], q1 - 1.5 * iqr);
+            const max = Math.min(sorted[sorted.length - 1], q3 + 1.5 * iqr);
+            return { q1, median, q3, min, max };
+        }
+
+        const randomJitter = d3.randomUniform.source(d3.randomLcg(1337))(-12, 12);
+
+        function updateMarginals(subset) {
+            // X Strip Plot (Top)
+            const xPoints = gTop.selectAll(".strip-dot")
+                .data(subset, (d, i) => i);
+
+            xPoints.join(
+                enter => enter.append("circle")
+                    .attr("class", "strip-dot")
+                    .attr("r", 2.5)
+                    .attr("cx", d => xScale(d.age))
+                    .attr("cy", topMarginHeight / 2 + randomJitter())
+                    .attr("fill", d => colorScale(d.group))
+                    .attr("fill-opacity", 0.4),
+                update => update.attr("cx", d => xScale(d.age)),
+                exit => exit.remove()
+            );
+
+            const xStats = computeStats(subset.map(d => d.age));
+            const xBox = gTop.selectAll(".box-plot").data(xStats ? [xStats] : []);
+            
+            const xBoxEnter = xBox.enter().append("g").attr("class", "box-plot");
+            xBoxEnter.append("line").attr("class", "whisker-line");
+            xBoxEnter.append("rect").attr("class", "box-rect");
+            xBoxEnter.append("line").attr("class", "median-line");
+
+            xBox.merge(xBoxEnter).each(function(d) {
+                const g = d3.select(this);
+                g.select(".whisker-line")
+                    .attr("x1", xScale(d.min)).attr("x2", xScale(d.max))
+                    .attr("y1", topMarginHeight / 2).attr("y2", topMarginHeight / 2);
+                g.select(".box-rect")
+                    .attr("x", xScale(d.q1)).attr("width", xScale(d.q3) - xScale(d.q1))
+                    .attr("y", topMarginHeight / 2 - 8).attr("height", 16);
+                g.select(".median-line")
+                    .attr("x1", xScale(d.median)).attr("x2", xScale(d.median))
+                    .attr("y1", topMarginHeight / 2 - 8).attr("y2", topMarginHeight / 2 + 8);
+            });
+            xBox.exit().remove();
+
+            // Y Strip Plot (Right)
+            const yPoints = gRight.selectAll(".strip-dot")
+                .data(subset, (d, i) => i);
+
+            yPoints.join(
+                enter => enter.append("circle")
+                    .attr("class", "strip-dot")
+                    .attr("r", 2.5)
+                    .attr("cy", d => yScale(d.cholesterol))
+                    .attr("cx", rightMarginWidth / 2 + randomJitter())
+                    .attr("fill", d => colorScale(d.group))
+                    .attr("fill-opacity", 0.4),
+                update => update.attr("cy", d => yScale(d.cholesterol)),
+                exit => exit.remove()
+            );
+
+            const yStats = computeStats(subset.map(d => d.cholesterol));
+            const yBox = gRight.selectAll(".box-plot").data(yStats ? [yStats] : []);
+            
+            const yBoxEnter = yBox.enter().append("g").attr("class", "box-plot");
+            yBoxEnter.append("line").attr("class", "whisker-line");
+            yBoxEnter.append("rect").attr("class", "box-rect");
+            yBoxEnter.append("line").attr("class", "median-line");
+
+            yBox.merge(yBoxEnter).each(function(d) {
+                const g = d3.select(this);
+                g.select(".whisker-line")
+                    .attr("y1", yScale(d.min)).attr("y2", yScale(d.max))
+                    .attr("x1", rightMarginWidth / 2).attr("x2", rightMarginWidth / 2);
+                g.select(".box-rect")
+                    .attr("y", yScale(d.q3)).attr("height", yScale(d.q1) - yScale(d.q3))
+                    .attr("x", rightMarginWidth / 2 - 8).attr("width", 16);
+                g.select(".median-line")
+                    .attr("y1", yScale(d.median)).attr("y2", yScale(d.median))
+                    .attr("x1", rightMarginWidth / 2 - 8).attr("x2", rightMarginWidth / 2 + 8);
+            });
+            yBox.exit().remove();
+        }
+
+        // Initialize Marginals
+        updateMarginals(data);
+
+        // Brushing
+        const brush = d3.brush()
+            .extent([[0, 0], [scatterWidth, scatterHeight]])
+            .on("brush end", function({selection}) {
+                if (selection) {
+                    const [[x0, y0], [x1, y1]] = selection;
+                    const subset = data.filter(d => {
+                        const x = xScale(d.age);
+                        const y = yScale(d.cholesterol);
+                        return x >= x0 && x <= x1 && y >= y0 && y <= y1;
+                    });
+                    
+                    points.attr("fill-opacity", d => {
+                        const x = xScale(d.age);
+                        const y = yScale(d.cholesterol);
+                        return (x >= x0 && x <= x1 && y >= y0 && y <= y1) ? 0.9 : 0.1;
+                    });
+                    
+                    updateMarginals(subset);
+                    
+                    if (subset.length > 1) {
+                        const newReg = getRegression(subset);
+                        regLine.transition().duration(50)
+                            .attr("y1", yScale(newReg.m * 20 + newReg.b))
+                            .attr("y2", yScale(newReg.m * 70 + newReg.b))
+                            .attr("stroke-opacity", 1);
+                        regLabel.text(`Sub: y = ${newReg.m.toFixed(2)}x + ${newReg.b.toFixed(1)}, R² = ${newReg.r_sq.toFixed(2)}`);
+                    }
+                } else {
+                    points.attr("fill-opacity", 0.6);
+                    updateMarginals(data);
+                    regLine.transition().duration(50)
+                        .attr("y1", yScale(reg.m * 20 + reg.b))
+                        .attr("y2", yScale(reg.m * 70 + reg.b));
+                    regLabel.text(`y = ${reg.m.toFixed(2)}x + ${reg.b.toFixed(1)}, R² = ${reg.r_sq.toFixed(2)}`);
+                }
+            });
+
+        gScatter.append("g")
+            .attr("class", "brush")
+            .call(brush);
+
+        // Legend
+        const legend = svg.append("g")
+            .attr("transform", `translate(${axisSpace + scatterWidth - 100}, ${topMarginHeight + padding + 10})`);
+
+        ["Low Risk", "Medium Risk", "High Risk"].forEach((d, i) => {
+            const lg = legend.append("g")
+                .attr("class", "legend-item")
+                .attr("transform", `translate(0, ${i * 18})`);
+            
+            lg.append("circle")
+                .attr("r", 6)
+                .attr("fill", colorScale(d));
+            
+            lg.append("text")
+                .attr("x", 12)
+                .attr("y", 4)
+                .text(d);
+        });
+
+    </script>
+</body>
+</html>

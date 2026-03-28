@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Falcon O(1) Histogram Prefetch</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #fff;
+            color: #333;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .container {
+            width: 940px;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            margin-bottom: 10px;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 10px;
+        }
+        h2 { margin: 0; font-size: 1.2rem; font-weight: 600; }
+        .metrics {
+            display: flex;
+            gap: 15px;
+            font-size: 13px;
+            font-variant-numeric: tabular-nums;
+            background: #f4f4f4;
+            padding: 8px 12px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+        .metric-label { color: #666; }
+        .metric-value { font-weight: 700; color: #4477AA; }
+        .speedup { color: #d62728; }
+        
+        .chart-label {
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            color: #999;
+            margin-bottom: 5px;
+            display: flex;
+            justify-content: space-between;
+        }
+        
+        .reset-btn {
+            background: #fff;
+            border: 1px solid #ccc;
+            border-radius: 3px;
+            padding: 2px 8px;
+            font-size: 11px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .reset-btn:hover { background: #eee; }
+        
+        svg {
+            background: #fff;
+            overflow: visible;
+        }
+        .line {
+            fill: none;
+            stroke: #4477AA;
+            stroke-width: 1.5;
+        }
+        .brush .selection {
+            fill: #4477AA;
+            fill-opacity: 0.1;
+            stroke: #4477AA;
+            stroke-width: 1;
+        }
+        .hist-bar-bg { fill: #ddd; }
+        .hist-bar-fg { fill: #4477AA; }
+        .axis text { font-size: 10px; fill: #666; }
+        .axis line, .axis path { stroke: #eee; }
+        
+        .info { font-size: 12px; color: #888; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h2>Falcon O(1) Precomputed Histograms</h2>
+            <div id="event-counter" style="font-size: 13px;">0 of 500,000 events</div>
+        </div>
+        
+        <div class="metrics">
+            <div><span class="metric-label">Prefetch:</span> <span id="prefetch-time" class="metric-value">0.00ms</span></div>
+            <div><span class="metric-label">Naive:</span> <span id="naive-time" class="metric-value">0.00ms</span></div>
+            <div><span class="metric-label">Speedup:</span> <span id="speedup-val" class="metric-value speedup">0.0x</span></div>
+            <button id="reset-btn" class="reset-btn">RESET</button>
+        </div>
+
+        <div class="chart-label">
+            <span>Daily Event Counts (Top Chart)</span>
+            <span>Drag to select time range</span>
+        </div>
+        <div id="top-svg-container"></div>
+        
+        <div style="height: 30px;"></div>
+        
+        <div class="chart-label">
+            <span>Value Distribution (Log Scale, 40 Bins)</span>
+            <span style="color: #4477AA;">■ Selected</span> <span style="color: #ddd;">■ Global</span>
+        </div>
+        <div id="bottom-svg-container"></div>
+        
+        <div class="info">
+            Falcon O(1) uses 256 precomputed cumulative histograms along the time axis. Range queries are resolved by interpolating and subtracting these histograms in constant time relative to dataset size.
+        </div>
+    </div>
+
+    <script>
+        const N = 500000;
+        const width = 900;
+        const height = 250;
+        const margin = {top: 10, right: 20, bottom: 30, left: 50};
+        const iWidth = width - margin.left - margin.right;
+        const iHeight = height - margin.top - margin.bottom;
+
+        // 1. Data Generation
+        const timestamps = new Float32Array(N);
+        const values = new Float32Array(N);
+        
+        const randn = d3.randomNormal();
+        const mus = [Math.log(25), Math.log(80), Math.log(250)];
+        const sigmas = [0.4, 0.4, 0.4];
+        const weights = [0.4, 0.4, 0.2];
+
+        for (let i = 0; i < N; i++) {
+            timestamps[i] = Math.random() * 365;
+            let r = Math.random();
+            let idx = r < weights[0] ? 0 : (r < weights[0] + weights[1] ? 1 : 2);
+            values[i] = Math.exp(mus[idx] + sigmas[idx] * randn());
+            if (values[i] < 1) values[i] = 1.001;
+            if (values[i] > 1000) values[i] = 1000;
+        }
+
+        // 2. Setup Scales & Bins
+        const numBins = 40;
+        const valueScale = d3.scaleLog().domain([1, 1000]).range([0, numBins - 1]);
+        const getBin = v => Math.max(0, Math.min(numBins - 1, Math.floor(valueScale(v))));
+
+        // 3. Falcon Precomputation
+        const numSteps = 256;
+        const indices = new Uint32Array(N);
+        for (let i = 0; i < N; i++) indices[i] = i;
+        indices.sort((a, b) => timestamps[a] - timestamps[b]);
+
+        const sortedT = new Float32Array(N);
+        const sortedV = new Float32Array(N);
+        for (let i = 0; i < N; i++) {
+            sortedT[i] = timestamps[indices[i]];
+            sortedV[i] = values[indices[i]];
+        }
+
+        const cumHists = new Uint32Array(numSteps * numBins);
+        let currentHist = new Uint32Array(numBins);
+        let dataIdx = 0;
+
+        for (let s = 0; s < numSteps; s++) {
+            const targetT = (s / (numSteps - 1)) * 365;
+            while (dataIdx < N && sortedT[dataIdx] <= targetT) {
+                currentHist[getBin(sortedV[dataIdx])]++;
+                dataIdx++;
+            }
+            for (let b = 0; b < numBins; b++) {
+                cumHists[s * numBins + b] = currentHist[b];
+            }
+        }
+
+        // 4. Global Stats for Visualization
+        const dailyCounts = new Uint32Array(365);
+        for (let i = 0; i < N; i++) {
+            dailyCounts[Math.min(364, Math.floor(timestamps[i]))]++;
+        }
+        const globalCounts = new Uint32Array(numBins);
+        for (let i = 0; i < N; i++) {
+            globalCounts[getBin(values[i])]++;
+        }
+
+        // 5. Visualization Elements
+        const timeScale = d3.scaleTime()
+            .domain([new Date(2026, 0, 1), new Date(2026, 11, 31, 23, 59)])
+            .range([0, iWidth]);
+
+        const timeToDays = d3.scaleLinear()
+            .domain([new Date(2026, 0, 1), new Date(2026, 11, 31, 23, 59)])
+            .range([0, 365]);
+
+        const topSvg = d3.select("#top-svg-container").append("svg")
+            .attr("width", width).attr("height", height)
+            .append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+        const topY = d3.scaleLinear().domain([0, d3.max(dailyCounts) * 1.1]).range([iHeight, 0]);
+        
+        topSvg.append("g").attr("class", "axis").attr("transform", `translate(0,${iHeight})`).call(d3.axisBottom(timeScale));
+        topSvg.append("g").attr("class", "axis").call(d3.axisLeft(topY).ticks(5));
+
+        const line = d3.line()
+            .x((d, i) => timeScale(new Date(2026, 0, i + 1)))
+            .y(d => topY(d))
+            .curve(d3.curveMonotoneX);
+
+        topSvg.append("path").datum(dailyCounts).attr("class", "line").attr("d", line);
+
+        const brush = d3.brushX()
+            .extent([[0, 0], [iWidth, iHeight]])
+            .on("brush end", brushed);
+
+        const gBrush = topSvg.append("g").attr("class", "brush").call(brush);
+
+        // Bottom Chart (Histogram)
+        const bottomSvg = d3.select("#bottom-svg-container").append("svg")
+            .attr("width", width).attr("height", height)
+            .append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+        const histX = d3.scaleBand().domain(d3.range(numBins)).range([0, iWidth]).padding(0.1);
+        const histY = d3.scaleLinear().domain([0, d3.max(globalCounts) * 1.1]).range([iHeight, 0]);
+
+        bottomSvg.append("g").attr("class", "axis").attr("transform", `translate(0,${iHeight})`)
+            .call(d3.axisBottom(histX).tickValues([0, 9, 19, 29, 39]).tickFormat(i => {
+                const v = valueScale.invert(i);
+                return v >= 100 ? Math.round(v) : v.toFixed(1);
+            }));
+        bottomSvg.append("g").attr("class", "axis").call(d3.axisLeft(histY).ticks(5));
+
+        const bgBars = bottomSvg.selectAll(".hist-bar-bg")
+            .data(globalCounts).join("rect").attr("class", "hist-bar-bg")
+            .attr("x", (d, i) => histX(i)).attr("y", d => histY(d))
+            .attr("width", histX.bandwidth()).attr("height", d => iHeight - histY(d));
+
+        const fgBars = bottomSvg.selectAll(".hist-bar-fg")
+            .data(new Uint32Array(numBins)).join("rect").attr("class", "hist-bar-fg")
+            .attr("x", (d, i) => histX(i)).attr("y", iHeight)
+            .attr("width", histX.bandwidth()).attr("height", 0);
+
+        // 6. Interaction Logic
+        function getCumHist(days) {
+            const s = Math.max(0, Math.min(numSteps - 1, (days / 365) * (numSteps - 1)));
+            const i = Math.floor(s);
+            const f = s - i;
+            const res = new Float32Array(numBins);
+            if (i >= numSteps - 1) {
+                for (let b = 0; b < numBins; b++) res[b] = cumHists[(numSteps - 1) * numBins + b];
+            } else {
+                const offA = i * numBins, offB = (i + 1) * numBins;
+                for (let b = 0; b < numBins; b++) res[b] = (1 - f) * cumHists[offA + b] + f * cumHists[offB + b];
+            }
+            return res;
+        }
+
+        function prefetch(t0, t1) {
+            const c0 = getCumHist(t0), c1 = getCumHist(t1);
+            const res = new Float32Array(numBins);
+            for (let b = 0; b < numBins; b++) res[b] = Math.max(0, c1[b] - c0[b]);
+            return res;
+        }
+
+        function naive(t0, t1) {
+            const res = new Uint32Array(numBins);
+            for (let i = 0; i < N; i++) {
+                if (timestamps[i] >= t0 && timestamps[i] <= t1) {
+                    res[getBin(values[i])]++;
+                }
+            }
+            return res;
+        }
+
+        const pixelToDays = d3.scaleLinear()
+            .domain([0, iWidth])
+            .range([0, 365]);
+
+        function brushed(event) {
+            const selection = event.selection;
+            if (!selection) {
+                fgBars.attr("y", iHeight).attr("height", 0);
+                d3.select("#event-counter").text("0 of 500,000 events");
+                return;
+            }
+
+            const [d0, d1] = selection.map(pixelToDays);
+            const tStart = d0;
+            const tEnd = d1;
+
+            // Measure Prefetch
+            const p0 = performance.now();
+            const countsP = prefetch(tStart, tEnd);
+            const p1 = performance.now();
+            const timeP = p1 - p0;
+
+            // Measure Naive
+            const n0 = performance.now();
+            const countsN = naive(tStart, tEnd);
+            const n1 = performance.now();
+            const timeN = n1 - n0;
+
+            // Update UI
+            d3.select("#prefetch-time").text(timeP.toFixed(2) + "ms");
+            d3.select("#naive-time").text(timeN.toFixed(2) + "ms");
+            d3.select("#speedup-val").text((timeN / Math.max(0.01, timeP)).toFixed(1) + "x");
+            
+            const total = d3.sum(countsN);
+            d3.select("#event-counter").text(total.toLocaleString() + " of 500,000 events");
+
+            fgBars.data(countsP)
+                .attr("y", d => histY(d))
+                .attr("height", d => iHeight - histY(d));
+        }
+
+        d3.select("#reset-btn").on("click", () => {
+            gBrush.call(brush.move, null);
+            fgBars.attr("y", iHeight).attr("height", 0);
+            d3.select("#prefetch-time").text("0.00ms");
+            d3.select("#naive-time").text("0.00ms");
+            d3.select("#speedup-val").text("0.0x");
+            d3.select("#event-counter").text("0 of 500,000 events");
+        });
+
+    </script>
+</body>
+</html>

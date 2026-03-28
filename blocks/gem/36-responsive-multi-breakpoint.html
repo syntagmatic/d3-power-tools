@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Responsive Multi-Breakpoint D3 Visualization</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg: #ffffff;
+            --fg: #222222;
+            --muted: #666666;
+            --grid: #eeeeee;
+            --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: var(--font);
+            color: var(--fg);
+            background-color: var(--bg);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        #controls {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        #breakpoint-label {
+            font-size: 24px;
+            font-weight: bold;
+            color: #4477AA;
+            margin-bottom: 5px;
+        }
+        #instructions {
+            font-size: 14px;
+            color: var(--muted);
+        }
+        #chart-container {
+            width: 100%;
+            max-width: 1200px;
+            height: 650px;
+            background: #fff;
+            border-radius: 8px;
+            overflow: hidden;
+            position: relative;
+        }
+        svg {
+            width: 100%;
+            height: 100%;
+        }
+        .axis-label {
+            font-size: 12px;
+            fill: var(--muted);
+        }
+        .annotation-text {
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .marginal-bar {
+            fill: #e0e0e0;
+            stroke: #fff;
+            stroke-width: 1;
+        }
+        .box-plot-rect {
+            fill: #f0f0f0;
+            stroke: #999;
+            stroke-width: 1;
+        }
+        .box-plot-line {
+            stroke: #333;
+            stroke-width: 1.5;
+        }
+        .legend-text {
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="controls">
+        <div id="breakpoint-label">Detecting...</div>
+        <div id="instructions">Resize the browser to see layout changes</div>
+    </div>
+
+    <div id="chart-container">
+        <svg id="viz"></svg>
+    </div>
+
+    <script>
+        // 1. DATA GENERATION
+        const categories = ["Alpha", "Beta", "Gamma", "Delta"];
+        const colors = ["#4477AA", "#EE6677", "#228833", "#CCBB44"]; // Tol Bright
+        const colorScale = d3.scaleOrdinal().domain(categories).range(colors);
+
+        const data = Array.from({ length: 80 }, (_, i) => ({
+            id: i,
+            x: Math.random() * 100,
+            y: Math.random() * 100,
+            category: categories[Math.floor(Math.random() * categories.length)],
+            size: 1 + Math.random() * 9
+        }));
+
+        // Identify outliers for Wide layout (top 3 by distance from center 50,50)
+        const outliers = [...data]
+            .sort((a, b) => {
+                const distA = Math.hypot(a.x - 50, a.y - 50);
+                const distB = Math.hypot(b.x - 50, b.y - 50);
+                return distB - distA;
+            })
+            .slice(0, 3);
+        const outlierIds = new Set(outliers.map(d => d.id));
+
+        // 2. SETUP
+        const svg = d3.select("#viz");
+        const gMain = svg.append("g").attr("class", "main-group");
+        
+        // Layers
+        const gGrid = gMain.append("g").attr("class", "grid-layer");
+        const gMarginals = gMain.append("g").attr("class", "marginal-layer");
+        const gBoxPlots = gMain.append("g").attr("class", "box-plot-layer");
+        const gAxes = gMain.append("g").attr("class", "axis-layer");
+        const gPoints = gMain.append("g").attr("class", "point-layer");
+        const gAnnotations = gMain.append("g").attr("class", "annotation-layer");
+        const gLegend = svg.append("g").attr("class", "legend-layer");
+
+        const margin = { top: 60, right: 80, bottom: 60, left: 60 };
+        const duration = 500;
+
+        // 3. RESPONSIVE LOGIC
+        const container = document.getElementById("chart-container");
+        const ro = new ResizeObserver(entries => {
+            const entry = entries[0];
+            const width = entry.contentRect.width;
+            const height = entry.contentRect.height;
+            update(width, height);
+        });
+        ro.observe(container);
+
+        function update(width, height) {
+            let breakpoint = "Wide";
+            if (width < 600) breakpoint = "Narrow";
+            else if (width < 1000) breakpoint = "Medium";
+
+            d3.select("#breakpoint-label").text(breakpoint);
+
+            // Scales
+            const x = d3.scaleLinear().domain([0, 100]);
+            const y = d3.scaleLinear().domain([0, 100]);
+            const xBand = d3.scaleBand().domain(categories).padding(0.4);
+
+            let scatterWidth, scatterHeight, scatterX, scatterY;
+
+            // Layout Definitions
+            if (breakpoint === "Wide") {
+                scatterWidth = 600;
+                scatterHeight = 400;
+                scatterX = (width - scatterWidth - 60) / 2;
+                scatterY = 120;
+
+                x.range([0, scatterWidth]);
+                y.range([scatterHeight, 0]);
+
+                updateMarginals(width, height, scatterX, scatterY, scatterWidth, scatterHeight, x, y, true);
+                updateBoxPlots([], y, 0, false);
+                updateAnnotations(outliers, x, y, scatterX, scatterY, true);
+                updateLegend(width, 40, "top-right", true);
+                updateAxes(x, y, scatterX, scatterY, scatterWidth, scatterHeight, "scatter", true);
+            } 
+            else if (breakpoint === "Medium") {
+                scatterWidth = width - margin.left - margin.right;
+                scatterHeight = height - margin.top - margin.bottom - 60;
+                scatterX = margin.left;
+                scatterY = margin.top;
+
+                x.range([0, scatterWidth]);
+                y.range([scatterHeight, 0]);
+
+                updateMarginals(width, height, 0, 0, 0, 0, x, y, false);
+                updateBoxPlots([], y, 0, false);
+                updateAnnotations([], x, y, 0, 0, false);
+                updateLegend(width, scatterY + scatterHeight + 50, "bottom", true);
+                updateAxes(x, y, scatterX, scatterY, scatterWidth, scatterHeight, "scatter", true);
+            } 
+            else { // Narrow
+                scatterWidth = width - margin.left - margin.right;
+                scatterHeight = height - margin.top - margin.bottom;
+                scatterX = margin.left;
+                scatterY = margin.top;
+
+                xBand.range([0, scatterWidth]);
+                y.range([scatterHeight, 0]);
+
+                const stats = categories.map(cat => {
+                    const values = data.filter(d => d.category === cat).map(d => d.y).sort(d3.ascending);
+                    return {
+                        category: cat,
+                        q1: d3.quantile(values, 0.25),
+                        median: d3.quantile(values, 0.5),
+                        q3: d3.quantile(values, 0.75),
+                        min: d3.min(values),
+                        max: d3.max(values)
+                    };
+                });
+
+                updateMarginals(width, height, 0, 0, 0, 0, x, y, false);
+                updateBoxPlots(stats, y, xBand, true);
+                updateAnnotations([], x, y, 0, 0, false);
+                updateLegend(0, 0, "none", false);
+                updateAxes(xBand, y, scatterX, scatterY, scatterWidth, scatterHeight, "strip", true);
+            }
+
+            // Update Points
+            const points = gPoints.selectAll(".point")
+                .data(data, d => d.id);
+
+            points.join("circle")
+                .attr("class", "point")
+                .attr("fill", d => colorScale(d.category))
+                .attr("stroke", "#fff")
+                .attr("stroke-width", 0.5)
+                .transition().duration(duration)
+                .attr("r", d => breakpoint === "Narrow" ? 4 : d.size)
+                .attr("cx", d => {
+                    if (breakpoint === "Narrow") {
+                        // Jitter within category band
+                        const random = d3.randomLcg(d.id)();
+                        return scatterX + xBand(d.category) + xBand.bandwidth() / 2 + (random - 0.5) * (xBand.bandwidth() * 0.8);
+                    }
+                    return scatterX + x(d.x);
+                })
+                .attr("cy", d => scatterY + y(d.y));
+        }
+
+        function updateAxes(xScale, yScale, tx, ty, width, height, type, visible) {
+            gAxes.transition().duration(duration).attr("transform", `translate(${tx}, ${ty})`);
+
+            const xAxis = type === "scatter" ? d3.axisBottom(xScale) : d3.axisBottom(xScale);
+            const yAxis = d3.axisLeft(yScale);
+
+            let gx = gAxes.selectAll(".x-axis").data([0]);
+            gx = gx.enter().append("g").attr("class", "x-axis").merge(gx);
+            gx.transition().duration(duration)
+                .attr("transform", `translate(0, ${height})`)
+                .call(xAxis);
+
+            let gy = gAxes.selectAll(".y-axis").data([0]);
+            gy = gy.enter().append("g").attr("class", "y-axis").merge(gy);
+            gy.transition().duration(duration)
+                .call(yAxis);
+
+            // Grid
+            gGrid.transition().duration(duration).attr("transform", `translate(${tx}, ${ty})`);
+            const xGrid = d3.axisBottom(xScale).tickSize(height).tickFormat("");
+            const yGrid = d3.axisLeft(yScale).tickSize(-width).tickFormat("");
+
+            let gxg = gGrid.selectAll(".x-grid").data([0]);
+            gxg = gxg.enter().append("g").attr("class", "x-grid").merge(gxg);
+            gxg.transition().duration(duration).call(xGrid)
+                .selectAll("line").attr("stroke", "#eee");
+            gxg.selectAll("path").remove();
+
+            let gyg = gGrid.selectAll(".y-grid").data([0]);
+            gyg = gyg.enter().append("g").attr("class", "y-grid").merge(gyg);
+            gyg.transition().duration(duration).call(yGrid)
+                .selectAll("line").attr("stroke", "#eee");
+            gyg.selectAll("path").remove();
+        }
+
+        function updateMarginals(width, height, tx, ty, sw, sh, xScale, yScale, visible) {
+            gMarginals.transition().duration(duration)
+                .attr("opacity", visible ? 1 : 0)
+                .attr("transform", `translate(${tx}, ${ty})`);
+
+            if (!visible) return;
+
+            // X Histogram
+            const xBins = d3.bin().domain([0, 100]).thresholds(20)(data.map(d => d.x));
+            const xHistY = d3.scaleLinear()
+                .domain([0, d3.max(xBins, d => d.length)])
+                .range([60, 0]);
+
+            const barsX = gMarginals.selectAll(".bar-x").data(xBins);
+            barsX.join("rect")
+                .attr("class", "bar-x marginal-bar")
+                .transition().duration(duration)
+                .attr("x", d => xScale(d.x0))
+                .attr("width", d => Math.max(0, xScale(d.x1) - xScale(d.x0) - 1))
+                .attr("y", d => xHistY(d.length) - 70)
+                .attr("height", d => 60 - xHistY(d.length));
+
+            // Y Histogram
+            const yBins = d3.bin().domain([0, 100]).thresholds(20)(data.map(d => d.y));
+            const yHistX = d3.scaleLinear()
+                .domain([0, d3.max(yBins, d => d.length)])
+                .range([0, 60]);
+
+            const barsY = gMarginals.selectAll(".bar-y").data(yBins);
+            barsY.join("rect")
+                .attr("class", "bar-y marginal-bar")
+                .transition().duration(duration)
+                .attr("x", sw + 10)
+                .attr("y", d => yScale(d.y1))
+                .attr("height", d => Math.max(0, yScale(d.y0) - yScale(d.y1) - 1))
+                .attr("width", d => yHistX(d.length));
+        }
+
+        function updateBoxPlots(stats, yScale, xBand, visible) {
+            gBoxPlots.transition().duration(duration).attr("opacity", visible ? 1 : 0);
+            if (!visible) return;
+
+            const tx = margin.left;
+            const ty = margin.top;
+            gBoxPlots.attr("transform", `translate(${tx}, ${ty})`);
+
+            const groups = gBoxPlots.selectAll(".box-group").data(stats, d => d.category);
+            const gEnter = groups.enter().append("g").attr("class", "box-group");
+
+            gEnter.append("line").attr("class", "whisker box-plot-line");
+            gEnter.append("rect").attr("class", "box-plot-rect");
+            gEnter.append("line").attr("class", "median box-plot-line");
+
+            const gAll = gEnter.merge(groups);
+            
+            gAll.select(".whisker")
+                .transition().duration(duration)
+                .attr("x1", d => xBand(d.category) + xBand.bandwidth() / 2)
+                .attr("x2", d => xBand(d.category) + xBand.bandwidth() / 2)
+                .attr("y1", d => yScale(d.min))
+                .attr("y2", d => yScale(d.max));
+
+            gAll.select(".box-plot-rect")
+                .transition().duration(duration)
+                .attr("x", d => xBand(d.category))
+                .attr("width", xBand.bandwidth())
+                .attr("y", d => yScale(d.q3))
+                .attr("height", d => yScale(d.q1) - yScale(d.q3));
+
+            gAll.select(".median")
+                .transition().duration(duration)
+                .attr("x1", d => xBand(d.category))
+                .attr("x2", d => xBand(d.category) + xBand.bandwidth())
+                .attr("y1", d => yScale(d.median))
+                .attr("y2", d => yScale(d.median));
+
+            groups.exit().remove();
+        }
+
+        function updateAnnotations(outliers, xScale, yScale, tx, ty, visible) {
+            gAnnotations.transition().duration(duration)
+                .attr("opacity", visible ? 1 : 0)
+                .attr("transform", `translate(${tx}, ${ty})`);
+
+            const ann = gAnnotations.selectAll(".ann").data(visible ? outliers : [], d => d.id);
+
+            const enter = ann.enter().append("g").attr("class", "ann");
+            enter.append("line").attr("stroke", "#333").attr("stroke-dasharray", "2,2");
+            enter.append("text").attr("class", "annotation-text").attr("dy", -5);
+
+            const merged = enter.merge(ann);
+            merged.select("line")
+                .transition().duration(duration)
+                .attr("x1", d => xScale(d.x))
+                .attr("y1", d => yScale(d.y))
+                .attr("x2", d => xScale(d.x) + (d.x > 50 ? 30 : -30))
+                .attr("y2", d => yScale(d.y) - 30);
+
+            merged.select("text")
+                .text(d => `Outlier (${Math.round(d.x)},${Math.round(d.y)})`)
+                .attr("text-anchor", d => d.x > 50 ? "start" : "end")
+                .transition().duration(duration)
+                .attr("x", d => xScale(d.x) + (d.x > 50 ? 32 : -32))
+                .attr("y", d => yScale(d.y) - 30);
+
+            ann.exit().remove();
+        }
+
+        function updateLegend(width, yPos, type, visible) {
+            gLegend.transition().duration(duration).attr("opacity", visible ? 1 : 0);
+            if (!visible) return;
+
+            const itemWidth = 80;
+            const totalWidth = categories.length * itemWidth;
+            let startX;
+
+            if (type === "top-right") {
+                startX = width - totalWidth - 40;
+                yPos = 30;
+            } else {
+                startX = (width - totalWidth) / 2;
+            }
+
+            const items = gLegend.selectAll(".legend-item").data(categories);
+            const enter = items.enter().append("g").attr("class", "legend-item");
+            enter.append("circle").attr("r", 5);
+            enter.append("text").attr("class", "legend-text").attr("dx", 10).attr("dy", 4);
+
+            const merged = enter.merge(items);
+            merged.transition().duration(duration)
+                .attr("transform", (d, i) => `translate(${startX + i * itemWidth}, ${yPos})`);
+
+            merged.select("circle").attr("fill", d => colorScale(d));
+            merged.select("text").text(d => d);
+        }
+
+    </script>
+</body>
+</html>

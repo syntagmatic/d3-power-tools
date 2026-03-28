@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebGL Streaming Particles - 200K Flow</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: #050505;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: #eee;
+    }
+    canvas {
+      display: block;
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+    #ui-layer {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+    .controls {
+      position: absolute;
+      bottom: 20px;
+      left: 20px;
+      background: rgba(0, 0, 0, 0.7);
+      padding: 15px;
+      border-radius: 8px;
+      pointer-events: all;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      backdrop-filter: blur(4px);
+      border: 1px solid #333;
+      font-size: 12px;
+      min-width: 200px;
+    }
+    .control-group {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .control-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    input[type=range] {
+      width: 100%;
+      cursor: pointer;
+    }
+    button {
+      background: #444;
+      border: none;
+      color: white;
+      padding: 5px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    button:hover {
+      background: #555;
+    }
+    .stats {
+      position: absolute;
+      top: 20px;
+      right: 20px;
+      text-align: right;
+      font-family: monospace;
+      font-size: 12px;
+      color: #88CCEE;
+      text-shadow: 0 0 4px rgba(0,0,0,0.8);
+    }
+    svg {
+      width: 100%;
+      height: 100%;
+    }
+    .axis-label {
+      fill: #666;
+      font-size: 10px;
+    }
+    .axis line, .axis path {
+      stroke: #333;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="gl-canvas"></canvas>
+  <svg id="ui-layer">
+    <g class="axis x-axis"></g>
+    <g class="axis y-axis"></g>
+  </svg>
+  
+  <div class="stats">
+    <div id="fps-counter">FPS: --</div>
+    <div id="particle-count-display">Particles: 200,000</div>
+  </div>
+
+  <div class="controls">
+    <div class="control-group">
+      <div class="control-row">
+        <label>Particle Count</label>
+        <span id="count-val">200K</span>
+      </div>
+      <input type="range" id="count-slider" min="50000" max="200000" step="10000" value="200000">
+    </div>
+    <div class="control-group">
+      <div class="control-row">
+        <label>Flow Speed</label>
+        <span id="speed-val">1.0x</span>
+      </div>
+      <input type="range" id="speed-slider" min="0.2" max="3.0" step="0.1" value="1.0">
+    </div>
+    <div class="control-row">
+      <button id="play-pause">Pause</button>
+      <button id="reset">Reset Particles</button>
+    </div>
+  </div>
+
+  <script id="vs-particles" type="x-shader/x-vertex">#version 300 es
+    in vec2 a_position;
+    in vec3 a_color;
+    uniform vec2 u_resolution;
+    uniform float u_pointSize;
+    out vec3 v_color;
+
+    void main() {
+      // Convert to clip space [-1, 1]
+      vec2 clip = (a_position / u_resolution) * 2.0 - 1.0;
+      gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0); // Y-flip for D3 space
+      gl_PointSize = u_pointSize;
+      v_color = a_color;
+    }
+  </script>
+
+  <script id="fs-particles" type="x-shader/x-fragment">#version 300 es
+    precision mediump float;
+    in vec3 v_color;
+    out vec4 fragColor;
+
+    void main() {
+      float dist = length(gl_PointCoord - 0.5);
+      if (dist > 0.5) discard;
+      float alpha = 1.0 - smoothstep(0.3, 0.5, dist);
+      fragColor = vec4(v_color, alpha * 0.8);
+    }
+  </script>
+
+  <script id="vs-quad" type="x-shader/x-vertex">#version 300 es
+    in vec2 a_position;
+    void main() {
+      gl_Position = vec4(a_position, 0.0, 1.0);
+    }
+  </script>
+
+  <script id="fs-quad" type="x-shader/x-fragment">#version 300 es
+    precision mediump float;
+    uniform float u_alpha;
+    out vec4 fragColor;
+    void main() {
+      fragColor = vec4(0.02, 0.02, 0.02, u_alpha); // Dark trail
+    }
+  </script>
+
+  <script>
+    const MAX_PARTICLES = 200000;
+    let particleCount = 200000;
+    let flowSpeed = 1.0;
+    let isPaused = false;
+    
+    const canvas = document.getElementById('gl-canvas');
+    const gl = canvas.getContext('webgl2', { 
+      preserveDrawingBuffer: true,
+      antialias: false,
+      alpha: false 
+    });
+
+    if (!gl) {
+      alert("WebGL 2 not supported");
+    }
+
+    // Colors
+    const colorScale = d3.scaleLinear()
+      .domain([0, 0.7, 1.4]) // Estimated magnitude range
+      .range(["#332288", "#88CCEE", "#DDCC77"])
+      .clamp(true);
+
+    const getRGB = (hex) => {
+      const c = d3.rgb(hex);
+      return [c.r / 255, c.g / 255, c.b / 255];
+    };
+
+    // State
+    let width, height, dpr;
+    const positions = new Float32Array(MAX_PARTICLES * 2);
+    const colors = new Float32Array(MAX_PARTICLES * 3);
+
+    function initParticles() {
+      for (let i = 0; i < MAX_PARTICLES; i++) {
+        positions[i * 2] = Math.random() * width;
+        positions[i * 2 + 1] = Math.random() * height;
+        colors[i * 3] = 0.5;
+        colors[i * 3 + 1] = 0.5;
+        colors[i * 3 + 2] = 0.5;
+      }
+    }
+
+    function createShader(gl, type, source) {
+      const shader = gl.createShader(type);
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(shader));
+        gl.deleteShader(shader);
+        return null;
+      }
+      return shader;
+    }
+
+    function createProgram(gl, vsSource, fsSource) {
+      const vs = createShader(gl, gl.VERTEX_SHADER, vsSource);
+      const fs = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
+      const program = gl.createProgram();
+      gl.attachShader(program, vs);
+      gl.attachShader(program, fs);
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        console.error(gl.getProgramInfoLog(program));
+        return null;
+      }
+      return program;
+    }
+
+    const particleProgram = createProgram(gl, 
+      document.getElementById('vs-particles').text, 
+      document.getElementById('fs-particles').text
+    );
+    const quadProgram = createProgram(gl,
+      document.getElementById('vs-quad').text,
+      document.getElementById('fs-quad').text
+    );
+
+    // Buffers
+    const posBuffer = gl.createBuffer();
+    const colorBuffer = gl.createBuffer();
+    const quadBuffer = gl.createBuffer();
+    
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
+
+    const particleVAO = gl.createVertexArray();
+    gl.bindVertexArray(particleVAO);
+    
+    gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW);
+    const posLoc = gl.getAttribLocation(particleProgram, "a_position");
+    gl.enableVertexAttribArray(posLoc);
+    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, colors, gl.DYNAMIC_DRAW);
+    const colorLoc = gl.getAttribLocation(particleProgram, "a_color");
+    gl.enableVertexAttribArray(colorLoc);
+    gl.vertexAttribPointer(colorLoc, 3, gl.FLOAT, false, 0, 0);
+
+    const quadVAO = gl.createVertexArray();
+    gl.bindVertexArray(quadVAO);
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+    const quadPosLoc = gl.getAttribLocation(quadProgram, "a_position");
+    gl.enableVertexAttribArray(quadPosLoc);
+    gl.vertexAttribPointer(quadPosLoc, 2, gl.FLOAT, false, 0, 0);
+
+    function resize() {
+      dpr = window.devicePixelRatio || 1;
+      width = window.innerWidth;
+      height = window.innerHeight;
+      canvas.width = width * dpr;
+      canvas.height = height * dpr;
+      canvas.style.width = width + 'px';
+      canvas.style.height = height + 'px';
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      initParticles();
+      
+      // Update axes
+      const svg = d3.select("#ui-layer");
+      const xScale = d3.scaleLinear().domain([0, width]).range([0, width]);
+      const yScale = d3.scaleLinear().domain([0, height]).range([0, height]);
+      
+      svg.select(".x-axis")
+        .attr("transform", `translate(0, ${height - 30})`)
+        .call(d3.axisBottom(xScale).ticks(width / 100).tickSize(-height));
+      
+      svg.select(".y-axis")
+        .attr("transform", `translate(30, 0)`)
+        .call(d3.axisLeft(yScale).ticks(height / 100).tickSize(-width));
+        
+      svg.selectAll(".axis line").attr("stroke-opacity", 0.1);
+      svg.selectAll(".axis text").attr("fill", "#666");
+    }
+
+    window.addEventListener('resize', resize);
+    resize();
+
+    let lastTime = 0;
+    let frames = 0;
+    let lastFpsUpdate = 0;
+
+    function updateParticles(dt) {
+      if (isPaused) return;
+
+      const speed = flowSpeed * dt * 60;
+      const xFreq = 3 / width;
+      const yFreq = 3 / height;
+
+      for (let i = 0; i < particleCount; i++) {
+        const idx = i * 2;
+        let x = positions[idx];
+        let y = positions[idx + 1];
+
+        // Vector field:
+        // vx = sin(y*3)*cos(x*2)+0.5
+        // vy = cos(x*3)*sin(y*2)-0.3
+        // We normalize x, y to [0, 1] for the field trig
+        const nx = (x / width) * Math.PI * 2;
+        const ny = (y / height) * Math.PI * 2;
+
+        const vx = (Math.sin(ny * 3) * Math.cos(nx * 2) + 0.5);
+        const vy = (Math.cos(nx * 3) * Math.sin(ny * 2) - 0.3);
+
+        x += vx * speed;
+        y += vy * speed;
+
+        // Wrap
+        if (x < 0) x = width;
+        if (x > width) x = 0;
+        if (y < 0) y = height;
+        if (y > height) y = 0;
+
+        positions[idx] = x;
+        positions[idx + 1] = y;
+
+        // Color by magnitude
+        const mag = Math.sqrt(vx * vx + vy * vy);
+        const rgb = getRGB(colorScale(mag));
+        colors[i * 3] = rgb[0];
+        colors[i * 3 + 1] = rgb[1];
+        colors[i * 3 + 2] = rgb[2];
+      }
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, positions.subarray(0, particleCount * 2));
+      
+      gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, colors.subarray(0, particleCount * 3));
+    }
+
+    function render(time) {
+      const dt = lastTime ? (time - lastTime) / 1000 : 0;
+      lastTime = time;
+
+      // Update FPS
+      frames++;
+      if (time - lastFpsUpdate > 1000) {
+        document.getElementById('fps-counter').innerText = `FPS: ${Math.round(frames * 1000 / (time - lastFpsUpdate))}`;
+        frames = 0;
+        lastFpsUpdate = time;
+      }
+
+      // Draw Trail (Semi-transparent quad)
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.useProgram(quadProgram);
+      gl.bindVertexArray(quadVAO);
+      gl.uniform1f(gl.getUniformLocation(quadProgram, "u_alpha"), 0.05);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+      // Update and Draw Particles
+      updateParticles(Math.min(dt, 0.1));
+
+      gl.useProgram(particleProgram);
+      gl.bindVertexArray(particleVAO);
+      gl.uniform2f(gl.getUniformLocation(particleProgram, "u_resolution"), width, height);
+      gl.uniform1f(gl.getUniformLocation(particleProgram, "u_pointSize"), 1.5 * dpr);
+      gl.drawArrays(gl.POINTS, 0, particleCount);
+
+      requestAnimationFrame(render);
+    }
+
+    // UI Events
+    d3.select("#count-slider").on("input", function() {
+      particleCount = +this.value;
+      d3.select("#count-val").text(Math.round(particleCount/1000) + "K");
+      d3.select("#particle-count-display").text(`Particles: ${particleCount.toLocaleString()}`);
+    });
+
+    d3.select("#speed-slider").on("input", function() {
+      flowSpeed = +this.value;
+      d3.select("#speed-val").text(flowSpeed.toFixed(1) + "x");
+    });
+
+    d3.select("#play-pause").on("click", function() {
+      isPaused = !isPaused;
+      d3.select(this).text(isPaused ? "Play" : "Pause");
+    });
+
+    d3.select("#reset").on("click", () => initParticles());
+
+    requestAnimationFrame(render);
+  </script>
+</body>
+</html>

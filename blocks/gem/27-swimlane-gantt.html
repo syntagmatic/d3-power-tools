@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gantt Chart with Swimlanes & Brush-to-Zoom</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: #f8f9fa;
+            color: #333;
+        }
+        #container {
+            width: 960px;
+            background: white;
+            margin-top: 20px;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        .swimlane-bg {
+            fill: #f0f4f8;
+            stroke: #d0d7de;
+            stroke-width: 0.5px;
+        }
+        .swimlane-header {
+            font-weight: bold;
+            font-size: 11px;
+            fill: #444;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .task-bar {
+            cursor: pointer;
+            rx: 4px;
+            ry: 4px;
+            stroke: #fff;
+            stroke-width: 1px;
+        }
+        .task-bar:hover {
+            filter: brightness(0.9);
+        }
+        .dependency-line {
+            fill: none;
+            stroke: #999;
+            stroke-width: 1px;
+            opacity: 0.4;
+            pointer-events: none;
+        }
+        .milestone {
+            fill: #333;
+            stroke: #fff;
+            stroke-width: 1.5px;
+        }
+        .today-line {
+            stroke: #d73a49;
+            stroke-width: 2px;
+            stroke-dasharray: 4,4;
+        }
+        .axis text {
+            font-size: 11px;
+            fill: #666;
+        }
+        .axis path, .axis line {
+            stroke: #ddd;
+        }
+        .overview .task-line {
+            stroke-width: 2px;
+            opacity: 0.6;
+        }
+        .tooltip {
+            position: absolute;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.85);
+            color: white;
+            border-radius: 4px;
+            font-size: 12px;
+            pointer-events: none;
+            visibility: hidden;
+            z-index: 10;
+            line-height: 1.4;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+        }
+        .tooltip b { color: #66CCEE; }
+        .brush .selection {
+            fill: #4477AA;
+            fill-opacity: 0.2;
+            stroke: #4477AA;
+        }
+    </style>
+</head>
+<body>
+
+<div id="container">
+    <h2 style="margin-top: 0; margin-bottom: 20px; text-align: center;">Project Roadmap: Gantt Chart</h2>
+    <div id="viz"></div>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+    // Constants
+    const width = 920;
+    const overviewHeight = 50;
+    const margin = {top: 20, right: 30, bottom: 40, left: 100};
+    const gap = 30; // space between overview and main
+    const rowHeight = 20;
+    const barHeight = 16;
+    const teamPadding = 12;
+    
+    const colors = {
+        "complete": "#4477AA",
+        "in-progress": "#228833",
+        "blocked": "#EE6677",
+        "not-started": "#BBBBBB"
+    };
+
+    const teams = ["Backend", "Frontend", "Design", "QA", "DevOps"];
+
+    // 1. DATA GENERATION
+    const startDateRange = new Date(2026, 0, 1); // Jan 1, 2026
+    const endDateRange = new Date(2026, 3, 1);   // Apr 1, 2026 (3 months)
+    const todaySimulated = d3.timeDay.offset(startDateRange, 45);
+
+    const data = [];
+    let idCounter = 1;
+
+    teams.forEach(team => {
+        const numTasks = 6 + Math.floor(Math.random() * 3); // 6-8 tasks per team
+        for (let i = 0; i < numTasks; i++) {
+            const startOffset = Math.floor(Math.random() * 70);
+            const duration = 1 + Math.floor(Math.random() * 20);
+            const start = d3.timeDay.offset(startDateRange, startOffset);
+            const end = d3.timeDay.offset(start, duration);
+            
+            let status;
+            if (end < todaySimulated) status = "complete";
+            else if (start > todaySimulated) status = Math.random() > 0.3 ? "not-started" : "blocked";
+            else status = Math.random() > 0.2 ? "in-progress" : "blocked";
+
+            data.push({
+                id: idCounter++,
+                name: `${team} Task ${i + 1}`,
+                team: team,
+                start: start,
+                end: end,
+                status: status,
+                dependencies: []
+            });
+        }
+    });
+
+    // Ensure we have exactly 35 tasks
+    while (data.length < 35) {
+        const team = teams[Math.floor(Math.random() * teams.length)];
+        const startOffset = Math.floor(Math.random() * 70);
+        const duration = 1 + Math.floor(Math.random() * 20);
+        const start = d3.timeDay.offset(startDateRange, startOffset);
+        data.push({
+            id: idCounter++,
+            name: `${team} Sync Task`,
+            team: team,
+            start: start,
+            end: d3.timeDay.offset(start, duration),
+            status: "not-started",
+            dependencies: []
+        });
+    }
+    data.splice(35);
+
+    // Assign dependencies (0-2)
+    data.forEach(task => {
+        const others = data.filter(d => d.id !== task.id && d.end <= task.start);
+        if (others.length > 0) {
+            const numDeps = Math.floor(Math.random() * 2);
+            for (let i = 0; i < numDeps; i++) {
+                const dep = others[Math.floor(Math.random() * others.length)];
+                if (!task.dependencies.includes(dep.id)) {
+                    task.dependencies.push(dep.id);
+                }
+            }
+        }
+    });
+
+    const milestones = [
+        { name: "Alpha Release", date: d3.timeDay.offset(startDateRange, 20) },
+        { name: "Beta Release", date: d3.timeDay.offset(startDateRange, 40) },
+        { name: "Public Preview", date: d3.timeDay.offset(startDateRange, 65) },
+        { name: "Final Launch", date: d3.timeDay.offset(startDateRange, 85) }
+    ];
+
+    // 2. STACKING LOGIC
+    const teamData = d3.groups(data, d => d.team);
+    let currentY = 0;
+    const teamLayout = [];
+
+    teamData.forEach(([team, tasks]) => {
+        tasks.sort((a, b) => a.start - b.start);
+        const rows = [];
+        tasks.forEach(task => {
+            let placed = false;
+            for (let i = 0; i < rows.length; i++) {
+                if (rows[i][rows[i].length - 1].end <= task.start) {
+                    rows[i].push(task);
+                    task.row = i;
+                    placed = true;
+                    break;
+                }
+            }
+            if (!placed) {
+                task.row = rows.length;
+                rows.push([task]);
+            }
+        });
+        
+        const teamHeight = rows.length * rowHeight + teamPadding * 2;
+        teamLayout.push({
+            team: team,
+            y: currentY,
+            height: teamHeight,
+            rowCount: rows.length
+        });
+        
+        tasks.forEach(t => {
+            t.yOffset = currentY + teamPadding + t.row * rowHeight;
+        });
+        
+        currentY += teamHeight;
+    });
+
+    const mainHeight = currentY;
+    const totalHeight = mainHeight + overviewHeight + margin.top + margin.bottom + gap;
+
+    // 3. SCALES
+    const x = d3.scaleTime().domain([startDateRange, endDateRange]).range([0, width - margin.left - margin.right]);
+    const x2 = d3.scaleTime().domain([startDateRange, endDateRange]).range([0, width - margin.left - margin.right]);
+
+    // 4. SVG SETUP
+    const svg = d3.select("#viz").append("svg")
+        .attr("width", width)
+        .attr("height", totalHeight);
+
+    // Marker for dependency arrows
+    svg.append("defs").append("marker")
+        .attr("id", "arrow")
+        .attr("viewBox", "0 0 10 10")
+        .attr("refX", 8)
+        .attr("refY", 5)
+        .attr("markerWidth", 5)
+        .attr("markerHeight", 5)
+        .attr("orient", "auto")
+      .append("path")
+        .attr("d", "M 0 0 L 10 5 L 0 10 z")
+        .attr("fill", "#999");
+
+    // Overview Group
+    const overview = svg.append("g")
+        .attr("class", "overview")
+        .attr("transform", `translate(${margin.left}, ${margin.top})`);
+
+    // Main Chart Group
+    const main = svg.append("g")
+        .attr("class", "main")
+        .attr("transform", `translate(${margin.left}, ${margin.top + overviewHeight + gap})`);
+
+    // Clip path for main chart zoom
+    svg.append("defs").append("clipPath")
+        .attr("id", "clip")
+      .append("rect")
+        .attr("width", width - margin.left - margin.right)
+        .attr("height", mainHeight);
+
+    const mainContent = main.append("g")
+        .attr("clip-path", "url(#clip)");
+
+    // 5. RENDER OVERVIEW
+    overview.selectAll(".task-line")
+        .data(data)
+        .enter().append("line")
+        .attr("class", "task-line")
+        .attr("x1", d => x2(d.start))
+        .attr("x2", d => x2(d.end))
+        .attr("y1", (d, i) => (i / data.length) * overviewHeight)
+        .attr("y2", (d, i) => (i / data.length) * overviewHeight)
+        .attr("stroke", d => colors[d.status]);
+
+    const brush = d3.brushX()
+        .extent([[0, 0], [width - margin.left - margin.right, overviewHeight]])
+        .on("brush end", brushed);
+
+    overview.append("g")
+        .attr("class", "brush")
+        .call(brush)
+        .call(brush.move, x2.range());
+
+    // 6. RENDER MAIN COMPONENTS
+    
+    // Swimlanes
+    const swimlanes = main.selectAll(".swimlane")
+        .data(teamLayout)
+        .enter().append("g")
+        .attr("class", "swimlane");
+
+    swimlanes.append("rect")
+        .attr("class", "swimlane-bg")
+        .attr("x", -margin.left)
+        .attr("y", d => d.y)
+        .attr("width", width)
+        .attr("height", d => d.height);
+
+    swimlanes.append("text")
+        .attr("class", "swimlane-header")
+        .attr("x", -margin.left + 10)
+        .attr("y", d => d.y + 20) // Positioned at top of lane
+        .text(d => d.team);
+
+    // Axes
+    const xAxis = d3.axisBottom(x).ticks(d3.timeWeek.every(1)).tickFormat(d3.timeFormat("%b %d"));
+    const gX = main.append("g")
+        .attr("class", "axis axis--x")
+        .attr("transform", `translate(0, ${mainHeight})`)
+        .call(xAxis);
+
+    // Task Bars
+    const tasksG = mainContent.append("g").attr("class", "tasks");
+    
+    // Dependencies
+    const depsG = mainContent.append("g").attr("class", "dependencies");
+
+    // Milestones
+    const milestonesG = mainContent.append("g").attr("class", "milestones");
+
+    // Today Line
+    const todayG = mainContent.append("line")
+        .attr("class", "today-line")
+        .attr("y1", 0)
+        .attr("y2", mainHeight);
+
+    const tooltip = d3.select("#tooltip");
+
+    function updateMain() {
+        // Update Axis
+        gX.call(xAxis);
+
+        // Update Today Line
+        todayG.attr("x1", x(todaySimulated)).attr("x2", x(todaySimulated));
+
+        // Update Tasks
+        const taskSelection = tasksG.selectAll(".task-bar")
+            .data(data, d => d.id);
+
+        taskSelection.join(
+            enter => enter.append("rect")
+                .attr("class", "task-bar")
+                .attr("fill", d => colors[d.status])
+                .attr("y", d => d.yOffset)
+                .attr("height", barHeight)
+                .on("mouseover", showTooltip)
+                .on("mousemove", moveTooltip)
+                .on("mouseout", hideTooltip),
+            update => update,
+            exit => exit.remove()
+        )
+        .attr("x", d => x(d.start))
+        .attr("width", d => Math.max(1, x(d.end) - x(d.start)));
+
+        // Update Dependencies
+        const depLinks = [];
+        data.forEach(task => {
+            task.dependencies.forEach(depId => {
+                const depTask = data.find(d => d.id === depId);
+                if (depTask) {
+                    depLinks.push({ source: depTask, target: task });
+                }
+            });
+        });
+
+        const depSelection = depsG.selectAll(".dependency-line")
+            .data(depLinks, d => `${d.source.id}-${d.target.id}`);
+
+        depSelection.join(
+            enter => enter.append("path")
+                .attr("class", "dependency-line")
+                .attr("marker-end", "url(#arrow)"),
+            update => update,
+            exit => exit.remove()
+        )
+        .attr("d", d => {
+            const x1 = x(d.source.end);
+            const y1 = d.source.yOffset + barHeight / 2;
+            const x2 = x(d.target.start);
+            const y2 = d.target.yOffset + barHeight / 2;
+            const midX = x1 + (x2 - x1) / 2;
+            return `M${x1},${y1} C${midX},${y1} ${midX},${y2} ${x2},${y2}`;
+        });
+
+        // Update Milestones
+        const milestoneSelection = milestonesG.selectAll(".milestone")
+            .data(milestones);
+
+        milestoneSelection.join(
+            enter => enter.append("path")
+                .attr("class", "milestone")
+                .attr("d", d3.symbol().type(d3.symbolDiamond).size(80)),
+            update => update,
+            exit => exit.remove()
+        )
+        .attr("transform", d => `translate(${x(d.date)}, ${mainHeight - 10})`);
+    }
+
+    function brushed(event) {
+        if (!event.sourceEvent) return; // ignore programmatic moves
+        const s = event.selection || x2.range();
+        x.domain(s.map(x2.invert, x2));
+        updateMain();
+    }
+
+    function showTooltip(event, d) {
+        const duration = Math.round((d.end - d.start) / (1000 * 60 * 60 * 24));
+        tooltip.style("visibility", "visible")
+            .html(`
+                <b>${d.name}</b><br/>
+                Team: ${d.team}<br/>
+                Status: <i>${d.status}</i><br/>
+                Dates: ${d3.timeFormat("%b %d")(d.start)} - ${d3.timeFormat("%b %d")(d.end)}<br/>
+                Duration: ${duration} days
+            `);
+    }
+
+    function moveTooltip(event) {
+        tooltip.style("top", (event.pageY - 10) + "px")
+            .style("left", (event.pageX + 10) + "px");
+    }
+
+    function hideTooltip() {
+        tooltip.style("visibility", "hidden");
+    }
+
+    // Initial Render
+    updateMain();
+
+</script>
+</body>
+</html>

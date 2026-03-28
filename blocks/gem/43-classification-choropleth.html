@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Choropleth Classification Methods</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/topojson-client@3"></script>
+    <style>
+        :root {
+            --bg: #f8f9fa;
+            --text: #222;
+            --light-blue: #BBCCEE;
+            --dark-blue: #222255;
+            --highlight: #ffcc00;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        h1 {
+            margin: 0 0 10px 0;
+            font-size: 24px;
+        }
+        .controls {
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            background: #fff;
+            padding: 10px 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+        .controls label {
+            font-weight: 600;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(2, 480px);
+            grid-gap: 30px;
+            justify-content: center;
+        }
+        .panel {
+            background: #fff;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            position: relative;
+        }
+        .panel h2 {
+            margin: 0 0 10px 0;
+            font-size: 16px;
+            text-align: center;
+        }
+        .map-container {
+            width: 480px;
+            height: 300px;
+        }
+        .state {
+            stroke: #fff;
+            stroke-width: 0.5;
+            transition: fill 500ms;
+        }
+        .state.highlighted {
+            stroke: var(--highlight);
+            stroke-width: 2;
+        }
+        .mesh {
+            fill: none;
+            stroke: #fff;
+            stroke-width: 0.5;
+            pointer-events: none;
+        }
+        .legend {
+            margin-top: 10px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .legend-swatches {
+            display: flex;
+            height: 12px;
+            width: 300px;
+            border: 1px solid #ddd;
+        }
+        .legend-swatch {
+            flex: 1;
+        }
+        .legend-labels {
+            display: flex;
+            justify-content: space-between;
+            width: 300px;
+            font-size: 10px;
+            margin-top: 4px;
+            color: #666;
+        }
+        .histogram-container {
+            margin-top: 40px;
+            background: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            width: 900px;
+        }
+        .histogram-title {
+            text-align: center;
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+        .tooltip {
+            position: absolute;
+            background: rgba(0,0,0,0.8);
+            color: #fff;
+            padding: 6px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+            z-index: 100;
+        }
+        .break-line {
+            stroke-width: 1.5;
+            stroke-dasharray: 4,2;
+            opacity: 0.7;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>How Classification Tells Different Stories — Same Data, Four Methods</h1>
+
+    <div class="controls">
+        <label for="class-slider">Number of Classes:</label>
+        <input type="range" id="class-slider" min="3" max="7" value="5">
+        <span id="class-value">5</span>
+    </div>
+
+    <div class="grid">
+        <div class="panel" id="panel-quantile">
+            <h2>Quantile (Equal Count)</h2>
+            <div class="map-container" id="map-quantile"></div>
+            <div class="legend" id="legend-quantile"></div>
+        </div>
+        <div class="panel" id="panel-equal">
+            <h2>Equal Interval</h2>
+            <div class="map-container" id="map-equal"></div>
+            <div class="legend" id="legend-equal"></div>
+        </div>
+        <div class="panel" id="panel-jenks">
+            <h2>Natural Breaks (Jenks)</h2>
+            <div class="map-container" id="map-jenks"></div>
+            <div class="legend" id="legend-jenks"></div>
+        </div>
+        <div class="panel" id="panel-manual">
+            <h2>Manual Threshold</h2>
+            <div class="map-container" id="map-manual"></div>
+            <div class="legend" id="legend-manual"></div>
+        </div>
+    </div>
+
+    <div class="histogram-container">
+        <div class="histogram-title">Income Distribution & Breakpoints</div>
+        <div id="histogram"></div>
+    </div>
+
+    <div class="tooltip" id="tooltip"></div>
+
+    <script>
+        const width = 480;
+        const height = 300;
+        const margin = { top: 10, right: 10, bottom: 10, left: 10 };
+
+        const formatIncome = d3.format("$,.0f");
+
+        // Jenks Natural Breaks optimization (1D)
+        function getJenksBreaks(data, nClasses) {
+            if (nClasses <= 1) return [];
+            const sorted = [...data].sort(d3.ascending);
+            const n = sorted.length;
+
+            const lower_class_limits = Array.from({ length: n + 1 }, () => new Array(nClasses + 1).fill(0));
+            const variance_combinations = Array.from({ length: n + 1 }, () => new Array(nClasses + 1).fill(Infinity));
+
+            for (let i = 1; i <= nClasses; i++) {
+                lower_class_limits[1][i] = 1;
+                variance_combinations[1][i] = 0;
+            }
+
+            for (let l = 2; l <= n; l++) {
+                let sum = 0;
+                let sum_sq = 0;
+                for (let m = 1; m <= l; m++) {
+                    const lower_class_limit = l - m + 1;
+                    const val = sorted[lower_class_limit - 1];
+                    sum += val;
+                    sum_sq += val * val;
+                    const variance = sum_sq - (sum * sum) / m;
+
+                    if (lower_class_limit !== 1) {
+                        for (let j = 2; j <= nClasses; j++) {
+                            if (variance_combinations[l][j] >= (variance + variance_combinations[lower_class_limit - 1][j - 1])) {
+                                lower_class_limits[l][j] = lower_class_limit;
+                                variance_combinations[l][j] = variance + variance_combinations[lower_class_limit - 1][j - 1];
+                            }
+                        }
+                    }
+                }
+                lower_class_limits[l][1] = 1;
+                variance_combinations[l][1] = sum_sq - (sum * sum) / l;
+            }
+
+            const k_class_index = new Array(nClasses).fill(0);
+            k_class_index[nClasses - 1] = n;
+            let k = n;
+            for (let j = nClasses; j >= 2; j--) {
+                const id = Math.floor(lower_class_limits[k][j]) - 2;
+                k_class_index[j - 2] = id + 1;
+                k = id + 1;
+            }
+
+            return k_class_index.map(i => sorted[i - 1]).slice(0, -1);
+        }
+
+        async function init() {
+            // Load US Atlas
+            const us = await d3.json("https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json");
+            const states = topojson.feature(us, us.objects.states).features;
+            const stateMesh = topojson.mesh(us, us.objects.states, (a, b) => a !== b);
+
+            // Generate synthetic income data
+            const stateFips = states.map(d => d.id);
+            const data = new Map();
+            
+            // Random right-skewed generator
+            const randomIncome = () => {
+                // Base: 38k, Max: 92k
+                // use a skewed distribution
+                const u = Math.random();
+                const skew = Math.pow(u, 1.5); // more towards 0
+                return 38000 + (92000 - 38000) * skew;
+            };
+
+            states.forEach(d => {
+                const val = randomIncome();
+                data.set(d.id, {
+                    id: d.id,
+                    name: d.properties.name,
+                    income: val
+                });
+            });
+
+            const incomeValues = Array.from(data.values()).map(d => d.income);
+            const incomeExtent = d3.extent(incomeValues);
+
+            const manualThresholds = {
+                3: [50000, 75000],
+                4: [50000, 65000, 80000],
+                5: [45000, 55000, 65000, 75000],
+                6: [45000, 55000, 65000, 75000, 85000],
+                7: [40000, 50000, 60000, 70000, 80000, 90000]
+            };
+
+            const colors = ["#BBCCEE", "#222255"];
+            
+            const panels = [
+                { id: "quantile", title: "Quantile", getScale: (n) => d3.scaleQuantile(incomeValues, d3.quantize(d3.interpolateHcl(colors[0], colors[1]), n)) },
+                { id: "equal", title: "Equal Interval", getScale: (n) => d3.scaleQuantize(incomeExtent, d3.quantize(d3.interpolateHcl(colors[0], colors[1]), n)) },
+                { id: "jenks", title: "Jenks", getScale: (n) => {
+                    const breaks = getJenksBreaks(incomeValues, n);
+                    return d3.scaleThreshold(breaks, d3.quantize(d3.interpolateHcl(colors[0], colors[1]), n));
+                }},
+                { id: "manual", title: "Manual", getScale: (n) => d3.scaleThreshold(manualThresholds[n], d3.quantize(d3.interpolateHcl(colors[0], colors[1]), n)) }
+            ];
+
+            const svgs = {};
+            const paths = {};
+
+            panels.forEach(p => {
+                const container = d3.select(`#map-${p.id}`);
+                const svg = container.append("svg")
+                    .attr("width", width)
+                    .attr("height", height);
+                
+                const projection = d3.geoAlbersUsa().fitSize([width, height], topojson.feature(us, us.objects.states));
+                const path = d3.geoPath().projection(projection);
+                
+                svg.append("g")
+                    .selectAll("path")
+                    .data(states)
+                    .join("path")
+                    .attr("class", d => `state state-${d.id}`)
+                    .attr("d", path)
+                    .on("mouseenter", (event, d) => showTooltip(event, d))
+                    .on("mousemove", (event) => moveTooltip(event))
+                    .on("mouseleave", hideTooltip);
+
+                svg.append("path")
+                    .datum(stateMesh)
+                    .attr("class", "mesh")
+                    .attr("d", path);
+
+                svgs[p.id] = svg;
+                paths[p.id] = path;
+            });
+
+            // Histogram setup
+            const histWidth = 860;
+            const histHeight = 150;
+            const histMargin = { top: 20, right: 20, bottom: 40, left: 40 };
+
+            const histSvg = d3.select("#histogram")
+                .append("svg")
+                .attr("width", histWidth)
+                .attr("height", histHeight);
+
+            const xHist = d3.scaleLinear()
+                .domain([35000, 95000])
+                .range([histMargin.left, histWidth - histMargin.right]);
+
+            histSvg.append("g")
+                .attr("transform", `translate(0,${histHeight - histMargin.bottom})`)
+                .call(d3.axisBottom(xHist).tickFormat(d3.format("$.0s")).ticks(10));
+
+            const bins = d3.bin()
+                .domain(xHist.domain())
+                .thresholds(xHist.ticks(40))(incomeValues);
+
+            const yHist = d3.scaleLinear()
+                .domain([0, d3.max(bins, d => d.length)])
+                .range([histHeight - histMargin.bottom, histMargin.top]);
+
+            histSvg.append("g")
+                .selectAll("rect")
+                .data(bins)
+                .join("rect")
+                .attr("x", d => xHist(d.x0) + 1)
+                .attr("width", d => Math.max(0, xHist(d.x1) - xHist(d.x0) - 1))
+                .attr("y", d => yHist(d.length))
+                .attr("height", d => yHist(0) - yHist(d.length))
+                .attr("fill", "#ccc");
+
+            const breakLinesG = histSvg.append("g").attr("class", "break-lines");
+            const methodColors = { quantile: "#e41a1c", equal: "#377eb8", jenks: "#4daf4a", manual: "#ff7f00" };
+
+            function update(nClasses) {
+                d3.select("#class-value").text(nClasses);
+                
+                panels.forEach(p => {
+                    const scale = p.getScale(nClasses);
+                    const svg = svgs[p.id];
+                    
+                    svg.selectAll(".state")
+                        .transition()
+                        .duration(500)
+                        .attr("fill", d => {
+                            const dData = data.get(d.id);
+                            return dData ? scale(dData.income) : "#eee";
+                        });
+
+                    // Update Legend
+                    const legendContainer = d3.select(`#legend-${p.id}`).html("");
+                    const swatches = legendContainer.append("div").attr("class", "legend-swatches");
+                    const colors = scale.range();
+                    
+                    colors.forEach(c => {
+                        swatches.append("div")
+                            .attr("class", "legend-swatch")
+                            .style("background-color", c);
+                    });
+
+                    const labels = legendContainer.append("div").attr("class", "legend-labels");
+                    const breaks = p.id === "quantile" ? scale.quantiles() : (p.id === "equal" ? d3.range(1, nClasses).map(i => incomeExtent[0] + (incomeExtent[1] - incomeExtent[0]) * i / nClasses) : scale.domain());
+                    
+                    labels.append("span").text(formatIncome(incomeExtent[0]));
+                    breaks.forEach(b => labels.append("span").text(formatIncome(b)));
+                    labels.append("span").text(formatIncome(incomeExtent[1]));
+                });
+
+                // Update Histogram Lines
+                breakLinesG.selectAll(".break-group").remove();
+                
+                panels.forEach(p => {
+                    const scale = p.getScale(nClasses);
+                    const breaks = p.id === "quantile" ? scale.quantiles() : (p.id === "equal" ? d3.range(1, nClasses).map(i => incomeExtent[0] + (incomeExtent[1] - incomeExtent[0]) * i / nClasses) : scale.domain());
+                    
+                    const group = breakLinesG.append("g").attr("class", "break-group");
+                    
+                    group.selectAll("line")
+                        .data(breaks)
+                        .join("line")
+                        .attr("class", "break-line")
+                        .attr("x1", d => xHist(d))
+                        .attr("x2", d => xHist(d))
+                        .attr("y1", histMargin.top)
+                        .attr("y2", histHeight - histMargin.bottom)
+                        .attr("stroke", methodColors[p.id]);
+                });
+
+                // Add small legend for histogram
+                const histLegend = breakLinesG.selectAll(".hist-legend")
+                    .data(panels)
+                    .join("g")
+                    .attr("class", "hist-legend")
+                    .attr("transform", (d, i) => `translate(${histMargin.left + i * 150}, ${histHeight - 15})`);
+                
+                histLegend.append("line")
+                    .attr("x1", 0).attr("x2", 20)
+                    .attr("stroke", d => methodColors[d.id])
+                    .attr("stroke-width", 2)
+                    .attr("stroke-dasharray", "4,2");
+                
+                histLegend.append("text")
+                    .attr("x", 25)
+                    .attr("y", 4)
+                    .style("font-size", "10px")
+                    .text(d => d.title);
+            }
+
+            const tooltip = d3.select("#tooltip");
+
+            function showTooltip(event, d) {
+                const dData = data.get(d.id);
+                if (!dData) return;
+
+                d3.selectAll(`.state-${d.id}`).classed("highlighted", true);
+
+                tooltip.style("opacity", 1)
+                    .html(`
+                        <strong>${dData.name}</strong><br/>
+                        Income: ${formatIncome(dData.income)}
+                    `);
+            }
+
+            function moveTooltip(event) {
+                tooltip.style("left", (event.pageX + 15) + "px")
+                    .style("top", (event.pageY - 28) + "px");
+            }
+
+            function hideTooltip() {
+                d3.selectAll(".state").classed("highlighted", false);
+                tooltip.style("opacity", 0);
+            }
+
+            d3.select("#class-slider").on("input", function() {
+                update(+this.value);
+            });
+
+            update(5);
+        }
+
+        init();
+    </script>
+</body>
+</html>

@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-Time Streaming Line Chart</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --tol-blue: #4477AA;
+            --bg-color: #ffffff;
+            --text-color: #333333;
+            --axis-color: #999999;
+            --overview-bg: #f9f9f9;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: var(--bg-color);
+            color: var(--text-color);
+            overflow-x: hidden;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .chart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        button {
+            padding: 6px 12px;
+            cursor: pointer;
+            border: 1px solid #ccc;
+            background: #fff;
+            border-radius: 4px;
+        }
+        button:hover { background: #f0f0f0; }
+        button.active { background: var(--tol-blue); color: #fff; border-color: var(--tol-blue); }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+            margin: 10px 0;
+            padding: 10px;
+            background: #f5f5f5;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .stat-item { display: flex; flex-direction: column; }
+        .stat-label { color: #666; font-size: 12px; }
+        .stat-value { font-weight: bold; font-family: monospace; }
+
+        .chart-container {
+            position: relative;
+            width: 100%;
+            height: 480px; /* 400 main + 80 overview approx */
+        }
+        #main-chart {
+            width: 100%;
+            height: 400px;
+            position: relative;
+        }
+        #overview-chart {
+            width: 100%;
+            height: 80px;
+            margin-top: 20px;
+            position: relative;
+            background: var(--overview-bg);
+        }
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+        svg {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+        }
+        svg .axis-label { fill: var(--axis-color); font-size: 11px; }
+        svg .grid line { stroke: #eee; stroke-dasharray: 2,2; }
+        
+        .fps-counter {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            font-size: 12px;
+            color: #999;
+            font-family: monospace;
+            pointer-events: none;
+        }
+        
+        .brush .selection {
+            fill: var(--tol-blue);
+            fill-opacity: 0.1;
+            stroke: var(--tol-blue);
+            stroke-width: 1px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="chart-header">
+        <h2>Streaming Sensor Data (OU Process)</h2>
+        <div class="controls">
+            <button id="pause-resume">Pause</button>
+            <span>Speed:</span>
+            <button class="speed-btn active" data-speed="1">1x</button>
+            <button class="speed-btn" data-speed="5">5x</button>
+            <button class="speed-btn" data-speed="10">10x</button>
+        </div>
+    </div>
+
+    <div class="stats">
+        <div class="stat-item"><span class="stat-label">CURRENT</span><span id="stat-current" class="stat-value">-</span></div>
+        <div class="stat-item"><span class="stat-label">MIN (60s)</span><span id="stat-min" class="stat-value">-</span></div>
+        <div class="stat-item"><span class="stat-label">MAX (60s)</span><span id="stat-max" class="stat-value">-</span></div>
+        <div class="stat-item"><span class="stat-label">MEAN (60s)</span><span id="stat-mean" class="stat-value">-</span></div>
+    </div>
+
+    <div class="chart-container">
+        <div id="main-chart">
+            <canvas id="main-canvas"></canvas>
+            <svg id="main-svg"></svg>
+            <div class="fps-counter">FPS: <span id="fps-value">0</span></div>
+        </div>
+        <div id="overview-chart">
+            <canvas id="overview-canvas"></canvas>
+            <svg id="overview-svg"></svg>
+        </div>
+    </div>
+</div>
+
+<script>
+/**
+ * LTTB Downsampling Algorithm
+ * Reduces point count while preserving visual peaks and valleys.
+ */
+function lttb(data, threshold) {
+    if (threshold >= data.length || threshold < 3) return data;
+    const sampled = [data[0]];
+    const bucketSize = (data.length - 2) / (threshold - 2);
+
+    let prevIdx = 0;
+    for (let i = 0; i < threshold - 2; i++) {
+        const bucketStart = Math.floor((i + 0) * bucketSize) + 1;
+        const bucketEnd = Math.floor((i + 1) * bucketSize) + 1;
+
+        const nextStart = Math.floor((i + 1) * bucketSize) + 1;
+        const nextEnd = Math.min(Math.floor((i + 2) * bucketSize) + 1, data.length);
+        
+        let avgX = 0, avgY = 0;
+        for (let j = nextStart; j < nextEnd; j++) {
+            avgX += data[j].time;
+            avgY += data[j].value;
+        }
+        avgX /= (nextEnd - nextStart);
+        avgY /= (nextEnd - nextStart);
+
+        let maxArea = -1, maxIdx = bucketStart;
+        const prevPoint = data[prevIdx];
+        for (let j = bucketStart; j < bucketEnd; j++) {
+            const area = Math.abs(
+                (prevPoint.time - avgX) * (data[j].value - prevPoint.value) -
+                (prevPoint.time - data[j].time) * (avgY - prevPoint.value)
+            ) * 0.5;
+            if (area > maxArea) { maxArea = area; maxIdx = j; }
+        }
+        sampled.push(data[maxIdx]);
+        prevIdx = maxIdx;
+    }
+    sampled.push(data[data.length - 1]);
+    return sampled;
+}
+
+/**
+ * Ornstein-Uhlenbeck Process Simulation
+ * Realistic sensor-like data with mean reversion.
+ */
+class OUSource {
+    constructor(mean = 50, speed = 0.05, volatility = 2) {
+        this.mean = mean;
+        this.speed = speed;
+        this.volatility = volatility;
+        this.current = mean + (Math.random() - 0.5) * 10;
+    }
+    next(dt = 0.1) {
+        const dw = (Math.random() * 2 - 1) * Math.sqrt(dt);
+        const dx = this.speed * (this.mean - this.current) * dt + this.volatility * dw;
+        this.current += dx;
+        return this.current;
+    }
+}
+
+// Configuration
+const MAIN_WINDOW_MS = 60000; // 60 seconds
+const OVERVIEW_WINDOW_MS = 300000; // 5 minutes
+const DATA_INTERVAL_MS = 100;
+const TOL_BLUE = "#4477AA";
+
+// State
+let isPaused = false;
+let speedFactor = 1;
+let data = []; // Array of {time: timestamp, value: number}
+let lastDataTime = Date.now();
+const source = new OUSource(50, 0.05, 2);
+
+// DOM Elements
+const mainContainer = d3.select("#main-chart");
+const overviewContainer = d3.select("#overview-chart");
+const mainCanvas = document.getElementById("main-canvas");
+const mainSvg = d3.select("#main-svg");
+const overviewCanvas = document.getElementById("overview-canvas");
+const overviewSvg = d3.select("#overview-svg");
+
+// Setup Canvases
+function setupCanvas(canvas, container) {
+    const rect = container.node().getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    canvas.style.width = rect.width + "px";
+    canvas.style.height = rect.height + "px";
+    const ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+    return { ctx, width: rect.width, height: rect.height };
+}
+
+let mainCtx, overviewCtx;
+let mainW, mainH, overW, overH;
+
+function resize() {
+    const m = setupCanvas(mainCanvas, mainContainer);
+    mainCtx = m.ctx; mainW = m.width; mainH = m.height;
+    
+    const o = setupCanvas(overviewCanvas, overviewContainer);
+    overviewCtx = o.ctx; overW = o.width; overH = o.height;
+
+    mainSvg.attr("width", mainW).attr("height", mainH);
+    overviewSvg.attr("width", overW).attr("height", overH);
+}
+
+window.addEventListener("resize", resize);
+resize();
+
+// Scales
+const xScaleMain = d3.scaleTime().range([0, mainW]);
+const yScaleMain = d3.scaleLinear().range([mainH - 30, 20]);
+const xScaleOver = d3.scaleTime().range([0, overW]);
+const yScaleOver = d3.scaleLinear().range([overH - 5, 5]);
+
+// Axes Groups
+const mainXAxisG = mainSvg.append("g").attr("transform", `translate(0, ${mainH - 30})`);
+const mainYAxisG = mainSvg.append("g").attr("transform", `translate(${mainW - 40}, 0)`);
+const overXAxisG = overviewSvg.append("g").attr("transform", `translate(0, ${overH})`);
+
+// Brush
+let userFocusEnd = null; // if null, follows current time
+const brush = d3.brushX()
+    .extent([[0, 0], [overW, overH]])
+    .on("brush end", brushed);
+
+const brushG = overviewSvg.append("g")
+    .attr("class", "brush")
+    .call(brush);
+
+function brushed(event) {
+    if (!event.sourceEvent) return; // ignore programmatic moves
+    if (event.selection) {
+        const [x0, x1] = event.selection.map(xScaleOver.invert);
+        // We want a fixed 60s window, but let's allow the brush to define the focus point
+        // If the user drags, we snap to 60s window or just show what they picked?
+        // Prompt says "brush this overview to scroll the main chart to any past 60-second window"
+        // So we should enforce a 60s window.
+        const duration = x1 - x0;
+        if (Math.abs(duration - MAIN_WINDOW_MS) > 1000) {
+            // Recenter to maintain 60s width
+            const center = new Date((x0.getTime() + x1.getTime()) / 2);
+            const start = new Date(center.getTime() - MAIN_WINDOW_MS / 2);
+            const end = new Date(center.getTime() + MAIN_WINDOW_MS / 2);
+            userFocusEnd = end.getTime();
+            // Move brush programmatically without re-triggering this handler
+            d3.select(this).call(brush.move, [xScaleOver(start), xScaleOver(end)]);
+        } else {
+            userFocusEnd = x1.getTime();
+        }
+    } else {
+        userFocusEnd = null; // follow live
+    }
+}
+
+// FPS Counter
+let frameCount = 0;
+let lastFpsTime = performance.now();
+const fpsValue = document.getElementById("fps-value");
+
+// Stats elements
+const statCurrent = document.getElementById("stat-current");
+const statMin = document.getElementById("stat-min");
+const statMax = document.getElementById("stat-max");
+const statMean = document.getElementById("stat-mean");
+
+// Main Loop
+function update() {
+    const now = Date.now();
+
+    // Data Generation
+    if (!isPaused) {
+        const elapsedSinceLastData = now - lastDataTime;
+        const targetInterval = DATA_INTERVAL_MS / speedFactor;
+        
+        if (elapsedSinceLastData >= targetInterval) {
+            const val = source.next(targetInterval / 1000);
+            data.push({ time: now, value: val });
+            lastDataTime = now;
+
+            // Trim old data (keep 5.5 minutes to ensure brush space)
+            const cutoff = now - OVERVIEW_WINDOW_MS - 30000;
+            while (data.length > 0 && data[0].time < cutoff) {
+                data.shift();
+            }
+        }
+    }
+
+    render();
+    requestAnimationFrame(update);
+
+    // FPS
+    frameCount++;
+    const pNow = performance.now();
+    if (pNow - lastFpsTime >= 1000) {
+        fpsValue.textContent = frameCount;
+        frameCount = 0;
+        lastFpsTime = pNow;
+    }
+}
+
+function render() {
+    const now = Date.now();
+    const focusEnd = userFocusEnd || now;
+    const focusStart = focusEnd - MAIN_WINDOW_MS;
+
+    // Filter data for main window
+    const mainData = data.filter(d => d.time >= focusStart && d.time <= focusEnd);
+    
+    // Update Scales
+    xScaleMain.domain([focusStart, focusEnd]);
+    if (mainData.length > 0) {
+        const [min, max] = d3.extent(mainData, d => d.value);
+        const pad = (max - min) * 0.1 || 1;
+        yScaleMain.domain([min - pad, max + pad]);
+        
+        // Stats
+        statCurrent.textContent = data[data.length-1].value.toFixed(2);
+        statMin.textContent = min.toFixed(2);
+        statMax.textContent = max.toFixed(2);
+        statMean.textContent = d3.mean(mainData, d => d.value).toFixed(2);
+    }
+
+    // DRAW MAIN CHART
+    mainCtx.clearRect(0, 0, mainW, mainH);
+    
+    if (mainData.length > 1) {
+        mainCtx.beginPath();
+        mainCtx.strokeStyle = TOL_BLUE;
+        mainCtx.lineWidth = 1.5;
+        mainCtx.lineJoin = "round";
+        
+        mainData.forEach((d, i) => {
+            const x = xScaleMain(d.time);
+            const y = yScaleMain(d.value);
+            if (i === 0) mainCtx.moveTo(x, y);
+            else mainCtx.lineTo(x, y);
+        });
+        mainCtx.stroke();
+    }
+
+    // DRAW AXES (throttle if needed, but here simple)
+    mainXAxisG.call(d3.axisBottom(xScaleMain).ticks(5));
+    mainYAxisG.call(d3.axisRight(yScaleMain).ticks(5));
+
+    // DRAW OVERVIEW
+    overviewCtx.clearRect(0, 0, overW, overH);
+    
+    const overFocusEnd = now;
+    const overFocusStart = now - OVERVIEW_WINDOW_MS;
+    xScaleOver.domain([overFocusStart, overFocusEnd]);
+    
+    const overviewDataRaw = data.filter(d => d.time >= overFocusStart);
+    if (overviewDataRaw.length > 2) {
+        const sampled = lttb(overviewDataRaw, 300);
+        const [min, max] = d3.extent(sampled, d => d.value);
+        yScaleOver.domain([min, max]);
+
+        overviewCtx.beginPath();
+        overviewCtx.strokeStyle = "#ccc";
+        overviewCtx.lineWidth = 1;
+        sampled.forEach((d, i) => {
+            const x = xScaleOver(d.time);
+            const y = yScaleOver(d.value);
+            if (i === 0) overviewCtx.moveTo(x, y);
+            else overviewCtx.lineTo(x, y);
+        });
+        overviewCtx.stroke();
+    }
+
+    // Update Brush position if following live
+    if (!userFocusEnd) {
+        const bStart = xScaleOver(focusStart);
+        const bEnd = xScaleOver(focusEnd);
+        brushG.call(brush.move, [bStart, bEnd]);
+    }
+}
+
+// UI Controls
+document.getElementById("pause-resume").addEventListener("click", function() {
+    isPaused = !isPaused;
+    this.textContent = isPaused ? "Resume" : "Pause";
+});
+
+document.querySelectorAll(".speed-btn").forEach(btn => {
+    btn.addEventListener("click", function() {
+        document.querySelectorAll(".speed-btn").forEach(b => b.classList.remove("active"));
+        this.classList.add("active");
+        speedFactor = parseInt(this.dataset.speed);
+    });
+});
+
+// Kickoff
+requestAnimationFrame(update);
+
+</script>
+</body>
+</html>

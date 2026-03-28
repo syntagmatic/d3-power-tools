@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Sunburst Breadcrumb Radial Brush</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: #fcfcfc;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        #container {
+            position: relative;
+            width: 800px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        #breadcrumb {
+            height: 40px;
+            width: 100%;
+            display: flex;
+            align-items: center;
+            margin-bottom: 20px;
+            overflow: hidden;
+        }
+        .crumb {
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+        .crumb:hover {
+            opacity: 0.8;
+        }
+        .crumb polygon {
+            stroke: #fff;
+            stroke-width: 1px;
+        }
+        .crumb text {
+            font-size: 11px;
+            font-weight: 600;
+            fill: #fff;
+            pointer-events: none;
+            text-anchor: middle;
+            dominant-baseline: middle;
+        }
+        #viz {
+            position: relative;
+            width: 600px;
+            height: 600px;
+        }
+        .arc {
+            cursor: pointer;
+            stroke: #fff;
+            stroke-width: 1px;
+            transition: opacity 0.2s;
+        }
+        .arc:hover {
+            stroke-width: 2px;
+            stroke: #333;
+        }
+        .arc-label {
+            font-size: 10px;
+            font-weight: 500;
+            pointer-events: none;
+            fill: #222;
+        }
+        #badge {
+            position: absolute;
+            top: -10px;
+            right: -100px;
+            background: rgba(255, 255, 255, 0.95);
+            padding: 10px 16px;
+            border-radius: 6px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+            font-size: 13px;
+            font-weight: 500;
+            pointer-events: none;
+            border-left: 4px solid #4477AA;
+            color: #444;
+            min-width: 180px;
+        }
+        .brush-overlay {
+            fill: none;
+            pointer-events: all;
+            cursor: crosshair;
+        }
+        .brush-handle {
+            stroke: #222;
+            stroke-width: 2px;
+            stroke-dasharray: 4 2;
+            pointer-events: none;
+        }
+        .brush-arc {
+            fill: rgba(0, 0, 0, 0.04);
+            stroke: #444;
+            stroke-width: 1px;
+            stroke-dasharray: 2 2;
+            pointer-events: none;
+        }
+        .other-arc {
+            fill: #eee;
+            stroke: #ddd;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div id="breadcrumb"></div>
+        <div id="viz">
+            <div id="badge">Selected 0 of 0 ($0)</div>
+        </div>
+    </div>
+
+    <script>
+        const width = 600;
+        const radius = width / 2;
+        const breadcrumbHeight = 30;
+        const breadcrumbSpacing = 4;
+
+        // 1. Data Generation
+        const departments = ["Electronics", "Home & Garden", "Fashion", "Sports", "Beauty", "Grocery"];
+        const categoryCounts = [4, 5, 3, 4, 3, 5];
+        const subcategoryCounts = [5, 4, 6, 5, 4, 6];
+
+        function generateData() {
+            const children = departments.map((dept, i) => {
+                const cats = d3.range(categoryCounts[i]).map(j => {
+                    const subcats = d3.range(subcategoryCounts[i]).map(k => ({
+                        name: `${dept} C${j+1} S${k+1}`,
+                        value: Math.floor(Math.random() * 1000) + (k === 0 ? 50 : 200) // some small values
+                    }));
+                    return { name: `${dept} Category ${j+1}`, children: subcats };
+                });
+                return { name: dept, children: cats };
+            });
+            return { name: "Root", children };
+        }
+
+        function mergeSmall(node, pValue) {
+            if (!node.children) return;
+            const threshold = 0.02; // 2% of parent
+            const smalls = node.children.filter(c => c.value / pValue < threshold);
+            if (smalls.length > 1) {
+                const otherValue = d3.sum(smalls, d => d.value);
+                node.children = node.children.filter(c => c.value / pValue >= threshold);
+                node.children.push({
+                    name: "Other",
+                    value: otherValue,
+                    children: null,
+                    isOther: true
+                });
+            }
+            node.children.forEach(c => mergeSmall(c, node.value));
+        }
+
+        const rawData = generateData();
+        // Calculate initial values for merging
+        const tempRoot = d3.hierarchy(rawData).sum(d => d.value);
+        mergeSmall(rawData, tempRoot.value);
+
+        const root = d3.hierarchy(rawData)
+            .sum(d => d.value)
+            .sort((a, b) => b.value - a.value);
+
+        const partition = d3.partition().size([2 * Math.PI, radius]);
+        partition(root);
+
+        // 2. Scales & Colors
+        // OKLCH palette: 6 hues at L=0.7, C=0.13. Descendants: decrease chroma, increase lightness.
+        const colorScale = (d) => {
+            if (d.data.isOther) return "#ddd";
+            if (d.depth === 0) return "#fff";
+            let node = d;
+            while (node.depth > 1) node = node.parent;
+            const hue = (departments.indexOf(node.data.name) * 360) / 6;
+            
+            const l = 0.7 + (d.depth - 1) * 0.06;
+            const c = Math.max(0.01, 0.13 - (d.depth - 1) * 0.03);
+            return d3.oklch(l, c, hue);
+        };
+
+        const desaturatedColor = (d) => {
+            if (d.data.isOther) return "#eee";
+            let node = d;
+            while (node.depth > 1) node = node.parent;
+            const hue = (departments.indexOf(node.data.name) * 360) / 6;
+            return d3.oklch(0.85, 0.02, hue);
+        };
+
+        const arc = d3.arc()
+            .startAngle(d => d.x0)
+            .endAngle(d => d.x1)
+            .innerRadius(d => d.y0)
+            .outerRadius(d => d.y1);
+
+        // 3. Setup SVG
+        const svg = d3.select("#viz").append("svg")
+            .attr("width", width)
+            .attr("height", width)
+            .append("g")
+            .attr("transform", `translate(${radius},${radius})`);
+
+        const gArcs = svg.append("g").attr("class", "arcs");
+        const gLabels = svg.append("g").attr("class", "labels");
+        const gBrush = svg.append("g").attr("class", "brush-container");
+
+        let currentFocus = root;
+        let selectedNodes = new Set();
+        let brushRange = null; // [startAngle, endAngle]
+
+        // 4. Breadcrumb Implementation
+        function breadcrumbPath(d, i) {
+            const w = 120;
+            const h = breadcrumbHeight;
+            const s = 10; // chevron slant
+            const points = [
+                [0, 0],
+                [w, 0],
+                [w + s, h / 2],
+                [w, h],
+                [0, h],
+                [s, h / 2]
+            ];
+            if (i === 0) { points[4] = [0, h]; points[5] = [0, h/2]; }
+            return d3.line()(points);
+        }
+
+        function updateBreadcrumb(nodes) {
+            const bc = d3.select("#breadcrumb").selectAll(".crumb")
+                .data(nodes, d => d.data.name + d.depth);
+
+            bc.exit().remove();
+
+            const enter = bc.enter().append("g")
+                .attr("class", "crumb")
+                .on("click", (event, d) => zoom(d));
+
+            enter.append("path")
+                .attr("d", (d, i) => breadcrumbPath(d, i))
+                .attr("fill", d => d.data.isOther ? "#ccc" : (d.depth === 0 ? "#666" : colorScale(d)));
+
+            enter.append("text")
+                .attr("x", 65)
+                .attr("y", breadcrumbHeight / 2)
+                .text(d => d.data.name.length > 15 ? d.data.name.substring(0, 12) + "..." : d.data.name);
+
+            d3.select("#breadcrumb").selectAll(".crumb")
+                .attr("transform", (d, i) => `translate(${i * (120 + breadcrumbSpacing)}, 0)`);
+        }
+
+        // 5. Interaction: Zoom
+        function zoom(p) {
+            currentFocus = p;
+            brushRange = null;
+            updateBrushUI();
+            
+            root.each(d => {
+                d.target = {
+                    x0: Math.max(0, Math.min(1, (d.x0 - p.x0) / (p.x1 - p.x0))) * 2 * Math.PI,
+                    x1: Math.max(0, Math.min(1, (d.x1 - p.x0) / (p.x1 - p.x0))) * 2 * Math.PI,
+                    y0: Math.max(0, d.y0 - p.y0),
+                    y1: Math.max(0, d.y1 - p.y0)
+                };
+            });
+
+            const t = svg.transition().duration(750);
+
+            gArcs.selectAll(".arc").transition(t)
+                .tween("data", d => {
+                    const i = d3.interpolate(d.current, d.target);
+                    return t => d.current = i(t);
+                })
+                .attrTween("d", d => () => arc(d.current))
+                .attr("opacity", d => (d.target.y0 >= radius || d.target.x1 - d.target.x0 <= 1e-6) ? 0 : 1)
+                .style("pointer-events", d => (d.target.y0 >= radius || d.target.x1 - d.target.x0 <= 1e-6) ? "none" : "all");
+
+            gLabels.selectAll(".arc-label").transition(t)
+                .attr("transform", d => labelTransform(d.target))
+                .attr("opacity", d => labelVisible(d.target) ? 1 : 0);
+
+            updateBreadcrumb(p.ancestors().reverse());
+            updateSelection();
+        }
+
+        function labelVisible(d) {
+            const angle = d.x1 - d.x0;
+            const midRadius = (d.y0 + d.y1) / 2;
+            const arcLength = midRadius * angle;
+            return angle > 0.1 && arcLength > 30 && d.y1 <= radius;
+        }
+
+        function labelTransform(d) {
+            const x = (d.x0 + d.x1) / 2 * 180 / Math.PI;
+            const y = (d.y0 + d.y1) / 2;
+            return `rotate(${x - 90}) translate(${y},0) rotate(${x < 180 ? 0 : 180})`;
+        }
+
+        // 6. Interaction: Radial Brush
+        const brushOverlay = gBrush.append("circle")
+            .attr("class", "brush-overlay")
+            .attr("r", radius);
+
+        const brushHandleStart = gBrush.append("line").attr("class", "brush-handle").attr("opacity", 0);
+        const brushHandleEnd = gBrush.append("line").attr("class", "brush-handle").attr("opacity", 0);
+        const brushArc = gBrush.append("path").attr("class", "brush-arc").attr("opacity", 0);
+
+        function updateBrushUI() {
+            if (!brushRange) {
+                brushHandleStart.attr("opacity", 0);
+                brushHandleEnd.attr("opacity", 0);
+                brushArc.attr("opacity", 0);
+                return;
+            }
+
+            const [s, e] = brushRange;
+            brushHandleStart.attr("opacity", 1)
+                .attr("x1", 0).attr("y1", 0)
+                .attr("x2", radius * Math.cos(s - Math.PI/2))
+                .attr("y2", radius * Math.sin(s - Math.PI/2));
+            
+            brushHandleEnd.attr("opacity", 1)
+                .attr("x1", 0).attr("y1", 0)
+                .attr("x2", radius * Math.cos(e - Math.PI/2))
+                .attr("y2", radius * Math.sin(e - Math.PI/2));
+
+            brushArc.attr("opacity", 1)
+                .attr("d", d3.arc()({
+                    innerRadius: radius - 20,
+                    outerRadius: radius,
+                    startAngle: s,
+                    endAngle: e
+                }));
+        }
+
+        function updateSelection() {
+            selectedNodes.clear();
+            const leaves = currentFocus.leaves();
+            const totalLeaves = root.leaves().length;
+            let selectedValue = 0;
+
+            leaves.forEach(d => {
+                if (!brushRange) {
+                    selectedNodes.add(d);
+                    selectedValue += d.value;
+                } else {
+                    const mid = (d.current.x0 + d.current.x1) / 2;
+                    let s = brushRange[0] % (2 * Math.PI); if (s < 0) s += 2 * Math.PI;
+                    let e = brushRange[1] % (2 * Math.PI); if (e < 0) e += 2 * Math.PI;
+                    let m = mid % (2 * Math.PI); if (m < 0) m += 2 * Math.PI;
+
+                    let isInside = s <= e ? (m >= s && m <= e) : (m >= s || m <= e);
+                    if (isInside) {
+                        selectedNodes.add(d);
+                        selectedValue += d.value;
+                    }
+                }
+            });
+
+            // Update Badge
+            d3.select("#badge").text(`Selected ${selectedNodes.size} of ${totalLeaves} ($${d3.format(",")(selectedValue)})`);
+
+            // Apply Colors
+            gArcs.selectAll(".arc").attr("fill", d => {
+                const isSelected = selectedNodes.has(d) || d.descendants().some(child => selectedNodes.has(child));
+                return isSelected ? colorScale(d) : desaturatedColor(d);
+            });
+
+            // Common Ancestor in Breadcrumb
+            if (brushRange && selectedNodes.size > 0) {
+                const nodes = Array.from(selectedNodes);
+                let common = nodes[0];
+                while (common.parent && !nodes.every(n => n.ancestors().includes(common))) {
+                    common = common.parent;
+                }
+                updateBreadcrumb(common.ancestors().reverse());
+            } else {
+                updateBreadcrumb(currentFocus.ancestors().reverse());
+            }
+        }
+
+        brushOverlay.on("pointerdown", function(event) {
+            const [x, y] = d3.pointer(event);
+            const angle = Math.atan2(y, x) + Math.PI / 2;
+            brushRange = [angle, angle];
+            updateBrushUI();
+            updateSelection();
+            
+            const move = (e) => {
+                const [mx, my] = d3.pointer(e);
+                brushRange[1] = Math.atan2(my, mx) + Math.PI / 2;
+                updateBrushUI();
+                updateSelection();
+            };
+            
+            const up = () => {
+                d3.select(window).on("pointermove", null).on("pointerup", null);
+            };
+            
+            d3.select(window).on("pointermove", move).on("pointerup", up);
+        });
+
+        // 7. Initial Render
+        function init() {
+            const arcs = gArcs.selectAll(".arc")
+                .data(root.descendants())
+                .enter().append("path")
+                .attr("class", d => "arc" + (d.depth === 0 ? " root-arc" : ""))
+                .attr("d", arc)
+                .attr("fill", d => colorScale(d))
+                .each(d => d.current = d)
+                .on("click", (event, d) => {
+                    if (d.children) zoom(d);
+                });
+
+            gLabels.selectAll(".arc-label")
+                .data(root.descendants())
+                .enter().append("text")
+                .attr("class", "arc-label")
+                .attr("transform", d => labelTransform(d))
+                .attr("opacity", d => labelVisible(d) ? 1 : 0)
+                .text(d => d.data.name);
+
+            updateBreadcrumb(root.ancestors().reverse());
+            updateSelection();
+        }
+
+        init();
+    </script>
+</body>
+</html>

@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>US Flight Route Bundling</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/topojson-client@3"></script>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel-bg: rgba(30, 41, 59, 0.8);
+      --text: #f8fafc;
+      --accent: #38bdf8;
+    }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+    #container {
+      position: relative;
+      flex: 1;
+      width: 100%;
+    }
+    canvas {
+      display: block;
+    }
+    .controls {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      background: var(--panel-bg);
+      padding: 16px;
+      border-radius: 8px;
+      backdrop-filter: blur(8px);
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+      width: 240px;
+      z-index: 10;
+    }
+    .controls h1 {
+      margin: 0 0 8px 0;
+      font-size: 16px;
+      font-weight: 600;
+    }
+    .controls p {
+      margin: 0 0 16px 0;
+      font-size: 12px;
+      color: #94a3b8;
+      line-height: 1.4;
+    }
+    .control-group {
+      margin-bottom: 12px;
+    }
+    .control-label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      margin-bottom: 4px;
+    }
+    input[type="range"] {
+      width: 100%;
+      cursor: pointer;
+    }
+    .tooltip {
+      position: absolute;
+      pointer-events: none;
+      background: #1e293b;
+      color: #fff;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      display: none;
+      z-index: 20;
+    }
+    .stats {
+      position: absolute;
+      bottom: 20px;
+      left: 20px;
+      font-size: 11px;
+      color: #64748b;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+
+<div id="container">
+  <div class="controls">
+    <h1>Flight Route Bundling</h1>
+    <p>Visualizing corridor structures using hierarchical edge bundling between 50 major US airports.</p>
+    
+    <div class="control-group">
+      <div class="control-label">
+        <span>Bundling Tension</span>
+        <span id="tension-val">0.85</span>
+      </div>
+      <input type="range" id="tension" min="0" max="1" step="0.01" value="0.85">
+    </div>
+
+    <div class="control-group">
+      <div class="control-label">
+        <span>Path Opacity</span>
+        <span id="opacity-val">0.2</span>
+      </div>
+      <input type="range" id="opacity" min="0.05" max="0.5" step="0.01" value="0.2">
+    </div>
+  </div>
+  <div id="tooltip" class="tooltip"></div>
+  <div class="stats">50 Airports • ~200 Routes • Hierarchical Routing</div>
+</div>
+
+<script>
+  async function init() {
+    const container = d3.select("#container");
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+
+    const dpr = window.devicePixelRatio || 1;
+    const canvas = container.append("canvas")
+      .attr("width", width * dpr)
+      .attr("height", height * dpr)
+      .style("width", `${width}px`)
+      .style("height", `${height}px`)
+      .node();
+    
+    const ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+
+    // 1. Data Generation
+    const airportList = [
+      { id: "ATL", name: "Atlanta", region: "South", lon: -84.4277, lat: 33.6407 },
+      { id: "ORD", name: "Chicago", region: "Midwest", lon: -87.9073, lat: 41.9742 },
+      { id: "LAX", name: "Los Angeles", region: "West", lon: -118.4085, lat: 33.9416 },
+      { id: "DFW", name: "Dallas", region: "South", lon: -97.0403, lat: 32.8998 },
+      { id: "DEN", name: "Denver", region: "West", lon: -104.6737, lat: 39.8561 },
+      { id: "JFK", name: "New York", region: "Northeast", lon: -73.7781, lat: 40.6413 },
+      { id: "SFO", name: "San Francisco", region: "West", lon: -122.3748, lat: 37.6189 },
+      { id: "SEA", name: "Seattle", region: "West", lon: -122.3088, lat: 47.4502 },
+      { id: "LAS", name: "Las Vegas", region: "West", lon: -115.1523, lat: 36.0840 },
+      { id: "MCO", name: "Orlando", region: "South", lon: -81.3089, lat: 28.4281 },
+      { id: "EWR", name: "Newark", region: "Northeast", lon: -74.1745, lat: 40.6895 },
+      { id: "CLT", name: "Charlotte", region: "South", lon: -80.9473, lat: 35.2140 },
+      { id: "PHX", name: "Phoenix", region: "West", lon: -112.0078, lat: 33.4342 },
+      { id: "IAH", name: "Houston", region: "South", lon: -95.3368, lat: 29.9902 },
+      { id: "MIA", name: "Miami", region: "South", lon: -80.2870, lat: 25.7959 },
+      { id: "BOS", name: "Boston", region: "Northeast", lon: -71.0096, lat: 42.3656 },
+      { id: "MSP", name: "Minneapolis", region: "Midwest", lon: -93.2223, lat: 44.8848 },
+      { id: "FLL", name: "Fort Lauderdale", region: "South", lon: -80.1527, lat: 26.0725 },
+      { id: "DTW", name: "Detroit", region: "Midwest", lon: -83.3533, lat: 42.2124 },
+      { id: "PHL", name: "Philadelphia", region: "Northeast", lon: -75.2424, lat: 39.8729 },
+      { id: "LGA", name: "New York", region: "Northeast", lon: -73.8740, lat: 40.7769 },
+      { id: "BWI", name: "Baltimore", region: "Northeast", lon: -76.6684, lat: 39.1774 },
+      { id: "SLC", name: "Salt Lake City", region: "West", lon: -111.9777, lat: 40.7899 },
+      { id: "SAN", name: "San Diego", region: "West", lon: -117.1897, lat: 32.7338 },
+      { id: "IAD", name: "Washington DC", region: "Northeast", lon: -77.4565, lat: 38.9531 },
+      { id: "DCA", name: "Washington DC", region: "Northeast", lon: -77.0377, lat: 38.8512 },
+      { id: "MDW", name: "Chicago", region: "Midwest", lon: -87.7524, lat: 41.7860 },
+      { id: "TPA", name: "Tampa", region: "South", lon: -82.5332, lat: 27.9772 },
+      { id: "PDX", name: "Portland", region: "West", lon: -122.5975, lat: 45.5898 },
+      { id: "HNL", name: "Honolulu", region: "West", lon: -157.9224, lat: 21.3187 },
+      { id: "STL", name: "St. Louis", region: "Midwest", lon: -90.3700, lat: 38.7477 },
+      { id: "BNA", name: "Nashville", region: "South", lon: -86.6774, lat: 36.1263 },
+      { id: "AUS", name: "Austin", region: "South", lon: -97.6664, lat: 30.1945 },
+      { id: "MKE", name: "Milwaukee", region: "Midwest", lon: -87.8966, lat: 42.9472 },
+      { id: "MSY", name: "New Orleans", region: "South", lon: -90.2580, lat: 29.9911 },
+      { id: "PBI", name: "West Palm Beach", region: "South", lon: -80.0956, lat: 26.6832 },
+      { id: "SJC", name: "San Jose", region: "West", lon: -121.9291, lat: 37.3619 },
+      { id: "PIT", name: "Pittsburgh", region: "Northeast", lon: -80.2329, lat: 40.4915 },
+      { id: "IND", name: "Indianapolis", region: "Midwest", lon: -86.2944, lat: 39.7173 },
+      { id: "CVG", name: "Cincinnati", region: "Midwest", lon: -84.6625, lat: 39.0461 },
+      { id: "CLE", name: "Cleveland", region: "Midwest", lon: -81.8498, lat: 41.4123 },
+      { id: "RDU", name: "Raleigh-Durham", region: "South", lon: -78.7875, lat: 35.8776 },
+      { id: "BDL", name: "Hartford", region: "Northeast", lon: -72.6832, lat: 41.9389 },
+      { id: "SMF", name: "Sacramento", region: "West", lon: -121.5908, lat: 38.6954 },
+      { id: "SAT", name: "San Antonio", region: "South", lon: -98.4698, lat: 29.5337 },
+      { id: "OAK", name: "Oakland", region: "West", lon: -122.2207, lat: 37.7213 },
+      { id: "SNA", name: "Santa Ana", region: "West", lon: -117.8682, lat: 33.6762 },
+      { id: "MCI", name: "Kansas City", region: "Midwest", lon: -94.7139, lat: 39.2976 },
+      { id: "SWH", name: "Wichita", region: "Midwest", lon: -97.4331, lat: 37.6499 },
+      { id: "MEM", name: "Memphis", region: "South", lon: -89.9767, lat: 35.0424 }
+    ];
+
+    // Map Setup
+    const projection = d3.geoAlbersUsa().scale(Math.min(width, height) * 1.2).translate([width / 2, height / 2]);
+    const path = d3.geoPath(projection).context(ctx);
+
+    const us = await d3.json("https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json");
+    const nation = topojson.feature(us, us.objects.nation);
+    const states = topojson.feature(us, us.objects.states);
+
+    // Project airports
+    airportList.forEach(a => {
+      const p = projection([a.lon, a.lat]);
+      if (p) {
+        a.x = p[0];
+        a.y = p[1];
+      } else {
+        // Handle cases outside the projection (though AlbersUsa handles HI/AK)
+        a.x = -100;
+        a.y = -100;
+      }
+    });
+
+    // Generate ~200 routes
+    const routes = [];
+    const hubs = ["ATL", "ORD", "LAX", "DFW", "DEN", "JFK", "SFO"];
+    
+    // Connect hubs to many
+    hubs.forEach(hId => {
+      const hub = airportList.find(a => a.id === hId);
+      for (let i = 0; i < 20; i++) {
+        const target = airportList[Math.floor(Math.random() * airportList.length)];
+        if (target.id !== hId) {
+          routes.push({ source: hub, target: target });
+        }
+      }
+    });
+    // Add some random routes
+    for (let i = 0; i < 60; i++) {
+      const s = airportList[Math.floor(Math.random() * airportList.length)];
+      const t = airportList[Math.floor(Math.random() * airportList.length)];
+      if (s.id !== t.id) routes.push({ source: s, target: t });
+    }
+
+    // 2. Hierarchy for Bundling
+    // We create a hierarchy: root -> region -> airport
+    const regions = d3.groups(airportList, d => d.region);
+    const hierarchyData = {
+      id: "root",
+      children: regions.map(([region, airports]) => ({
+        id: region,
+        children: airports.map(a => ({ ...a }))
+      }))
+    };
+
+    const root = d3.hierarchy(hierarchyData);
+    
+    // Position internal nodes
+    // root at center of US
+    root.x = width / 2;
+    root.y = height / 2;
+
+    // regions at their centroids or approximate locations
+    const regionPositions = {
+      "Northeast": [-75, 41],
+      "South": [-85, 33],
+      "Midwest": [-92, 42],
+      "West": [-115, 40]
+    };
+
+    root.children.forEach(regionNode => {
+      const pos = projection(regionPositions[regionNode.data.id]) || [width / 2, height / 2];
+      regionNode.x = pos[0];
+      regionNode.y = pos[1];
+      
+      regionNode.children.forEach(airportNode => {
+        // Leaves stay at their geographic projected positions
+        const a = airportList.find(al => al.id === airportNode.data.id);
+        airportNode.x = a.x;
+        airportNode.y = a.y;
+      });
+    });
+
+    const nodesById = new Map();
+    root.descendants().forEach(d => nodesById.set(d.data.id, d));
+
+    const bundledLinks = routes.map(r => {
+      const s = nodesById.get(r.source.id);
+      const t = nodesById.get(r.target.id);
+      return s.path(t);
+    });
+
+    // 3. Rendering
+    let tension = 0.85;
+    let opacity = 0.2;
+    let hoveredAirport = null;
+
+    const line = d3.line()
+      .curve(d3.curveBundle.beta(1 - tension))
+      .x(d => d.x)
+      .y(d => d.y)
+      .context(ctx);
+
+    function render() {
+      ctx.clearRect(0, 0, width, height);
+
+      // Draw US Map
+      ctx.beginPath();
+      path(nation);
+      ctx.fillStyle = "#1e293b";
+      ctx.fill();
+
+      ctx.beginPath();
+      path(states);
+      ctx.strokeStyle = "#334155";
+      ctx.lineWidth = 0.5;
+      ctx.stroke();
+
+      // Draw Links
+      line.curve(d3.curveBundle.beta(1 - tension));
+      
+      bundledLinks.forEach((link, i) => {
+        const sourceId = link[0].data.id;
+        const targetId = link[link.length - 1].data.id;
+        const isRelated = hoveredAirport && (sourceId === hoveredAirport.id || targetId === hoveredAirport.id);
+        
+        ctx.beginPath();
+        line(link);
+        if (hoveredAirport) {
+          if (isRelated) {
+            ctx.strokeStyle = `rgba(56, 189, 248, 0.8)`;
+            ctx.lineWidth = 1.5;
+          } else {
+            ctx.strokeStyle = `rgba(100, 116, 139, 0.05)`;
+            ctx.lineWidth = 0.5;
+          }
+        } else {
+          ctx.strokeStyle = `rgba(56, 189, 248, ${opacity})`;
+          ctx.lineWidth = 0.8;
+        }
+        ctx.stroke();
+      });
+
+      // Draw Airports
+      airportList.forEach(a => {
+        const isHovered = hoveredAirport && hoveredAirport.id === a.id;
+        ctx.beginPath();
+        ctx.arc(a.x, a.y, isHovered ? 5 : 2.5, 0, Math.PI * 2);
+        ctx.fillStyle = isHovered ? "#38bdf8" : "#94a3b8";
+        ctx.fill();
+        if (isHovered) {
+          ctx.strokeStyle = "#fff";
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
+      });
+    }
+
+    // Interaction
+    container.on("mousemove", (event) => {
+      const [mx, my] = d3.pointer(event);
+      const nearest = airportList.find(a => {
+        const dx = a.x - mx;
+        const dy = a.y - my;
+        return Math.sqrt(dx * dx + dy * dy) < 15;
+      });
+
+      if (nearest !== hoveredAirport) {
+        hoveredAirport = nearest;
+        const tooltip = d3.select("#tooltip");
+        if (hoveredAirport) {
+          tooltip
+            .style("display", "block")
+            .style("left", `${mx + 15}px`)
+            .style("top", `${my - 10}px`)
+            .html(`<strong>${hoveredAirport.id}</strong>: ${hoveredAirport.name}<br/>${hoveredAirport.region}`);
+        } else {
+          tooltip.style("display", "none");
+        }
+        render();
+      } else if (hoveredAirport) {
+        d3.select("#tooltip")
+          .style("left", `${mx + 15}px`)
+          .style("top", `${my - 10}px`);
+      }
+    });
+
+    d3.select("#tension").on("input", function() {
+      tension = +this.value;
+      d3.select("#tension-val").text(tension.toFixed(2));
+      render();
+    });
+
+    d3.select("#opacity").on("input", function() {
+      opacity = +this.value;
+      d3.select("#opacity-val").text(opacity.toFixed(2));
+      render();
+    });
+
+    window.addEventListener("resize", () => {
+      // For simplicity, just refresh or re-calc
+      // A full responsive impl would re-project
+    });
+
+    render();
+  }
+
+  init();
+</script>
+
+</body>
+</html>

@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Monthly Revenue — Actual vs Forecast</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --tol-blue: #332288;
+            --text-color: #2c3e50;
+            --font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        body {
+            font-family: var(--font-family);
+            color: var(--text-color);
+            background-color: #f8f9fa;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin-top: 40px;
+        }
+
+        #container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+
+        h2 {
+            margin-top: 0;
+            font-weight: 600;
+        }
+
+        .controls {
+            margin-bottom: 20px;
+        }
+
+        button {
+            padding: 8px 16px;
+            font-size: 14px;
+            cursor: pointer;
+            background-color: #eee;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            margin: 0 5px;
+            transition: all 0.2s;
+        }
+
+        button:hover {
+            background-color: #ddd;
+        }
+
+        button.primary {
+            background-color: var(--tol-blue);
+            color: white;
+            border-color: var(--tol-blue);
+        }
+
+        button.primary:hover {
+            background-color: #261a66;
+        }
+
+        .axis-label {
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .legend text {
+            font-size: 12px;
+        }
+
+        .annotation-label {
+            font-size: 11px;
+            font-weight: bold;
+        }
+
+        .annotation line {
+            stroke: #666;
+            stroke-dasharray: 2,2;
+        }
+
+        .actual-line {
+            fill: none;
+            stroke: var(--tol-blue);
+            stroke-width: 2px;
+        }
+
+        .prediction-line {
+            fill: none;
+            stroke: var(--tol-blue);
+            stroke-width: 2px;
+            stroke-dasharray: 5,5;
+        }
+
+        .dot {
+            fill: var(--tol-blue);
+        }
+
+        .fan-95 { fill: var(--tol-blue); opacity: 0.15; }
+        .fan-80 { fill: var(--tol-blue); opacity: 0.25; }
+        .fan-50 { fill: var(--tol-blue); opacity: 0.35; }
+
+        .prediction-start-line {
+            stroke: #999;
+            stroke-width: 1px;
+            stroke-dasharray: 4,4;
+        }
+
+        .annotation-diamond {
+            fill: #333;
+        }
+
+        .hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+<div id="container">
+    <h2>Monthly Revenue — Actual vs Forecast</h2>
+    <div class="controls">
+        <button id="btn-story" class="primary">Tell the Story</button>
+        <button id="btn-reset">Reset</button>
+    </div>
+    <div id="chart"></div>
+</div>
+
+<script>
+    // Configuration
+    const width = 800;
+    const height = 400;
+    const margin = {top: 40, right: 100, bottom: 50, left: 60};
+
+    const actualCount = 30;
+    const forecastCount = 6;
+    const totalCount = actualCount + forecastCount;
+
+    // Data generation
+    const startDate = new Date(2023, 0, 1);
+    const data = [];
+    const step = (3.5 - 2.0) / (actualCount - 1);
+
+    for (let i = 0; i < totalCount; i++) {
+        const date = new Date(startDate);
+        date.setMonth(startDate.getMonth() + i);
+
+        let revenue = null;
+        let isForecast = i >= actualCount;
+
+        if (i < actualCount) {
+            // Actual
+            const trend = 2.0 + i * step;
+            const seasonal = Math.sin(i * Math.PI / 6) * 0.15;
+            const noise = (Math.random() - 0.5) * 0.1;
+            revenue = trend + seasonal + noise;
+        } else {
+            // Forecast median
+            const trend = 2.0 + i * step;
+            const seasonal = Math.sin(i * Math.PI / 6) * 0.15;
+            revenue = trend + seasonal;
+        }
+
+        const monthIdx = i;
+        const uncertaintyFactor = i >= actualCount ? (i - actualCount + 1) : 0;
+
+        data.push({
+            date,
+            revenue,
+            isForecast,
+            monthIdx,
+            // Uncertainty bands
+            y95_low: isForecast ? revenue - 0.1 * uncertaintyFactor : null,
+            y95_high: isForecast ? revenue + 0.1 * uncertaintyFactor : null,
+            y80_low: isForecast ? revenue - 0.06 * uncertaintyFactor : null,
+            y80_high: isForecast ? revenue + 0.06 * uncertaintyFactor : null,
+            y50_low: isForecast ? revenue - 0.03 * uncertaintyFactor : null,
+            y50_high: isForecast ? revenue + 0.03 * uncertaintyFactor : null
+        });
+    }
+
+    // Connect forecast start with last actual
+    const lastActual = data[actualCount - 1];
+    data[actualCount].y95_low = lastActual.revenue;
+    data[actualCount].y95_high = lastActual.revenue;
+    data[actualCount].y80_low = lastActual.revenue;
+    data[actualCount].y80_high = lastActual.revenue;
+    data[actualCount].y50_low = lastActual.revenue;
+    data[actualCount].y50_high = lastActual.revenue;
+
+    const annotations = [
+        {date: data[6].date, y: data[6].revenue, label: "Product Launch", type: "event"},
+        {date: data[12].date, y: data[12].revenue, label: "Price Increase", type: "event"},
+        {date: data[18].date, y: data[18].revenue, label: "Competitor Entry", type: "event"},
+        {date: data[30].date, y: data[30].revenue, label: "Forecast Start", type: "system"}
+    ];
+
+    // SVG setup
+    const svg = d3.select("#chart")
+        .append("svg")
+        .attr("width", width)
+        .attr("height", height);
+
+    const chartArea = svg.append("g")
+        .attr("transform", `translate(${margin.left},${margin.top})`);
+
+    const innerWidth = width - margin.left - margin.right;
+    const innerHeight = height - margin.top - margin.bottom;
+
+    // Scales
+    const x = d3.scaleUtc()
+        .domain(d3.extent(data, d => d.date))
+        .range([0, innerWidth]);
+
+    const y = d3.scaleLinear()
+        .domain([1.5, 4.5])
+        .range([innerHeight, 0]);
+
+    // Axes
+    chartArea.append("g")
+        .attr("transform", `translate(0,${innerHeight})`)
+        .call(d3.axisBottom(x));
+
+    chartArea.append("g")
+        .call(d3.axisLeft(y).ticks(6).tickFormat(d => `$${d}M`));
+
+    // Grid lines
+    chartArea.append("g")
+        .attr("class", "grid")
+        .attr("opacity", 0.1)
+        .call(d3.axisLeft(y).tickSize(-innerWidth).tickFormat(""));
+
+    // Prediction Bands
+    const areaGenerator = (keyLow, keyHigh) => d3.area()
+        .defined(d => d.isForecast || d.monthIdx === actualCount - 1)
+        .x(d => x(d.date))
+        .y0(d => y(d[keyLow]))
+        .y1(d => y(d[keyHigh]))
+        .curve(d3.curveMonotoneX);
+
+    const fan95 = chartArea.append("path")
+        .datum(data)
+        .attr("class", "fan-95 story-step-4 hidden")
+        .attr("d", areaGenerator("y95_low", "y95_high"));
+
+    const fan80 = chartArea.append("path")
+        .datum(data)
+        .attr("class", "fan-80 story-step-4 hidden")
+        .attr("d", areaGenerator("y80_low", "y80_high"));
+
+    const fan50 = chartArea.append("path")
+        .datum(data)
+        .attr("class", "fan-50 story-step-4 hidden")
+        .attr("d", areaGenerator("y50_low", "y50_high"));
+
+    // Lines
+    const lineGenerator = d3.line()
+        .x(d => x(d.date))
+        .y(d => y(d.revenue))
+        .curve(d3.curveMonotoneX);
+
+    // Prediction Median
+    chartArea.append("path")
+        .datum(data.filter(d => d.isForecast || d.monthIdx === actualCount - 1))
+        .attr("class", "prediction-line story-step-4 hidden")
+        .attr("d", lineGenerator);
+
+    // Actual Line
+    chartArea.append("path")
+        .datum(data.filter(d => !d.isForecast))
+        .attr("class", "actual-line")
+        .attr("d", lineGenerator);
+
+    // Actual Dots
+    chartArea.selectAll(".dot")
+        .data(data.filter(d => !d.isForecast))
+        .enter().append("circle")
+        .attr("class", "dot")
+        .attr("cx", d => x(d.date))
+        .attr("cy", d => y(d.revenue))
+        .attr("r", 3);
+
+    // Prediction start vertical line
+    chartArea.append("line")
+        .attr("class", "prediction-start-line story-step-3 hidden")
+        .attr("x1", x(data[actualCount].date))
+        .attr("x2", x(data[actualCount].date))
+        .attr("y1", 0)
+        .attr("y2", innerHeight);
+
+    // Annotations
+    const annoGroup = chartArea.selectAll(".annotation")
+        .data(annotations)
+        .enter().append("g")
+        .attr("class", (d, i) => `annotation story-step-${i} hidden`);
+
+    // Vertical line
+    annoGroup.append("line")
+        .attr("x1", d => x(d.date))
+        .attr("x2", d => x(d.date))
+        .attr("y1", d => y(d.y))
+        .attr("y2", d => y(d.y) - 60);
+
+    // Diamond
+    annoGroup.append("path")
+        .attr("class", "annotation-diamond")
+        .attr("d", d => `M ${x(d.date)} ${y(d.y)-5} L ${x(d.date)+5} ${y(d.y)} L ${x(d.date)} ${y(d.y)+5} L ${x(d.date)-5} ${y(d.y)} Z`);
+
+    // Label
+    annoGroup.append("text")
+        .attr("class", "annotation-label")
+        .attr("x", d => x(d.date))
+        .attr("y", d => y(d.y) - 65)
+        .attr("text-anchor", "middle")
+        .text(d => d.label);
+
+    // Legend
+    const legend = svg.append("g")
+        .attr("class", "legend")
+        .attr("transform", `translate(${width - margin.right + 10}, ${margin.top})`);
+
+    const legendItems = [
+        {label: "Actual", color: "var(--tol-blue)", type: "line"},
+        {label: "Forecast", color: "var(--tol-blue)", type: "dashed"},
+        {label: "50% Interval", color: "rgba(51, 34, 136, 0.35)", type: "rect"},
+        {label: "80% Interval", color: "rgba(51, 34, 136, 0.25)", type: "rect"},
+        {label: "95% Interval", color: "rgba(51, 34, 136, 0.15)", type: "rect"}
+    ];
+
+    legendItems.forEach((item, i) => {
+        const g = legend.append("g").attr("transform", `translate(0, ${i * 20})`);
+        
+        if (item.type === "line") {
+            g.append("line").attr("x1", 0).attr("x2", 15).attr("y1", 5).attr("y2", 5).attr("stroke", item.color).attr("stroke-width", 2);
+        } else if (item.type === "dashed") {
+            g.append("line").attr("x1", 0).attr("x2", 15).attr("y1", 5).attr("y2", 5).attr("stroke", item.color).attr("stroke-width", 2).attr("stroke-dasharray", "3,2");
+        } else {
+            g.append("rect").attr("width", 15).attr("height", 10).attr("fill", item.color);
+        }
+
+        g.append("text")
+            .attr("x", 20)
+            .attr("y", 9)
+            .text(item.label);
+    });
+
+    // Story sequencing
+    d3.select("#btn-story").on("click", function() {
+        const steps = [
+            ".story-step-0", // Product Launch
+            ".story-step-1", // Price Increase
+            ".story-step-2", // Competitor
+            ".story-step-3", // Forecast Start Line
+            ".story-step-4"  // Prediction Fan + Median
+        ];
+
+        let delay = 0;
+        steps.forEach((selector, i) => {
+            d3.selectAll(selector)
+                .transition()
+                .delay(delay)
+                .duration(400)
+                .style("opacity", 1)
+                .on("start", function() {
+                    d3.select(this).classed("hidden", false);
+                });
+            
+            delay += 1000; // 400ms fade + 600ms dwell
+        });
+    });
+
+    d3.select("#btn-reset").on("click", function() {
+        d3.selectAll(".hidden").interrupt().style("opacity", 0).classed("hidden", true);
+        d3.selectAll("[class*='story-step-']").interrupt().style("opacity", 0).classed("hidden", true);
+    });
+
+</script>
+</body>
+</html>

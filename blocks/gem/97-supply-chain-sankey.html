@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Supply Chain Sankey Explorer</title>
+    <link rel="stylesheet" href="../../style/d3-power-tools.css">
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/d3-sankey@0.12/dist/d3-sankey.min.js"></script>
+    <style>
+        body {
+            overflow: hidden;
+            background-color: var(--color-bg);
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        header {
+            padding: var(--sp-4) var(--sp-6);
+            border-bottom: 1px solid var(--color-border-light);
+        }
+
+        #chart-container {
+            flex: 1;
+            position: relative;
+            padding: var(--sp-4);
+        }
+
+        .node rect {
+            cursor: pointer;
+            fill-opacity: 0.9;
+            stroke: #fff;
+            stroke-width: 1px;
+            transition: fill-opacity 0.2s;
+        }
+
+        .node:hover rect {
+            fill-opacity: 1;
+        }
+
+        .node text {
+            font-size: 11px;
+            font-weight: 500;
+            pointer-events: none;
+            text-shadow: 0 1px 2px rgba(255,255,255,0.8);
+        }
+
+        .link {
+            fill: none;
+            stroke: var(--color-border-light);
+            stroke-opacity: 0.25;
+            transition: stroke-opacity 0.3s, stroke 0.3s;
+        }
+
+        .link.highlight {
+            stroke-opacity: 0.6;
+            stroke: var(--color-primary);
+        }
+
+        .link.dimmed {
+            stroke-opacity: 0.05;
+        }
+
+        .node.highlight rect {
+            stroke: var(--color-primary);
+            stroke-width: 2px;
+        }
+
+        .node.dimmed {
+            opacity: 0.2;
+        }
+
+        .particle {
+            pointer-events: none;
+        }
+
+        .brush-overlay {
+            pointer-events: all;
+        }
+
+        .brush .selection {
+            fill: var(--color-primary);
+            fill-opacity: 0.1;
+            stroke: var(--color-primary);
+            stroke-opacity: 0.3;
+        }
+
+        .controls-info {
+            position: absolute;
+            bottom: var(--sp-4);
+            left: var(--sp-6);
+            font-size: 12px;
+            color: var(--color-text-muted);
+            background: rgba(255,255,255,0.8);
+            padding: var(--sp-2) var(--sp-3);
+            border-radius: var(--radius);
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Supply Chain <b>Sankey Explorer</b></h1>
+        <p class="subtitle">Raw Materials &rarr; Components &rarr; Products &rarr; Markets</p>
+    </header>
+
+    <div id="chart-container">
+        <div class="controls-info">
+            Hover <b>Product</b> to trace supply chain backward • Brush <b>Market</b> column to filter
+        </div>
+    </div>
+
+    <script>
+        const width = document.getElementById('chart-container').clientWidth;
+        const height = document.getElementById('chart-container').clientHeight;
+        const margin = { top: 40, right: 120, bottom: 40, left: 100 };
+
+        const svg = d3.select("#chart-container")
+            .append("svg")
+            .attr("width", width)
+            .attr("height", height);
+
+        const g = svg.append("g")
+            .attr("transform", `translate(${margin.left},${margin.top})`);
+
+        const innerWidth = width - margin.left - margin.right;
+        const innerHeight = height - margin.top - margin.bottom;
+
+        // --- Data Generation ---
+        const levels = [
+            { name: "Raw Materials", nodes: ["Lithium", "Cobalt", "Nickel", "Steel", "Aluminum", "Copper", "Silicon", "Rare Earths"] },
+            { name: "Components", nodes: ["Battery Cells", "Anodes", "Cathodes", "Electric Motors", "Chassis", "Body Panels", "Wiring", "Control Chips", "Sensors", "Displays", "Magnets", "Inverters"] },
+            { name: "Products", nodes: ["EV Model S", "EV Model X", "Energy Wall", "Solar Roof", "Industrial Pack", "EV Model 3", "EV Model Y", "Charging Post"] },
+            { name: "Markets", nodes: ["North America", "Europe", "Asia Pacific", "Latin America", "Middle East"] }
+        ];
+
+        const nodes = [];
+        levels.forEach((lvl, i) => {
+            lvl.nodes.forEach(name => {
+                nodes.push({ name, level: i, id: `${i}-${name}` });
+            });
+        });
+
+        const links = [];
+        // Connect Level 0 -> 1
+        levels[0].nodes.forEach((src, si) => {
+            const targets = d3.range(3 + Math.floor(Math.random() * 3)).map(() => Math.floor(Math.random() * levels[1].nodes.length));
+            [...new Set(targets)].forEach(ti => {
+                links.push({
+                    source: `0-${src}`,
+                    target: `1-${levels[1].nodes[ti]}`,
+                    value: 5 + Math.random() * 15
+                });
+            });
+        });
+
+        // Connect Level 1 -> 2
+        levels[1].nodes.forEach((src, si) => {
+            const targets = d3.range(2 + Math.floor(Math.random() * 2)).map(() => Math.floor(Math.random() * levels[2].nodes.length));
+            [...new Set(targets)].forEach(ti => {
+                links.push({
+                    source: `1-${src}`,
+                    target: `2-${levels[2].nodes[ti]}`,
+                    value: 5 + Math.random() * 10
+                });
+            });
+        });
+
+        // Connect Level 2 -> 3
+        levels[2].nodes.forEach((src, si) => {
+            const targets = d3.range(2 + Math.floor(Math.random() * 3)).map(() => Math.floor(Math.random() * levels[3].nodes.length));
+            [...new Set(targets)].forEach(ti => {
+                links.push({
+                    source: `2-${src}`,
+                    target: `3-${levels[3].nodes[ti]}`,
+                    value: 10 + Math.random() * 20
+                });
+            });
+        });
+
+        // --- Sankey Layout ---
+        const sankey = d3.sankey()
+            .nodeId(d => d.id)
+            .nodeWidth(15)
+            .nodePadding(20)
+            .nodeAlign(d3.sankeyJustify)
+            .extent([[0, 0], [innerWidth, innerHeight]]);
+
+        const { nodes: sankeyNodes, links: sankeyLinks } = sankey({
+            nodes: nodes.map(d => Object.assign({}, d)),
+            links: links.map(d => Object.assign({}, d))
+        });
+
+        const color = d3.scaleOrdinal(d3.schemeTableau10);
+
+        // --- Drawing ---
+        const link = g.append("g")
+            .attr("fill", "none")
+            .attr("stroke-opacity", 0.2)
+            .selectAll("path")
+            .data(sankeyLinks)
+            .join("path")
+            .attr("class", "link")
+            .attr("d", d3.sankeyLinkHorizontal())
+            .attr("stroke", d => color(d.source.level))
+            .attr("stroke-width", d => Math.max(1, d.width));
+
+        const node = g.append("g")
+            .selectAll("g")
+            .data(sankeyNodes)
+            .join("g")
+            .attr("class", "node");
+
+        node.append("rect")
+            .attr("x", d => d.x0)
+            .attr("y", d => d.y0)
+            .attr("height", d => d.y1 - d.y0)
+            .attr("width", d => d.x1 - d.x0)
+            .attr("fill", d => color(d.level))
+            .on("mouseenter", (event, d) => {
+                if (d.level === 2) highlightChain(d);
+            })
+            .on("mouseleave", clearHighlight);
+
+        node.append("text")
+            .attr("x", d => d.x0 < innerWidth / 2 ? d.x1 + 6 : d.x0 - 6)
+            .attr("y", d => (d.y1 + d.y0) / 2)
+            .attr("dy", "0.35em")
+            .attr("text-anchor", d => d.x0 < innerWidth / 2 ? "start" : "end")
+            .text(d => d.name)
+            .attr("fill", "var(--color-text)");
+
+        // --- Particles ---
+        const particleGroup = g.append("g").attr("class", "particles");
+        const particles = [];
+
+        sankeyLinks.forEach((l, i) => {
+            const numParticles = Math.max(1, Math.floor(l.value / 3));
+            for (let j = 0; j < numParticles; j++) {
+                particles.push({
+                    link: l,
+                    path: link.nodes()[i],
+                    length: link.nodes()[i].getTotalLength(),
+                    speed: 0.5 + Math.random() * 1.5,
+                    offset: Math.random(),
+                    size: 1 + Math.random() * 2
+                });
+            }
+        });
+
+        const particleSelection = particleGroup.selectAll(".particle")
+            .data(particles)
+            .join("circle")
+            .attr("class", "particle")
+            .attr("r", d => d.size)
+            .attr("fill", d => color(d.link.source.level))
+            .attr("fill-opacity", 0.8);
+
+        d3.timer(elapsed => {
+            particleSelection.attr("transform", d => {
+                const t = (elapsed * 0.05 * d.speed / d.length + d.offset) % 1;
+                const p = d.path.getPointAtLength(t * d.length);
+                return `translate(${p.x}, ${p.y})`;
+            });
+        });
+
+        // --- Interactions ---
+        function getAncestors(node) {
+            const ancestors = new Set([node]);
+            const queue = [node];
+            while (queue.length > 0) {
+                const curr = queue.shift();
+                curr.targetLinks.forEach(l => {
+                    if (!ancestors.has(l.source)) {
+                        ancestors.add(l.source);
+                        queue.push(l.source);
+                    }
+                });
+            }
+            return ancestors;
+        }
+
+        function highlightChain(targetNode) {
+            const ancestorNodes = getAncestors(targetNode);
+            const ancestorLinks = new Set();
+            sankeyLinks.forEach(l => {
+                if (ancestorNodes.has(l.target) && ancestorNodes.has(l.source)) {
+                    ancestorLinks.add(l);
+                }
+            });
+
+            link.classed("highlight", d => ancestorLinks.has(d))
+                .classed("dimmed", d => !ancestorLinks.has(d));
+            
+            node.classed("dimmed", d => !ancestorNodes.has(d));
+            
+            particleSelection.style("opacity", d => ancestorLinks.has(d.link) ? 1 : 0.1);
+        }
+
+        function clearHighlight() {
+            link.classed("highlight", false).classed("dimmed", false);
+            node.classed("dimmed", false);
+            particleSelection.style("opacity", 1);
+        }
+
+        // --- Brushing ---
+        const marketX = sankeyNodes.find(d => d.level === 3).x0;
+        const brush = d3.brushY()
+            .extent([[marketX - 10, 0], [innerWidth + margin.right, innerHeight]])
+            .on("brush end", brushed);
+
+        const brushG = g.append("g")
+            .attr("class", "brush")
+            .call(brush);
+
+        function brushed({ selection }) {
+            if (!selection) {
+                clearHighlight();
+                return;
+            }
+
+            const [y0, y1] = selection;
+            const selectedMarkets = sankeyNodes.filter(d => 
+                d.level === 3 && d.y0 < y1 && d.y1 > y0
+            );
+
+            if (selectedMarkets.length === 0) {
+                clearHighlight();
+                return;
+            }
+
+            const allAncestors = new Set();
+            selectedMarkets.forEach(m => {
+                getAncestors(m).forEach(a => allAncestors.add(a));
+            });
+
+            const ancestorLinks = new Set();
+            sankeyLinks.forEach(l => {
+                if (allAncestors.has(l.target) && allAncestors.has(l.source)) {
+                    ancestorLinks.add(l);
+                }
+            });
+
+            link.classed("highlight", d => ancestorLinks.has(d))
+                .classed("dimmed", d => !ancestorLinks.has(d));
+            
+            node.classed("dimmed", d => !allAncestors.has(d));
+            
+            particleSelection.style("opacity", d => ancestorLinks.has(d.link) ? 1 : 0.1);
+        }
+
+    </script>
+</body>
+</html>

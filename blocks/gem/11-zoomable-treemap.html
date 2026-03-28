@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File System Explorer</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #f8f9fa;
+            --text-color: #212529;
+            --border-color: #dee2e6;
+            --breadcrumb-bg: #e9ecef;
+            --breadcrumb-hover: #dee2e6;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            overflow-x: hidden;
+        }
+
+        header {
+            padding: 20px;
+            background: #fff;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        header h1 {
+            margin: 0;
+            font-size: 1.5rem;
+            font-weight: 600;
+        }
+
+        .total-size {
+            font-size: 0.9rem;
+            color: #6c757d;
+        }
+
+        #breadcrumbs {
+            padding: 10px 20px;
+            background: var(--breadcrumb-bg);
+            border-bottom: 1px solid var(--border-color);
+            font-size: 0.9rem;
+            display: flex;
+            gap: 5px;
+            align-items: center;
+        }
+
+        .breadcrumb-item {
+            cursor: pointer;
+            padding: 2px 8px;
+            border-radius: 4px;
+            transition: background 0.2s;
+        }
+
+        .breadcrumb-item:hover {
+            background: var(--breadcrumb-hover);
+        }
+
+        .breadcrumb-separator {
+            color: #adb5bd;
+        }
+
+        #chart-container {
+            width: 100vw;
+            height: 600px;
+            position: relative;
+            background: #fff;
+        }
+
+        .cell rect {
+            stroke: #fff;
+            stroke-width: 1px;
+            cursor: pointer;
+        }
+
+        .cell text {
+            font-size: 11px;
+            pointer-events: none;
+            fill: #fff;
+            font-weight: 500;
+            text-shadow: 0 1px 2px rgba(0,0,0,0.3);
+        }
+
+        #legend {
+            padding: 20px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            justify-content: center;
+            background: #fff;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.85rem;
+        }
+
+        .legend-color {
+            width: 14px;
+            height: 14px;
+            border-radius: 2px;
+        }
+
+        .tooltip {
+            position: absolute;
+            padding: 10px;
+            background: rgba(33, 37, 41, 0.95);
+            color: #fff;
+            border-radius: 4px;
+            pointer-events: none;
+            font-size: 0.8rem;
+            z-index: 1000;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            max-width: 300px;
+            word-wrap: break-word;
+            display: none;
+        }
+
+        .tooltip b {
+            display: block;
+            margin-bottom: 4px;
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>File System Explorer</h1>
+    <div class="total-size" id="total-size">Total Size: 0 MB</div>
+</header>
+
+<div id="breadcrumbs"></div>
+
+<div id="chart-container">
+    <div id="tooltip" class="tooltip"></div>
+</div>
+
+<div id="legend"></div>
+
+<script>
+    // Configuration
+    const width = window.innerWidth;
+    const height = 600;
+    const transitionDuration = 750;
+
+    // Tol Bright + Muted mix (8 distinct colors)
+    const colors = [
+        "#4477AA", // Blue (Bright)
+        "#EE6677", // Red (Bright)
+        "#228833", // Green (Bright)
+        "#CCBB44", // Yellow (Bright)
+        "#66CCEE", // Cyan (Bright)
+        "#AA3377", // Purple (Bright)
+        "#BBBBBB", // Grey (Bright)
+        "#88CCEE"  // Light Blue (Muted)
+    ];
+
+    // Data Generation
+    function generateData() {
+        const rootDirs = ["Documents", "Photos", "Code", "Music", "Videos", "Downloads", "Projects", "Archives"];
+        const root = { name: "Root", children: [] };
+
+        rootDirs.forEach(dirName => {
+            const dir = { name: dirName, children: [] };
+            const numSubDirs = 3 + Math.floor(Math.random() * 4); // 3-6
+
+            for (let i = 0; i < numSubDirs; i++) {
+                const subDir = { name: `Subdir ${i + 1}`, children: [] };
+                const numFiles = 5 + Math.floor(Math.random() * 11); // 5-15
+
+                for (let j = 0; j < numFiles; j++) {
+                    // Log-distributed size: 1KB to 500MB
+                    // Math.random() is linear, we want it to be exponent of log
+                    // min = 10^0 (1KB), max = 10^5.698 (500,000KB)
+                    const minLog = 0;
+                    const maxLog = Math.log10(500000);
+                    const sizeKB = Math.pow(10, minLog + Math.random() * (maxLog - minLog));
+                    
+                    subDir.children.push({
+                        name: `file_${j + 1}.${getFileExt(dirName)}`,
+                        size: Math.round(sizeKB)
+                    });
+                }
+                dir.children.push(subDir);
+            }
+            root.children.push(dir);
+        });
+
+        return root;
+    }
+
+    function getFileExt(category) {
+        const mapping = {
+            "Documents": "pdf", "Photos": "jpg", "Code": "js", "Music": "mp3",
+            "Videos": "mp4", "Downloads": "zip", "Projects": "ts", "Archives": "tar.gz"
+        };
+        return mapping[category] || "txt";
+    }
+
+    function formatSize(kb) {
+        if (kb < 1024) return kb.toFixed(1) + " KB";
+        if (kb < 1024 * 1024) return (kb / 1024).toFixed(1) + " MB";
+        return (kb / (1024 * 1024)).toFixed(1) + " GB";
+    }
+
+    // Setup Scales and Layout
+    const x = d3.scaleLinear().rangeRound([0, width]);
+    const y = d3.scaleLinear().rangeRound([0, height]);
+
+    const colorScale = d3.scaleOrdinal()
+        .domain(["Documents", "Photos", "Code", "Music", "Videos", "Downloads", "Projects", "Archives"])
+        .range(colors);
+
+    const treemap = d3.treemap()
+        .size([width, height])
+        .paddingOuter(0)
+        .paddingTop(0)
+        .paddingInner(1)
+        .round(true);
+
+    const svg = d3.select("#chart-container").append("svg")
+        .attr("viewBox", `0 0 ${width} ${height}`)
+        .style("width", "100%")
+        .style("height", "100%");
+
+    const tooltip = d3.select("#tooltip");
+
+    // Initialize
+    const data = generateData();
+    const root = d3.hierarchy(data)
+        .sum(d => d.size)
+        .sort((a, b) => b.value - a.value);
+
+    treemap(root);
+
+    d3.select("#total-size").text(`Total Size: ${formatSize(root.value)}`);
+
+    let focus = root;
+    let node = root;
+
+    // Render cells
+    const cell = svg.selectAll("g")
+        .data(root.descendants())
+        .join("g")
+        .attr("class", "cell")
+        .attr("transform", d => `translate(${d.x0},${d.y0})`);
+
+    cell.append("rect")
+        .attr("id", d => (d.leafId = `leaf-${Math.random().toString(36).substr(2, 9)}`))
+        .attr("width", d => d.x1 - d.x0)
+        .attr("height", d => d.y1 - d.y0)
+        .attr("fill", d => {
+            while (d.depth > 1) d = d.parent;
+            return d.depth === 0 ? "#ccc" : colorScale(d.data.name);
+        })
+        .on("click", (event, d) => {
+            if (d.children) {
+                zoom(event, d);
+            } else {
+                showTooltip(event, d);
+            }
+        });
+
+    cell.append("clipPath")
+        .attr("id", d => (d.clipId = `clip-${Math.random().toString(36).substr(2, 9)}`))
+        .append("use")
+        .attr("xlink:href", d => `#${d.leafId}`);
+
+    cell.append("text")
+        .attr("clip-path", d => `url(#${d.clipId})`)
+        .selectAll("tspan")
+        .data(d => d.data.name.split(/(?=[A-Z][^A-Z])/g))
+        .join("tspan")
+        .attr("x", 4)
+        .attr("y", (d, i) => 13 + i * 10)
+        .text(d => d);
+
+    updateLabels(root);
+    updateBreadcrumbs(root);
+    renderLegend();
+
+    // Interaction Functions
+    function zoom(event, d) {
+        focus = d;
+
+        const t = svg.transition()
+            .duration(transitionDuration)
+            .ease(d3.easeCubicInOut);
+
+        x.domain([d.x0, d.x1]);
+        y.domain([d.y0, d.y1]);
+
+        svg.selectAll(".cell")
+            .transition(t)
+            .attr("transform", d => `translate(${x(d.x0)},${y(d.y0)})`)
+            .select("rect")
+            .attr("width", d => x(d.x1) - x(d.x0))
+            .attr("height", d => y(d.y1) - y(d.y0));
+
+        updateLabels(d, t);
+        updateBreadcrumbs(d);
+    }
+
+    function updateLabels(focusedNode, t = null) {
+        const labels = svg.selectAll(".cell text");
+        
+        const update = (selection) => {
+            selection.style("display", d => {
+                const w = x(d.x1) - x(d.x0);
+                const h = y(d.y1) - y(d.y0);
+                // Only show if it's a descendant of focus and big enough
+                const isDescendant = d.ancestors().includes(focusedNode);
+                return (isDescendant && w > 40 && h > 40) ? "block" : "none";
+            });
+        };
+
+        if (t) {
+            // Check at the end of transition for better performance/look
+            t.on("end.labels", () => update(labels));
+        } else {
+            update(labels);
+        }
+    }
+
+    function updateBreadcrumbs(d) {
+        const ancestors = d.ancestors().reverse();
+        const bc = d3.select("#breadcrumbs");
+        bc.selectAll("*").remove();
+
+        ancestors.forEach((node, i) => {
+            if (i > 0) {
+                bc.append("span").attr("class", "breadcrumb-separator").text(">");
+            }
+            bc.append("span")
+                .attr("class", "breadcrumb-item")
+                .text(node.data.name)
+                .on("click", (event) => zoom(event, node));
+        });
+    }
+
+    function showTooltip(event, d) {
+        const path = d.ancestors().reverse().map(a => a.data.name).join(" / ");
+        tooltip
+            .style("display", "block")
+            .style("left", (event.pageX + 10) + "px")
+            .style("top", (event.pageY + 10) + "px")
+            .html(`<b>${d.data.name}</b>Path: ${path}<br>Size: ${formatSize(d.data.size)}`);
+        
+        // Hide tooltip after 3 seconds or on move
+        setTimeout(() => tooltip.style("display", "none"), 3000);
+    }
+
+    function renderLegend() {
+        const legend = d3.select("#legend");
+        const rootDirs = ["Documents", "Photos", "Code", "Music", "Videos", "Downloads", "Projects", "Archives"];
+        
+        rootDirs.forEach(dir => {
+            const item = legend.append("div").attr("class", "legend-item");
+            item.append("div")
+                .attr("class", "legend-color")
+                .style("background-color", colorScale(dir));
+            item.append("span").text(dir);
+        });
+    }
+
+    // Hide tooltip on mousemove outside cells
+    d3.select("body").on("mousemove", (event) => {
+        if (!event.target.closest(".cell")) {
+            tooltip.style("display", "none");
+        }
+    });
+
+</script>
+</body>
+</html>

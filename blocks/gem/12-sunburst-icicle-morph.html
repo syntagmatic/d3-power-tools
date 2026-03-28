@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>D3 Sunburst to Icicle Morph</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: #f8f9fa;
+            color: #333;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        #controls {
+            margin-bottom: 20px;
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            background: #fff;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+        button:hover {
+            background: #f0f0f0;
+            border-color: #999;
+        }
+        #viz-container {
+            position: relative;
+            width: 1000px;
+            height: 600px;
+            background: white;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.05);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        svg {
+            width: 100%;
+            height: 100%;
+        }
+        .node-path {
+            stroke: #fff;
+            stroke-width: 0.5px;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+        .node-path:hover {
+            stroke: #000;
+            stroke-width: 1.5px;
+        }
+        .label {
+            pointer-events: none;
+            font-size: 10px;
+            fill: #333;
+            text-anchor: middle;
+            dominant-baseline: middle;
+            font-weight: 500;
+        }
+        #tooltip {
+            position: absolute;
+            background: rgba(255, 255, 255, 0.95);
+            border: 1px solid #ddd;
+            padding: 8px 12px;
+            border-radius: 4px;
+            pointer-events: none;
+            font-size: 12px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            display: none;
+            z-index: 10;
+        }
+        .department-label {
+            font-weight: bold;
+            margin-bottom: 4px;
+            display: block;
+        }
+        .breadcrumb {
+            color: #666;
+            font-size: 11px;
+            margin-bottom: 4px;
+        }
+        .value {
+            font-family: monospace;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+<div id="controls">
+    <button id="toggle-btn">Switch to Icicle</button>
+    <div style="font-size: 14px; color: #666;">Hierarchy: Root → Department → Team → Member</div>
+</div>
+
+<div id="viz-container">
+    <div id="tooltip"></div>
+    <svg id="viz"></svg>
+</div>
+
+<script>
+    // --- Config & Constants ---
+    const width = 1000;
+    const height = 600;
+    const radius = 250;
+    const cx = width / 2;
+    const cy = 300; // Center for sunburst
+    
+    // Tol Bright Colors (5 for departments)
+    const colors = ["#EE6677", "#228833", "#4477AA", "#CCBB44", "#66CCEE"];
+    
+    // --- Data Generation ---
+    function generateData() {
+        const departments = ["Engineering", "Product", "Sales", "Design", "HR"];
+        const teamPrefixes = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"];
+        
+        const root = {
+            name: "CorpInc",
+            children: departments.map((dept, i) => {
+                const numTeams = Math.floor(Math.random() * 3) + 3; // 3-5 teams
+                return {
+                    name: dept,
+                    colorId: i,
+                    children: Array.from({ length: numTeams }, (_, j) => {
+                        const numMembers = Math.floor(Math.random() * 7) + 4; // 4-10 members
+                        return {
+                            name: `${teamPrefixes[j % teamPrefixes.length]} Team`,
+                            children: Array.from({ length: numMembers }, (_, k) => ({
+                                name: `Member ${k + 1}`,
+                                value: Math.floor(Math.random() * 160000) + 40000
+                            }))
+                        };
+                    })
+                };
+            })
+        };
+        return root;
+    }
+
+    const data = generateData();
+
+    // --- Layout Setup ---
+    const root = d3.hierarchy(data)
+        .sum(d => d.value)
+        .sort((a, b) => b.value - a.value);
+
+    // Normalize partition to [0, 1] for both axes
+    const partition = d3.partition()
+        .size([1, 1]);
+
+    partition(root);
+
+    // --- Rendering Helpers ---
+    const svg = d3.select("#viz");
+    const g = svg.append("g");
+    const tooltip = d3.select("#tooltip");
+
+    // Color scale
+    const color = (d) => {
+        if (d.depth === 0) return "#eee";
+        let dept = d;
+        while (dept.depth > 1) dept = dept.parent;
+        const base = d3.color(colors[dept.data.colorId % colors.length]);
+        // Decrease saturation/brightness with depth
+        return base.brighter(d.depth * 0.4).toString();
+    };
+
+    // Morphing Geometry
+    // We sample the edges to handle the curve -> line transition
+    const SAMPLES = 40; 
+    
+    function getPoint(d, nx, ny, t) {
+        // Sunburst Projection
+        // nx maps to angle [0, 2PI]
+        // ny maps to radius [0, radius]
+        const angle = nx * 2 * Math.PI - Math.PI / 2;
+        const r = ny * radius;
+        const sunX = cx + r * Math.cos(angle);
+        const sunY = cy + r * Math.sin(angle);
+        
+        // Icicle Projection
+        // nx maps to width [0, width]
+        // ny maps to height [0, 400]
+        const iciX = nx * width;
+        const iciY = 100 + ny * 400; // Offset from top
+        
+        // Interpolate
+        return [
+            (1 - t) * sunX + t * iciX,
+            (1 - t) * sunY + t * iciY
+        ];
+    }
+
+    function generatePath(d, t) {
+        const points = [];
+        const {x0, x1, y0, y1} = d;
+        
+        // Top edge (curved/horizontal)
+        for (let i = 0; i <= SAMPLES; i++) {
+            const nx = x0 + (x1 - x0) * (i / SAMPLES);
+            points.push(getPoint(d, nx, y0, t));
+        }
+        // Right edge (radial/vertical)
+        points.push(getPoint(d, x1, y1, t));
+        
+        // Bottom edge (curved/horizontal) - backwards
+        for (let i = SAMPLES; i >= 0; i--) {
+            const nx = x0 + (x1 - x0) * (i / SAMPLES);
+            points.push(getPoint(d, nx, y1, t));
+        }
+        // Left edge (radial/vertical)
+        points.push(getPoint(d, x0, y0, t));
+
+        return "M" + points.map(p => p[0].toFixed(2) + "," + p[1].toFixed(2)).join("L") + "Z";
+    }
+
+    // --- Draw Nodes ---
+    const nodes = g.selectAll(".node")
+        .data(root.descendants())
+        .enter()
+        .append("g")
+        .attr("class", "node");
+
+    const paths = nodes.append("path")
+        .attr("class", "node-path")
+        .attr("fill", d => color(d))
+        .attr("d", d => generatePath(d, 0));
+
+    // Labels
+    const labels = nodes.append("text")
+        .attr("class", "label")
+        .text(d => d.data.name)
+        .style("opacity", 0); // Hide initially, logic below
+
+    function updateLabels(t) {
+        labels
+            .attr("transform", d => {
+                const midX = (d.x0 + d.x1) / 2;
+                const midY = (d.y0 + d.y1) / 2;
+                const p = getPoint(d, midX, midY, t);
+                
+                if (t < 0.5) {
+                    // Sunburst labeling
+                    const angle = (midX * 2 * Math.PI - Math.PI / 2) * 180 / Math.PI;
+                    // Rotation logic: if angle is in left half, flip it so text is upright
+                    const rotation = (angle > 90 && angle < 270) ? angle + 180 : angle;
+                    return `translate(${p[0]},${p[1]}) rotate(${rotation})`;
+                } else {
+                    // Icicle labeling
+                    return `translate(${p[0]},${p[1]})`;
+                }
+            })
+            .style("opacity", d => {
+                // Heuristic for visibility
+                const widthInPixels = (d.x1 - d.x0) * (t > 0.5 ? width : (d.y0 + d.y1) * Math.PI * radius);
+                const heightInPixels = (d.y1 - d.y0) * (t > 0.5 ? 400 : radius);
+                
+                if (t > 0.5) {
+                    // Icicle: check width and height
+                    return (widthInPixels > 40 && heightInPixels > 12) ? 1 : 0;
+                } else {
+                    // Sunburst: check arc length and radial width
+                    const arcLength = (d.x1 - d.x0) * 2 * Math.PI * ((d.y0 + d.y1)/2 * radius);
+                    const radialWidth = (d.y1 - d.y0) * radius;
+                    return (arcLength > 40 && radialWidth > 12) ? 1 : 0;
+                }
+            })
+            .style("font-size", d => {
+                const depthScale = [14, 12, 10, 8];
+                return (depthScale[d.depth] || 8) + "px";
+            });
+    }
+
+    updateLabels(0);
+
+    // --- Hover & Interactions ---
+    paths.on("mouseenter", function(event, d) {
+        // Highlight ancestors
+        const ancestors = d.ancestors();
+        paths.style("opacity", node => ancestors.includes(node) ? 1 : 0.3);
+        
+        // Tooltip
+        tooltip.style("display", "block")
+            .html(`
+                <div class="breadcrumb">${ancestors.reverse().map(a => a.data.name).join(" > ")}</div>
+                <div class="department-label">${d.data.name}</div>
+                <div class="value">${d3.format("$,.0f")(d.value)}</div>
+            `);
+    });
+
+    paths.on("mousemove", function(event) {
+        tooltip.style("left", (event.pageX + 15) + "px")
+               .style("top", (event.pageY - 10) + "px");
+    });
+
+    paths.on("mouseleave", function() {
+        paths.style("opacity", 1);
+        tooltip.style("display", "none");
+    });
+
+    // --- Morph Logic ---
+    let mode = "sunburst"; // or "icicle"
+    let interpolator = null;
+    let startTime = null;
+    const duration = 1200;
+
+    const btn = d3.select("#toggle-btn");
+
+    btn.on("click", () => {
+        if (startTime !== null) return; // Prevent concurrent animations
+        
+        const targetMode = mode === "sunburst" ? "icicle" : "sunburst";
+        const startT = mode === "sunburst" ? 0 : 1;
+        const endT = mode === "sunburst" ? 1 : 0;
+        
+        btn.text(targetMode === "sunburst" ? "Switch to Icicle" : "Switch to Sunburst");
+        
+        d3.transition()
+            .duration(duration)
+            .ease(d3.easeCubicInOut)
+            .tween("morph", () => {
+                const i = d3.interpolate(startT, endT);
+                return (t) => {
+                    const currentT = i(t);
+                    paths.attr("d", d => generatePath(d, currentT));
+                    updateLabels(currentT);
+                };
+            })
+            .on("end", () => {
+                mode = targetMode;
+                startTime = null;
+            });
+    });
+
+</script>
+
+</body>
+</html>

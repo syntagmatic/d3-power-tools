@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>2D Density Contour Heatmap</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: #fff;
+    }
+    #chart-container {
+      position: relative;
+      width: 100vw;
+      height: 600px;
+    }
+    canvas, svg {
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+    .axis-label {
+      font-size: 14px;
+      fill: #333;
+    }
+    .legend-text {
+      font-size: 12px;
+      fill: #666;
+    }
+    .brush .selection {
+      fill: #000;
+      fill-opacity: 0.1;
+      stroke: #333;
+      stroke-width: 1px;
+      stroke-dasharray: 4,4;
+    }
+  </style>
+</head>
+<body>
+  <div id="chart-container"></div>
+
+  <script>
+    const width = window.innerWidth;
+    const height = 600;
+    const margin = { top: 40, right: 120, bottom: 60, left: 60 };
+    const chartWidth = width - margin.left - margin.right;
+    const chartHeight = height - margin.top - margin.bottom;
+
+    // --- 1. Data Generation ---
+    const centers = [
+      { x: 0.3, y: 0.4, n: 4000, sx: 0.08, sy: 0.1, color: "#3498db" },
+      { x: 0.7, y: 0.7, n: 2500, sx: 0.07, sy: 0.07, color: "#e74c3c" },
+      { x: 0.2, y: 0.8, n: 1500, sx: 0.05, sy: 0.04, color: "#2ecc71" }
+    ];
+
+    const randomNormal = d3.randomNormal();
+    const data = [];
+    centers.forEach(c => {
+      for (let i = 0; i < c.n; i++) {
+        data.push({
+          x: c.x + randomNormal() * c.sx,
+          y: c.y + randomNormal() * c.sy
+        });
+      }
+    });
+
+    // Assign color by nearest cluster center
+    data.forEach(d => {
+      let minDist = Infinity;
+      let nearestColor = "#000";
+      centers.forEach(c => {
+        const dx = d.x - c.x;
+        const dy = d.y - c.y;
+        const dist = dx * dx + dy * dy;
+        if (dist < minDist) {
+          minDist = dist;
+          nearestColor = c.color;
+        }
+      });
+      d.color = nearestColor;
+    });
+
+    // --- 2. Setup DOM ---
+    const container = d3.select("#chart-container");
+    
+    // Canvas for points
+    const canvas = container.append("canvas")
+      .attr("width", width)
+      .attr("height", height)
+      .style("width", width + "px")
+      .style("height", height + "px");
+    const ctx = canvas.node().getContext("2d");
+
+    // SVG for contours and axes
+    const svg = container.append("svg")
+      .attr("width", width)
+      .attr("height", height);
+
+    const g = svg.append("g")
+      .attr("transform", `translate(${margin.left},${margin.top})`);
+
+    // Clip path for the brushable area
+    svg.append("defs").append("clipPath")
+      .attr("id", "clip")
+      .append("rect")
+      .attr("width", chartWidth)
+      .attr("height", chartHeight);
+
+    const contourG = g.append("g").attr("clip-path", "url(#clip)");
+    const axisG = g.append("g");
+    const xAxisG = axisG.append("g").attr("transform", `translate(0,${chartHeight})`);
+    const yAxisG = axisG.append("g");
+
+    // --- 3. Scales & Axes ---
+    const xInitial = [0, 1];
+    const yInitial = [0, 1];
+    let x = d3.scaleLinear().domain(xInitial).range([0, chartWidth]);
+    let y = d3.scaleLinear().domain(yInitial).range([chartHeight, 0]);
+
+    // Color scale for contours: blue to red
+    const densityColor = d3.scaleSequential(d3.interpolateRdBu).domain([1, 0]); // 1 (high) is red, 0 (low) is blue in interpolateRdBu reversed
+
+    // --- 4. Drawing Functions ---
+    function drawPoints() {
+      ctx.clearRect(0, 0, width, height);
+      ctx.save();
+      ctx.translate(margin.left, margin.top);
+      
+      // Scissor/Clip to chart area
+      ctx.beginPath();
+      ctx.rect(0, 0, chartWidth, chartHeight);
+      ctx.clip();
+
+      ctx.globalAlpha = 0.15;
+      data.forEach(d => {
+        const px = x(d.x);
+        const py = y(d.y);
+        // Optimization: only draw if visible
+        if (px >= -2 && px <= chartWidth + 2 && py >= -2 && py <= chartHeight + 2) {
+          ctx.fillStyle = d.color;
+          ctx.beginPath();
+          ctx.arc(px, py, 1.5, 0, 2 * Math.PI);
+          ctx.fill();
+        }
+      });
+      ctx.restore();
+    }
+
+    function drawContours() {
+      const contours = d3.contourDensity()
+        .x(d => x(d.x))
+        .y(d => y(d.y))
+        .size([chartWidth, chartHeight])
+        .bandwidth(20)
+        .thresholds(10)
+        (data);
+
+      const maxVal = d3.max(contours, d => d.value) || 1;
+      const color = d3.scaleSequential(d3.interpolateRdBu)
+        .domain([maxVal, 0]);
+
+      contourG.selectAll("path")
+        .data(contours)
+        .join("path")
+        .attr("d", d3.geoPath())
+        .attr("fill", d => color(d.value))
+        .attr("fill-opacity", 0.3)
+        .attr("stroke", "#444")
+        .attr("stroke-width", 0.5);
+      
+      updateLegend(maxVal);
+    }
+
+    function drawAxes() {
+      xAxisG.call(d3.axisBottom(x));
+      yAxisG.call(d3.axisLeft(y));
+    }
+
+    // --- 5. Legend ---
+    const legendG = svg.append("g")
+      .attr("transform", `translate(${width - margin.right + 40}, ${margin.top + 20})`);
+
+    const legendHeight = 200;
+    const legendWidth = 20;
+
+    // Gradient for legend
+    const defs = svg.select("defs");
+    const linearGradient = defs.append("linearGradient")
+      .attr("id", "legend-gradient")
+      .attr("x1", "0%").attr("y1", "100%")
+      .attr("x2", "0%").attr("y2", "0%");
+
+    linearGradient.selectAll("stop")
+      .data(d3.range(0, 1.1, 0.1))
+      .enter().append("stop")
+      .attr("offset", d => (d * 100) + "%")
+      .attr("stop-color", d => densityColor(d));
+
+    legendG.append("rect")
+      .attr("width", legendWidth)
+      .attr("height", legendHeight)
+      .style("fill", "url(#legend-gradient)")
+      .style("stroke", "#ccc");
+
+    const legendTitle = legendG.append("text")
+      .attr("class", "legend-text")
+      .attr("y", -10)
+      .text("Density");
+
+    const legendScale = d3.scaleLinear().range([legendHeight, 0]);
+    const legendAxis = legendG.append("g")
+      .attr("transform", `translate(${legendWidth}, 0)`);
+
+    function updateLegend(maxVal) {
+      legendScale.domain([0, maxVal]);
+      legendAxis.call(d3.axisRight(legendScale).ticks(5, ".2s"));
+    }
+
+    // --- 6. Interaction ---
+    const brush = d3.brush()
+      .extent([[0, 0], [chartWidth, chartHeight]])
+      .on("end", brushed);
+
+    const brushG = g.append("g")
+      .attr("class", "brush")
+      .call(brush);
+
+    function brushed(event) {
+      const selection = event.selection;
+      if (!selection) return;
+
+      const [[x0, y0], [x1, y1]] = selection;
+      const newXDomain = [x.invert(x0), x.invert(x1)];
+      const newYDomain = [y.invert(y1), y.invert(y0)];
+
+      zoomTo(newXDomain, newYDomain);
+      brushG.call(brush.move, null);
+    }
+
+    svg.on("dblclick", () => {
+      zoomTo(xInitial, yInitial);
+    });
+
+    function zoomTo(newX, newY) {
+      const xInterpolator = d3.interpolate(x.domain(), newX);
+      const yInterpolator = d3.interpolate(y.domain(), newY);
+
+      const transition = d3.transition().duration(750).ease(d3.easeCubicInOut);
+
+      d3.timer(elapsed => {
+        const t = Math.min(1, elapsed / 750);
+        const progress = d3.easeCubicInOut(t);
+        
+        x.domain(xInterpolator(progress));
+        y.domain(yInterpolator(progress));
+        
+        drawPoints();
+        drawAxes();
+        
+        if (t === 1) {
+          drawContours(); // Recompute contours at final zoom
+        }
+        
+        return t === 1;
+      });
+    }
+
+    // Axis Labels
+    g.append("text")
+      .attr("class", "axis-label")
+      .attr("x", chartWidth / 2)
+      .attr("y", chartHeight + 45)
+      .attr("text-anchor", "middle")
+      .text("Feature 1");
+
+    g.append("text")
+      .attr("class", "axis-label")
+      .attr("transform", "rotate(-90)")
+      .attr("x", -chartHeight / 2)
+      .attr("y", -45)
+      .attr("text-anchor", "middle")
+      .text("Feature 2");
+
+    // Initial Render
+    drawPoints();
+    drawAxes();
+    drawContours();
+
+    // Handle Resize
+    window.addEventListener('resize', () => {
+      const newWidth = window.innerWidth;
+      const newChartWidth = newWidth - margin.left - margin.right;
+      
+      canvas.attr("width", newWidth).style("width", newWidth + "px");
+      svg.attr("width", newWidth);
+      x.range([0, newChartWidth]);
+      
+      // Update labels and brush
+      g.select(".axis-label[text-anchor='middle']").attr("x", newChartWidth / 2);
+      brush.extent([[0, 0], [newChartWidth, chartHeight]]);
+      brushG.call(brush);
+      
+      legendG.attr("transform", `translate(${newWidth - margin.right + 40}, ${margin.top + 20})`);
+      
+      drawPoints();
+      drawAxes();
+      drawContours();
+    });
+
+  </script>
+</body>
+</html>

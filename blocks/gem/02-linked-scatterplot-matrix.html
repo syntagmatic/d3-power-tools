@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Linked Scatterplot Matrix (SPLOM)</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --text: #2d3436;
+      --border: #dfe6e9;
+      --muted: #b2bec3;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      margin: 0;
+      padding: 20px;
+    }
+    .cell-frame {
+      fill: none;
+      stroke: var(--border);
+      stroke-width: 1px;
+    }
+    .label {
+      font-size: 13px;
+      font-weight: 600;
+      fill: var(--text);
+      text-transform: capitalize;
+    }
+    .brush .selection {
+      fill: #000;
+      fill-opacity: 0.05;
+      stroke: #000;
+      stroke-opacity: 0.3;
+      stroke-width: 1px;
+    }
+    .legend {
+      font-size: 12px;
+      margin-top: 20px;
+      display: flex;
+      gap: 25px;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .legend-color {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+    }
+  </style>
+</head>
+<body>
+
+<div id="vis"></div>
+<div class="legend" id="legend"></div>
+
+<script>
+  // --- Data Generation ---
+  const seed = 42;
+  const random = d3.randomLcg(seed);
+  const species = ["setosa", "versicolor", "virginica"];
+  const columns = ["sepal_length", "sepal_width", "petal_length", "petal_width"];
+  
+  const data = [];
+  const nPoints = 200;
+  
+  // Synthetic parameters for iris-like clusters
+  const clusters = {
+    "setosa": { sl: [5.0, 0.35], sw: [3.4, 0.4], pl: [1.5, 0.2], pw: [0.2, 0.1] },
+    "versicolor": { sl: [5.9, 0.5], sw: [2.8, 0.3], pl: [4.3, 0.5], pw: [1.3, 0.2] },
+    "virginica": { sl: [6.6, 0.6], sw: [3.0, 0.3], pl: [5.6, 0.6], pw: [2.0, 0.3] }
+  };
+
+  const colRanges = {
+    sepal_length: [4, 8],
+    sepal_width: [2, 4.5],
+    petal_length: [1, 7],
+    petal_width: [0.1, 2.5]
+  };
+
+  for (let i = 0; i < nPoints; i++) {
+    const sp = species[i % 3];
+    const c = clusters[sp];
+    const d = { id: i, species: sp };
+    
+    columns.forEach(col => {
+      const key = col.split("_").map(s => s[0]).join("");
+      const [mu, sigma] = c[key];
+      const range = colRanges[col];
+      d[col] = Math.max(range[0], Math.min(range[1], d3.randomNormal.source(random)(mu, sigma)()));
+    });
+    data.push(d);
+  }
+
+  // --- Configuration ---
+  const n = columns.length;
+  const size = 160;
+  const padding = 30;
+  const margin = { top: 40, right: 20, bottom: 20, left: 100 };
+  const color = d3.scaleOrdinal()
+    .domain(species)
+    .range(["#4477AA", "#EE6677", "#228833"]); // Tol Bright Palette
+
+  const x = columns.map(c => d3.scaleLinear()
+    .domain(d3.extent(data, d => d[c]))
+    .range([padding / 2, size - padding / 2]));
+    
+  const y = x.map(s => s.copy().range([size - padding / 2, padding / 2]));
+
+  const dispatch = d3.dispatch("brush");
+
+  // --- KDE Helpers ---
+  function kernelEpanechnikov(k) {
+    return v => Math.abs(v /= k) <= 1 ? 0.75 * (1 - v * v) / k : 0;
+  }
+
+  function kde(kernel, thresholds, values) {
+    return thresholds.map(t => [t, d3.mean(values, v => kernel(t - v))]);
+  }
+
+  // --- Render ---
+  const svg = d3.select("#vis").append("svg")
+    .attr("width", size * n + margin.left + margin.right)
+    .attr("height", size * n + margin.top + margin.bottom)
+    .append("g")
+    .attr("transform", `translate(${margin.left}, ${margin.top})`);
+
+  // Column Labels (Top)
+  columns.forEach((c, i) => {
+    svg.append("text")
+      .attr("class", "label")
+      .attr("x", i * size + size / 2)
+      .attr("y", -15)
+      .attr("text-anchor", "middle")
+      .text(c.replace("_", " "));
+      
+    // Row Labels (Left)
+    svg.append("text")
+      .attr("class", "label")
+      .attr("x", -padding)
+      .attr("y", i * size + size / 2)
+      .attr("dy", "0.35em")
+      .attr("text-anchor", "end")
+      .text(c.replace("_", " "));
+  });
+
+  const cells = svg.selectAll(".cell-group")
+    .data(d3.cross(d3.range(n), d3.range(n)))
+    .join("g")
+    .attr("class", "cell-group")
+    .attr("transform", ([i, j]) => `translate(${j * size}, ${i * size})`);
+
+  cells.append("rect")
+    .attr("class", "cell-frame")
+    .attr("width", size)
+    .attr("height", size);
+
+  const circleGroups = [];
+
+  cells.each(function([i, j]) {
+    const sel = d3.select(this);
+    const colX = columns[j];
+    const colY = columns[i];
+
+    if (i === j) {
+      // Diagonal: KDE
+      const thresholds = x[i].ticks(40);
+      const bandwidth = (x[i].domain()[1] - x[i].domain()[0]) * 0.1;
+      const kernel = kernelEpanechnikov(bandwidth);
+      
+      const spDensities = species.map(sp => {
+        const values = data.filter(d => d.species === sp).map(d => d[colX]);
+        return { species: sp, density: kde(kernel, thresholds, values) };
+      });
+      
+      const maxDensity = d3.max(spDensities, s => d3.max(s.density, d => d[1]));
+      const yScaleKDE = d3.scaleLinear()
+        .domain([0, maxDensity])
+        .range([size - padding / 2, padding / 2]);
+
+      const line = d3.line()
+        .curve(d3.curveBasis)
+        .x(d => x[j](d[0]))
+        .y(d => yScaleKDE(d[1]));
+
+      spDensities.forEach(s => {
+        sel.append("path")
+          .datum(s.density)
+          .attr("fill", "none")
+          .attr("stroke", color(s.species))
+          .attr("stroke-width", 1.5)
+          .attr("d", line);
+      });
+    } else {
+      // Off-diagonal: Scatterplot
+      const circles = sel.selectAll("circle")
+        .data(data)
+        .join("circle")
+        .attr("cx", d => x[j](d[colX]))
+        .attr("cy", d => y[i](d[colY]))
+        .attr("r", 4)
+        .attr("fill", d => color(d.species))
+        .attr("fill-opacity", 0.6);
+        
+      circleGroups.push(circles);
+
+      const brush = d3.brush()
+        .extent([[0, 0], [size, size]])
+        .on("start brush end", function(event) {
+          if (event.sourceEvent === null) return;
+          if (event.selection) {
+            const [[x0, y0], [x1, y1]] = event.selection;
+            const selected = data.filter(d => 
+              x0 <= x[j](d[colX]) && x[j](d[colX]) <= x1 &&
+              y0 <= y[i](d[colY]) && y[i](d[colY]) <= y1
+            ).map(d => d.id);
+            dispatch.call("brush", this, { selected, source: [i, j] });
+          } else {
+            dispatch.call("brush", this, { selected: null, source: [i, j] });
+          }
+        });
+
+      sel.append("g")
+        .attr("class", "brush")
+        .call(brush);
+    }
+  });
+
+  dispatch.on("brush", function({ selected, source }) {
+    circleGroups.forEach(circles => {
+      circles.attr("fill-opacity", d => selected === null || selected.includes(d.id) ? 0.6 : 0.1);
+    });
+    
+    if (selected !== null) {
+      cells.each(function([i, j]) {
+        if (i !== source[0] || j !== source[1]) {
+          d3.select(this).selectAll(".brush").call(d3.brush().move, null);
+        }
+      });
+    }
+  });
+
+  // --- Legend ---
+  const legend = d3.select("#legend");
+  species.forEach(sp => {
+    const item = legend.append("div").attr("class", "legend-item");
+    item.append("div").attr("class", "legend-color").style("background-color", color(sp));
+    item.append("span").text(sp);
+  });
+</script>
+</body>
+</html>

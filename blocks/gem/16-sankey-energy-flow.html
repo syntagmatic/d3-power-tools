@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sankey Energy Flow</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://unpkg.com/d3-sankey@0.12.3/dist/d3-sankey.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f8f9fa;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        #chart-container {
+            width: 100%;
+            max-width: 1000px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+            padding: 20px;
+            position: relative;
+        }
+        .node rect {
+            cursor: move;
+            fill-opacity: 0.9;
+            shape-rendering: crispEdges;
+        }
+        .node text {
+            pointer-events: none;
+            font-size: 12px;
+            font-weight: 500;
+            fill: #333;
+        }
+        .link {
+            fill: none;
+            stroke-opacity: 0.4;
+            transition: stroke-opacity 0.2s;
+        }
+        .link:hover {
+            stroke-opacity: 0.7 !important;
+        }
+        .tooltip {
+            position: absolute;
+            padding: 8px 12px;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            border-radius: 4px;
+            font-size: 13px;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+            z-index: 10;
+        }
+        .title {
+            font-size: 24px;
+            font-weight: 700;
+            margin-bottom: 10px;
+            color: #222;
+        }
+        .subtitle {
+            font-size: 16px;
+            color: #666;
+            margin-bottom: 30px;
+        }
+        .loss-label {
+            fill: #CC3311;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div id="chart-container">
+        <div class="title">Energy Flow: Production to End Use</div>
+        <div id="total-label" class="subtitle">Total Energy: 1,000 Units</div>
+        <svg id="sankey-svg"></svg>
+        <div id="tooltip" class="tooltip"></div>
+    </div>
+
+    <script>
+        const width = 960;
+        const height = 500;
+
+        const svg = d3.select("#sankey-svg")
+            .attr("viewBox", `0 0 ${width} ${height}`)
+            .attr("preserveAspectRatio", "xMinYMin meet");
+
+        const colorScale = d3.scaleOrdinal()
+            .range(["#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE"]); // Tol Bright subset
+
+        const data = {
+            nodes: [
+                // Stage 0: Sources
+                { name: "Coal", stage: 0 }, { name: "Natural Gas", stage: 0 }, { name: "Nuclear", stage: 0 },
+                { name: "Solar", stage: 0 }, { name: "Wind", stage: 0 }, { name: "Hydro", stage: 0 },
+                // Stage 1: Generation
+                { name: "Thermal", stage: 1 }, { name: "Renewable", stage: 1 },
+                // Stage 2: Grid
+                { name: "Transmission", stage: 2 }, { name: "Transmission Loss", stage: 2, isLoss: true },
+                { name: "Distribution", stage: 2 }, { name: "Distribution Loss", stage: 2, isLoss: true },
+                // Stage 3: Sectors
+                { name: "Residential", stage: 3 }, { name: "Commercial", stage: 3 },
+                { name: "Industrial", stage: 3 }, { name: "Transport", stage: 3 },
+                // Stage 4: End Use
+                { name: "Heating", stage: 4 }, { name: "Cooling", stage: 4 }, { name: "Lighting", stage: 4 },
+                { name: "Electronics", stage: 4 }, { name: "Motors", stage: 4 }, { name: "Vehicle Motion", stage: 4 }
+            ],
+            links: [
+                // Sources -> Generation
+                { source: 0, target: 6, value: 300 }, // Coal -> Thermal
+                { source: 1, target: 6, value: 250 }, // NatGas -> Thermal
+                { source: 2, target: 6, value: 150 }, // Nuclear -> Thermal
+                { source: 3, target: 7, value: 100 }, // Solar -> Renewable
+                { source: 4, target: 7, value: 150 }, // Wind -> Renewable
+                { source: 5, target: 7, value: 50 },  // Hydro -> Renewable
+
+                // Generation -> Grid
+                { source: 6, target: 8, value: 660 }, // Thermal -> Transmission
+                { source: 6, target: 9, value: 40 },  // Thermal -> TransLoss
+                { source: 7, target: 8, value: 280 }, // Renewable -> Transmission
+                { source: 7, target: 9, value: 20 },  // Renewable -> TransLoss
+
+                // Grid -> Sectors
+                { source: 8, target: 10, value: 910 }, // Transmission -> Distribution
+                { source: 8, target: 11, value: 30 },  // Transmission -> DistLoss
+                { source: 10, target: 12, value: 250 }, // Distribution -> Residential
+                { source: 10, target: 13, value: 200 }, // Distribution -> Commercial
+                { source: 10, target: 14, value: 310 }, // Distribution -> Industrial
+                { source: 10, target: 15, value: 150 }, // Distribution -> Transport
+
+                // Sectors -> End Use
+                { source: 12, target: 16, value: 120 }, // Residential -> Heating
+                { source: 12, target: 17, value: 40 },  // Residential -> Cooling
+                { source: 12, target: 18, value: 30 },  // Residential -> Lighting
+                { source: 12, target: 19, value: 60 },  // Residential -> Electronics
+
+                { source: 13, target: 16, value: 60 },  // Commercial -> Heating
+                { source: 13, target: 17, value: 50 },  // Commercial -> Cooling
+                { source: 13, target: 18, value: 40 },  // Commercial -> Lighting
+                { source: 13, target: 19, value: 50 },  // Commercial -> Electronics
+
+                { source: 14, target: 20, value: 210 }, // Industrial -> Motors
+                { source: 14, target: 16, value: 100 }, // Industrial -> Heating
+
+                { source: 15, target: 21, value: 150 }  // Transport -> Vehicle Motion
+            ]
+        };
+
+        const sankey = d3.sankey()
+            .nodeWidth(24)
+            .nodePadding(15)
+            .extent([[40, 40], [width - 40, height - 40]]);
+
+        const { nodes, links } = sankey(data);
+
+        // Gradient links
+        const defs = svg.append("defs");
+        links.forEach((d, i) => {
+            const gradient = defs.append("linearGradient")
+                .attr("id", `gradient-${i}`)
+                .attr("gradientUnits", "userSpaceOnUse")
+                .attr("x1", d.source.x1)
+                .attr("x2", d.target.x0);
+
+            gradient.append("stop")
+                .attr("offset", "0%")
+                .attr("stop-color", d.isLoss ? "#CC3311" : colorScale(d.source.stage));
+
+            gradient.append("stop")
+                .attr("offset", "100%")
+                .attr("stop-color", d.isLoss ? "#CC3311" : colorScale(d.target.stage));
+        });
+
+        const link = svg.append("g")
+            .selectAll(".link")
+            .data(links)
+            .enter().append("path")
+            .attr("class", "link")
+            .attr("d", d3.sankeyLinkHorizontal())
+            .attr("stroke", (d, i) => d.target.isLoss || d.source.isLoss ? "#CC3311" : `url(#gradient-${i})`)
+            .attr("stroke-width", d => Math.max(1, d.width))
+            .on("mouseover", function(event, d) {
+                d3.select("#tooltip")
+                    .style("opacity", 1)
+                    .html(`${d.source.name} &rarr; ${d.target.name}<br/><b>${d.value} Units</b> (${((d.value/1000)*100).toFixed(1)}%)`);
+            })
+            .on("mousemove", function(event) {
+                d3.select("#tooltip")
+                    .style("left", (event.pageX + 10) + "px")
+                    .style("top", (event.pageY - 28) + "px");
+            })
+            .on("mouseout", function() {
+                d3.select("#tooltip").style("opacity", 0);
+            });
+
+        const node = svg.append("g")
+            .selectAll(".node")
+            .data(nodes)
+            .enter().append("g")
+            .attr("class", "node")
+            .attr("transform", d => `translate(${d.x0},${d.y0})`)
+            .call(d3.drag()
+                .subject(d => d)
+                .on("start", function() { this.parentNode.appendChild(this); })
+                .on("drag", dragmove))
+            .on("mouseover", function(event, d) {
+                // Highlight connected links
+                const connectedLinks = new Set();
+                d.sourceLinks.forEach(l => connectedLinks.add(l));
+                d.targetLinks.forEach(l => connectedLinks.add(l));
+
+                link.style("stroke-opacity", l => connectedLinks.has(l) ? 0.8 : 0.1);
+            })
+            .on("mouseout", function() {
+                link.style("stroke-opacity", 0.4);
+            });
+
+        node.append("rect")
+            .attr("height", d => d.y1 - d.y0)
+            .attr("width", sankey.nodeWidth())
+            .style("fill", d => d.isLoss ? "#CC3311" : colorScale(d.stage))
+            .append("title")
+            .text(d => `${d.name}\n${d.value} Units`);
+
+        node.append("text")
+            .attr("x", d => d.stage === 0 ? -6 : sankey.nodeWidth() + 6)
+            .attr("y", d => (d.y1 - d.y0) / 2)
+            .attr("dy", "0.35em")
+            .attr("text-anchor", d => d.stage === 0 ? "end" : "start")
+            .text(d => d.name)
+            .attr("class", d => d.isLoss ? "loss-label" : "");
+
+        function dragmove(event, d) {
+            d3.select(this)
+                .attr("transform", `translate(${d.x0},${d.y0 = Math.max(0, Math.min(height - (d.y1 - d.y0), event.y))})`);
+            sankey.update({ nodes, links });
+            link.attr("d", d3.sankeyLinkHorizontal());
+            
+            // Update gradients positions
+            links.forEach((l, i) => {
+                const grad = d3.select(`#gradient-${i}`);
+                grad.attr("x1", l.source.x1)
+                    .attr("x2", l.target.x0);
+            });
+        }
+    </script>
+</body>
+</html>

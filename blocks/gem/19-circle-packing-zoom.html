@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wikipedia Circle Packing Zoom</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #f8f9fa;
+            --text-color: #202122;
+            --border-color: #a2a9b1;
+            --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: var(--font-family);
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            margin-bottom: 10px;
+        }
+
+        #breadcrumb {
+            margin-bottom: 20px;
+            font-size: 0.9rem;
+            color: #54595d;
+            height: 1.2em;
+        }
+
+        #breadcrumb span {
+            cursor: pointer;
+            color: #3366cc;
+        }
+
+        #breadcrumb span:hover {
+            text-decoration: underline;
+        }
+
+        #breadcrumb span.current {
+            color: var(--text-color);
+            cursor: default;
+            text-decoration: none;
+            font-weight: bold;
+        }
+
+        #container {
+            width: 700px;
+            height: 700px;
+            background: white;
+            border-radius: 50%;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            position: relative;
+            cursor: pointer;
+        }
+
+        svg {
+            display: block;
+        }
+
+        circle {
+            transition: stroke-width 0.2s;
+        }
+
+        circle:hover {
+            stroke-width: 2px !important;
+        }
+
+        .label {
+            font-family: var(--font-family);
+            text-anchor: middle;
+            dominant-baseline: middle;
+            pointer-events: none;
+            fill: #333;
+            font-weight: 500;
+        }
+
+        .tooltip {
+            position: absolute;
+            padding: 8px 12px;
+            background: rgba(255, 255, 255, 0.95);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            pointer-events: none;
+            font-size: 0.85rem;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            z-index: 100;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+
+        .tooltip b {
+            display: block;
+            margin-bottom: 4px;
+            color: #000;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Wikipedia Category Explorer</h1>
+    <div id="breadcrumb"></div>
+    <div id="container"></div>
+    <div class="tooltip" id="tooltip"></div>
+
+    <script>
+        // 1. Data Generation
+        const categories = [
+            { name: "Science", sub: ["Physics", "Biology", "Chemistry", "Astronomy", "Earth Science"] },
+            { name: "Arts", sub: ["Literature", "Music", "Visual Arts", "Performing Arts", "Architecture"] },
+            { name: "History", sub: ["Ancient", "Medieval", "Modern", "Military", "Social"] },
+            { name: "Technology", sub: ["Computing", "Engineering", "AI", "Medicine", "Spaceflight", "Energy"] },
+            { name: "Geography", sub: ["Continents", "Countries", "Cities", "Oceans", "Mountains"] },
+            { name: "Sports", sub: ["Team Sports", "Athletics", "Water Sports", "Motorsport"] }
+        ];
+
+        function generateData() {
+            const root = { name: "Wikipedia", children: [] };
+            
+            categories.forEach(cat => {
+                const catNode = { name: cat.name, children: [] };
+                cat.sub.forEach(sub => {
+                    const subNode = { name: sub, children: [] };
+                    const articleCount = 5 + Math.floor(Math.random() * 8);
+                    for (let i = 0; i < articleCount; i++) {
+                        subNode.children.push({
+                            name: `${sub} Article ${i + 1}`,
+                            value: 500 + Math.floor(Math.random() * 49500)
+                        });
+                    }
+                    catNode.children.push(subNode);
+                });
+                root.children.push(catNode);
+            });
+            return root;
+        }
+
+        const data = generateData();
+
+        // 2. Setup
+        const width = 700;
+        const height = 700;
+        const tolBright = ["#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE", "#AA3377"];
+        
+        const colorScale = d3.scaleOrdinal()
+            .domain(categories.map(d => d.name))
+            .range(tolBright);
+
+        function getNodeColor(d) {
+            if (d.depth === 0) return "none";
+            
+            // Find top-level category
+            let top = d;
+            while (top.depth > 1) top = top.parent;
+            
+            const baseColor = d3.hcl(colorScale(top.data.name));
+            
+            if (d.depth === 1) return baseColor;
+            if (d.depth === 2) {
+                baseColor.c *= 0.7;
+                baseColor.l += (100 - baseColor.l) * 0.4;
+                return baseColor;
+            }
+            if (!d.children) {
+                baseColor.c *= 0.4;
+                baseColor.l += (100 - baseColor.l) * 0.7;
+                return baseColor;
+            }
+            return baseColor;
+        }
+
+        const svg = d3.select("#container").append("svg")
+            .attr("width", width)
+            .attr("height", height)
+            .attr("viewBox", `-${width / 2} -${height / 2} ${width} ${height}`)
+            .style("display", "block")
+            .style("background", "white")
+            .style("cursor", "pointer")
+            .on("click", (event) => zoom(event, root));
+
+        const pack = d3.pack()
+            .size([width, height])
+            .padding(3);
+
+        const root = d3.hierarchy(data)
+            .sum(d => d.value)
+            .sort((a, b) => b.value - a.value);
+
+        const nodes = pack(root).descendants();
+        let focus = root;
+        let view;
+
+        const g = svg.append("g");
+
+        const node = g.selectAll("g")
+            .data(nodes)
+            .join("g")
+            .attr("class", d => d.children ? "node" : "node leaf")
+            .on("mouseover", showTooltip)
+            .on("mouseout", hideTooltip)
+            .on("click", (event, d) => {
+                if (focus !== d) {
+                    zoom(event, d);
+                    event.stopPropagation();
+                }
+            });
+
+        node.append("circle")
+            .attr("fill", d => d.children ? "none" : getNodeColor(d))
+            .attr("stroke", d => d.depth > 0 ? getNodeColor(d) : "none")
+            .attr("stroke-width", d => d.children ? 1 : 0.5);
+
+        const label = g.append("g")
+            .style("fill", "#333")
+            .style("pointer-events", "none")
+            .attr("text-anchor", "middle")
+            .selectAll("text")
+            .data(nodes)
+            .join("text")
+            .attr("class", "label")
+            .style("fill-opacity", d => d.parent === root ? 1 : 0)
+            .style("display", d => d.parent === root ? "inline" : "none")
+            .text(d => d.data.name);
+
+        const tooltip = d3.select("#tooltip");
+
+        function showTooltip(event, d) {
+            if (!d.children) {
+                tooltip.style("opacity", 1)
+                    .html(`<b>${d.data.name}</b>Length: ${d.data.value.toLocaleString()} words`)
+                    .style("left", (event.pageX + 15) + "px")
+                    .style("top", (event.pageY - 15) + "px");
+            }
+        }
+
+        function hideTooltip() {
+            tooltip.style("opacity", 0);
+        }
+
+        function zoomTo(v) {
+            const k = width / v[2];
+            view = v;
+
+            label.attr("transform", d => `translate(${(d.x - v[0]) * k},${(d.y - v[1]) * k})`);
+            node.attr("transform", d => `translate(${(d.x - v[0]) * k},${(d.y - v[1]) * k})`);
+            node.select("circle").attr("r", d => d.r * k);
+
+            // LOD labels
+            label
+                .style("font-size", d => Math.max(10, d.r * k * 0.2) + "px")
+                .style("fill-opacity", d => {
+                    const r = d.r * k;
+                    // Only show labels for children of current focus or the focus itself
+                    // And only if they are big enough
+                    if (d === focus) return 0; // Don't show focus label, it's in breadcrumb
+                    if (d.parent === focus && r > 20) return 1;
+                    if (d.parent && d.parent.parent === focus && r > 40) return 0.7;
+                    return 0;
+                })
+                .style("display", d => {
+                    const r = d.r * k;
+                    if (d === focus) return "none";
+                    if (d.parent === focus && r > 20) return "inline";
+                    if (d.parent && d.parent.parent === focus && r > 40) return "inline";
+                    return "none";
+                });
+        }
+
+        function zoom(event, d) {
+            // Zoom out one level if clicking current focus or background
+            if (d === focus && d.parent) d = d.parent;
+            
+            focus = d;
+
+            const transition = svg.transition()
+                .duration(750)
+                .tween("zoom", d => {
+                    const i = d3.interpolateZoom(view, [focus.x, focus.y, focus.r * 2]);
+                    return t => zoomTo(i(t));
+                });
+
+            updateBreadcrumb();
+        }
+
+        function updateBreadcrumb() {
+            const path = focus.ancestors().reverse();
+            const breadcrumb = d3.select("#breadcrumb");
+            breadcrumb.selectAll("*").remove();
+            
+            path.forEach((d, i) => {
+                if (i > 0) breadcrumb.append("span").text(" > ").style("color", "#a2a9b1").style("cursor", "default");
+                const span = breadcrumb.append("span")
+                    .text(d.data.name)
+                    .classed("current", d === focus)
+                    .on("click", (event) => {
+                        if (d !== focus) zoom(event, d);
+                    });
+            });
+        }
+
+        // Initialize
+        view = [root.x, root.y, root.r * 2];
+        zoomTo(view);
+        updateBreadcrumb();
+
+    </script>
+</body>
+</html>

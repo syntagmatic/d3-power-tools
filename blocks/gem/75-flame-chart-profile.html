@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>CPU Profiling Flame Chart</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --color-bg: #fff;
+            --color-text: #1a1a1a;
+            --color-border: #d4d4d4;
+            --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            --font-mono: "SF Mono", Monaco, Consolas, monospace;
+        }
+        [data-theme="dark"] {
+            --color-bg: #1a1a2e;
+            --color-text: #e8e8ec;
+            --color-border: #3a3a5a;
+        }
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: var(--font-sans);
+            background: var(--color-bg);
+            color: var(--color-text);
+            overflow-x: hidden;
+        }
+        h1 { font-size: 20px; font-weight: 500; margin-bottom: 5px; }
+        .subtitle { font-size: 13px; color: #777; margin-bottom: 20px; }
+        #container {
+            position: relative;
+            width: 100%;
+            border: 1px solid var(--color-border);
+            height: 550px;
+            overflow: hidden;
+        }
+        canvas {
+            display: block;
+            cursor: crosshair;
+        }
+        svg {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+        }
+        .tooltip {
+            position: absolute;
+            background: rgba(255, 255, 255, 0.95);
+            border: 1px solid #ddd;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            pointer-events: none;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            line-height: 1.4;
+            z-index: 1000;
+            display: none;
+            color: #333;
+        }
+        .tooltip b { color: #000; }
+        .axis-label { font-size: 10px; fill: #999; }
+    </style>
+</head>
+<body>
+    <h1>CPU Profiling <b>Flame Chart</b></h1>
+    <p class="subtitle">Mock Profile: 800 frames across 8 modules. Zoom horizontally, click to focus.</p>
+
+    <div id="container">
+        <canvas id="flame-canvas"></canvas>
+        <svg id="axis-svg"></svg>
+        <div id="tooltip" class="tooltip"></div>
+    </div>
+
+    <script>
+        // --- Configuration & Data Generation ---
+        const width = document.getElementById('container').clientWidth;
+        const height = 500;
+        const axisHeight = 50;
+        const rowHeight = 18;
+        const rootValue = 5000; // 5000ms
+
+        const modules = ["Kernel", "Network", "UI", "Storage", "Auth", "Crypto", "Render", "GC"];
+        const tolColors = ["#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE", "#AA3377", "#BBBBBB", "#EECC66"];
+        const colorMap = new Map(modules.map((m, i) => [m, tolColors[i]]));
+        colorMap.set("System", "#999999");
+
+        function generateData() {
+            const frames = [{ id: "main", parentId: null, name: "main", module: "System", selfTime: 50 }];
+            let totalFrames = 1;
+            
+            function addChildren(parent, depth) {
+                if (totalFrames >= 800) return;
+                const numChildren = Math.floor(Math.random() * 4) + 1;
+                for (let i = 0; i < numChildren; i++) {
+                    if (totalFrames >= 800) break;
+                    const id = `f${totalFrames++}`;
+                    const module = depth === 0 ? modules[i % 8] : parent.module;
+                    const selfTime = Math.random() * 49 + 1; 
+                    const name = `${module}::${depth === 0 ? 'init' : 'process_' + id.slice(1)}`;
+                    frames.push({ id, parentId: parent.id, name, module, selfTime });
+                    if (depth < 6 && Math.random() > 0.4) {
+                        addChildren(frames[frames.length - 1], depth + 1);
+                    }
+                }
+            }
+            addChildren(frames[0], 0);
+            return frames;
+        }
+
+        const data = generateData();
+        const root = d3.stratify()
+            .id(d => d.id)
+            .parentId(d => d.parentId)
+            (data)
+            .sum(d => d.selfTime)
+            .sort((a, b) => b.value - a.value);
+
+        const maxDepth = root.height;
+        const partition = d3.partition()
+            .size([rootValue, (maxDepth + 1) * rowHeight]);
+
+        partition(root);
+
+        // --- Setup Canvas & SVG ---
+        const canvas = d3.select("#flame-canvas")
+            .attr("width", width)
+            .attr("height", height);
+        const context = canvas.node().getContext("2d");
+        const dpr = window.devicePixelRatio || 1;
+        canvas.attr("width", width * dpr).attr("height", height * dpr);
+        canvas.style("width", width + "px").style("height", height + "px");
+        context.scale(dpr, dpr);
+
+        const svg = d3.select("#axis-svg")
+            .attr("width", width)
+            .attr("height", height + axisHeight);
+
+        const gAxis = svg.append("g")
+            .attr("transform", `translate(0, ${height})`);
+
+        const xScale = d3.scaleLinear().domain([0, rootValue]).range([0, width]);
+        const axis = d3.axisBottom(xScale).ticks(10).tickFormat(d => d + "ms");
+        gAxis.call(axis);
+
+        // --- State ---
+        let currentTransform = d3.zoomIdentity;
+        let currentXScale = xScale;
+        let hoveredNode = null;
+
+        function getHash(s) {
+            let hash = 0;
+            for (let i = 0; i < s.length; i++) hash = s.charCodeAt(i) + ((hash << 5) - hash);
+            return hash;
+        }
+
+        function getColor(node) {
+            const base = colorMap.get(node.data.module) || "#999999";
+            const h = Math.abs(getHash(node.data.name));
+            return d3.hsl(base).brighter((h % 10) / 30 - 0.1).toString();
+        }
+
+        // --- Rendering ---
+        function render() {
+            context.clearRect(0, 0, width, height);
+            const k = currentTransform.k;
+            
+            // Draw background grid/line
+            context.strokeStyle = "#eee";
+            context.lineWidth = 1;
+            context.beginPath();
+            for (let i = 0; i <= rootValue; i += 500) {
+                const x = currentXScale(i);
+                if (x >= 0 && x <= width) {
+                    context.moveTo(x, 0);
+                    context.lineTo(x, height);
+                }
+            }
+            context.stroke();
+
+            root.each(d => {
+                const x0 = currentXScale(d.x0);
+                const x1 = currentXScale(d.x1);
+                const w = x1 - x0;
+                
+                const minW = k > 3 ? 1 : 2;
+                if (w < minW) return;
+                if (x1 < 0 || x0 > width) return;
+
+                // Flip vertically: root at bottom
+                const y0 = height - d.y1;
+                const y1 = height - d.y0;
+                const h = y1 - y0;
+
+                context.fillStyle = getColor(d);
+                if (d === hoveredNode) context.fillStyle = d3.rgb(context.fillStyle).brighter(0.5);
+                
+                context.fillRect(x0, y0, w - 0.5, h - 0.5);
+
+                const labelMinW = k > 8 ? 20 : (k > 3 ? 40 : Infinity);
+                if (w > labelMinW) {
+                    context.fillStyle = "#000";
+                    context.font = "10px sans-serif";
+                    const name = d.data.name;
+                    const textW = context.measureText(name).width;
+                    if (textW < w - 6) {
+                        context.fillText(name, x0 + 3, y0 + 12);
+                    } else {
+                        // Truncate
+                        const charW = textW / name.length;
+                        const numChars = Math.floor((w - 10) / charW);
+                        if (numChars > 1) {
+                            context.fillText(name.slice(0, numChars) + "…", x0 + 3, y0 + 12);
+                        }
+                    }
+                }
+            });
+        }
+
+        let pendingRender = false;
+        function requestRender() {
+            if (pendingRender) return;
+            pendingRender = true;
+            requestAnimationFrame(() => {
+                render();
+                pendingRender = false;
+            });
+        }
+
+        // --- Zoom ---
+        const zoom = d3.zoom()
+            .scaleExtent([1, 100])
+            .translateExtent([[0, 0], [width, height]])
+            .on("zoom", (event) => {
+                currentTransform = event.transform;
+                currentXScale = currentTransform.rescaleX(xScale);
+                gAxis.call(axis.scale(currentXScale));
+                requestRender();
+            });
+
+        d3.select("#flame-canvas").call(zoom);
+
+        // --- Interactions ---
+        function findNode(mx, my) {
+            const tx = currentXScale.invert(mx);
+            const ty = height - my;
+            let found = null;
+            
+            root.each(d => {
+                if (tx >= d.x0 && tx <= d.x1 && ty >= d.y0 && ty <= d.y1) {
+                    if (!found || d.depth > found.depth) {
+                        found = d;
+                    }
+                }
+            });
+            return found;
+        }
+
+        const tooltip = d3.select("#tooltip");
+
+        canvas.on("mousemove", (event) => {
+            const [mx, my] = d3.pointer(event);
+            const node = findNode(mx, my);
+            
+            if (node !== hoveredNode) {
+                hoveredNode = node;
+                requestRender();
+            }
+
+            if (node) {
+                const total = node.value.toFixed(1);
+                const self = node.data.selfTime.toFixed(1);
+                const pct = ((node.value / root.value) * 100).toFixed(2);
+                tooltip
+                    .style("display", "block")
+                    .style("left", (event.pageX + 10) + "px")
+                    .style("top", (event.pageY + 10) + "px")
+                    .html(`
+                        <b>${node.data.name}</b><br/>
+                        Module: ${node.data.module}<br/>
+                        Total Time: ${total}ms (${pct}%)<br/>
+                        Self Time: ${self}ms
+                    `);
+            } else {
+                tooltip.style("display", "none");
+            }
+        });
+
+        canvas.on("mouseleave", () => {
+            hoveredNode = null;
+            tooltip.style("display", "none");
+            requestRender();
+        });
+
+        canvas.on("click", (event) => {
+            const [mx, my] = d3.pointer(event);
+            const d = findNode(mx, my);
+            if (!d) return;
+
+            const k = width / (xScale(d.x1) - xScale(d.x0));
+            const tx = -xScale(d.x0) * k;
+
+            d3.select("#flame-canvas").transition().duration(500).call(
+                zoom.transform,
+                d3.zoomIdentity.scale(k).translate(tx / k, 0)
+            );
+        });
+
+        canvas.on("dblclick", () => {
+            d3.select("#flame-canvas").transition().duration(500).call(
+                zoom.transform,
+                d3.zoomIdentity
+            );
+        });
+
+        // Initial render
+        requestRender();
+
+        // Responsive
+        window.addEventListener("resize", () => {
+            const newWidth = document.getElementById('container').clientWidth;
+            xScale.range([0, newWidth]);
+            currentXScale = currentTransform.rescaleX(xScale);
+            
+            const canvasNode = d3.select("#flame-canvas").node();
+            canvasNode.width = newWidth * dpr;
+            canvasNode.style.width = newWidth + "px";
+            context.scale(dpr, dpr);
+            
+            svg.attr("width", newWidth);
+            gAxis.call(axis.scale(currentXScale));
+            requestRender();
+        });
+
+    </script>
+</body>
+</html>

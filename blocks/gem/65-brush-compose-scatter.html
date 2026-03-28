@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-Brush Composition Explorer</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #ffffff;
+            --text-color: #1a1a1a;
+            --panel-bg: #f8f9fa;
+            --border-color: #dee2e6;
+            --active-color: #4477AA;
+            --moderate-color: #EE6677;
+            --sedentary-color: #228833;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid var(--border-color);
+        }
+
+        .controls {
+            display: flex;
+            gap: 20px;
+            align-items: center;
+        }
+
+        .mode-toggle {
+            display: flex;
+            background: var(--panel-bg);
+            border-radius: 20px;
+            padding: 4px;
+            border: 1px solid var(--border-color);
+        }
+
+        .mode-toggle button {
+            border: none;
+            background: none;
+            padding: 6px 16px;
+            border-radius: 16px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+
+        .mode-toggle button.active {
+            background: var(--text-color);
+            color: white;
+        }
+
+        .stats-badge {
+            background: #e9ecef;
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-weight: bold;
+        }
+
+        .grid-container {
+            display: grid;
+            grid-template-columns: repeat(3, 300px);
+            grid-gap: 20px;
+            justify-content: center;
+        }
+
+        .panel {
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            position: relative;
+        }
+
+        .panel-title {
+            text-align: center;
+            font-size: 12px;
+            font-weight: bold;
+            padding: 5px 0;
+            color: #666;
+            text-transform: uppercase;
+        }
+
+        .axis text {
+            font-size: 10px;
+            fill: #888;
+        }
+
+        .axis line, .axis path {
+            stroke: #ddd;
+        }
+
+        .dot {
+            transition: opacity 0.2s, r 0.2s;
+        }
+
+        .brush .selection {
+            fill: rgba(0, 0, 0, 0.05);
+            stroke: #333;
+            stroke-dasharray: 4, 2;
+        }
+
+        .legend {
+            display: flex;
+            gap: 15px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+
+        /* Annotation styles */
+        .crosshair {
+            stroke: #333;
+            stroke-width: 1px;
+            pointer-events: none;
+        }
+
+        .outlier-flag {
+            fill: none;
+            stroke: #d93025;
+            stroke-width: 1.5px;
+            pointer-events: none;
+        }
+
+        .outlier-mark {
+            fill: #d93025;
+            font-size: 14px;
+            font-weight: bold;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <div>
+        <h1 style="margin:0; font-size: 24px;">Health Metric Explorer</h1>
+        <div class="legend" style="margin-top: 5px;">
+            <div class="legend-item"><div class="legend-color" style="background: var(--active-color);"></div> Active</div>
+            <div class="legend-item"><div class="legend-color" style="background: var(--moderate-color);"></div> Moderate</div>
+            <div class="legend-item"><div class="legend-color" style="background: var(--sedentary-color);"></div> Sedentary</div>
+        </div>
+    </div>
+    <div class="controls">
+        <div class="mode-toggle">
+            <button id="unionBtn" class="active">UNION (OR)</button>
+            <button id="intersectBtn">INTERSECTION (AND)</button>
+        </div>
+        <div class="stats-badge" id="selectionCount">0 selected</div>
+    </div>
+</header>
+
+<div class="grid-container" id="grid"></div>
+
+<script>
+    // Configuration
+    const width = 300;
+    const height = 250;
+    const margin = {top: 20, right: 20, bottom: 40, left: 40};
+    const n = 300;
+    const pairs = [
+        {x: "height", y: "weight", label: "Height vs Weight"},
+        {x: "age", y: "fitness_score", label: "Age vs Fitness"},
+        {x: "resting_hr", y: "systolic_bp", label: "Resting HR vs Systolic BP"},
+        {x: "weight", y: "cholesterol", label: "Weight vs Cholesterol"},
+        {x: "age", y: "systolic_bp", label: "Age vs Systolic BP"},
+        {x: "fitness_score", y: "cholesterol", label: "Fitness vs Cholesterol"}
+    ];
+
+    const colors = {
+        "Active": "#4477AA",
+        "Moderate": "#EE6677",
+        "Sedentary": "#228833"
+    };
+
+    // Data Generation
+    const groups = ["Active", "Moderate", "Sedentary"];
+    const data = Array.from({length: n}, (_, i) => {
+        const group = groups[i % 3];
+        const age = 20 + Math.random() * 50;
+        let fitness_score, resting_hr, height_val, weight_val, systolic_bp, cholesterol;
+
+        if (group === "Active") {
+            fitness_score = 70 + Math.random() * 30;
+            resting_hr = 45 + Math.random() * 15;
+            height_val = 160 + Math.random() * 35;
+            weight_val = (height_val - 100) * (0.8 + Math.random() * 0.2);
+            systolic_bp = 100 + (age * 0.3) + Math.random() * 15;
+            cholesterol = 150 + (age * 0.5) + Math.random() * 30;
+        } else if (group === "Moderate") {
+            fitness_score = 40 + Math.random() * 40;
+            resting_hr = 60 + Math.random() * 20;
+            height_val = 155 + Math.random() * 35;
+            weight_val = (height_val - 100) * (0.9 + Math.random() * 0.3);
+            systolic_bp = 110 + (age * 0.4) + Math.random() * 20;
+            cholesterol = 170 + (age * 0.7) + Math.random() * 40;
+        } else {
+            fitness_score = 10 + Math.random() * 40;
+            resting_hr = 75 + Math.random() * 25;
+            height_val = 150 + Math.random() * 35;
+            weight_val = (height_val - 100) * (1.1 + Math.random() * 0.5);
+            systolic_bp = 125 + (age * 0.5) + Math.random() * 25;
+            cholesterol = 190 + (age * 1.0) + Math.random() * 50;
+        }
+
+        return {
+            id: i,
+            group,
+            age,
+            fitness_score,
+            resting_hr,
+            height: height_val,
+            weight: weight_val,
+            systolic_bp,
+            cholesterol
+        };
+    });
+
+    // Scales
+    const domains = {
+        height: d3.extent(data, d => d.height),
+        weight: d3.extent(data, d => d.weight),
+        age: d3.extent(data, d => d.age),
+        fitness_score: d3.extent(data, d => d.fitness_score),
+        resting_hr: d3.extent(data, d => d.resting_hr),
+        systolic_bp: d3.extent(data, d => d.systolic_bp),
+        cholesterol: d3.extent(data, d => d.cholesterol)
+    };
+
+    // State
+    let compositionMode = "union"; // "union" or "intersect"
+    const activeBrushes = new Map();
+    let timeouts = [];
+
+    // Initialize Grid
+    const svgElements = [];
+    const panels = d3.select("#grid").selectAll(".panel")
+        .data(pairs)
+        .enter()
+        .append("div")
+        .attr("class", "panel")
+        .each(function(p, i) {
+            const container = d3.select(this);
+            container.append("div").attr("class", "panel-title").text(p.label);
+            
+            const svg = container.append("svg")
+                .attr("width", width)
+                .attr("height", height);
+            
+            const g = svg.append("g")
+                .attr("transform", `translate(${margin.left},${margin.top})`);
+
+            const xScale = d3.scaleLinear()
+                .domain(domains[p.x]).nice()
+                .range([0, width - margin.left - margin.right]);
+
+            const yScale = d3.scaleLinear()
+                .domain(domains[p.y]).nice()
+                .range([height - margin.top - margin.bottom, 0]);
+
+            // Axes
+            g.append("g")
+                .attr("class", "axis x-axis")
+                .attr("transform", `translate(0,${height - margin.top - margin.bottom})`)
+                .call(d3.axisBottom(xScale).ticks(5));
+
+            g.append("g")
+                .attr("class", "axis y-axis")
+                .call(d3.axisLeft(yScale).ticks(5));
+
+            // Points
+            const dots = g.selectAll(".dot")
+                .data(data)
+                .enter()
+                .append("circle")
+                .attr("class", "dot")
+                .attr("cx", d => xScale(d[p.x]))
+                .attr("cy", d => yScale(d[p.y]))
+                .attr("r", 4)
+                .attr("fill", d => colors[d.group])
+                .attr("opacity", 0.6);
+
+            // Brush
+            const brush = d3.brush()
+                .extent([[0, 0], [width - margin.left - margin.right, height - margin.top - margin.bottom]])
+                .on("start brush end", (event) => brushed(event, i, p, xScale, yScale));
+
+            g.append("g")
+                .attr("class", "brush")
+                .call(brush);
+
+            svgElements.push({g, xScale, yScale, dots, pair: p});
+        });
+
+    function brushed(event, panelIdx, pair, xScale, yScale) {
+        if (!event.selection) {
+            activeBrushes.delete(panelIdx);
+        } else {
+            activeBrushes.set(panelIdx, {
+                selection: event.selection,
+                x: xScale,
+                y: yScale,
+                pair: pair
+            });
+        }
+        updateSelection();
+    }
+
+    function updateSelection() {
+        // Clear previous timeouts and annotations
+        timeouts.forEach(t => t.stop());
+        timeouts = [];
+        svgElements.forEach(s => {
+            s.g.selectAll(".annotation").remove();
+        });
+
+        const selectedIds = new Set();
+        const brushCount = activeBrushes.size;
+
+        if (brushCount === 0) {
+            svgElements.forEach(s => s.dots.attr("opacity", 0.6).attr("r", 4));
+            d3.select("#selectionCount").text("0 selected");
+            return;
+        }
+
+        data.forEach(d => {
+            let isSelected = false;
+            const brushResults = Array.from(activeBrushes.values()).map(b => {
+                const x0 = b.selection[0][0], y0 = b.selection[0][1],
+                      x1 = b.selection[1][0], y1 = b.selection[1][1];
+                const dx = b.x(d[b.pair.x]), dy = b.y(d[b.pair.y]);
+                return dx >= x0 && dx <= x1 && dy >= y0 && dy <= y1;
+            });
+
+            if (compositionMode === "union") {
+                isSelected = brushResults.some(r => r);
+            } else {
+                isSelected = brushResults.every(r => r);
+            }
+
+            if (isSelected) selectedIds.add(d.id);
+        });
+
+        // Apply visual styles
+        svgElements.forEach(s => {
+            s.dots.each(function(d) {
+                const sel = d3.select(this);
+                if (selectedIds.has(d.id)) {
+                    sel.attr("opacity", 1).attr("r", 5);
+                } else {
+                    sel.attr("opacity", 0.1).attr("r", 4);
+                }
+            });
+        });
+
+        const selectedCount = selectedIds.size;
+        d3.select("#selectionCount").text(`${selectedCount} selected`);
+
+        if (selectedCount > 0) {
+            scheduleProgressiveAnnotations(selectedIds);
+        }
+    }
+
+    function scheduleProgressiveAnnotations(selectedIds) {
+        const selectedData = data.filter(d => selectedIds.has(d.id));
+        
+        // Stage 2: Mean Crosshair (+500ms)
+        timeouts.push(d3.timeout(() => {
+            svgElements.forEach(s => {
+                const meanX = d3.mean(selectedData, d => d[s.pair.x]);
+                const meanY = d3.mean(selectedData, d => d[s.pair.y]);
+                const px = s.xScale(meanX);
+                const py = s.yScale(meanY);
+
+                const group = s.g.append("g").attr("class", "annotation");
+                
+                group.append("line")
+                    .attr("class", "crosshair")
+                    .attr("x1", px - 15).attr("y1", py)
+                    .attr("x2", px + 15).attr("y2", py);
+                
+                group.append("line")
+                    .attr("class", "crosshair")
+                    .attr("x1", px).attr("y1", py - 15)
+                    .attr("x2", px).attr("y2", py + 15);
+                
+                group.append("circle")
+                    .attr("cx", px).attr("cy", py).attr("r", 3)
+                    .attr("fill", "#333");
+            });
+        }, 500));
+
+        // Stage 3: Outlier Flags (+1000ms)
+        timeouts.push(d3.timeout(() => {
+            svgElements.forEach(s => {
+                const valsX = selectedData.map(d => d[s.pair.x]);
+                const valsY = selectedData.map(d => d[s.pair.y]);
+                const meanX = d3.mean(valsX), stdX = d3.deviation(valsX) || 0;
+                const meanY = d3.mean(valsY), stdY = d3.deviation(valsY) || 0;
+
+                const outliers = selectedData.filter(d => {
+                    const devX = Math.abs(d[s.pair.x] - meanX);
+                    const devY = Math.abs(d[s.pair.y] - meanY);
+                    return devX > 2 * stdX || devY > 2 * stdY;
+                });
+
+                const group = s.g.append("g").attr("class", "annotation");
+
+                outliers.forEach(o => {
+                    const px = s.xScale(o[s.pair.x]);
+                    const py = s.yScale(o[s.pair.y]);
+                    
+                    group.append("circle")
+                        .attr("class", "outlier-flag")
+                        .attr("cx", px).attr("cy", py)
+                        .attr("r", 8);
+                    
+                    group.append("text")
+                        .attr("class", "outlier-mark")
+                        .attr("x", px + 6).attr("y", py - 6)
+                        .text("!");
+                });
+            });
+        }, 1000));
+    }
+
+    // Toggle logic
+    d3.select("#unionBtn").on("click", function() {
+        compositionMode = "union";
+        d3.select(this).classed("active", true);
+        d3.select("#intersectBtn").classed("active", false);
+        updateSelection();
+    });
+
+    d3.select("#intersectBtn").on("click", function() {
+        compositionMode = "intersect";
+        d3.select(this).classed("active", true);
+        d3.select("#unionBtn").classed("active", false);
+        updateSelection();
+    });
+
+</script>
+</body>
+</html>

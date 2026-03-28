@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Annotation Techniques — Stock Price Analysis</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f8f9fa;
+            color: #333;
+            display: flex;
+            justify-content: center;
+        }
+        .container {
+            width: 100%;
+            max-width: 900px;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+        }
+        h1 {
+            font-size: 1.5rem;
+            margin-bottom: 0.5rem;
+            text-align: center;
+        }
+        .chart-container {
+            width: 100%;
+            height: auto;
+        }
+        .axis path, .axis line {
+            stroke: #ccc;
+        }
+        .axis text {
+            fill: #666;
+            font-size: 11px;
+        }
+        .line {
+            fill: none;
+            stroke: #4477AA;
+            stroke-width: 1.5px;
+        }
+        .area {
+            fill: #4477AA;
+            opacity: 0.1;
+        }
+        .threshold-band {
+            opacity: 0.15;
+        }
+        .threshold-label {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .event-marker {
+            stroke: #999;
+            stroke-dasharray: 4,4;
+            stroke-width: 1px;
+        }
+        .event-label {
+            font-size: 9px;
+            fill: #888;
+        }
+        .diamond {
+            fill: #666;
+        }
+        .trend-line {
+            stroke: #666;
+            stroke-dasharray: 6,3;
+            stroke-width: 1px;
+        }
+        .trend-label {
+            font-size: 11px;
+            font-style: italic;
+            fill: #444;
+        }
+        .range-annotation line {
+            stroke: #444;
+            stroke-width: 1px;
+        }
+        .range-label {
+            font-size: 10px;
+            fill: #444;
+            text-anchor: middle;
+        }
+        .callout-circle {
+            fill: #4477AA;
+            stroke: white;
+            stroke-width: 2px;
+        }
+        .callout-line {
+            fill: none;
+            stroke: #666;
+            stroke-width: 1px;
+        }
+        .callout-box {
+            fill: white;
+            stroke: #ccc;
+            stroke-width: 1px;
+            rx: 4;
+            ry: 4;
+        }
+        .callout-text {
+            font-size: 11px;
+            fill: #333;
+        }
+        .callout-date {
+            font-weight: bold;
+            font-size: 10px;
+            fill: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Annotation Techniques — Stock Price Analysis</h1>
+        <div id="chart" class="chart-container"></div>
+    </div>
+
+    <script>
+        // 1. DATA GENERATION
+        const nDays = 500;
+        const startDate = new Date(2024, 0, 1);
+        const data = [];
+        let price = 100;
+        const drift = 0.05; // slight upward drift
+        const volatility = 1.5;
+
+        // Crash parameters
+        const crashStart = 180;
+        const crashEnd = 202; // ~22 trading days total window
+        const crashBottom = 194; // peak intensity
+        
+        // Recovery parameters
+        const recoveryStart = 203;
+        const recoveryEnd = 300;
+
+        for (let i = 0; i < nDays; i++) {
+            const date = new Date(startDate);
+            date.setDate(startDate.getDate() + i);
+
+            let change = (Math.random() - 0.5) * volatility + drift;
+
+            // Apply crash logic
+            if (i >= crashStart && i <= crashBottom) {
+                // Accelerating drop
+                change -= (i - crashStart) * 0.2 + 2; 
+            } else if (i > crashBottom && i <= crashEnd) {
+                // Stabilizing
+                change += (i - crashBottom) * 0.3;
+            } else if (i > crashEnd && i <= recoveryEnd) {
+                // Faster recovery drift
+                change += 0.15;
+            }
+
+            price += change;
+            if (price < 10) price = 10; // floor
+
+            data.push({ date, price, index: i });
+        }
+
+        // Find key events for annotations
+        const crashStartEvent = data[crashStart];
+        const crashBottomEvent = data.reduce((a, b) => (a.price < b.price ? a : b), data[0]);
+        const allTimeHighEvent = data.reduce((a, b) => (a.price > b.price ? a : b), data[0]);
+
+        // 2. CHART SETUP
+        const width = 800;
+        const height = 450;
+        const margin = { top: 60, right: 120, bottom: 40, left: 60 };
+        const innerWidth = width - margin.left - margin.right;
+        const innerHeight = height - margin.top - margin.bottom;
+
+        const svg = d3.select("#chart")
+            .append("svg")
+            .attr("viewBox", `0 0 ${width} ${height}`)
+            .append("g")
+            .attr("transform", `translate(${margin.left},${margin.top})`);
+
+        const x = d3.scaleTime()
+            .domain(d3.extent(data, d => d.date))
+            .range([0, innerWidth]);
+
+        const y = d3.scaleLinear()
+            .domain([Math.min(50, d3.min(data, d => d.price) - 10), d3.max(data, d => d.price) + 10])
+            .range([innerHeight, 0]);
+
+        // 3. DRAW MAIN CHART
+        // Area fill
+        const area = d3.area()
+            .x(d => x(d.date))
+            .y0(innerHeight)
+            .y1(d => y(d.price))
+            .curve(d3.curveMonotoneX);
+
+        svg.append("path")
+            .datum(data)
+            .attr("class", "area")
+            .attr("d", area);
+
+        // Line
+        const line = d3.line()
+            .x(d => x(d.date))
+            .y(d => y(d.price))
+            .curve(d3.curveMonotoneX);
+
+        svg.append("path")
+            .datum(data)
+            .attr("class", "line")
+            .attr("d", line);
+
+        // Axes
+        svg.append("g")
+            .attr("class", "axis x-axis")
+            .attr("transform", `translate(0,${innerHeight})`)
+            .call(d3.axisBottom(x).ticks(d3.timeMonth.every(2)).tickFormat(d3.timeFormat("%b %y")));
+
+        svg.append("g")
+            .attr("class", "axis y-axis")
+            .call(d3.axisLeft(y).tickFormat(d => `$${d}`));
+
+        // 4. ANNOTATIONS
+
+        // --- 4.2 THRESHOLD BANDS ---
+        const bands = [
+            { y0: 120, y1: 130, label: "Target Range", color: "#28a745" },
+            { y0: 70, y1: 80, label: "Danger Zone", color: "#dc3545" }
+        ];
+
+        const bandLayer = svg.insert("g", ".area").attr("class", "bands");
+
+        bands.forEach(b => {
+            bandLayer.append("rect")
+                .attr("class", "threshold-band")
+                .attr("x", 0)
+                .attr("y", y(b.y1))
+                .attr("width", innerWidth)
+                .attr("height", Math.abs(y(b.y1) - y(b.y0)))
+                .attr("fill", b.color);
+
+            bandLayer.append("text")
+                .attr("class", "threshold-label")
+                .attr("x", innerWidth - 5)
+                .attr("y", y(b.y1) + 12)
+                .attr("text-anchor", "end")
+                .attr("fill", b.color)
+                .text(b.label);
+        });
+
+        // --- 4.3 EVENT MARKERS ---
+        const earningsDates = [
+            new Date(2024, 2, 15),
+            new Date(2024, 5, 15),
+            new Date(2024, 8, 15),
+            new Date(2024, 11, 15),
+            new Date(2025, 2, 15)
+        ];
+
+        const markerLayer = svg.append("g").attr("class", "markers");
+
+        earningsDates.forEach(d => {
+            const xPos = x(d);
+            markerLayer.append("line")
+                .attr("class", "event-marker")
+                .attr("x1", xPos)
+                .attr("x2", xPos)
+                .attr("y1", 0)
+                .attr("y2", innerHeight);
+
+            markerLayer.append("path")
+                .attr("class", "diamond")
+                .attr("d", d3.symbol().type(d3.symbolDiamond).size(40))
+                .attr("transform", `translate(${xPos}, 0)`);
+
+            markerLayer.append("text")
+                .attr("class", "event-label")
+                .attr("x", xPos)
+                .attr("y", -8)
+                .attr("text-anchor", "start")
+                .attr("transform", `rotate(-45, ${xPos}, -8)`)
+                .text(d3.timeFormat("%b %d")(d) + " Earnings");
+        });
+
+        // --- 4.4 TREND LINE ---
+        // Recovery period regression
+        const recoveryData = data.slice(recoveryStart, recoveryEnd);
+        const xMean = d3.mean(recoveryData, d => d.index);
+        const yMean = d3.mean(recoveryData, d => d.price);
+        const num = d3.sum(recoveryData, d => (d.index - xMean) * (d.price - yMean));
+        const den = d3.sum(recoveryData, d => Math.pow(d.index - xMean, 2));
+        const slope = num / den;
+        const intercept = yMean - slope * xMean;
+
+        const trendPoints = [recoveryData[0], recoveryData[recoveryData.length-1]];
+        const x1 = x(trendPoints[0].date);
+        const y1 = y(slope * trendPoints[0].index + intercept);
+        const x2 = x(trendPoints[1].date);
+        const y2 = y(slope * trendPoints[1].index + intercept);
+
+        svg.append("line")
+            .attr("class", "trend-line")
+            .attr("x1", x1)
+            .attr("y1", y1)
+            .attr("x2", x2)
+            .attr("y2", y2);
+
+        svg.append("text")
+            .attr("class", "trend-label")
+            .attr("x", x2 + 5)
+            .attr("y", y2)
+            .attr("alignment-baseline", "middle")
+            .text(`Recovery Trend (+$${slope.toFixed(2)}/day)`);
+
+        // --- 4.5 RANGE ANNOTATION ---
+        const rangeX1 = x(data[crashStart].date);
+        const rangeX2 = x(data[crashEnd].date);
+        const rangeY = y(60);
+
+        const rangeGroup = svg.append("g").attr("class", "range-annotation");
+        
+        // Double-headed arrow
+        rangeGroup.append("line")
+            .attr("x1", rangeX1)
+            .attr("x2", rangeX2)
+            .attr("y1", rangeY)
+            .attr("y2", rangeY);
+
+        rangeGroup.append("line") // Start cap
+            .attr("x1", rangeX1).attr("x2", rangeX1)
+            .attr("y1", rangeY-5).attr("y2", rangeY+5);
+
+        rangeGroup.append("line") // End cap
+            .attr("x1", rangeX2).attr("x2", rangeX2)
+            .attr("y1", rangeY-5).attr("y2", rangeY+5);
+
+        rangeGroup.append("text")
+            .attr("class", "range-label")
+            .attr("x", (rangeX1 + rangeX2) / 2)
+            .attr("y", rangeY + 15)
+            .text("22 trading days");
+
+        // --- 4.1 & 4.6 CALLOUT LABELS WITH FORCE ---
+        const callouts = [
+            { 
+                target: crashStartEvent, 
+                title: "Correction Triggered", 
+                body: "Global supply chain disruption leads to sell-off.",
+                dx: -60, dy: -80
+            },
+            { 
+                target: crashBottomEvent, 
+                title: "Cycle Bottom", 
+                body: "Oversold conditions met; institutional buying resumes.",
+                dx: 40, dy: 40
+            },
+            { 
+                target: allTimeHighEvent, 
+                title: "New All-Time High", 
+                body: "Earnings beat expectations, driven by tech growth.",
+                dx: 50, dy: -60
+            }
+        ];
+
+        // Prepare nodes for force simulation
+        const nodes = callouts.map((c, i) => ({
+            id: i,
+            fx: x(c.target.date) + c.dx, // Initial position based on desired offset
+            fy: y(c.target.price) + c.dy,
+            targetX: x(c.target.date),
+            targetY: y(c.target.price),
+            width: 140,
+            height: 45,
+            ...c
+        }));
+
+        // Simple force simulation to avoid overlap
+        // We'll run it statically
+        const simulation = d3.forceSimulation(nodes)
+            .force("x", d3.forceX(d => d.fx).strength(0.1))
+            .force("y", d3.forceY(d => d.fy).strength(0.1))
+            .force("collide", d3.forceCollide().radius(60))
+            .stop();
+
+        for (let i = 0; i < 100; i++) simulation.tick();
+
+        const calloutLayer = svg.append("g").attr("class", "callouts");
+
+        nodes.forEach(n => {
+            const g = calloutLayer.append("g")
+                .attr("transform", `translate(${n.x},${n.y})`);
+
+            // Elbow connector
+            // M target -> L corner -> L box
+            // We'll calculate a simple elbow: move horizontal then vertical
+            const dx = n.x - n.targetX;
+            const dy = n.y - n.targetY;
+            
+            const pathData = `M${n.targetX - n.x},${n.targetY - n.y} L0,${n.targetY - n.y} L0,0`;
+            
+            g.append("path")
+                .attr("class", "callout-line")
+                .attr("d", pathData);
+
+            // Box
+            g.append("rect")
+                .attr("class", "callout-box")
+                .attr("x", -70)
+                .attr("y", -22)
+                .attr("width", 140)
+                .attr("height", 45);
+
+            // Text
+            g.append("text")
+                .attr("class", "callout-date")
+                .attr("x", -65)
+                .attr("y", -8)
+                .text(d3.timeFormat("%B %d, %Y")(n.target.date));
+
+            g.append("text")
+                .attr("class", "callout-text")
+                .attr("x", -65)
+                .attr("y", 6)
+                .text(n.title)
+                .style("font-weight", "bold");
+
+            // Wrap body text
+            const body = g.append("text")
+                .attr("class", "callout-text")
+                .attr("x", -65)
+                .attr("y", 18)
+                .style("font-size", "9px");
+            
+            const words = n.body.split(/\s+/);
+            let line = [];
+            let lineNum = 0;
+            const maxWidth = 130;
+            
+            words.forEach(word => {
+                line.push(word);
+                const testLine = line.join(" ");
+                if (testLine.length > 25) { // Simple char-based wrap for speed
+                    body.append("tspan")
+                        .attr("x", -65)
+                        .attr("dy", lineNum === 0 ? 0 : "1.1em")
+                        .text(line.slice(0, -1).join(" "));
+                    line = [word];
+                    lineNum++;
+                }
+            });
+            body.append("tspan")
+                .attr("x", -65)
+                .attr("dy", lineNum === 0 ? 0 : "1.1em")
+                .text(line.join(" "));
+
+            // Anchor point circle
+            svg.append("circle")
+                .attr("class", "callout-circle")
+                .attr("cx", n.targetX)
+                .attr("cy", n.targetY)
+                .attr("r", 4);
+        });
+
+    </script>
+</body>
+</html>

@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>5M Point WebGL Density Heatmap</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #050505;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            color: white;
+        }
+        canvas {
+            display: block;
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+        svg {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+        }
+        .axis line, .axis path {
+            stroke: #444;
+        }
+        .axis text {
+            fill: #888;
+            font-size: 10px;
+        }
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            pointer-events: none;
+            text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+        }
+        .badge {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            backdrop-filter: blur(4px);
+        }
+        #legend {
+            position: absolute;
+            bottom: 30px;
+            right: 30px;
+            width: 200px;
+            height: 40px;
+            pointer-events: none;
+        }
+        .legend-bar {
+            width: 100%;
+            height: 10px;
+            background: linear-gradient(to right, #000, #00f, #0ff, #ff0, #fff);
+            border: 1px solid #444;
+        }
+        .legend-labels {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 5px;
+            font-size: 10px;
+            color: #888;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="glCanvas"></canvas>
+    <svg id="overlay"></svg>
+    <div id="ui">
+        <div id="mode-badge" class="badge">Density view</div>
+        <div id="point-count" style="font-size: 10px; margin-top: 4px; color: #aaa;">5,000,000 points</div>
+    </div>
+    <div id="legend">
+        <div class="legend-bar"></div>
+        <div class="legend-labels">
+            <span>Low Density</span>
+            <span>High</span>
+        </div>
+    </div>
+
+<script>
+const N = 5_000_000;
+const width = window.innerWidth;
+const height = window.innerHeight;
+const dpr = window.devicePixelRatio || 1;
+
+// Data generation
+function generateData(n) {
+    const pos = new Float32Array(n * 2);
+    const clusters = new Uint8Array(n);
+    const rng = d3.randomNormal.source(d3.randomLcg(0.42));
+    
+    const centers = [
+        { x: 0.25, y: 0.25, s: 0.05 },
+        { x: 0.75, y: 0.25, s: 0.08 },
+        { x: 0.25, y: 0.75, s: 0.06 },
+        { x: 0.75, y: 0.75, s: 0.10 }
+    ];
+
+    for (let i = 0; i < n; i++) {
+        const cIdx = i % 4;
+        const c = centers[cIdx];
+        pos[i * 2] = rng(c.x, c.s)();
+        pos[i * 2 + 1] = rng(c.y, c.s)();
+        clusters[i] = cIdx;
+    }
+    return { pos, clusters };
+}
+
+const { pos: posData, clusters: clusterData } = generateData(N);
+
+// Tol Bright colors
+const tolColors = [
+    [0.266, 0.466, 0.666], // #4477AA
+    [0.933, 0.4, 0.466],   // #EE6677
+    [0.133, 0.533, 0.2],   // #228833
+    [0.8, 0.733, 0.266]    // #CCBB44
+];
+
+// WebGL Initialization
+const canvas = document.getElementById('glCanvas');
+canvas.width = width * dpr;
+canvas.height = height * dpr;
+canvas.style.width = `${width}px`;
+canvas.style.height = `${height}px`;
+
+const gl = canvas.getContext('webgl2', { antialias: false, alpha: false });
+if (!gl) {
+    alert('WebGL 2 not supported');
+}
+
+// Shaders
+const densityVs = `#version 300 es
+layout(location = 0) in vec2 a_pos;
+uniform vec2 u_translate;
+uniform float u_scale;
+uniform vec2 u_resolution;
+
+void main() {
+    vec2 pos = a_pos * u_scale + u_translate;
+    vec2 clip = (pos * 2.0 - 1.0);
+    clip.y = -clip.y;
+    gl_Position = vec4(clip, 0.0, 1.0);
+    gl_PointSize = 2.0; // Kernel size for density
+}
+`;
+
+const densityFs = `#version 300 es
+precision mediump float;
+out vec4 fragColor;
+void main() {
+    float r = length(gl_PointCoord - 0.5) * 2.0;
+    if (r > 1.0) discard;
+    float alpha = exp(-r * r * 4.0); // Gaussian splat
+    fragColor = vec4(vec3(alpha * 0.15), 1.0);
+}
+`;
+
+const postVs = `#version 300 es
+layout(location = 0) in vec2 a_pos;
+out vec2 v_uv;
+void main() {
+    v_uv = a_pos * 0.5 + 0.5;
+    gl_Position = vec4(a_pos, 0.0, 1.0);
+}
+`;
+
+const postFs = `#version 300 es
+precision mediump float;
+uniform sampler2D u_tex;
+uniform sampler2D u_ramp;
+in vec2 v_uv;
+out vec4 fragColor;
+void main() {
+    float val = texture(u_tex, v_uv).r;
+    fragColor = texture(u_ramp, vec2(clamp(val, 0.001, 0.999), 0.5));
+}
+`;
+
+const pointsVs = `#version 300 es
+layout(location = 0) in vec2 a_pos;
+layout(location = 1) in uint a_cluster;
+uniform vec2 u_translate;
+uniform float u_scale;
+uniform vec2 u_resolution;
+uniform float u_dpr;
+out vec3 v_color;
+flat out uint v_visible;
+
+void main() {
+    vec2 pos = a_pos * u_scale + u_translate;
+    
+    // Frustum culling
+    if (pos.x < 0.0 || pos.x > 1.0 || pos.y < 0.0 || pos.y > 1.0) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        v_visible = 0u;
+    } else {
+        vec2 clip = (pos * 2.0 - 1.0);
+        clip.y = -clip.y;
+        gl_Position = vec4(clip, 0.0, 1.0);
+        gl_PointSize = max(3.0, 1.0 * u_scale/20.0) * u_dpr;
+        v_visible = 1u;
+    }
+
+    if (a_cluster == 0u) v_color = vec3(0.266, 0.466, 0.666);
+    else if (a_cluster == 1u) v_color = vec3(0.933, 0.4, 0.466);
+    else if (a_cluster == 2u) v_color = vec3(0.133, 0.533, 0.2);
+    else v_color = vec3(0.8, 0.733, 0.266);
+}
+`;
+
+const pointsFs = `#version 300 es
+precision mediump float;
+in vec3 v_color;
+flat in uint v_visible;
+out vec4 fragColor;
+void main() {
+    if (v_visible == 0u) discard;
+    float dist = length(gl_PointCoord - 0.5);
+    if (dist > 0.5) discard;
+    float alpha = 1.0 - smoothstep(0.4, 0.5, dist);
+    fragColor = vec4(v_color, alpha);
+}
+`;
+
+function createProgram(vsSource, fsSource) {
+    const vs = gl.createShader(gl.VERTEX_SHADER);
+    gl.shaderSource(vs, vsSource);
+    gl.compileShader(vs);
+    const fs = gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(fs, fsSource);
+    gl.compileShader(fs);
+    const prog = gl.createProgram();
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    return prog;
+}
+
+const densityProg = createProgram(densityVs, densityFs);
+const postProg = createProgram(postVs, postFs);
+const pointsProg = createProgram(pointsVs, pointsFs);
+
+// Buffers
+const posBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+gl.bufferData(gl.ARRAY_BUFFER, posData, gl.STATIC_DRAW);
+
+const clusterBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, clusterBuf);
+gl.bufferData(gl.ARRAY_BUFFER, clusterData, gl.STATIC_DRAW);
+
+const quadBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
+
+// Framebuffer for density
+const densityTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, densityTex);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, width * dpr, height * dpr, 0, gl.RED, gl.FLOAT, null);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+const fb = gl.createFramebuffer();
+gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, densityTex, 0);
+
+if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+    // Fallback to half float or rgba if R32F is not supported
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width * dpr, height * dpr, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+}
+
+// Color ramp texture
+const rampTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, rampTex);
+const rampData = new Uint8Array([
+    0, 0, 0, 255,      // black
+    0, 0, 255, 255,    // blue
+    0, 255, 255, 255,  // cyan
+    255, 255, 0, 255,  // yellow
+    255, 255, 255, 255 // white
+]);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 5, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, rampData);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+// D3 Zoom and Axes
+const xScale = d3.scaleLinear().domain([0, 1]).range([0, width]);
+const yScale = d3.scaleLinear().domain([0, 1]).range([0, height]);
+
+const svg = d3.select('#overlay')
+    .attr('width', width)
+    .attr('height', height);
+
+const gX = svg.append('g').attr('class', 'axis').attr('transform', `translate(0, ${height - 20})`);
+const gY = svg.append('g').attr('class', 'axis').attr('transform', `translate(20, 0)`);
+
+const xAxis = d3.axisBottom(xScale).ticks(10).tickSize(-height);
+const yAxis = d3.axisLeft(yScale).ticks(10).tickSize(-width);
+
+let transform = d3.zoomIdentity;
+let mode = 'density'; // 'density' or 'points'
+
+const zoom = d3.zoom()
+    .scaleExtent([1, 200])
+    .on('zoom', (e) => {
+        transform = e.transform;
+        const k = transform.k;
+        
+        // LOD Hysteresis
+        if (mode === 'density' && k >= 4) {
+            mode = 'points';
+            d3.select('#mode-badge').text('Point view');
+        } else if (mode === 'points' && k < 2) {
+            mode = 'density';
+            d3.select('#mode-badge').text('Density view');
+        }
+        
+        gX.call(xAxis.scale(e.transform.rescaleX(xScale)));
+        gY.call(yAxis.scale(e.transform.rescaleY(yScale)));
+        
+        render();
+    });
+
+d3.select('body').call(zoom);
+gX.call(xAxis);
+gY.call(yAxis);
+
+function render() {
+    gl.viewport(0, 0, width * dpr, height * dpr);
+    
+    const uTrans = [transform.x / width, transform.y / height];
+    const uScale = transform.k;
+
+    if (mode === 'density') {
+        // Pass 1: Accumulate
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.ONE, gl.ONE);
+        
+        gl.useProgram(densityProg);
+        gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+        
+        gl.uniform2f(gl.getUniformLocation(densityProg, 'u_translate'), uTrans[0], uTrans[1]);
+        gl.uniform1f(gl.getUniformLocation(densityProg, 'u_scale'), uScale);
+        gl.uniform2f(gl.getUniformLocation(densityProg, 'u_resolution'), width, height);
+        
+        gl.drawArrays(gl.POINTS, 0, N);
+        
+        // Pass 2: Post-process
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.disable(gl.BLEND);
+        gl.useProgram(postProg);
+        gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+        
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, densityTex);
+        gl.uniform1i(gl.getUniformLocation(postProg, 'u_tex'), 0);
+        
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, rampTex);
+        gl.uniform1i(gl.getUniformLocation(postProg, 'u_ramp'), 1);
+        
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+    } else {
+        // Points Mode
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.clearColor(0.02, 0.02, 0.02, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        
+        gl.useProgram(pointsProg);
+        
+        gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+        
+        gl.bindBuffer(gl.ARRAY_BUFFER, clusterBuf);
+        gl.enableVertexAttribArray(1);
+        gl.vertexAttribIPointer(1, 1, gl.UNSIGNED_BYTE, 0, 0);
+        
+        gl.uniform2f(gl.getUniformLocation(pointsProg, 'u_translate'), uTrans[0], uTrans[1]);
+        gl.uniform1f(gl.getUniformLocation(pointsProg, 'u_scale'), uScale);
+        gl.uniform2f(gl.getUniformLocation(pointsProg, 'u_resolution'), width, height);
+        gl.uniform1f(gl.getUniformLocation(pointsProg, 'u_dpr'), dpr);
+        
+        gl.drawArrays(gl.POINTS, 0, N);
+    }
+}
+
+// Handle window resize
+window.onresize = () => {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    canvas.style.width = `${w}px`;
+    canvas.style.height = `${h}px`;
+    
+    gl.bindTexture(gl.TEXTURE_2D, densityTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, w * dpr, h * dpr, 0, gl.RED, gl.FLOAT, null);
+    
+    svg.attr('width', w).attr('height', h);
+    xScale.range([0, w]);
+    yScale.range([0, h]);
+    xAxis.tickSize(-h);
+    yAxis.tickSize(-w);
+    gX.attr('transform', `translate(0, ${h - 20})`);
+    
+    render();
+};
+
+render();
+</script>
+</body>
+</html>

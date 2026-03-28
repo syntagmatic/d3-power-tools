@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Accessible Canvas Scatterplot</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg: #ffffff;
+            --text: #1a1a1a;
+            --primary: #4477AA;
+            --focus: #EE6677;
+            --border: #dddddd;
+            --row-hover: #f5f5f5;
+            --row-selected: #e8f0fe;
+            --row-focused: #fff9c4;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 20px;
+            color: var(--text);
+            background: var(--bg);
+        }
+
+        .controls {
+            margin-bottom: 20px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        button {
+            padding: 8px 16px;
+            cursor: pointer;
+            background: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-weight: 500;
+        }
+
+        button:hover {
+            opacity: 0.9;
+        }
+
+        .viz-container {
+            position: relative;
+            width: 700px;
+            height: 500px;
+            border: 1px solid var(--border);
+            margin-bottom: 20px;
+            outline: none;
+        }
+
+        .viz-container:focus-within {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 2px rgba(68, 119, 170, 0.2);
+        }
+
+        canvas, svg {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+
+        svg {
+            pointer-events: none;
+        }
+
+        .axis text {
+            font-size: 12px;
+            fill: #666;
+        }
+
+        .axis path, .axis line {
+            stroke: #ccc;
+        }
+
+        #table-view {
+            width: 700px;
+            max-height: 500px;
+            overflow-y: auto;
+            border: 1px solid var(--border);
+            display: none;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+
+        th {
+            position: sticky;
+            top: 0;
+            background: #eee;
+            padding: 10px;
+            text-align: left;
+            cursor: pointer;
+            user-select: none;
+            border-bottom: 2px solid var(--border);
+        }
+
+        th:hover {
+            background: #e0e0e0;
+        }
+
+        th.num { text-align: right; }
+        td.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+        td {
+            padding: 8px 10px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        tr.focused { background: var(--row-focused) !important; }
+        tr.selected { background: var(--row-selected); }
+        tr:hover { background: var(--row-hover); }
+
+        .selection-list {
+            width: 700px;
+            margin-top: 20px;
+            padding: 15px;
+            background: #f9f9f9;
+            border-radius: 4px;
+        }
+
+        .selection-list h3 { margin-top: 0; }
+        .selection-tag {
+            display: inline-block;
+            background: var(--primary);
+            color: white;
+            padding: 4px 8px;
+            border-radius: 12px;
+            margin: 4px;
+            font-size: 12px;
+        }
+
+        .sr-only {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Demographic Income Analysis</h1>
+    
+    <div class="controls">
+        <button id="toggle-view" aria-pressed="false">Show Data Table</button>
+        <span id="summary-stats" aria-live="polite"></span>
+    </div>
+
+    <div id="chart-view">
+        <div id="canvas-container" class="viz-container" tabindex="0" role="img" aria-label="Scatterplot of Age vs Income. Use arrow keys to navigate points, Enter to select.">
+            <canvas id="main-canvas"></canvas>
+            <svg id="overlay-svg"></svg>
+        </div>
+    </div>
+
+    <div id="table-view">
+        <table id="data-table">
+            <thead>
+                <tr>
+                    <th data-key="label">Name</th>
+                    <th data-key="x" class="num">Age</th>
+                    <th data-key="y" class="num">Income ($)</th>
+                    <th data-key="category">Group</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <div id="announcement" class="sr-only" aria-live="assertive"></div>
+
+    <div class="selection-list">
+        <h3>Selected Points</h3>
+        <div id="selected-tags">None selected</div>
+    </div>
+
+    <script>
+        // 1. Data Generation
+        const n = 1500;
+        const categories = ["A", "B", "C", "D"];
+        const names = ["James", "Mary", "Robert", "Patricia", "John", "Jennifer", "Michael", "Linda", "David", "Elizabeth", "William", "Barbara", "Richard", "Susan", "Joseph", "Jessica", "Thomas", "Sarah", "Christopher", "Karen"];
+        const lastNames = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Rodriguez", "Martinez"];
+
+        const data = Array.from({ length: n }, (_, i) => ({
+            id: i,
+            x: Math.floor(Math.random() * (80 - 18 + 1)) + 18,
+            y: Math.floor(Math.random() * (200000 - 20000 + 1)) + 20000,
+            category: categories[Math.floor(Math.random() * categories.length)],
+            label: `${names[Math.floor(Math.random() * names.length)]} ${lastNames[Math.floor(Math.random() * lastNames.length)]}`
+        }));
+
+        // Sort data for linear navigation (left-to-right by X, then Y)
+        data.sort((a, b) => a.x - b.x || a.y - b.y);
+
+        // 2. Constants & Scales
+        const width = 700;
+        const height = 500;
+        const margin = { top: 20, right: 20, bottom: 50, left: 70 };
+        const innerWidth = width - margin.left - margin.right;
+        const innerHeight = height - margin.top - margin.bottom;
+
+        const xScale = d3.scaleLinear().domain([15, 85]).range([0, innerWidth]);
+        const yScale = d3.scaleLinear().domain([0, 210000]).range([innerHeight, 0]);
+        
+        // Tol Bright colors
+        const colorScale = d3.scaleOrdinal()
+            .domain(categories)
+            .range(["#EE6677", "#228833", "#4477AA", "#CCBB44"]);
+
+        // 3. Setup Canvas & SVG
+        const dpr = window.devicePixelRatio || 1;
+        const canvas = d3.select("#main-canvas")
+            .attr("width", width * dpr)
+            .attr("height", height * dpr)
+            .style("width", `${width}px`)
+            .style("height", `${height}px`)
+            .node();
+        const ctx = canvas.getContext("2d");
+        ctx.scale(dpr, dpr);
+
+        const svg = d3.select("#overlay-svg")
+            .attr("width", width)
+            .attr("height", height);
+
+        const g = svg.append("g")
+            .attr("transform", `translate(${margin.left}, ${margin.top})`);
+
+        // Axes
+        g.append("g")
+            .attr("class", "axis x-axis")
+            .attr("transform", `translate(0, ${innerHeight})`)
+            .call(d3.axisBottom(xScale).ticks(10));
+
+        g.append("text")
+            .attr("x", innerWidth / 2)
+            .attr("y", innerHeight + 40)
+            .attr("text-anchor", "middle")
+            .style("font-size", "14px")
+            .text("Age (Years)");
+
+        g.append("g")
+            .attr("class", "axis y-axis")
+            .call(d3.axisLeft(yScale).ticks(10, "$,.0f"));
+
+        g.append("text")
+            .attr("transform", "rotate(-90)")
+            .attr("x", -innerHeight / 2)
+            .attr("y", -60)
+            .attr("text-anchor", "middle")
+            .style("font-size", "14px")
+            .text("Annual Income ($)");
+
+        // 4. State
+        let focusedIndex = -1;
+        const selectedIds = new Set();
+        let sortKey = null;
+        let sortOrder = 1;
+
+        // 5. Rendering Functions
+        function render() {
+            ctx.clearRect(0, 0, width, height);
+            ctx.save();
+            ctx.translate(margin.left, margin.top);
+            ctx.globalAlpha = 0.5;
+
+            // Batched rendering by category
+            const groups = d3.group(data, d => d.category);
+            for (const [cat, points] of groups) {
+                ctx.fillStyle = colorScale(cat);
+                ctx.beginPath();
+                for (const d of points) {
+                    const cx = xScale(d.x);
+                    const cy = yScale(d.y);
+                    ctx.moveTo(cx + 3, cy);
+                    ctx.arc(cx, cy, 3, 0, Math.PI * 2);
+                }
+                ctx.fill();
+            }
+            ctx.restore();
+
+            updateFocusRing();
+            updateSummary();
+        }
+
+        function updateFocusRing() {
+            g.selectAll(".focus-ring").remove();
+            if (focusedIndex >= 0 && focusedIndex < data.length) {
+                const d = data[focusedIndex];
+                g.append("circle")
+                    .attr("class", "focus-ring")
+                    .attr("cx", xScale(d.x))
+                    .attr("cy", yScale(d.y))
+                    .attr("r", 6)
+                    .attr("fill", "none")
+                    .attr("stroke", "#000")
+                    .attr("stroke-width", 2)
+                    .attr("stroke-dasharray", "2,2");
+            }
+        }
+
+        function updateSummary() {
+            const stats = `1500 data points in 4 categories across age 18-80 and income $20K-$200K. ${selectedIds.size} selected.`;
+            d3.select("#summary-stats").text(stats);
+        }
+
+        function announce(text) {
+            const el = document.getElementById("announcement");
+            el.textContent = ""; // Clear
+            setTimeout(() => el.textContent = text, 50); // Small delay to trigger ARIA live
+        }
+
+        function updateSelectionUI() {
+            const container = d3.select("#selected-tags");
+            if (selectedIds.size === 0) {
+                container.text("None selected");
+            } else {
+                container.html("");
+                data.filter(d => selectedIds.has(d.id)).forEach(d => {
+                    container.append("span")
+                        .attr("class", "selection-tag")
+                        .text(`${d.label} (Age ${d.x})`);
+                });
+            }
+            updateTable();
+        }
+
+        // 6. Interaction
+        const container = d3.select("#canvas-container");
+
+        container.on("keydown", (event) => {
+            let handled = true;
+            switch (event.key) {
+                case "ArrowRight":
+                case "ArrowDown":
+                    focusedIndex = Math.min(focusedIndex + 1, data.length - 1);
+                    if (focusedIndex === -1) focusedIndex = 0;
+                    break;
+                case "ArrowLeft":
+                case "ArrowUp":
+                    focusedIndex = Math.max(focusedIndex - 1, 0);
+                    break;
+                case "Home":
+                    focusedIndex = 0;
+                    break;
+                case "End":
+                    focusedIndex = data.length - 1;
+                    break;
+                case "Enter":
+                case " ":
+                    if (focusedIndex >= 0) {
+                        const d = data[focusedIndex];
+                        if (selectedIds.has(d.id)) selectedIds.delete(d.id);
+                        else selectedIds.add(d.id);
+                        updateSelectionUI();
+                        announce(`Point ${d.label} ${selectedIds.has(d.id) ? "selected" : "deselected"}`);
+                    }
+                    break;
+                default:
+                    handled = false;
+            }
+
+            if (handled) {
+                event.preventDefault();
+                const d = data[focusedIndex];
+                updateFocusRing();
+                announce(`Point: ${d.label}, Age ${d.x}, Income $${d3.format(",")(d.y)}, Group ${d.category}`);
+                
+                // Sync table scroll if visible
+                if (d3.select("#table-view").style("display") === "block") {
+                    updateTable();
+                    const row = document.querySelector(`tr[data-id="${d.id}"]`);
+                    if (row) row.scrollIntoView({ block: "nearest" });
+                }
+            }
+        });
+
+        // 7. Table Logic
+        function updateTable() {
+            let tableData = [...data];
+            if (sortKey) {
+                tableData.sort((a, b) => {
+                    const va = a[sortKey], vb = b[sortKey];
+                    return (va < vb ? -1 : va > vb ? 1 : 0) * sortOrder;
+                });
+            }
+
+            const tbody = d3.select("#data-table tbody");
+            const rows = tbody.selectAll("tr")
+                .data(tableData, d => d.id)
+                .join("tr")
+                .attr("data-id", d => d.id)
+                .classed("selected", d => selectedIds.has(d.id))
+                .classed("focused", d => focusedIndex >= 0 && data[focusedIndex].id === d.id);
+
+            rows.selectAll("td")
+                .data(d => [
+                    d.label,
+                    d.x,
+                    `$${d3.format(",")(d.y)}`,
+                    d.category
+                ])
+                .join("td")
+                .attr("class", (_, i) => i === 1 || i === 2 ? "num" : "")
+                .text(d => d);
+            
+            rows.on("click", (event, d) => {
+                if (selectedIds.has(d.id)) selectedIds.delete(d.id);
+                else selectedIds.add(d.id);
+                focusedIndex = data.findIndex(p => p.id === d.id);
+                updateSelectionUI();
+                render();
+            });
+        }
+
+        d3.selectAll("th").on("click", function() {
+            const key = d3.select(this).attr("data-key");
+            if (sortKey === key) {
+                sortOrder *= -1;
+            } else {
+                sortKey = key;
+                sortOrder = 1;
+            }
+            d3.selectAll("th").attr("aria-sort", "none");
+            d3.select(this).attr("aria-sort", sortOrder === 1 ? "ascending" : "descending");
+            updateTable();
+        });
+
+        // 8. Toggle Logic
+        d3.select("#toggle-view").on("click", function() {
+            const isTable = d3.select("#table-view").style("display") === "block";
+            if (isTable) {
+                d3.select("#table-view").style("display", "none");
+                d3.select("#chart-view").style("display", "block");
+                d3.select(this).text("Show Data Table").attr("aria-pressed", "false");
+            } else {
+                d3.select("#table-view").style("display", "block");
+                d3.select("#chart-view").style("display", "none");
+                d3.select(this).text("Show Chart").attr("aria-pressed", "true");
+                updateTable();
+            }
+        });
+
+        // Initial Render
+        render();
+        updateSummary();
+    </script>
+</body>
+</html>
