@@ -5,7 +5,7 @@ description: "High-performance Canvas 2D rendering patterns for D3.js visualizat
 
 # High-Performance Canvas Rendering with D3
 
-D3 handles data (scales, layouts, binning). Canvas handles pixels. No data join — compute positions into arrays, iterate and draw. This is what makes it fast: no DOM overhead, just a tight loop painting pixels.
+D3 handles data (scales, layouts, binning). Canvas handles pixels. No data join — compute positions into arrays, iterate and draw. No DOM overhead, just a tight loop painting pixels.
 
 ```
 data → d3.scales/layouts → position arrays → canvas draw loop → pixels
@@ -42,16 +42,16 @@ function addCanvas(div, width, height) {
 }
 ```
 
-After `ctx.scale(dpr, dpr)`, all drawing uses CSS pixels — no need to multiply every coordinate. Re-run setup when moving between displays:
+After `ctx.scale(dpr, dpr)`, all drawing uses CSS pixels. Re-run setup on display changes:
 
 ```js
 matchMedia(`(resolution: ${devicePixelRatio}dppx)`)
   .addEventListener("change", () => resize());
 ```
 
-Hit detection canvas: create offscreen (never append to DOM), use `willReadFrequently: true` for fast `getImageData` reads. This flag keeps the backing store in CPU memory — cuts read time from ~3ms to ~1ms but **disables GPU acceleration**, adding 35+ms penalty to draws. Only use it on canvases you draw once and read often (color-picking, heatmap generation). Never set it on the main rendering canvas.
+Hit detection canvas: create offscreen (never append to DOM), use `willReadFrequently: true` for fast `getImageData` reads. This keeps the backing store in CPU memory — cuts read time ~3x but **disables GPU acceleration** (35+ms draw penalty). Only use on canvases you draw once and read often (color-picking, heatmap generation).
 
-Modern Canvas 2D APIs worth knowing: `ctx.roundRect(x, y, w, h, [radii])` for rounded bar charts and card-style nodes (all modern browsers). `ctx.reset()` clears canvas and resets all state in one call — replaces `clearRect` + manual state reset.
+Modern Canvas 2D APIs: `ctx.roundRect()` for rounded bars/cards. `ctx.reset()` clears canvas and resets all state in one call.
 
 ## Quadtree Hit Detection
 
@@ -69,7 +69,7 @@ svg.on("pointermove", (event) => {
 });
 ```
 
-Rebuild when scales change (zoom, resize). The third argument is a search radius — always set one rather than searching the entire space.
+Rebuild when scales change (zoom, resize). Always set a search radius rather than searching the entire space.
 
 ### Radius Search (All Points Within Distance)
 
@@ -101,18 +101,13 @@ function findWithinRadius(quadtree, qx, qy, radius, xAcc, yAcc) {
 
 ## Geometric Hit Detection
 
-For rectangles (treemaps, icicles): loop through nodes, test `mouseX/Y` against bounding box, keep deepest hit by `node.depth`.
-
-For arcs (sunbursts): convert mouse `(x, y)` to polar `(distance, angle)`, test against each arc's `innerR`/`outerR` and `startAngle`/`endAngle`. Adjust angle for D3's 12-o'clock origin: `atan2(y, x) + π/2`.
-
-For multi-layout visualizations, route to the correct hit test strategy based on current layout type.
+For rectangles (treemaps, icicles): test `mouseX/Y` against bounding box, keep deepest hit by `node.depth`. For arcs (sunbursts): convert mouse `(x, y)` to polar `(distance, angle)`, test against `innerR`/`outerR` and `startAngle`/`endAngle`. Adjust angle for D3's 12-o'clock origin: `atan2(y, x) + PI/2`.
 
 ## Typed Arrays for Large Data
 
 For 100K+ points, flat typed arrays avoid GC pressure and are cache-friendly.
 
 ```js
-// Structure of arrays instead of array of objects
 const xs = new Float32Array(n), ys = new Float32Array(n);
 data.forEach((d, i) => { xs[i] = xScale(d.x); ys[i] = yScale(d.y); });
 
@@ -130,18 +125,9 @@ Typed arrays transfer to Web Workers at zero copy cost via `postMessage(data, [b
 
 ## Batched Rendering
 
-Canvas state changes (`fillStyle`, `strokeStyle`, `lineWidth`, `globalAlpha`) are expensive. Group draw calls by visual style.
+Canvas state changes (`fillStyle`, `strokeStyle`, `lineWidth`, `globalAlpha`) are expensive. Group draw calls by visual style — 5 draw calls instead of 100K:
 
 ```js
-// Bad: state change per element
-data.forEach(d => {
-  ctx.fillStyle = colorScale(d.category);
-  ctx.beginPath();
-  ctx.arc(d.x, d.y, 3, 0, Math.PI * 2);
-  ctx.fill();
-});
-
-// Good: batch by category — 5 draw calls instead of 100K
 const groups = d3.group(data, d => d.category);
 for (const [cat, points] of groups) {
   ctx.fillStyle = colorScale(cat);
@@ -197,29 +183,21 @@ function createRenderQueue(drawFn, { rate = 500, onComplete } = {}) {
 }
 ```
 
-Shuffle ensures every frame shows a representative sample of the full dataset. Clear canvas before starting, not between chunks.
+Shuffle ensures every frame shows a representative sample. Clear canvas before starting, not between chunks.
 
 ## ImageData: Pixel-Level Operations
 
-For heatmaps and density plots, writing pixels directly is faster than thousands of small rectangles.
-
-Note: `putImageData` bypasses the canvas transform and ignores clipping. Draw to an offscreen canvas first, then `ctx.drawImage()` back to respect margins and DPR.
-
-```js
-// Accumulate density into a Float32Array grid
-// Colorize with d3.interpolateInferno + non-linear alpha ramp
-// putImageData to offscreen, then drawImage to main canvas with clip rect
-```
+For heatmaps and density plots, writing pixels directly is faster than thousands of small rectangles. `putImageData` bypasses the canvas transform and ignores clipping — draw to an offscreen canvas first, then `ctx.drawImage()` back to respect margins and DPR.
 
 | Approach | Best for |
 |----------|----------|
 | ImageData pixel writes | Heatmaps, density, continuous fields |
-| `ctx.fillRect` per cell | Small grids (<100×100) |
+| `ctx.fillRect` per cell | Small grids (<100x100) |
 | `ctx.arc` / path batching | Scatter, bubble, node-link (<500K) |
 
 ## Web Workers
 
-Move expensive computation off main thread: binning, clustering, layout, force ticks, contours. Keep main thread for rendering and interaction.
+Move expensive computation off main thread: binning, clustering, layout, force ticks, contours.
 
 ```js
 // Main: post data, receive positions
@@ -232,9 +210,9 @@ self.postMessage({ positions }, [positions.buffer]);
 
 ### OffscreenCanvas: Off-Main-Thread Rendering
 
-When the draw loop itself is heavy (100K+ complex shapes), move rendering to a worker so the main thread stays free for DOM events and UI. As of March 2026, `transferControlToOffscreen()` is supported in all modern browsers (Chrome 69+, Firefox 105+, Safari 16.4+).
+When the draw loop itself is heavy (100K+ complex shapes), move rendering to a worker. `transferControlToOffscreen()` is supported in all modern browsers (Chrome 69+, Firefox 105+, Safari 16.4+).
 
-The D3 challenge: `d3.zoom` and event handlers need the DOM. The worker owns the canvas. Bridge them with messages:
+D3 challenge: `d3.zoom` needs the DOM, but the worker owns the canvas. Bridge with messages:
 
 ```js
 // Main thread: transfer canvas, forward zoom transforms
@@ -256,13 +234,11 @@ self.onmessage = ({ data }) => {
 };
 ```
 
-**When to use**: 50K+ points where interaction jank is visible, or dashboards with multiple heavy canvases (each in its own worker). **Don't use** if you need synchronous `getImageData` hit detection — the main thread can't read a transferred canvas.
-
-Gotchas: after transfer, `getContext()` on the original DOM element throws. DPR changes must be forwarded via message. No `document.fonts` in workers — pre-load fonts or use a text atlas.
+**Use when**: 50K+ points with visible interaction jank, or dashboards with multiple heavy canvases. **Don't use** if you need synchronous `getImageData` — the main thread can't read a transferred canvas. Gotchas: after transfer, `getContext()` on the original throws. DPR changes must be forwarded via message. No `document.fonts` in workers — pre-load fonts or use a text atlas.
 
 ## Zoom and Pan
 
-Use `d3.zoom` on the SVG overlay, transform the canvas coordinate system:
+Use `d3.zoom` on the SVG overlay, apply the transform to canvas coordinates:
 
 ```js
 const zoom = d3.zoom().scaleExtent([0.5, 100]).on("zoom", ({ transform }) => {
@@ -280,49 +256,36 @@ function drawWithZoom(ctx, transform) {
 }
 ```
 
-See `navigation` skill for semantic zoom, culling, and minimap patterns.
-
-### Culling Off-Screen Elements
-
-Compute visible viewport in data coordinates, skip elements outside it:
-
-```js
-const x0 = -transform.x / transform.k, y0 = -transform.y / transform.k;
-const x1 = (width - transform.x) / transform.k, y1 = (height - transform.y) / transform.k;
-```
-
-For quadtree-indexed data, `quadtree.visit()` efficiently enumerates only visible points.
+Cull off-screen elements by inverting the transform to get the visible viewport in data coordinates: `x0 = -transform.x / transform.k`, etc. For quadtree-indexed data, `quadtree.visit()` efficiently enumerates only visible points. See `navigation` skill for semantic zoom, constraints, and minimap patterns.
 
 ## Level of Detail (LOD)
 
 | Visible Points | Technique |
 |---------------|-----------|
 | < 500 | Full detail: sized circles, labels, tooltips |
-| 500–10K | Colored dots, 2–4px, hover to identify |
-| 10K–100K | 1px dots, batch-rendered, opacity scaled |
-| 100K–1M | Density heatmap or binned hexagons |
+| 500-10K | Colored dots, 2-4px, hover to identify |
+| 10K-100K | 1px dots, batch-rendered, opacity scaled |
+| 100K-1M | Density heatmap or binned hexagons |
 | 1M+ | Aggregated tiles, progressive refinement |
 
 Combine with zoom: zooming in reduces visible count, automatically increasing detail.
 
-## Canvas Text Rendering
+## Canvas Text and Texture Atlases
 
 `ctx.fillText` is slow — each call rasterizes the font. Only label visible/selected items, cap at ~50 labels. For a fixed set of labels rendered many times, pre-render to a text atlas canvas and `drawImage` sub-regions.
 
-## Texture Atlas for Custom Markers
-
-Pre-render each marker shape (circle, triangle, star, icon) into one offscreen canvas, then stamp with `drawImage()` instead of per-element path commands. 3-10x faster for custom markers; smaller gain for plain circles since `arc()` is already optimized.
+Same pattern works for custom markers — pre-render each shape into cells of one offscreen canvas, stamp with `drawImage()`:
 
 ```js
 function buildMarkerAtlas(categories, colorScale, size = 16) {
   const dpr = devicePixelRatio, cell = size * dpr;
   const atlas = new OffscreenCanvas(cell * categories.length, cell);
   const ctx = atlas.getContext("2d");
-  // Draw each shape into its cell, indexed by category
   categories.forEach((cat, i) => {
     ctx.fillStyle = colorScale(cat);
     ctx.beginPath();
-    drawShape(ctx, i * cell + cell / 2, cell / 2, cell * 0.35, cat);
+    // Draw shape (circle, triangle, etc.) centered at (i*cell + cell/2, cell/2)
+    ctx.arc(i * cell + cell / 2, cell / 2, cell * 0.35, 0, Math.PI * 2);
     ctx.fill();
   });
   return { atlas, cell, cssSize: size };
@@ -330,13 +293,11 @@ function buildMarkerAtlas(categories, colorScale, size = 16) {
 // Stamp: ctx.drawImage(atlas, col*cell, 0, cell, cell, x-half, y-half, size, size)
 ```
 
-**Use when**: multiple marker shapes (categorical scatter), repeated icons, or expensive effects (shadows, glows — pre-render once). **Don't use** for uniform circles (batched `arc()` is faster) or continuously varying sizes (needs many atlas entries or scaling that re-enables smoothing).
-
-Rebuild the atlas on DPR change. Set `imageSmoothingEnabled = false` for pixel-perfect stamps. For 100K+ points with custom markers, WebGL instanced rendering is the better path — `drawImage` per point can't be batched.
+3-10x faster for custom markers; smaller gain for plain circles (`arc()` is already optimized). Rebuild on DPR change. Set `imageSmoothingEnabled = false` for pixel-perfect stamps. For 100K+ with custom markers, WebGL instanced rendering is the better path.
 
 ## GPU Escalation: When to Leave Canvas 2D
 
-Canvas 2D is the right default for 1K-500K elements. When batching + culling + LOD can't hold 60fps, escalate:
+Canvas 2D is the right default for 1K-500K elements. When batching + culling + LOD can't hold 60fps:
 
 | Data Scale | First Try | Escalate To | Why |
 |-----------|-----------|-------------|-----|
@@ -345,13 +306,9 @@ Canvas 2D is the right default for 1K-500K elements. When batching + culling + L
 | 500K-5M | Canvas 2D progressive render | regl / WebGL | GPU instanced draw, one draw call for all points |
 | 5M+ | — | WebGPU | Compute shaders for GPU-side aggregation |
 
-**regl** (~15KB) is the pragmatic middle ground: functional WebGL without the state machine. `regl-scatterplot` handles up to 20M points with D3 scale integration, lasso selection, and zoom. **d3fc** provides D3-idiomatic WebGL series renderers (scatter, line, bar) if you want a higher-level API.
+**regl** (~15KB): functional WebGL without the state machine. `regl-scatterplot` handles up to 20M points with D3 scale integration. **d3fc** provides D3-idiomatic WebGL series renderers. **WebGPU** (Chrome, Edge, Firefox, Safari 26+; ~70% global support) enables compute shaders for GPU-side binning/density and 10M+ point rendering. See `webgl` skill for shader patterns. **Observable Plot** uses Canvas internally for its raster mark — worth considering before hand-rolling a heatmap.
 
-**WebGPU** (as of March 2026: Chrome, Edge, Firefox, Safari 26+; ~70% global support) enables compute shaders for GPU-side binning/density and 10M+ point rendering at 45+ fps. The pattern: D3 scales compute positions into typed arrays, upload to GPU buffers, update a transform uniform on zoom — no data re-upload. API is verbose; only reach for it when WebGL performance is insufficient or you need compute shaders. See `webgl` skill for shader patterns.
-
-**Observable Plot** (as of March 2026) uses Canvas rendering internally for its raster mark and can handle moderate dataset sizes without manual Canvas code — worth considering before hand-rolling a heatmap or density plot.
-
-The escalation rule: **profile first, escalate only when measured performance requires it.** Each step up adds debugging complexity and narrows browser support.
+The escalation rule: **profile first, escalate only when measured performance requires it.**
 
 ## Accessibility
 
@@ -373,7 +330,7 @@ Canvas is a black box for screen readers. See `canvas-accessibility` for hidden 
 
 7. **Leaking animation frames** — always `cancelAnimationFrame` before starting a new loop.
 
-8. **`putImageData` ignores canvas transform** — writes pixels 1:1 to backing store. Create ImageData at physical pixel dimensions (`width * dpr × height * dpr`), not CSS dimensions.
+8. **`putImageData` ignores canvas transform** — writes pixels 1:1 to backing store. Create ImageData at physical pixel dimensions (`width * dpr x height * dpr`), not CSS dimensions.
 
 9. **Too many `beginPath`/`fill` pairs** — batch shapes by style. One `beginPath`/`fill` per category, not per point.
 
