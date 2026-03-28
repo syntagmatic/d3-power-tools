@@ -167,7 +167,6 @@ Skills for testing, evaluating, and improving other skills.
 
 #### Adversarial agents
 - `meta/visual-critic/` — evaluate visual design quality: color harmony, typographic hierarchy, whitespace, data-ink ratio, overall feel (screenshot-based, not accessibility)
-- `meta/deception-detector/` — audit for mathematical deception: lie factor, zero baselines, quantile trap, dual-axis fabrication
+- `meta/encoding-integrity/` — audit for honest and robust data encoding: lie factor, zero baselines, dual-axis risk, metamorphic relations (scaling, permutation, subset, shift), data join correctness
 - `meta/interaction-stress-test/` — hunt race conditions: update storms, stale closures, feedback loops, transition handoff conflicts
 - `meta/perceptual-red-team/` — audit cognitive load: working memory limits, animation congruence, spaghetti threshold, chart fatigue
-- `meta/metamorphic-tester/` — validate without an oracle: scaling, permutation, subset, and shifting relations on visual output

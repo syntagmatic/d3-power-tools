@@ -1,6 +1,6 @@
 ---
 name: adversarial-eval
-description: "Calibrate and evaluate adversarial agents (visual-critic, deception-detector, interaction-stress-test, etc.) by testing whether they produce honest, consistent scores. Use when tuning an agent's SKILL.md, running blind evaluations, checking inter-rater reliability, or diagnosing score inflation/deflation."
+description: "Calibrate and evaluate adversarial agents (visual-critic, encoding-integrity, interaction-stress-test, etc.) by testing whether they produce honest, consistent scores. Use when tuning an agent's SKILL.md, running blind evaluations, checking inter-rater reliability, or diagnosing score inflation/deflation."
 ---
 
 # Adversarial Agent Evaluation
