@@ -59,6 +59,19 @@ Examples live in `skills/*/examples/` and double as test fixtures. Add new test 
 3. Test interactions if interactive: `--interactions hover,brush,click`
 4. Read the post-interaction screenshot
 
+## Blocks
+
+Example visualizations live in `blocks/`. Each is a self-contained HTML file generated from `blocks/manifest.json`.
+
+- `blocks/*.html` — Claude-generated blocks (105)
+- `blocks/gem/*.html` — Gemini-generated blocks (105), same prompts and skills
+
+**Generating Gemini blocks:**
+```bash
+python3 scripts/generate-blocks-gemini.py
+```
+Reads manifest, runs `gemini -p --sandbox --yolo` with 5 parallel workers. Skips existing files, so safe to re-run for retries.
+
 ## Code Style
 
 - ES modules or inline `<script type="module">`
