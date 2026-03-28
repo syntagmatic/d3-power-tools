@@ -36,9 +36,66 @@ Pick the layout that answers the viewer's actual question:
 - **Too many leaves (>500) without interaction.** A static treemap with 500 unlabeled slivers is a texture, not a visualization. Either add zoom/drill-down (see `hierarchy-interaction`) or aggregate small nodes into "Other."
 - **No meaningful size variable.** If all leaves are the same size, treemap and sunburst degenerate into uniform grids. Use `.count()` deliberately, or switch to tree/cluster where equal leaves are expected.
 
-## Data Validation
+## d3.stratify End-to-End
 
-`d3.stratify()` throws unhelpful errors on bad input (duplicate IDs, orphaned nodes, cycles, multiple roots). Validate before calling it: index all IDs in a Set, check parent references, detect cycles with DFS (gray/black coloring). See [`scripts/validate-hierarchy.js`](scripts/validate-hierarchy.js) for `validateHierarchy()` / `cleanHierarchy()`.
+Flat CSV with id/parentId columns to hierarchy:
+
+```js
+const csv = await d3.csv("departments.csv", d3.autoType);
+// csv: [{id: "CEO", parentId: ""}, {id: "Engineering", parentId: "CEO"}, ...]
+
+const stratify = d3.stratify()
+  .id(d => d.id)
+  .parentId(d => d.parentId || null);  // empty string → null for root
+
+const root = stratify(csv);
+root.sum(d => d.budget || 0).sort((a, b) => b.value - a.value);
+```
+
+For path-based data (e.g., file paths), use `/` delimiter:
+
+```js
+const stratify = d3.stratify().path(d => d.filepath);
+// input: [{filepath: "/src/index.js"}, {filepath: "/src/utils/math.js"}, ...]
+// creates intermediate nodes for /src, /src/utils automatically
+```
+
+### Validation
+
+`d3.stratify()` throws unhelpful errors on bad input (duplicate IDs, orphaned nodes, cycles, multiple roots). Validate before calling it:
+
+```js
+function validateFlat(rows, idField = "id", parentField = "parentId") {
+  const ids = new Set(rows.map(d => d[idField]));
+  const errors = [];
+
+  // Duplicate IDs
+  if (ids.size < rows.length) {
+    const seen = new Set();
+    for (const d of rows) {
+      if (seen.has(d[idField])) errors.push(`Duplicate: "${d[idField]}"`);
+      seen.add(d[idField]);
+    }
+  }
+
+  // Orphaned nodes — parent not in dataset and not null/empty
+  for (const d of rows) {
+    const pid = d[parentField];
+    if (pid && pid !== "" && !ids.has(pid)) {
+      errors.push(`Orphan: "${d[idField]}" references missing parent "${pid}"`);
+    }
+  }
+
+  // Multiple roots
+  const roots = rows.filter(d => !d[parentField] || d[parentField] === "");
+  if (roots.length === 0) errors.push("No root node (every row has a parent)");
+  if (roots.length > 1) errors.push(`Multiple roots: ${roots.map(d => d[idField]).join(", ")}`);
+
+  return errors;  // empty array = valid
+}
+```
+
+See [`scripts/validate-hierarchy.js`](scripts/validate-hierarchy.js) for the full `validateHierarchy()` / `cleanHierarchy()` with cycle detection (DFS gray/black coloring).
 
 ## `.sum()` vs `.count()`
 
@@ -104,6 +161,57 @@ rect.attr("x", d => d.y0).attr("y", d => d.x0)
 
 **Flame graphs** (Brendan Gregg, 2011) are inverted partition layouts where the x-axis is alphabetically sorted — identical stack frames are merged so width = total sampled time. Flame *charts* (Chrome DevTools) are time-ordered on x and don't merge frames. Both are partition layouts, but flame charts typically require custom x-positioning rather than `d3.partition()`. For the canonical D3 implementation, see [d3-flame-graph](https://github.com/spiermar/d3-flame-graph). For zoomable icicle interaction, see `hierarchy-interaction`.
 
+## Treemap Label Placement
+
+Measure text against cell size, truncate or hide when it won't fit:
+
+```js
+cell.append("text")
+  .attr("x", 4).attr("y", 14)
+  .text(d => d.data.name)
+  .each(function(d) {
+    const cellWidth = d.x1 - d.x0 - 8;  // 4px padding each side
+    const cellHeight = d.y1 - d.y0;
+    if (cellHeight < 16) {               // too short for text
+      d3.select(this).remove();
+      return;
+    }
+    // measure rendered width, truncate with ellipsis
+    let text = d.data.name;
+    while (this.getComputedTextLength() > cellWidth && text.length > 0) {
+      text = text.slice(0, -1);
+      d3.select(this).text(text + "...");
+    }
+    if (text.length === 0) d3.select(this).remove();
+  });
+```
+
+For multi-line labels in larger cells, use `<tspan>` word-wrapping:
+
+```js
+cell.append("text").each(function(d) {
+  const cellW = d.x1 - d.x0 - 8;
+  const words = d.data.name.split(/\s+/);
+  let line = [], lineNum = 0;
+  const maxLines = Math.floor((d.y1 - d.y0 - 4) / 14);  // 14px line height
+  for (const word of words) {
+    line.push(word);
+    const tspan = d3.select(this).append("tspan")
+      .attr("x", 4).attr("dy", lineNum ? "1.1em" : "1em")
+      .text(line.join(" "));
+    if (tspan.node().getComputedTextLength() > cellW) {
+      line.pop();
+      tspan.text(line.join(" "));
+      line = [word];
+      lineNum++;
+      if (lineNum >= maxLines) break;
+      d3.select(this).append("tspan")
+        .attr("x", 4).attr("dy", "1.1em").text(word);
+    }
+  }
+});
+```
+
 ## Radial Labels
 
 Labels in radial layouts need rotation and flipping. Without flipping, labels on the left half render upside-down:
@@ -119,7 +227,22 @@ node.append("text")
   .attr("text-anchor", d => d.x < Math.PI ? "start" : "end");
 ```
 
-For sunburst arcs, hide labels when the arc is too short to read — otherwise they pile up at the center:
+For sunburst arcs, rotate labels along the arc midpoint and flip so text always reads left-to-right:
+
+```js
+// Sunburst label transform — x is angle, y is radius (after partition)
+label.attr("transform", d => {
+  const x = (d.x0 + d.x1) / 2 * 180 / Math.PI;  // midpoint angle in degrees
+  const y = (d.y0 + d.y1) / 2;                     // midpoint radius
+  // Flip text on left half so it reads L→R
+  return `rotate(${x - 90}) translate(${y},0) rotate(${x < 180 ? 0 : 180})`;
+}).attr("text-anchor", d => {
+  const x = (d.x0 + d.x1) / 2 * 180 / Math.PI;
+  return x < 180 ? "start" : "end";
+});
+```
+
+Hide labels when the arc is too short to read — otherwise they pile up at the center:
 ```js
 const arcLength = (d.x1 - d.x0) * (d.y0 + d.y1) / 2;
 label.attr("opacity", arcLength > 40 ? 1 : 0);
@@ -142,9 +265,107 @@ path.transition(t).attrTween("transform", (d) => (time) => {
 });
 ```
 
+## Drilldown: Layout-Side Setup
+
+When the viewer clicks a node to zoom in, the layout doesn't change — only the scales do. Recompute scales to map the clicked node's bounds to the full viewport:
+
+```js
+// Treemap drilldown — rescale to show clicked node's subtree
+function zoomTo(d) {
+  const x = d3.scaleLinear().domain([d.x0, d.x1]).range([0, width]);
+  const y = d3.scaleLinear().domain([d.y0, d.y1]).range([0, height]);
+
+  cell.transition().duration(750)
+    .attr("transform", n => `translate(${x(n.x0)},${y(n.y0)})`)
+    .select("rect")
+      .attr("width", n => Math.max(0, x(n.x1) - x(n.x0)))
+      .attr("height", n => Math.max(0, y(n.y1) - y(n.y0)));
+}
+```
+
+Breadcrumb trail for navigation back — track the zoom path:
+
+```js
+let focus = root;
+const breadcrumb = d3.select("#breadcrumb");
+
+function zoomTo(d) {
+  focus = d;
+  // rebuild breadcrumb from ancestors
+  const ancestors = d.ancestors().reverse();
+  breadcrumb.selectAll("span").data(ancestors, d => d.data.name)
+    .join("span")
+      .text(d => d.data.name)
+      .on("click", (event, d) => zoomTo(d));
+
+  // ... rescale layout as above
+}
+```
+
+Filter visible nodes to the focused subtree to avoid rendering thousands of off-screen cells:
+
+```js
+const visible = root.descendants().filter(n =>
+  n.x0 >= focus.x0 && n.x1 <= focus.x1 &&
+  n.y0 >= focus.y0 && n.y1 <= focus.y1
+);
+```
+
+For the full zoomable treemap/sunburst/pack interaction pattern with animated transitions, see `hierarchy-interaction`.
+
 ## Link Generators
 
 For node-link layouts, swap `.x`/`.y` accessors to match coordinate semantics: `d3.linkHorizontal().x(d => d.y).y(d => d.x)` for horizontal trees (because `d.y` is the horizontal axis). Use `d3.linkRadial().angle(d => d.x).radius(d => d.y)` for radial layouts.
+
+## Color Mapping Strategies
+
+Three common patterns, each answering a different question:
+
+**Sequential by depth** — "how deep is this node?" Useful for showing hierarchy structure in treemaps where nesting is otherwise invisible:
+
+```js
+const color = d3.scaleSequential([0, root.height], d3.interpolateBlues);
+cell.attr("fill", d => color(d.depth));
+```
+
+**Categorical by top-level ancestor** — "which branch does this belong to?" The most common treemap coloring. Use `.ancestors()` to find each leaf's top-level group:
+
+```js
+const topLevel = root.children || [root];
+const color = d3.scaleOrdinal(topLevel.map(d => d.data.name), d3.schemeTableau10);
+// For any node, walk up to depth-1 ancestor
+const branch = d => d.ancestors().find(a => a.depth === 1)?.data.name;
+cell.attr("fill", d => color(branch(d)))
+    .attr("fill-opacity", d => 0.4 + 0.6 * (1 - d.depth / root.height));  // fade deeper nodes
+```
+
+**Diverging by change metric** — "what grew or shrank?" For treemaps comparing two time periods:
+
+```js
+const color = d3.scaleDiverging([-0.5, 0, 0.5], d3.interpolateRdBu);
+cell.attr("fill", d => color(d.data.change));  // change = (new - old) / old
+```
+
+## Performance
+
+**SVG vs Canvas threshold.** SVG treemaps work well up to ~500 nodes. Beyond that, DOM overhead causes sluggish interactions and slow initial render. Switch to Canvas for the data layer, keep SVG for labels and interaction overlays:
+
+```js
+// Canvas treemap rendering
+const ctx = canvas.getContext("2d");
+for (const d of root.leaves()) {
+  ctx.fillStyle = color(d.data.category);
+  ctx.fillRect(d.x0, d.y0, d.x1 - d.x0, d.y1 - d.y0);
+  ctx.strokeRect(d.x0, d.y0, d.x1 - d.x0, d.y1 - d.y0);
+}
+// Hit detection: point-in-rectangle test on root.leaves()
+```
+
+**`.sum()` vs `.count()` performance.** Both are O(n) over all nodes. `.sum()` is marginally slower because it calls the accessor function — irrelevant for <10K nodes. For very large trees, avoid re-calling `.sum()` on every update if the accessor hasn't changed; cache the hierarchy object.
+
+**Tiling strategy for animation.** `treemapResquarify` caches the first layout's topology, so subsequent `.tile()` calls only resize — no reordering. This makes transitions smooth. `treemapSquarify` recomputes ordering every time, causing cells to jump. Always use resquarify for animated treemaps.
+
+**Pack layout is expensive.** Circle packing solves a non-trivial optimization problem. For >5K nodes, pre-compute the layout once and cache. For interactive filtering, recompute only the affected subtree if possible.
 
 ## Common Pitfalls
 
@@ -160,6 +381,12 @@ For node-link layouts, swap `.x`/`.y` accessors to match coordinate semantics: `
 3. **Sunburst root fills center.** Partition allocates the full innermost ring to root, which carries no information. Filter it out: `.filter(d => d.depth > 0)`, or render as a small center circle for zoom-out navigation.
 
 4. **Squarify for animated data.** Squarify reorders nodes to minimize aspect ratios, so cells jump to new positions when data changes. Switch to `treemapResquarify` for any treemap that transitions between data states.
+
+5. **`.sum()` vs `.count()` confusion.** `.sum(d => d.value)` accumulates leaf values up the tree — internal node values are the sum of their descendants. `.count()` ignores data values entirely and counts leaves. If your treemap shows all cells the same size, you probably called `.count()` when you meant `.sum()`. If totals don't add up, check whether your accessor returns values for internal nodes (they get *added* to children's sum, not ignored).
+
+6. **Negative values silently ignored by treemap.** If `.sum(d => d.profit)` encounters negative values, they become 0 in the layout — no warning, no error. The treemap just looks wrong. Check for negatives before layout: `root.leaves().filter(d => d.data.profit < 0)`. To show losses, encode sign as color and use absolute values for area: `.sum(d => Math.abs(d.profit))`.
+
+7. **Stratify with missing parents throws cryptic error.** `d3.stratify()` throws `"missing: X"` when a parentId references an id not in the dataset, or `"ambiguous: X"` for duplicate ids. The error message doesn't say which row caused it. Always run validation first (see d3.stratify section above). Common causes: trailing whitespace in CSV ids (`"Sales "` vs `"Sales"`), null vs empty string for root's parentId, header row included in data.
 
 ## Observable Plot
 

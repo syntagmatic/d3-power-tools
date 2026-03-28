@@ -25,29 +25,29 @@ The choice is analytical, not aesthetic. Each chart type conceals something:
 | **Strip/jitter** | Quick overview, any n | Raw data distribution | Overplots past ~200 pts/group without opacity |
 | **Density plot** | Comparing 2–4 overlapping distributions | Smooth shape, overlap regions | Individual values; bandwidth choice shapes what you see |
 
-**The box plot trap.** Two datasets — one normal, one bimodal with the same median and IQR — produce identical box plots. If you haven't already confirmed unimodality, a box plot will hide the most important feature of your data. Use a violin or overlay raw points to check before committing to box plots.
+**The box plot trap.** Two datasets — one normal, one bimodal with the same median and IQR — produce identical box plots. If you haven't confirmed unimodality, a box plot hides the most important feature. Use a violin or overlay raw points to check.
 
 **Combining charts** improves insight: violin + inner box shows shape and summary; bee swarm + median line shows individuals and center. Raincloud plots (half-violin + strip + box) give all three.
 
 ### Quick Selection by Sample Size
 
-- **n < 10:** strip + median line. No summary stats — too few points for reliable estimates.
+- **n < 10:** strip + median line. No summary stats — too few for reliable estimates.
 - **n 10–30:** strip + box or bee swarm. No KDE — too few for reliable density.
-- **n 30–500:** raincloud, violin, or bee swarm. All three work; choose by how many groups.
+- **n 30–500:** raincloud, violin, or bee swarm. Choose by number of groups.
 - **n 500–5000:** violin + box or letter-value plot. Individual points overplot; use density.
 - **n 5000+:** letter-value plot or violin. Never bee swarm or strip.
 
 **When NOT to use:**
-- **Box plots with n < 10** — quartiles from tiny samples are noise; just show the raw points
-- **Violin plots with n < 30** — KDE invents smooth curves from sparse data, showing peaks and valleys that don't exist
-- **Density plots for small samples** — use a histogram instead; it shows what you actually observed rather than a smoothed fantasy
+- **Box plots with n < 10** — quartiles from tiny samples are noise; just show raw points
+- **Violin plots with n < 30** — KDE invents smooth curves from sparse data
+- **Density plots for small samples** — use a histogram; it shows what you actually observed
 - **Bee swarm with n > 500/group** — force simulation becomes slow; switch to jitter or violin
-- **Ridgeline for unordered categories** — the vertical stacking implies order; use faceted violins instead
-- **Any smoothed chart when the data is discrete** — KDE smears probability across impossible values (e.g., showing density at 3.5 children); use a histogram or bar chart
+- **Ridgeline for unordered categories** — vertical stacking implies order; use faceted violins
+- **Any smoothed chart when data is discrete** — KDE smears probability across impossible values (e.g., density at 3.5 children)
 
 ## Kernel Density Estimation (KDE)
 
-KDE smooths raw data into a continuous density curve. The bandwidth parameter is the single most consequential choice — it determines what the viewer sees as "signal" vs "noise."
+KDE smooths raw data into a continuous density curve. Bandwidth is the single most consequential choice — it determines what the viewer sees as "signal" vs "noise."
 
 ```js
 const gaussian = (x) => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
@@ -59,34 +59,30 @@ function kde(kernel, bandwidth, data) {
   ]);
 }
 
-// Extend 3 bandwidths past data extent to avoid edge truncation
+// Usage: extend 3 bandwidths past data extent to avoid edge truncation
+const extent = d3.extent(values);
 const ticks = d3.ticks(extent[0] - 3 * bandwidth, extent[1] + 3 * bandwidth, 200);
 const density = kde(gaussian, bandwidth, values)(ticks);
 ```
 
 ### Bandwidth: A Judgment Call
 
-Bandwidth is not a technical parameter — it's an editorial decision about what features to show the viewer.
+Bandwidth is not a technical parameter — it's an editorial decision about what features to show.
 
-**Too small:** every data point becomes its own peak, fabricating modes that don't exist. The viewer sees structure that is pure noise.
+**Too small:** every data point becomes its own peak, fabricating modes. **Too large:** real features merge; a bimodal distribution becomes unimodal.
 
-**Too large:** real features merge into a single smooth hump. A bimodal distribution becomes unimodal. The viewer misses the story.
-
-**Silverman's rule** — good default for roughly normal data, robust to outliers:
+**Silverman's rule** — good default for roughly normal data:
 
 ```js
-const std = d3.deviation(values);
-const iqr = d3.quantile(sorted, 0.75) - d3.quantile(sorted, 0.25);
+const sorted = Float64Array.from(values).sort();
+const std = d3.deviation(values), iqr = d3.quantile(sorted, 0.75) - d3.quantile(sorted, 0.25);
 // Use smaller of std and IQR/1.34 to handle outlier-inflated std
 const bandwidth = 0.9 * Math.min(std, iqr / 1.34) * Math.pow(values.length, -0.2);
 ```
 
-**When to override the rule:**
-- **Bimodal data:** Silverman assumes one peak, so it over-smooths and merges two modes into one. Halve the bandwidth and check visually.
-- **Very skewed data:** log-transform before KDE, then back-transform the density curve.
-- **Small samples (n < 30):** the rule produces tiny bandwidths that create spiky, misleading curves. Increase by 20-50%, or just use a histogram — it honestly shows what you observed.
+**When to override:** Bimodal data — halve bandwidth (Silverman over-smooths). Very skewed — log-transform before KDE. Small samples (n < 30) — increase 20-50% or use histogram.
 
-**Defensive KDE.** Clip density to the observed data range — extending 3 bandwidths past the extent (the code above) prevents edge truncation but can show density at impossible values (negative durations, scores above 100). For bounded data, truncate the density curve at the domain boundaries after computing it. For rainclouds and violins this matters more because the shape is directly visible.
+**Defensive KDE.** Clip density to the observed data range for bounded data (negative durations, scores above 100). The 3-bandwidth extension above prevents edge truncation but can show density at impossible values.
 
 ## Descriptive Statistics Helper
 
@@ -95,11 +91,8 @@ Compute everything once per group — avoids repeated sorting and quantile calcu
 ```js
 function computeStats(values) {
   const sorted = Float64Array.from(values).sort();
-  const q1 = d3.quantile(sorted, 0.25);
-  const q3 = d3.quantile(sorted, 0.75);
-  const iqr = q3 - q1;
-  const lowerFence = q1 - 1.5 * iqr;
-  const upperFence = q3 + 1.5 * iqr;
+  const q1 = d3.quantile(sorted, 0.25), q3 = d3.quantile(sorted, 0.75), iqr = q3 - q1;
+  const lowerFence = q1 - 1.5 * iqr, upperFence = q3 + 1.5 * iqr;
   return {
     min: sorted[0], max: sorted[sorted.length - 1],
     q1, median: d3.quantile(sorted, 0.5), q3, iqr,
@@ -114,27 +107,20 @@ function computeStats(values) {
 
 ## Notched Box Plot
 
-Notches indicate confidence interval around the median. If notches of two boxes don't overlap, their medians differ significantly (~95% confidence).
+Notches indicate confidence interval around the median. Non-overlapping notches between two boxes suggest significantly different medians (~95% confidence).
 
 ```js
-// Notch extent: median +/- 1.57 * IQR / sqrt(n)
 const notchHalf = 1.57 * stats.iqr / Math.sqrt(stats.n);
-const notchLow = stats.median - notchHalf;
-const notchHigh = stats.median + notchHalf;
+const notchLow = stats.median - notchHalf, notchHigh = stats.median + notchHalf;
 const notchIndent = boxWidth * 0.15; // visual pinch at the median
 
-// Draw as polygon instead of rect
+// Draw as polygon: pinch inward at median height
 const points = [
-  [0, yScale(stats.q3)],
-  [boxWidth, yScale(stats.q3)],
-  [boxWidth, yScale(notchHigh)],
-  [boxWidth - notchIndent, yScale(stats.median)],
-  [boxWidth, yScale(notchLow)],
-  [boxWidth, yScale(stats.q1)],
-  [0, yScale(stats.q1)],
-  [0, yScale(notchLow)],
-  [notchIndent, yScale(stats.median)],
-  [0, yScale(notchHigh)],
+  [0, yScale(stats.q3)], [boxWidth, yScale(stats.q3)],
+  [boxWidth, yScale(notchHigh)], [boxWidth - notchIndent, yScale(stats.median)],
+  [boxWidth, yScale(notchLow)], [boxWidth, yScale(stats.q1)],
+  [0, yScale(stats.q1)], [0, yScale(notchLow)],
+  [notchIndent, yScale(stats.median)], [0, yScale(notchHigh)],
 ].map(p => p.join(",")).join(" ");
 
 boxes.append("polygon").attr("points", points);
@@ -142,32 +128,22 @@ boxes.append("polygon").attr("points", points);
 
 ## Whisker Variants
 
-Pick whiskers based on what question the viewer is asking:
-
-- **1.5xIQR (Tukey)** — default choice. Points beyond are flagged as outliers, which is what most audiences expect.
-- **Min/Max** — use when there are no true outliers, or when the audience cares about the full range (e.g., manufacturing tolerances). Hides nothing but also flags nothing.
-- **Percentile (5th/95th)** — use when outlier counts are unreliable (small n) or when you want a consistent definition across groups with different distributions.
-- **1 SD / 2 SD** — use only when the audience thinks in standard deviations (scientific, engineering). Misleading for skewed data since SD is symmetric around the mean.
+- **1.5xIQR (Tukey)** — default. Points beyond flagged as outliers.
+- **Min/Max** — full range, no outlier flagging. Use when there are no true outliers.
+- **Percentile (5th/95th)** — consistent definition across groups regardless of distribution.
+- **1 SD / 2 SD** — only when audience thinks in standard deviations. Misleading for skewed data.
 
 ## Ridgeline (Joy) Plots
 
-### Overlap Tuning
-
-- `overlap = 0` — no overlap, standard small multiples
-- `overlap = 0.3-0.5` — mild overlap, most readable
-- `overlap = 0.7-1.0` — dramatic overlap, Joy Division effect
-
-Render from bottom to top (reverse data order) so lower rows appear in front.
+`overlap` controls density: 0 = small multiples, 0.3-0.5 = readable, 0.7-1.0 = dramatic. Render bottom-to-top so lower rows appear in front.
 
 ```js
 const overlap = 0.7;
 const ridgeHeight = yBand.step() * (1 + overlap);
-const densityYScale = d3.scaleLinear().domain([0, maxDensity]).range([0, ridgeHeight]);
+const densityYScale = d3.scaleLinear([0, maxDensity], [0, ridgeHeight]);
 
 const area = d3.area()
-  .x(d => xScale(d[0]))
-  .y0(0)
-  .y1(d => -densityYScale(d[1]))
+  .x(d => xScale(d[0])).y0(0).y1(d => -densityYScale(d[1]))
   .curve(d3.curveBasis);
 
 ridges.attr("transform", d => `translate(0, ${yBand(d.key) + yBand.bandwidth()})`);
@@ -175,7 +151,7 @@ ridges.attr("transform", d => `translate(0, ${yBand(d.key) + yBand.bandwidth()})
 
 ## Bee Swarm: Dodge Algorithm
 
-Faster alternative to force simulation. Place points in sorted order, nudging to avoid overlap:
+Faster alternative to force simulation — place points sorted, nudging to avoid overlap:
 
 ```js
 function dodgeBeeswarm(data, xScale, radius) {
@@ -196,35 +172,26 @@ function dodgeBeeswarm(data, xScale, radius) {
 }
 ```
 
-For force-based bee swarm, pre-compute: `simulation.stop(); for (let i = 0; i < 120; i++) simulation.tick();`
+For force-based bee swarm, pre-compute: `simulation.stop(); for (let i = 0; i < 120; i++) simulation.tick();` See `force` skill for simulation setup.
 
-## Seeded Jitter
+## Jitter Strategies
 
-Use `d3.randomLcg` for reproducible jitter (strip plots won't shift on re-render):
-
+**Seeded random** — reproducible, won't shift on re-render:
 ```js
 const random = d3.randomLcg(42);
-const jitter = () => (random() - 0.5) * groupScale.bandwidth() * 0.6;
+const jitter = () => (random() - 0.5) * groupBandwidth * 0.6;
 ```
 
-### Sinusoidal jitter — uniform spread without randomness
-
+**Sinusoidal** — uniform spread without randomness:
 ```js
-sortedData.forEach((d, i, arr) => {
-  d.jitterX = Math.sin(i * Math.PI / arr.length) * (bandwidth * 0.3);
-});
+sortedData.forEach((d, i, arr) => { d.jitterX = Math.sin(i * Math.PI / arr.length) * bandwidth * 0.3; });
 ```
 
-## Violin + Strip: Constrained Jitter
-
-Constrain jitter width to the violin width at each y-position:
-
+**Violin-constrained** — jitter width matches violin density at each y-position:
 ```js
-const jitterScale = d3.scaleLinear().domain([0, maxDensity]).range([0, groupScale.bandwidth() / 2]);
-circles.attr("cx", d => {
-  const densityAtValue = interpolateDensity(d.value, d.group);
-  return (Math.random() - 0.5) * 2 * jitterScale(densityAtValue);
-});
+// densityAt(value, group) returns KDE density for a given value in a given group
+const jitterScale = d3.scaleLinear([0, maxDensity], [0, groupBandwidth / 2]);
+circles.attr("cx", d => (Math.random() - 0.5) * 2 * jitterScale(densityAt(d.value, d.group)));
 ```
 
 ## Half (Split) Violin
@@ -239,58 +206,39 @@ violin.append("path")
     .y(d => yScale(d[0]))
     .curve(d3.curveCatmullRom)(densityA))
   .attr("fill", colorA);
-// Right half: group B density
-violin.append("path")
-  .attr("d", d3.area()
-    .x0(0).x1(d => violinScale(d[1]))
-    .y(d => yScale(d[0]))
-    .curve(d3.curveCatmullRom)(densityB))
-  .attr("fill", colorB);
+// Right half: group B — same but positive x1
 ```
 
 ## Raincloud Plot
 
-Three components stacked asymmetrically: half-violin (density shape), box plot (summary stats), and jittered strip (individual observations). The half-violin frees horizontal space that a mirrored violin wastes. Allen et al. 2019 formalized the pattern; empirical studies show 0.43–0.76 SD improvement in correct interpretation vs single-view alternatives.
-
-Horizontal orientation (groups on y-axis, values on x-axis) is most common — group labels read naturally.
+Half-violin + box plot + jittered strip, stacked asymmetrically (Allen et al. 2019; 0.43-0.76 SD improvement in interpretation vs single-view). Horizontal orientation (groups on y-axis) reads most naturally.
 
 ```js
 // Layout: each group gets a band. Within the band:
-//   top third: half-violin (area, one side only)
-//   middle: box plot (rect + lines)
-//   bottom third: jittered strip (circles)
+//   top: half-violin (area, one side only) using kde() + d3.area()
+//   middle: box plot (rect + lines) using computeStats()
+//   bottom: jittered strip (circles) using seeded jitter
 const bw = yBand.bandwidth();
-
-// 1. Half-violin — area going upward from midpoint
 const violinArea = d3.area()
   .x(d => xScale(d[0]))
   .y0(bw * 0.45)                          // baseline at midpoint
   .y1(d => bw * 0.45 - densityScale(d[1])) // density goes up
   .curve(d3.curveBasis);
-
-// 2. Box plot — narrow rect centered below the violin (use computeStats)
-// 3. Jittered strip — circles in lower portion of band, seeded random
 ```
 
-**Defensive design** (Waskom 2023): clip the density curve to the observed data range — naive KDE extends density into impossible values (negative heights, impossible scores). For discrete or small-n data, consider a histogram-based half instead of KDE.
+**Defensive design** (Waskom 2023): clip density to observed data range — naive KDE extends into impossible values. For discrete or small-n data, consider a histogram-based half instead of KDE.
 
-**When NOT to use:** n < 10 (density curve is unreliable), n > 5000 (jittered points become overplotted mess — use violin + box), more than 8 groups (use ridgelines — rainclouds consume too much space per group).
-
-Observable Plot has no raincloud mark — compose from `Plot.areaY`, `Plot.boxX`/`Plot.boxY`, and `Plot.dot` with jitter.
+**When NOT to use:** n < 10 (density unreliable), n > 5000 (points overplot — use violin + box), more than 8 groups (use ridgelines).
 
 ## Letter-Value Plot (Large-n Box Plot)
 
-Standard box plots show only median + quartiles regardless of n. With 10,000 points, you can reliably estimate 1/128th quantiles, but a box plot throws that away and flags hundreds of expected tail values as "outliers." Letter-value plots (Hofmann, Wickham, Kafadar 2017) show progressively more quantile levels as nested, shrinking boxes.
-
-Tukey's letter values: M (median, 0.500), F (fourths, 0.250/0.750), E (eighths, 0.125/0.875), D (sixteenths), C, B, A... Depth formula: `d_i = (1 + floor(d_{i-1})) / 2`, recursively from `d_1 = (1+n)/2`. Stop when the estimate is unreliable — rule of thumb: `k = floor(log2(n)) - 2` levels.
+Standard box plots show only median + quartiles regardless of n — with 10,000 points you can estimate 1/128th quantiles, but a box plot flags hundreds of expected tail values as "outliers." Letter-value plots (Hofmann, Wickham, Kafadar 2017) show progressively more quantile levels as nested, shrinking boxes. Letter values: M (median), F (fourths), E (eighths), D, C, B, A... Stop when unreliable: `k = floor(log2(n)) - 2` levels.
 
 ```js
 function computeLetterValues(sorted) {
-  const n = sorted.length;
-  const levels = [];
+  const n = sorted.length, levels = [];
   let depth = (1 + n) / 2;
   levels.push({ letter: "M", lower: atDepth(sorted, depth), upper: atDepth(sorted, depth) });
-
   const letters = ["F", "E", "D", "C", "B", "A", "Z", "Y", "X", "W"];
   const maxLevels = Math.max(0, Math.floor(Math.log2(n)) - 2);
   for (let k = 0; k < Math.min(maxLevels, letters.length); k++) {
@@ -307,73 +255,44 @@ function atDepth(sorted, depth) {
 }
 
 // Render: nested rects, widest at center, sequential color encodes depth
-const widthScale = d3.scaleLinear().domain([0, levels.length]).range([bandW, bandW * 0.15]);
+const widthScale = d3.scaleLinear([0, levels.length], [bandWidth, bandWidth * 0.15]);
 const colorScale = d3.scaleSequential(d3.interpolateBlues).domain([-1, levels.length]);
 ```
 
-**When it beats box plots:** large n (>200) where box plots flag too many "outliers," comparing tail behavior across groups, detecting tail asymmetry. **When NOT to use:** small n (<100) where only 2–3 levels are reliable (just use a box plot), or when distribution shape matters more than tail quantiles (use violin).
+**When it beats box plots:** large n (>200) where box plots flag too many "outliers," tail comparison, tail asymmetry. **When NOT to use:** small n (<100) — just use a box plot; or when shape matters more than tail quantiles — use violin.
 
 ## QQ Plot
 
-QQ plots answer "does my data follow this distribution?" — points on the diagonal mean yes, curvature means no. Heavy tails curve up at right and down at left; skew curves one way throughout.
+Points on the diagonal mean data follows the reference distribution; curvature means no. Heavy tails curve up at right and down at left; skew curves one way throughout.
 
-Use the Beasley-Springer-Moro rational approximation for `normalQuantile(p)` (the inverse normal CDF) — it's a ~25-line pure math function with no D3 dependency. See any standard implementation.
-
-Plotting position: `p = (i + 0.5) / n` (Hazen formula). Standardize data before comparing: `(v - mean) / sd`.
+Plotting position: `p = (i + 0.5) / n` (Hazen). Standardize data: `(v - mean) / sd`. Use the Beasley-Springer-Moro rational approximation for `normalQuantile(p)` (inverse normal CDF) — a ~25-line pure math function with no D3 dependency.
 
 ### QQ Confidence Bands
 
 95% pointwise envelope under the null (data is normal):
 
 ```js
-// se of order statistic i: sqrt(p(1-p) / n) / f(z_p)
-// f = standard normal density at the theoretical quantile
 const confBands = theoreticalQuantiles.map((z, i) => {
   const p = (i + 0.5) / n;
-  const f = Math.exp(-0.5 * z * z) / Math.sqrt(2 * Math.PI);
+  const f = Math.exp(-0.5 * z * z) / Math.sqrt(2 * Math.PI); // normal density at z
   const se = Math.sqrt(p * (1 - p) / n) / f;
   return { z, lower: z - 1.96 * se, upper: z + 1.96 * se };
 });
 ```
 
-## Multiple Overlapping Densities
+## Overlapping Densities and Transitions
 
-Draw widest distribution first, or use `mix-blend-mode: multiply` for better overlap visibility:
+**Multiple densities:** draw widest first, or use `mix-blend-mode: multiply` with `fill-opacity: 0.3`. Limit to 2-4 groups; beyond that, use ridgeline.
 
-```js
-svg.selectAll(".density-area")
-  .data(densities)
-  .join("path")
-    .attr("d", d => area(d.density))
-    .attr("fill", d => colorScale(d.key))
-    .attr("fill-opacity", 0.3)
-    .attr("stroke", d => colorScale(d.key))
-    .attr("stroke-width", 1.5);
-```
-
-## Transitions Between Chart Types
-
-Pre-compute positions for each view, then interpolate:
-
-```js
-data.forEach(d => {
-  d.boxX = groupScale(d.group) + groupScale.bandwidth() / 2;
-  d.boxY = yScale(d.value);
-  d.swarmX = d.simulatedX;
-  d.swarmY = d.simulatedY;
-  d.stripX = groupScale(d.group) + jitter();
-  d.stripY = yScale(d.value);
-});
-// Transition by interpolating cx/cy between view positions
-```
+**Chart type transitions:** pre-compute positions for each view (box, swarm, strip), then interpolate `cx`/`cy`. See `motion` skill.
 
 ## Density Scale Normalization
 
-This is a hidden editorial choice that changes what the viewer concludes:
+A hidden editorial choice that changes what the viewer concludes:
 
-- **Per-group normalization** (each violin same max width): lets the viewer compare shape, but a group with n=10 looks as confident as n=10,000. Use when shape comparison is the point and sample sizes are similar.
+- **Per-group** (each violin same max width): compare shape, but n=10 looks as confident as n=10,000.
 - **Shared density scale**: wider violins mean more data. Use when relative group sizes matter.
-- **Width scaled by sqrt(n)**: `violinScale.range([0, Math.sqrt(d.stats.n) * scaleFactor])` — a compromise that encodes sample size without letting large groups dominate. Good default when group sizes vary by more than 3x.
+- **Width ~ sqrt(n)**: `violinScale.range([0, Math.sqrt(n) * scaleFactor])` — good default when group sizes vary >3x.
 
 ## Common Pitfalls
 
@@ -391,16 +310,16 @@ This is a hidden editorial choice that changes what the viewer concludes:
 
 **Ridgeline occlusion.** Later (lower) rows occlude earlier ones. Render from bottom to top and use semi-transparent fills.
 
-**Force simulation not converged.** Bee swarm points overlap if the simulation hasn't run enough ticks. Check `simulation.alpha()` — should be < 0.001. Increase tick count or reduce collision radius.
+**Force simulation not converged.** Bee swarm points overlap if the simulation hasn't run enough ticks. Check `simulation.alpha()` — should be < 0.001.
 
-**Overplotting in large datasets.** Beyond ~500 points, individual dots become useless. Switch to density representations (violin, density plot) or use canvas with alpha blending.
+**Overplotting in large datasets.** Beyond ~500 points, individual dots become useless. Switch to density representations or use canvas with alpha blending.
 
-**Filtered KDE spikes outside chart bounds.** When recomputing KDE on a brushed subset with the same bandwidth, fewer points produce taller peaks — selecting 5 of 200 points can spike 10x higher than the full dataset. Scale the density by `subset.length / fullGroup.length` so height represents proportion. See the ghost/active pattern in `linked-views`.
+**Filtered KDE spikes outside chart bounds.** When recomputing KDE on a brushed subset with the same bandwidth, fewer points produce taller peaks — selecting 5 of 200 points can spike 10x higher. Scale density by `subset.length / fullGroup.length` so height represents proportion. See ghost/active pattern in `linked-views`.
 
 ## References
 
 - Wilke, [Visualizing Distributions](https://clauswilke.com/dataviz/boxplots-violins.html) — when box plots lie and violins help
 - Akin, [KDE Bandwidth Importance](https://aakinshin.net/posts/kde-bw/) — visual consequences of bandwidth choice
-- Allen et al. 2019, [Raincloud plots](https://pmc.ncbi.nlm.nih.gov/articles/PMC6480976/) — the composite pattern formalized (as of 2025)
+- Allen et al. 2019, [Raincloud plots](https://pmc.ncbi.nlm.nih.gov/articles/PMC6480976/) — the composite pattern formalized
 - Hofmann, Wickham, Kafadar 2017, [Letter-Value Plots](https://vita.had.co.nz/papers/letter-value-plot.pdf) — box plots for large data
 - Waskom 2023, [Defensive Raincloud Plots](https://arxiv.org/pdf/2303.17709) — KDE pitfalls in rainclouds

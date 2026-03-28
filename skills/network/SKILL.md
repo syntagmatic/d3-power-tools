@@ -51,24 +51,6 @@ In node-link diagrams, edge crossings cause the eye to lose track of which line 
 
 Real-world network data has dangling references, self-loops, duplicate edges, and disconnected components. Run [`validateNetwork()`](scripts/validate-network.js) before any layout — it catches issues that cause silent rendering bugs (nodes positioned at 0,0, missing links, NaN coordinates).
 
-## Curved Links and Multi-Edges
-
-When multiple edges connect the same pair, offset them with arc curvature so they remain individually visible:
-
-```js
-const linkCounts = new Map();
-links.forEach(d => {
-  const key = [d.source.id, d.target.id].sort().join("--");
-  linkCounts.set(key, (linkCounts.get(key) || 0) + 1);
-});
-
-link.attr("d", d => {
-  const dx = d.target.x - d.source.x, dy = d.target.y - d.source.y;
-  const dr = Math.sqrt(dx * dx + dy * dy) * (d.curveOffset || 1);
-  return `M${d.source.x},${d.source.y}A${dr},${dr} 0 0,1 ${d.target.x},${d.target.y}`;
-});
-```
-
 ## Directional Edge Markers
 
 `refX` must account for the target node's radius, or the arrowhead hides inside the circle:
@@ -125,9 +107,142 @@ D3 has no graph algorithms beyond layout. For community detection, centrality, o
 
 **Convex hull overlays:** after force layout stabilizes, draw `d3.polygonHull` around each community's nodes as a semi-transparent shape. Without a custom clustering force that pulls nodes toward their community centroid, Louvain assigns colors but force layout scatters communities randomly — the hull overlay is meaningless. See the `force` skill for clustering force implementation.
 
+## Weighted Edge Encoding
+
+Stroke-width is the natural channel for edge weight. Use `scaleSqrt` — linear width exaggerates heavy edges because the eye reads area, not width:
+
+```js
+const widthScale = d3.scaleSqrt()
+  .domain(d3.extent(links, d => d.weight))
+  .range([0.5, 6]);
+
+link.attr("stroke-width", d => widthScale(d.weight));
+```
+
+For color encoding, a sequential scale on weight works when topology matters more than precise comparison. Combine with width for redundant encoding — accessible and more legible:
+
+```js
+const colorScale = d3.scaleSequential(d3.interpolateYlOrRd)
+  .domain(d3.extent(links, d => d.weight));
+link.attr("stroke", d => colorScale(d.weight))
+    .attr("stroke-width", d => widthScale(d.weight));
+```
+
+**Bundled parallel edges** between the same node pair — offset each by index so they don't stack:
+
+```js
+// Pre-compute: group parallel edges and assign offset index
+const pairMap = new Map();
+links.forEach(d => {
+  const key = [d.source.id, d.target.id].sort().join("--");
+  if (!pairMap.has(key)) pairMap.set(key, []);
+  pairMap.get(key).push(d);
+});
+pairMap.forEach(group => group.forEach((d, i) => {
+  d.parallelIndex = i;
+  d.parallelCount = group.length;
+}));
+
+// Render with offset curvature
+link.attr("d", d => {
+  const dx = d.target.x - d.source.x, dy = d.target.y - d.source.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  // Spread parallel edges; single edges get straight line
+  const offset = d.parallelCount === 1 ? 0
+    : (d.parallelIndex - (d.parallelCount - 1) / 2) * 30;
+  const dr = offset === 0 ? 0 : dist / (2 * Math.sin(Math.atan(offset / dist)));
+  return offset === 0
+    ? `M${d.source.x},${d.source.y}L${d.target.x},${d.target.y}`
+    : `M${d.source.x},${d.source.y}A${dr},${dr} 0 0,${offset > 0 ? 1 : 0} ${d.target.x},${d.target.y}`;
+});
+```
+
+## Label Placement
+
+### Node-Link Labels
+
+For sparse graphs (<50 nodes), offset labels from node center and let the eye resolve collisions:
+
+```js
+label.attr("x", d => d.x + d.r + 4).attr("y", d => d.y + 4);
+```
+
+For denser graphs, use force-based label collision avoidance — same pattern as `annotation` skill's rectangular collision force. Create label proxy objects so the main node positions aren't mutated:
+
+```js
+const labelNodes = nodes.map(d => ({id: d.id, anchorX: d.x, anchorY: d.y, labelWidth: d.labelWidth}));
+const labelSim = d3.forceSimulation(labelNodes)
+  .force("x", d3.forceX(d => d.anchorX).strength(0.5))
+  .force("y", d3.forceY(d => d.anchorY).strength(0.5))
+  .force("collide", d3.forceCollide(d => d.labelWidth / 2 + 2))
+  .stop();
+labelSim.tick(50);
+label.data(labelNodes).attr("x", d => d.x).attr("y", d => d.y);
+```
+
+### Arc Diagram Labels
+
+Place labels below the axis, rotated 45 degrees. Stagger vertically when neighbors overlap:
+
+```js
+label.attr("transform", d => `translate(${x(d.id)},${y0 + 12}) rotate(45)`)
+    .attr("text-anchor", "start");
+```
+
+### Chord Diagram Outer Labels
+
+Labels sit outside the arcs, rotated to follow the circle. Flip text on the left half so it reads left-to-right:
+
+```js
+label.attr("transform", d => {
+  const angle = (d.startAngle + d.endAngle) / 2;
+  const rotate = angle * 180 / Math.PI - 90;
+  const flip = angle > Math.PI;  // left half of circle
+  return `rotate(${rotate}) translate(${outerRadius + 10}) ${flip ? "rotate(180)" : ""}`;
+})
+.attr("text-anchor", d => {
+  const angle = (d.startAngle + d.endAngle) / 2;
+  return angle > Math.PI ? "end" : "start";
+});
+```
+
 ## Chord Diagrams
 
 Best for 5-20 groups with asymmetric flows. The input matrix must be square — non-square bipartite data needs reshaping (pad with zeros or restructure).
+
+### Edge List to Square Matrix
+
+The most common stumbling block. `d3.chord()` requires a square matrix, but data usually arrives as `[{source, target, value}]`:
+
+```js
+// Edge list → square matrix for d3.chord
+const names = Array.from(new Set(edges.flatMap(d => [d.source, d.target])));
+const index = new Map(names.map((name, i) => [name, i]));
+const n = names.length;
+const matrix = Array.from({length: n}, () => new Array(n).fill(0));
+
+// Aggregate duplicate source-target pairs
+const rolled = d3.rollup(edges, v => d3.sum(v, d => d.value), d => d.source, d => d.target);
+for (const [source, targets] of rolled) {
+  for (const [target, value] of targets) {
+    matrix[index.get(source)][index.get(target)] = value;
+  }
+}
+
+const chords = d3.chord().padAngle(0.05)(matrix);
+```
+
+For undirected data, symmetrize: `matrix[i][j] = matrix[j][i] = value`. For bipartite data (e.g., countries-to-products), pad with zeros:
+
+```js
+// Bipartite: rows are sources, cols are targets — pad to make square
+const nSrc = sources.length, nTgt = targets.length, total = nSrc + nTgt;
+const matrix = Array.from({length: total}, () => new Array(total).fill(0));
+edges.forEach(d => {
+  matrix[srcIndex.get(d.source)][nSrc + tgtIndex.get(d.target)] = d.value;
+  matrix[nSrc + tgtIndex.get(d.target)][srcIndex.get(d.source)] = d.value; // symmetric
+});
+```
 
 Hide labels for small groups to prevent overlap:
 ```js
@@ -138,13 +253,222 @@ Hide labels for small groups to prevent overlap:
 
 Requires `d3-sankey` (separate package): `https://cdn.jsdelivr.net/npm/d3-sankey@0.12/dist/d3-sankey.min.js`
 
-`d3.sankey()` does not handle cycles — it throws or produces broken layouts. For flows that loop back (recycling, user session flows), remove back edges via DFS before layout, or use the circular Sankey extension.
+### Tabular Data to Sankey Format
+
+Sankey needs `{nodes: [{name}], links: [{source, target, value}]}`. Tabular data (CSV rows with category columns) needs reshaping — build links between adjacent columns:
+
+```js
+// CSV rows like: {region: "West", product: "Widget", channel: "Online", revenue: 500}
+const columns = ["region", "product", "channel"];  // flow order
+const nodeSet = new Set();
+const linkMap = new Map();
+
+data.forEach(row => {
+  for (let i = 0; i < columns.length - 1; i++) {
+    const src = `${columns[i]}:${row[columns[i]]}`;
+    const tgt = `${columns[i + 1]}:${row[columns[i + 1]]}`;
+    nodeSet.add(src);
+    nodeSet.add(tgt);
+    const key = `${src}→${tgt}`;
+    linkMap.set(key, (linkMap.get(key) || 0) + +row.revenue);
+  }
+});
+
+const nodes = Array.from(nodeSet, name => ({name}));
+const nodeIndex = new Map(nodes.map((d, i) => [d.name, i]));
+const links = Array.from(linkMap, ([key, value]) => {
+  const [source, target] = key.split("→");
+  return {source: nodeIndex.get(source), target: nodeIndex.get(target), value};
+});
+```
+
+### Cycle Removal
+
+`d3.sankey()` does not handle cycles — it throws or produces broken layouts. For flows that loop back (recycling, user session flows), detect and remove back edges via DFS before layout:
+
+```js
+function removeCycles(nodes, links) {
+  const adj = new Map(nodes.map((_, i) => [i, []]));
+  links.forEach((l, i) => adj.get(l.source).push({target: l.target, index: i}));
+
+  const state = new Array(nodes.length).fill(0); // 0=white, 1=grey, 2=black
+  const backEdges = new Set();
+
+  function dfs(u) {
+    state[u] = 1;
+    for (const {target: v, index} of adj.get(u)) {
+      if (state[v] === 1) backEdges.add(index);  // back edge = cycle
+      else if (state[v] === 0) dfs(v);
+    }
+    state[u] = 2;
+  }
+
+  nodes.forEach((_, i) => { if (state[i] === 0) dfs(i); });
+  return links.filter((_, i) => !backEdges.has(i));
+}
+```
+
+For flows where cycles are meaningful (e.g., user session loops), use [d3-sankey-circular](https://github.com/tomshanley/d3-sankey-circular) which routes back-edges as arcs below the diagram.
 
 ## Accessibility by Layout Type
 
 - **Adjacency matrix** — `role="grid"` with `role="row"` and `role="gridcell"`. The most inherently accessible layout because it maps to a table.
 - **Arc diagram / Node-link** — `role="img"` with descriptive `aria-label`. Provide a hidden data table as the accessible alternative (see `data-table` skill).
 - **Chord / Sankey** — `role="img"` with summary label. Offer underlying matrix/flow data as an accessible table.
+
+## Force Tuning Recipes for Network Layout
+
+The `force` skill covers simulation mechanics in depth. Here are ready-to-use parameter sets for common graph shapes:
+
+**Sparse tree-like** (acyclic or near-acyclic, degree mostly 1-3):
+```js
+simulation
+  .force("charge", d3.forceManyBody().strength(-200))
+  .force("link", d3.forceLink(links).id(d => d.id).distance(80))
+  .force("center", d3.forceCenter(width / 2, height / 2));
+// High repulsion + long links spread the tree. No collision needed — low density.
+```
+
+**Dense community graph** (50-500 nodes, 5-15 communities):
+```js
+simulation
+  .force("charge", d3.forceManyBody().strength(-80).distanceMax(250))
+  .force("link", d3.forceLink(links).id(d => d.id).distance(30).strength(d =>
+    d.source.group === d.target.group ? 0.3 : 0.01))
+  .force("collide", d3.forceCollide(d => d.r + 1))
+  .force("center", d3.forceCenter(width / 2, height / 2));
+// Intra-community links pull tight, inter-community links are slack → groups separate.
+```
+
+**Bipartite** (two node types, edges only between types):
+```js
+const leftX = width * 0.3, rightX = width * 0.7;
+simulation
+  .force("x", d3.forceX(d => d.type === "A" ? leftX : rightX).strength(0.4))
+  .force("y", d3.forceY(height / 2).strength(0.01))
+  .force("charge", d3.forceManyBody().strength(-30))
+  .force("link", d3.forceLink(links).id(d => d.id).distance(100))
+  .force("collide", d3.forceCollide(d => d.r + 2));
+// Strong x-force pins types to columns; weak y lets them spread vertically.
+```
+
+**Hub-and-spoke** (few hubs with high degree, many leaves):
+```js
+simulation
+  .force("charge", d3.forceManyBody().strength(d => d.degree > 10 ? -300 : -30))
+  .force("link", d3.forceLink(links).id(d => d.id)
+    .distance(d => d.source.degree > 10 || d.target.degree > 10 ? 60 : 30))
+  .force("collide", d3.forceCollide(d => d.r + 1))
+  .force("center", d3.forceCenter(width / 2, height / 2));
+// Per-node charge gives hubs room; shorter leaf links keep spokes compact.
+```
+
+## Hairball Reduction
+
+When a node-link diagram becomes unreadable, these are practical fixes — not just "add opacity."
+
+**Minimum weight threshold** — the simplest filter. Use a slider for exploration:
+
+```js
+function filterByWeight(links, minWeight) {
+  return links.filter(d => d.weight >= minWeight);
+}
+// Bind to slider:
+slider.on("input", function() {
+  const filtered = filterByWeight(allLinks, +this.value);
+  simulation.force("link", d3.forceLink(filtered).id(d => d.id));
+  simulation.alpha(0.3).restart();
+});
+```
+
+**Top-k edges per node** — keeps the strongest connections of every node, preventing isolates:
+
+```js
+function topKEdgesPerNode(links, k) {
+  const keep = new Set();
+  const byNode = d3.group(links, d => d.source.id);
+  for (const [, nodeLinks] of byNode) {
+    nodeLinks.sort((a, b) => b.weight - a.weight);
+    nodeLinks.slice(0, k).forEach(l => keep.add(l));
+  }
+  // Also check target side
+  const byTarget = d3.group(links, d => d.target.id);
+  for (const [, nodeLinks] of byTarget) {
+    nodeLinks.sort((a, b) => b.weight - a.weight);
+    nodeLinks.slice(0, k).forEach(l => keep.add(l));
+  }
+  return Array.from(keep);
+}
+```
+
+**Community-based aggregation** — collapse each community to a single meta-node, showing inter-community edges as weighted links. Turns a 500-node hairball into a 10-node summary:
+
+```js
+// After Louvain community detection (via graphology), aggregate
+function aggregateByCommunity(nodes, links) {
+  const communityNodes = Array.from(
+    d3.group(nodes, d => d.community),
+    ([id, members]) => ({id, label: `Community ${id}`, size: members.length})
+  );
+  const communityLinks = d3.rollups(
+    links.filter(d => d.source.community !== d.target.community),
+    v => d3.sum(v, d => d.weight || 1),
+    d => d.source.community,
+    d => d.target.community
+  ).flatMap(([src, targets]) =>
+    targets.map(([tgt, weight]) => ({source: src, target: tgt, weight}))
+  );
+  return {nodes: communityNodes, links: communityLinks};
+}
+```
+
+**Fisheye on hover** — keep the full graph but magnify the neighborhood under the cursor. See the `brushing` skill for the fisheye distortion pattern. The key idea: apply fisheye to node positions on mousemove, redraw, and snap back on mouseout.
+
+## Temporal Networks
+
+Edges that appear and disappear over time. The core pattern: filter links by a time range and transition the visual state.
+
+```js
+const timeScale = d3.scaleTime()
+  .domain(d3.extent(links, d => d.timestamp))
+  .range([0, sliderWidth]);
+
+function updateTime(t0, t1) {
+  const active = links.filter(d => d.timestamp >= t0 && d.timestamp <= t1);
+  const activeSet = new Set(active.map(d => `${d.source.id}--${d.target.id}`));
+
+  // Links: fade in/out
+  linkSel.transition().duration(300)
+    .attr("stroke-opacity", d =>
+      activeSet.has(`${d.source.id}--${d.target.id}`) ? 0.6 : 0.02);
+
+  // Nodes: highlight if they have any active edge
+  const activeNodes = new Set(active.flatMap(d => [d.source.id, d.target.id]));
+  nodeSel.transition().duration(300)
+    .attr("fill-opacity", d => activeNodes.has(d.id) ? 1 : 0.15)
+    .attr("r", d => activeNodes.has(d.id) ? radiusScale(d.degree) : 2);
+}
+
+// Bind to range slider or play button
+slider.on("input", function() {
+  const t = timeScale.invert(+this.value);
+  const windowMs = 30 * 24 * 60 * 60 * 1000; // 30-day window
+  updateTime(new Date(t - windowMs), t);
+});
+```
+
+For animated playback, step through time with `d3.interval`:
+
+```js
+const windowMs = 30 * 24 * 60 * 60 * 1000; // 30-day window
+const play = d3.interval(elapsed => {
+  const t = timeScale.invert(elapsed * 10); // 10x speed
+  updateTime(new Date(t - windowMs), t);
+  if (t > timeScale.domain()[1]) play.stop();
+}, 50);
+```
+
+Keep the force simulation running during time animation — nodes settle into new positions as their connections change. Reheat gently (`alpha(0.1)`) on each time step to avoid jarring jumps.
 
 ## Scaling Past D3
 
@@ -170,3 +494,4 @@ D3 SVG hits a wall at ~5,000 nodes (DOM overhead). D3 Canvas extends this to ~10
 - [Matrix Reordering](https://hal.inria.fr/hal-01326759/document) — Fekete's research on optimal matrix orderings
 - [Graphology](https://graphology.github.io/) — JavaScript graph analysis library (community detection, centrality, shortest paths)
 - [sigma.js](https://www.sigmajs.org/) — WebGL graph renderer for 10K+ nodes (v3, 2024)
+- [d3-sankey-circular](https://github.com/tomshanley/d3-sankey-circular) — Sankey layout with cycle support
