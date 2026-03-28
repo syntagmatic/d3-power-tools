@@ -7,41 +7,69 @@ description: "Compress and simplify a D3 power-tools SKILL.md for clarity and to
 
 Simplify the D3 power-tools skill at `$ARGUMENTS`.
 
-Read the full SKILL.md file, then compress it using these techniques — in order of impact:
+Read the full SKILL.md, then work through three phases: triage, compress, verify.
 
-## Calibrate first
+## Phase 1 — Triage
 
-- **Verbose files (600+ lines, wrapper functions, repeated scaffolding):** Apply all 6 techniques aggressively. Target 40-50% reduction.
-- **Moderate files (400-600 lines):** Focus on techniques 1-4. Target 20-30% reduction.
-- **Already lean files (<400 lines, terse code, no wrappers):** Focus on techniques 4-6 only. Target 10-15% reduction. Don't force compression — an already-tight file compressed further just loses clarity.
+Before editing anything, build a section inventory. For each `##` section, note its line count and classify it:
 
-## Compression techniques
+| Classification | Meaning | Action |
+|---|---|---|
+| **core** | High-frequency pattern, hard to derive | Keep in full |
+| **compress** | Valuable but verbose or repetitive | Tighten (Phase 2) |
+| **reference** | Covered better in another skill | Replace with one-line cross-skill pointer |
+| **cut** | Niche, rarely needed, or derivable from core sections | Remove entirely |
 
-1. **Strip boilerplate from code examples.** Remove SVG creation, container setup, `role`/`aria-label`, `style("vertical-align", ...)`, option destructuring. Show only the D3 pattern being taught — scales, generators, bindings.
+Decision criteria for each section:
+- How often does a developer need this pattern? (weekly → core, rarely → cut candidate)
+- Is this the *owning* skill for this pattern, or does another skill cover it better?
+- Can a developer who understands the core sections derive this one without help?
+- Does the section duplicate infrastructure (state management, Worker setup, DOM boilerplate) that appears elsewhere in this file?
 
-2. **Remove wrapper functions.** Don't wrap every example in `function fooChart(container, data, {...} = {}) { ... }`. Show the D3 code inline. Exception: keep wrapper functions that ARE the pattern (like `patternHatch` or `brokenScale`).
+**Show the triage table to the user and get approval before proceeding.** This is where the biggest gains come from — cutting or replacing entire sections beats line-level compression.
 
-3. **Use terse D3 v7 syntax.** `d3.scaleLinear([domain], [range])` shorthand. Chain `.attr()` calls on one line when ≤3 attrs. Use comma-separated `const` for related variables. Skip intermediate variables when the chain is readable.
-
-4. **Collapse variants.** When multiple chart types share structure (e.g., sparkline variants, hierarchy layouts), show one canonical form in full, then describe each variant's delta in 2-3 lines of code + 1 line of prose. Don't repeat the shared scaffolding.
-
-5. **Deduplicate cross-skill content.** If a pattern is covered thoroughly in another skill, replace with a one-line reference: "See `canvas` skill for DPR setup." Don't re-explain.
-
-6. **Tighten prose.** Cut sentences that restate what the code shows. One line of context before a code block is usually enough. Remove "Note that..." / "It's important to..." / "You should..." filler.
-
-## What to preserve
-
+### Hard constraints — never cut these
 - Architecture diagrams (ASCII art flow diagrams)
-- Decision tables (scale selection, projection choice, etc.)
-- **ALL pitfalls** — never cut or limit the pitfalls list
+- Decision tables (scale selection, projection choice, layout flowcharts)
+- **All pitfalls** — never cut, shorten, or limit the pitfalls list
 - References section
-- The skill's core teaching: someone should be able to implement any pattern from the compressed version. Never compress a section below the point where a developer could implement the pattern from it alone.
 - Cross-skill `Related:` links at the top
 
-## Process
+### Skill map for cross-references
 
-1. Read the original file and note its line count
-2. Apply compression techniques
-3. Write the compressed version
-4. Report: original lines → compressed lines, compression ratio
-5. Immediately run `/check-skill` on the result
+When classifying sections as "reference," point to the right owner. Consult the project's CLAUDE.md skill listing for the full map. Common ownership boundaries:
+- Zoom/pan mechanics → `navigation`
+- DPR, resize, container sizing → `responsive`
+- Quadtree hit detection, typed arrays → `canvas`
+- Color scales, palettes, CVD → `color`
+- Brushing, lasso, linked selection → `brushing`
+- ARIA, keyboard nav, screen readers → `canvas-accessibility`
+- Tooltip positioning, leader lines → `annotation`
+- Data loading, reshaping, binning → `data-gathering`
+- Enter/update/exit, transitions → `motion`
+
+## Phase 2 — Compress
+
+Apply these techniques to sections classified as "compress," ordered by typical impact:
+
+1. **Collapse variants.** When multiple sub-patterns share structure (filter types, layout variants, chart flavors), show one canonical form in full. Describe each variant's delta in 2-3 lines of code + 1 line of prose. Don't repeat shared scaffolding.
+
+2. **Extract shared infrastructure.** If the same state object, Worker setup, event wiring, or DOM scaffold appears in multiple sections, define it once and reference it. "Uses the state pattern from §Chart↔Table Toggle" beats repeating 15 lines.
+
+3. **Strip code boilerplate.** Remove SVG/container creation, `role`/`aria-label`, style resets, option destructuring. Show only the D3 pattern being taught.
+
+4. **Remove wrapper functions.** Don't wrap examples in `function fooChart(container, data, opts) { ... }` unless the wrapper IS the pattern (like a reusable chart closure).
+
+5. **Tighten prose.** Cut sentences that restate what the code shows. One line of context before a code block is enough. Remove "Note that..." / "It's important to..." filler.
+
+6. **Use terse D3 v7 syntax.** `d3.scaleLinear([0,1], [0,w])` shorthand. Chain ≤3 `.attr()` calls on one line. Comma-separated `const` for related variables.
+
+## Phase 3 — Verify
+
+1. **Coverage diff.** List every implementable pattern from the original. Verify each one is either still present or explicitly referenced to another skill. A developer should be able to implement any pattern from the compressed version alone (or by following one cross-skill pointer).
+
+2. **Run `/check-skill`** on the compressed file to catch undefined variables, dangling function references, and code/prose mismatches.
+
+3. **Eval check (if available).** If `meta/evals/eval.config.json` lists evals targeting this skill, run them before and after compression. If structural check scores drop, the compression cut too deep — restore that section.
+
+4. **Report.** Original lines → compressed lines, compression ratio, and which sections were triaged as reference/cut.
