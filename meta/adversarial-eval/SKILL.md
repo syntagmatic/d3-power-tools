@@ -1,11 +1,11 @@
 ---
 name: adversarial-eval
-description: "Calibrate and evaluate adversarial agents (visual-critic, encoding-integrity, interaction-stress-test, etc.) by testing whether they produce honest, consistent scores. Use when tuning an agent's SKILL.md, running blind evaluations, checking inter-rater reliability, or diagnosing score inflation/deflation."
+description: "Calibrate and evaluate auditing skills (visual-critic, encoding-integrity, interaction-stress-test, etc.) by testing whether they produce honest, consistent scores. Use when tuning an agent's SKILL.md, running blind evaluations, checking inter-rater reliability, or diagnosing score inflation/deflation."
 ---
 
-# Adversarial Agent Evaluation
+# Auditing Skill Evaluation
 
-The adversarial agents produce scores, not code. Evaluating them asks a different question than skill-eval: not "does this help Claude write better code?" but "does this agent score visualizations honestly and consistently?"
+The auditing skills produce scores, not code. Evaluating them asks a different question than skill-eval: not "does this help Claude write better code?" but "does this agent score visualizations honestly and consistently?"
 
 ## Context Contamination
 
@@ -95,4 +95,4 @@ An agent that gives different scores on different runs is unreliable. To test:
 
 - **Specific block scores** — "block 50 should be a 6" is a test fixture, not a criterion. It belongs in calibration anchors, not the skill.
 - **Checklists that encourage box-ticking** — especially for holistic evaluations like visual design. Dimensions are lenses, not checkboxes.
-- **Criteria that duplicate other agents** — each agent owns a distinct dimension. Visual critic doesn't score accessibility. Deception detector doesn't score typography.
+- **Criteria that duplicate other agents** — each agent owns a distinct dimension. Visual critic doesn't score accessibility. Encoding integrity doesn't score typography.

@@ -13,7 +13,7 @@ The standard is publication-quality work: NYT Graphics, Observable notebooks, Na
 
 **Screenshot first.** Before scoring, render the visualization and look at it. Code review alone cannot catch: elements rendering too small to read, labels overlapping data, colors that clash, layouts that feel cramped, or proportions that are off. If you can't screenshot, say so — a code-only review is incomplete and should be flagged.
 
-Use cached screenshots from `temp/blocks/` when the block HTML hasn't changed (compare file modification times). Screenshots are shared across all adversarial agents — don't regenerate what already exists.
+Use cached screenshots from `temp/blocks/` when the block HTML hasn't changed (compare file modification times). Screenshots are shared across all auditing skills — don't regenerate what already exists.
 
 **Score holistically.** The dimensions below are lenses, not a checklist. A visualization with perfect typography but clashing colors is not a 7. A visualization with default styling but excellent proportions and restraint might be. Trust your overall impression, then use the dimensions to explain it.
 

@@ -170,15 +170,13 @@ Skills for testing, evaluating, and improving other skills. The compound tool.
 
 **[skill-eval](meta/skill-eval/SKILL.md)** — Evaluate skill effectiveness with before/after comparisons.
 
-**[adversarial-eval](meta/adversarial-eval/SKILL.md)** — Calibrate adversarial agents with blind evaluation protocol and inter-rater reliability checks.
-
-**[metamorphic-tester](meta/metamorphic-tester/SKILL.md)** — Validate math and logic via visual invariants. Scaling, permutation, and subset relations to catch silent bugs.
+**[adversarial-eval](meta/adversarial-eval/SKILL.md)** — Calibrate auditing skills with blind evaluation protocol and inter-rater reliability checks.
 
 **[visual-critic](meta/visual-critic/SKILL.md)** — Audit design quality and "taste." Typographic hierarchy, 8px grid, WCAG accessibility, and visual logic.
 
-**[perceptual-red-team](meta/perceptual-red-team/SKILL.md)** — Audit for cognitive overload. Working memory limits, "Chart Fatigue," hairball detection, and congruence in animation.
+**[encoding-integrity](meta/encoding-integrity/SKILL.md)** — Audit for honest and robust data encoding. Lie factor, zero baselines, metamorphic relations, data join correctness.
 
-**[deception-detector](meta/deception-detector/SKILL.md)** — Audit for mathematical and ethical honesty. Truncated axes, "The Lie Factor," quantile traps, and fabricated correlations.
+**[perceptual-red-team](meta/perceptual-red-team/SKILL.md)** — Audit for cognitive overload. Working memory limits, "Chart Fatigue," hairball detection, and congruence in animation.
 
 **[interaction-stress-test](meta/interaction-stress-test/SKILL.md)** — Audit for race conditions and "update storms." Feedback loops, stale closures, RAF coalescing, and dirty-flag rendering.
 
