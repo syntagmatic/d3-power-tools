@@ -72,6 +72,35 @@ python3 scripts/generate-blocks-gemini.py
 ```
 Reads manifest, runs `gemini -p --sandbox --yolo` with 5 parallel workers. Skips existing files, so safe to re-run for retries.
 
+## Multi-Session Coordination
+
+When working alongside other Claude sessions, use `scripts/coord.sh` to coordinate. State lives in `.git/coordination/` (shared across worktrees, containers, and host).
+
+```bash
+# On startup: register yourself
+scripts/coord.sh register <name> <env>   # env: host, worktree, container
+
+# Declare what you're working on
+scripts/coord.sh status "Rewriting projection section"
+scripts/coord.sh files skills/cartography/SKILL.md
+
+# Check for other sessions and conflicts
+scripts/coord.sh list                     # see all active sessions
+scripts/coord.sh conflicts                # check for file overlaps
+
+# Task board
+scripts/coord.sh task-list                # see available tasks
+scripts/coord.sh task-claim <id>          # claim a task
+scripts/coord.sh task-done <id>           # mark complete
+scripts/coord.sh task-add <title> [desc]  # add a new task
+
+# When done
+scripts/coord.sh done                     # mark session complete
+scripts/coord.sh deregister               # remove session
+```
+
+Container sessions: `$COORD_SESSION_NAME` and `$COORD_SESSION_ENV` are set automatically.
+
 ## Code Style
 
 - ES modules or inline `<script type="module">`

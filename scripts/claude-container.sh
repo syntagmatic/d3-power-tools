@@ -21,6 +21,8 @@ container run -it --rm \
 	-v "$HOME/.claude:/home/node/.claude" \
 	-v "$HOME/.ssh:/home/node/.ssh:ro" \
 	-e GIT_CONFIG_GLOBAL=/workspace/.gitconfig \
+	-e COORD_SESSION_NAME="$NAME" \
+	-e COORD_SESSION_ENV=container \
 	-u node -w /workspace \
 	"$IMAGE" \
 	claude --dangerously-skip-permissions "${@:3}"

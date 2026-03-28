@@ -60,6 +60,7 @@ case "$1" in
     ;;
   --remove|-R)
     [ -z "$2" ] && usage
+    "$REPO_ROOT/scripts/coord.sh" deregister 2>/dev/null || true
     git worktree remove "$WORKTREE_DIR/$2"
     git branch -d "session/$2" 2>/dev/null && echo "Deleted branch session/$2" || true
     ;;
@@ -79,8 +80,11 @@ case "$1" in
       echo "Created worktree at $WORKTREE (branch: $BRANCH)"
     fi
 
+    # Register coordination session
+    cd "$WORKTREE"
+    "$REPO_ROOT/scripts/coord.sh" register "$NAME" worktree
+
     if [ "$2" != "--no-claude" ]; then
-      cd "$WORKTREE"
       exec claude
     fi
     ;;
