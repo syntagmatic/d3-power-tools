@@ -5,97 +5,57 @@ description: "Build fluid, purposeful D3.js animated transitions. Use this skill
 
 # Animated Transitions
 
-Build fluid, purposeful D3 transitions that communicate data changes clearly. Covers enter/update/exit, morphing between chart types, staggering, interruption handling, and canvas animation.
+Build fluid, purposeful D3 transitions that communicate data changes clearly. Covers enter/update/exit, staggering, interruption handling, canvas animation, and scrollytelling.
 
 ## Core Principle
 
-Animation should answer: **"What changed?"** If a transition doesn't help the viewer track changes, remove it. Gratuitous animation is worse than no animation.
+Animation should answer: **"What changed?"** If a transition doesn't help the viewer track changes, remove it.
 
 ### When Animation Helps (Heer & Robertson 2007)
 
-- **Tracking identity**: the viewer needs to see which elements moved where (object constancy)
+- **Tracking identity**: viewer sees which elements moved where (object constancy)
 - **Revealing causation**: temporal sequence shows this-caused-that
 - **Sequential storytelling**: scrollytelling, steppers, guided narratives
 - **Aggregation/disaggregation**: seeing how points roll up into summaries
 
 ### When to Use Small Multiples Instead
 
-- The viewer needs to **compare** two states precisely — side-by-side beats sequential
-- More than ~4 elements move simultaneously without staggering — the visual system can't track them
-- The animation creates **occluded intermediate states** where elements overlap mid-flight
+- Viewer needs to **compare** two states precisely -- side-by-side beats sequential
+- More than ~4 elements move simultaneously without staggering
+- Animation creates **occluded intermediate states** where elements overlap mid-flight
 - Users will see the transition **repeatedly** (it becomes annoying fast)
 
-### Duration Guidelines (from perception research)
+### Duration Guidelines
 
 | Motion type | Duration |
 |---|---|
-| Simple position change | 300–500ms |
+| Simple position change | 300-500ms |
 | Complex multi-element transition | ~1000ms total |
-| Dwell time between stages | 200–400ms |
-| Stagger gap per element | 20–80ms (total stagger < 500ms) |
-| Scrollytelling step transition | 400–800ms |
+| Dwell time between stages | 200-400ms |
+| Stagger gap per element | 20-80ms (total stagger < 500ms) |
+| Scrollytelling step transition | 400-800ms |
 
-The Heer & Robertson **Congruence Principle** applies: maintain valid data graphics during transitions. No nonsensical intermediate states — if bars pass through each other mid-animation, stage the transition instead.
+**Congruence Principle**: maintain valid data graphics during transitions. No nonsensical intermediate states -- if bars pass through each other mid-animation, stage the transition instead.
 
-## SVG Transitions (D3 Built-in)
+## SVG Transitions
 
-### Enter / Update / Exit with Key Functions
+### Enter / Update / Exit with `.join()`
 
-The foundation of D3 animation. Always use a key function so D3 can track identity:
-
-```js
-const bars = svg.selectAll("rect")
-  .data(data, d => d.id);  // key function — critical
-
-// EXIT: fade out removed elements
-bars.exit()
-  .transition().duration(400)
-  .attr("opacity", 0)
-  .attr("width", 0)
-  .remove();
-
-// UPDATE: move existing elements
-bars.transition().duration(600)
-  .attr("x", d => xScale(d.category))
-  .attr("y", d => yScale(d.value))
-  .attr("height", d => height - yScale(d.value));
-
-// ENTER: grow in new elements
-bars.enter().append("rect")
-  .attr("x", d => xScale(d.category))
-  .attr("y", height)           // start from baseline
-  .attr("height", 0)            // start collapsed
-  .attr("width", xScale.bandwidth())
-  .attr("opacity", 0)
-  .transition().duration(600)
-  .attr("y", d => yScale(d.value))
-  .attr("height", d => height - yScale(d.value))
-  .attr("opacity", 1);
-```
-
-### The Join Pattern (D3 v7+)
-
-Modern D3 uses `.join()` which handles enter/update/exit in one call:
+Always use a key function so D3 can track identity:
 
 ```js
 svg.selectAll("circle")
-  .data(data, d => d.id)
+  .data(data, d => d.id)  // key function -- critical for object constancy
   .join(
     enter => enter.append("circle")
-      .attr("r", 0)
-      .attr("cx", d => xScale(d.x))
-      .attr("cy", d => yScale(d.y))
-      .call(enter => enter.transition().duration(500)
-        .attr("r", d => rScale(d.value))),
+      .attr("r", 0).attr("cx", d => xScale(d.x)).attr("cy", d => yScale(d.y))
+      .call(e => e.transition().duration(500).attr("r", d => rScale(d.value))),
     update => update
-      .call(update => update.transition().duration(500)
-        .attr("cx", d => xScale(d.x))
-        .attr("cy", d => yScale(d.y))
+      .call(u => u.transition().duration(500)
+        .attr("cx", d => xScale(d.x)).attr("cy", d => yScale(d.y))
         .attr("r", d => rScale(d.value))),
     exit => exit
-      .call(exit => exit.transition().duration(300)
-        .attr("r", 0)
-        .remove())
+      .call(e => e.transition().duration(300).attr("r", 0).remove())
   );
 ```
 
@@ -104,40 +64,24 @@ svg.selectAll("circle")
 Staggering helps the eye track individual elements in large groups:
 
 ```js
-bars.transition()
-  .duration(400)
+svg.selectAll("rect").transition().duration(400)
   .delay((d, i) => i * 20)  // 20ms offset per element
   .attr("y", d => yScale(d.value))
   .attr("height", d => height - yScale(d.value));
 ```
 
-### Stagger Strategies
-
-- **Index-based**: `delay((d, i) => i * 20)` — simple left-to-right
-- **Value-based**: `delay(d => (maxVal - d.value) / maxVal * 500)` — largest first
-- **Spatial**: `delay(d => Math.hypot(d.x - cx, d.y - cy) * 2)` — ripple from center
-- **Random**: `delay(() => Math.random() * 300)` — organic feel
-- **Group-then-item**: exit all → transition layout → enter all (three-phase)
+**Stagger strategies**: index-based `i * 20` (left-to-right), value-based `(maxVal - d.value) / maxVal * 500` (largest first), spatial `Math.hypot(d.x - cx, d.y - cy) * 2` (ripple from center), random `Math.random() * 300` (organic feel), or group-then-item (exit all, transition layout, enter all).
 
 ## Easing Functions
 
 Choose easing based on the semantic of the motion:
 
 ```js
-// Responsive UI feel — fast start, gentle stop
-.ease(d3.easeCubicOut)
-
-// Bouncy/playful — use sparingly
-.ease(d3.easeElasticOut.amplitude(1).period(0.4))
-
-// Anticipation — pulls back before moving forward
-.ease(d3.easeBackOut.overshoot(1.5))
-
-// Linear — only for continuous processes (loading, progress)
-.ease(d3.easeLinear)
-
-// Smooth start and stop — default, good for most cases
-.ease(d3.easeCubicInOut)
+.ease(d3.easeCubicOut)      // responsive UI -- fast start, gentle stop
+.ease(d3.easeElasticOut.amplitude(1).period(0.4))  // bouncy -- use sparingly
+.ease(d3.easeBackOut.overshoot(1.5))   // anticipation -- pulls back first
+.ease(d3.easeLinear)        // only for continuous processes (loading, progress)
+.ease(d3.easeCubicInOut)    // smooth start and stop -- default, most cases
 ```
 
 **Rule of thumb**: Out-easing for entrances, in-easing for exits, in-out for position changes.
@@ -146,33 +90,24 @@ Choose easing based on the semantic of the motion:
 
 ### Sequential Transitions
 
+Chain `.transition()` on a transition to create a sequence:
+
 ```js
 selection
-  .transition("phase1").duration(300)
-    .attr("opacity", 0)
-  .transition("phase2").duration(500)
-    .attr("transform", "translate(100, 0)")
-    .attr("opacity", 1);
+  .transition().duration(300).attr("opacity", 0)
+  .transition().duration(500).attr("transform", "translate(100, 0)").attr("opacity", 1);
 ```
 
-### Staged Exit → Update → Enter
+### Staged Exit, Update, Enter
 
-When adding or removing elements, run exit animations first so departing marks clear out before
-remaining marks slide to their new positions, then enter new marks last. This prevents overlap
-where marks pass through each other.
-
-The simplest approach is coordinated delays — more robust than `transition.end()` promises,
-which reject on interruption or empty selections:
+Run exit first so departing marks clear before remaining marks reposition. Use coordinated delays -- more robust than `transition.end()` promises, which reject on interruption or empty selections:
 
 ```js
 function render(data) {
   const joined = svg.selectAll(".bar").data(data, d => d.id);
-  const hasExit = !joined.exit().empty();
-  const hasEnter = !joined.enter().empty();
-
   const exitDur = 300, moveDur = 400, enterDur = 400;
-  const moveDelay = hasExit ? exitDur : 0;
-  const enterDelay = hasEnter ? moveDelay + moveDur : 0;
+  const moveDelay = joined.exit().empty() ? 0 : exitDur;
+  const enterDelay = moveDelay + moveDur;
 
   joined.join(
     enter => enter.append("rect").attr("class", "bar")
@@ -182,60 +117,39 @@ function render(data) {
         .attr("height", d => height - yScale(d.value))),
     update => update
       .call(u => u.transition().delay(moveDelay).duration(moveDur)
-        .attr("x", d => xScale(d.id))
-        .attr("width", xScale.bandwidth())
+        .attr("x", d => xScale(d.id)).attr("width", xScale.bandwidth())
         .attr("y", d => yScale(d.value))
         .attr("height", d => height - yScale(d.value))),
     exit => exit
       .call(e => e.transition().duration(exitDur)
-        .attr("height", 0).attr("y", height).attr("opacity", 0)
-        .remove())
+        .attr("height", 0).attr("y", height).attr("opacity", 0).remove())
   );
 }
 ```
 
-When nothing is entering or exiting (e.g. a value update or sort), the delays collapse to zero
-so the update plays immediately with no dead time.
+When nothing is entering or exiting, delays collapse to zero so the update plays immediately.
 
-**Interruption safety:** The update handler must assert every visual property that enter or exit
-animates — especially `opacity`. If an enter transition (fading from 0→1) is interrupted by
-a new render, the element moves to the update selection at whatever mid-transition opacity it
-had. Without `.attr("opacity", 1)` in the update handler, it stays semi-transparent.
+**Interruption safety:** The update handler must assert every visual property that enter or exit animates -- especially `opacity`. If an enter transition (fading from 0 to 1) is interrupted by a new render, the element moves to update at whatever mid-transition opacity it had.
 
 ### Handling Interruptions
 
-When a new transition starts before the old one finishes, D3 interrupts. Handle gracefully:
+When a new transition starts before the old one finishes, D3 interrupts. Cancel explicitly when needed:
 
 ```js
-selection
-  .interrupt()  // cancel any in-progress transition
-  .transition().duration(300)
-  .attr("x", newValue);
+selection.interrupt()
+  .transition().duration(300).attr("x", newValue);
 ```
 
-For elements that might be mid-transition, read the current computed value:
-
-```js
-selection.each(function(d) {
-  const current = d3.select(this);
-  const currentX = parseFloat(current.attr("x"));
-  // use currentX as the starting point
-});
-```
-
-**Interrupted transition recovery tip:** Cache the *target* values, not mid-interpolation values. If a transition is interrupted and you read the current DOM attribute, you get a mid-interpolation snapshot that produces jittery restarts. Instead, store intended targets in a data property or Map:
+**Cache targets, not mid-interpolation values.** Reading DOM attributes mid-transition produces jittery restarts. Store intended targets in a Map:
 
 ```js
 const targets = new Map();
 
 function moveTo(sel, x, y) {
   targets.set(sel.node(), { x, y });
-  sel.interrupt()
-    .transition().duration(300)
-    .attr("x", x).attr("y", y);
+  sel.interrupt().transition().duration(300).attr("x", x).attr("y", y);
 }
 
-// On interruption, restart from wherever DOM is, toward the cached target
 function recover(sel) {
   const t = targets.get(sel.node());
   if (t) moveTo(sel, t.x, t.y);
@@ -248,48 +162,37 @@ See the **shape-morphing** skill for comprehensive coverage: parametric interpol
 
 ## Canvas Animations
 
-SVG transitions don't work on Canvas. Use `d3.timer` or `requestAnimationFrame`:
+SVG transitions don't work on Canvas. Use `d3.timer` or `requestAnimationFrame`.
 
-### Basic Canvas Animation Loop
+### Lerp Animation Loop
 
 ```js
 function animate(data, targets) {
-  const speed = 0.05; // interpolation factor per frame
-
-  // current positions (mutable, updated each frame)
-  const current = data.map(d => ({ ...d }));
+  const speed = 0.05, current = data.map(d => ({ ...d }));
 
   d3.timer(() => {
     ctx.clearRect(0, 0, width, height);
-
     let settled = true;
     current.forEach((d, i) => {
-      // lerp toward target
       d.x += (targets[i].x - d.x) * speed;
       d.y += (targets[i].y - d.y) * speed;
-
-      if (Math.abs(targets[i].x - d.x) > 0.5) settled = false;
-      if (Math.abs(targets[i].y - d.y) > 0.5) settled = false;
-
+      if (Math.abs(targets[i].x - d.x) > 0.5 || Math.abs(targets[i].y - d.y) > 0.5)
+        settled = false;
       ctx.beginPath();
       ctx.arc(d.x, d.y, d.r, 0, 2 * Math.PI);
       ctx.fill();
     });
-
-    return settled; // return true to stop timer
+    return settled; // true stops timer
   });
 }
 ```
 
-### FLIP Animation Pattern (Canvas)
+### FLIP Animation Pattern
 
-For layout changes, compute First and Last positions, then Invert and Play:
+Compute First and Last positions, then Invert and Play with precomputed interpolators:
 
 ```js
 function flipTransition(data, oldLayout, newLayout, duration = 800) {
-  const start = performance.now();
-
-  // precompute interpolators
   const interps = data.map((d, i) => ({
     x: d3.interpolateNumber(oldLayout[i].x, newLayout[i].x),
     y: d3.interpolateNumber(oldLayout[i].y, newLayout[i].y),
@@ -300,201 +203,80 @@ function flipTransition(data, oldLayout, newLayout, duration = 800) {
   d3.timer((elapsed) => {
     const t = d3.easeCubicInOut(Math.min(1, elapsed / duration));
     ctx.clearRect(0, 0, width, height);
-
-    interps.forEach((interp, i) => {
+    interps.forEach(interp => {
       ctx.fillStyle = interp.color(t);
       ctx.beginPath();
       ctx.arc(interp.x(t), interp.y(t), interp.r(t), 0, 2 * Math.PI);
       ctx.fill();
     });
-
     return elapsed >= duration;
   });
 }
 ```
 
-### Multi-Property Canvas Architecture (State Machine)
+### Multi-Property State Machine
 
-For complex visualizations that morph between entirely different layouts (e.g., Circle Pack to Treemap), the simple FLIP loop breaks down because properties change shape (radius vs. width/height).
+For complex layout morphs (e.g., Circle Pack to Treemap) where properties change shape (radius vs. width/height), separate three concerns:
 
-The robust pattern separates Data, Target State, and Render State:
+1. **Render State:** Map of current drawn values per node (`x, y, r, w, h, opacity, shapeType`)
+2. **Target State:** Desired layout computed by D3
+3. **Transition Manager:** Builds a Map of `d3.interpolateNumber` interpolators per node/property from render state to target, then runs a `d3.timer` loop applying `easeCubicInOut(elapsed / duration)` to all interpolators each frame. For shape type switches (circle to rect), flip at `t = 0.5`.
 
-1. **Render State:** A Map holding the *current* drawn values for every node (`x, y, r, w, h, opacity, shapeType`). This is what the Renderer draws.
-2. **Target State:** The desired layout computed by D3.
-3. **Transition Manager:** A class that orchestrates interpolating from the Render State toward the Target State.
+This pattern handles interruption gracefully -- when a new transition starts, it reads current render state (which may be mid-flight) as the new source.
 
-#### The Interpolator Map
-
-Instead of interpolating array elements, create a map of interpolators for every numeric property. This allows graceful interruption:
-
-```js
-class TransitionManager {
-  startTransition(targets, renderState, duration) {
-    this.interpolators = new Map();
-    
-    for (const [nodeId, target] of targets) {
-      const rs = renderState.get(nodeId); // Current mid-flight or rested state
-      if (!rs) continue;
-      
-      const nodeInterps = {};
-      // Dynamically create interpolators for all numeric properties
-      for (const key of ['x', 'y', 'r', 'w', 'h', 'opacity', 'startAngle', 'endAngle']) {
-        if (target[key] !== undefined && rs[key] !== undefined) {
-          nodeInterps[key] = d3.interpolateNumber(rs[key], target[key]);
-        }
-      }
-      
-      this.interpolators.set(nodeId, {
-        props: nodeInterps,
-        sourceShape: rs.shapeType,
-        targetShape: target.shapeType
-      });
-    }
-    
-    this.runLoop(renderState, duration);
-  }
-
-  runLoop(renderState, duration) {
-    const ease = d3.easeCubicInOut;
-    
-    d3.timer((elapsed) => {
-      const t = Math.min(1, elapsed / duration);
-      const easedT = ease(t);
-      
-      // Update Render State
-      for (const [nodeId, data] of this.interpolators) {
-        const rs = renderState.get(nodeId);
-        
-        // Update all numbers
-        for (const [key, interp] of Object.entries(data.props)) {
-          rs[key] = interp(easedT);
-        }
-        
-        // Handle Shape Morphing logic (e.g., wait until halfway to switch shape type)
-        if (data.sourceShape !== data.targetShape) {
-           rs.shapeType = easedT < 0.5 ? data.sourceShape : data.targetShape;
-        }
-      }
-      
-      triggerRender(); // Tell canvas to draw current renderState
-      return t >= 1;
-    });
-  }
-}
-```
-
-#### Handling Background Tabs (setTimeout Fallback)
-
-`requestAnimationFrame` and `d3.timer` pause when a browser tab is hidden. If a user clicks a button to change layouts and switches tabs, the transition halts.
-
-To ensure state consistency, implement a timeout fallback:
-
-```js
-_scheduleFrame(callback) {
-  if (!document.hidden) {
-    this._animFrameId = requestAnimationFrame(callback);
-    
-    // Safety fallback: if rAF doesn't fire within 100ms, switch to timeout
-    this._timeoutId = setTimeout(() => {
-      if (this.isTransitioning && this.frameCount === 0) {
-        this._useTimeoutFallback(callback);
-      }
-    }, 100);
-  } else {
-    this._useTimeoutFallback(callback);
-  }
-}
-
-_useTimeoutFallback(callback) {
-  cancelAnimationFrame(this._animFrameId);
-  const tick = () => {
-    if (!this.isTransitioning) return;
-    callback(performance.now());
-    if (this.isTransitioning) {
-      setTimeout(tick, 16); // Simulate 60fps
-    }
-  };
-  setTimeout(tick, 16);
-}
-```
+**Background tab safety:** `d3.timer` pauses when a tab is hidden. If layout transitions must complete while hidden, add a `setTimeout(tick, 16)` fallback when `document.hidden` is true.
 
 ## Color Transitions
 
-### Perceptually Uniform Interpolation
-
-Never interpolate in RGB — it produces muddy intermediate colors. Use Lab or HCL:
+See the **color** skill for perceptual color space theory (Lab, HCL, OKLCH). Key rule for animation: never interpolate in RGB -- it produces muddy intermediate colors.
 
 ```js
-// Bad: RGB interpolation
-d3.interpolateRgb("steelblue", "orange")
-
-// Good: Lab interpolation (perceptually uniform)
-d3.interpolateLab("steelblue", "orange")
-
-// Best for hue rotation: HCL
-d3.interpolateHcl("steelblue", "orange")
+d3.interpolateLab("steelblue", "orange")  // perceptually uniform
+d3.interpolateHcl("steelblue", "orange")  // best for hue rotation
 ```
 
-### Animating Color Scales
-
-When the data domain changes, transition the color mapping:
+When the data domain changes, transition the color mapping with `attrTween`:
 
 ```js
 const oldScale = colorScale.copy();
 colorScale.domain(newDomain);
-
 selection.transition().duration(600)
-  .attrTween("fill", function(d) {
-    const from = oldScale(d.value);
-    const to = colorScale(d.value);
-    return d3.interpolateLab(from, to);
-  });
+  .attrTween("fill", d => d3.interpolateLab(oldScale(d.value), colorScale(d.value)));
 ```
 
 ## Animated Data Storytelling
 
-### Scrollytelling: The Sticky-Graphic Pattern
+### Scrollytelling: Sticky-Graphic Pattern
 
-The dominant scrollytelling pattern (NYT, The Pudding, etc.): a chart stays fixed (`position: sticky`) while narrative text steps scroll past it. Each step triggers a D3 transition.
-
-**Architecture**: Use IntersectionObserver (or scrollama, which wraps it) to detect when step elements cross a viewport threshold, then call a D3 update function.
+A chart stays fixed (`position: sticky`) while narrative text scrolls past. Each step triggers a D3 transition. Use IntersectionObserver (or scrollama, which wraps it) to detect step crossings:
 
 ```js
-// Scrollama setup — scrollama v3+ uses IntersectionObserver internally
-const scroller = scrollama();
-scroller.setup({
-  step: ".step",
-  offset: 0.5,        // trigger at 50% of viewport
-}).onStepEnter(({ index, direction }) => {
-  updateChart(states[index]);  // D3 transition inside
-});
+// scrollama v3+ (IntersectionObserver internally)
+scrollama().setup({ step: ".step", offset: 0.5 })
+  .onStepEnter(({ index }) => updateChart(states[index]));
 ```
 
-Without scrollama, raw IntersectionObserver works the same way:
+Without scrollama, raw IntersectionObserver:
 
 ```js
 const observer = new IntersectionObserver(
-  (entries) => {
-    entries.forEach(entry => {
-      if (entry.isIntersecting) {
-        updateChart(states[entry.target.dataset.step]);
-      }
-    });
-  },
+  entries => entries.forEach(e => {
+    if (e.isIntersecting) updateChart(states[e.target.dataset.step]);
+  }),
   { threshold: 0.5 }
 );
 document.querySelectorAll(".step").forEach(el => observer.observe(el));
 ```
 
-**Key layout**: The graphic container uses `position: sticky; top: 0` and the step text elements scroll past it in a sibling column or overlay. CSS grid or flexbox handles the two-column layout.
+**Layout**: graphic container uses `position: sticky; top: 0`, step text scrolls in a sibling column. CSS grid or flexbox for the two-column layout.
 
-**Progress-driven interpolation**: For smooth continuous animation tied to scroll position (not just step snaps), scrollama's `progress: true` mode fires events with a 0–1 progress value you can feed to `d3.interpolate`.
+**Progress-driven interpolation**: scrollama's `progress: true` mode fires events with a 0-1 value you can feed to `d3.interpolate` for smooth continuous animation.
 
-For step-sequenced annotations that reveal callouts, labels, or highlights at each scroll step, see the **annotation** skill.
+For step-sequenced annotations, see the **annotation** skill.
 
-### CSS Scroll-Driven Animations (as of March 2026)
+### CSS Scroll-Driven Animations
 
-CSS `animation-timeline: view()` animates elements based on their viewport visibility — GPU-accelerated and off the main thread. Use this for visual polish (fade-in, slide-up) alongside scrollama for D3 data updates:
+CSS `animation-timeline: view()` animates CSS properties based on viewport visibility -- GPU-accelerated, off the main thread. Use for visual polish (fade-in, slide-up) alongside scrollama for D3 data updates. Only animates CSS properties, not SVG attributes or D3 data joins.
 
 ```css
 .step {
@@ -505,48 +287,20 @@ CSS `animation-timeline: view()` animates elements based on their viewport visib
 @keyframes fade-in { from { opacity: 0.3; } to { opacity: 1; } }
 ```
 
-**Limitation**: CSS scroll-driven animations only animate CSS properties, not SVG attributes or D3 data joins. They complement scrollama, they don't replace it.
-
 ### Stepper / Slideshow
 
-For presentation-style narratives (button/keyboard-driven rather than scroll-driven):
+For button/keyboard-driven narratives, maintain a steps array (`[{ data, layout, title }]`) and an index. On advance, clamp the index and call your D3 transition function with the new step's data and layout.
+
+## View Transitions API
+
+Browser-native cross-fade between DOM states (Baseline 2025). Use for container-level view changes (switching chart types, toggling chart vs. data table), not data-level animation where D3 interpolation produces valid intermediate states.
 
 ```js
-const steps = [
-  { data: step1Data, layout: "bar", title: "Overview" },
-  { data: step2Data, layout: "scatter", title: "By region" },
-  { data: step3Data, layout: "tree", title: "Hierarchy" },
-];
-
-let currentStep = 0;
-
-function advance() {
-  currentStep = Math.min(currentStep + 1, steps.length - 1);
-  const step = steps[currentStep];
-  transitionToLayout(step.layout, step.data);
-  updateTitle(step.title);
-}
+if (document.startViewTransition) document.startViewTransition(() => renderChart(newData));
+else renderChart(newData);
 ```
 
-## View Transitions API (as of March 2026)
-
-The View Transitions API (Baseline Newly Available, October 2025) provides browser-native animated transitions between DOM states. The browser screenshots before and after your update, then cross-fades or morphs between them.
-
-**When to use it with D3**: Container-level view changes — switching between chart types, toggling chart vs. data table, navigating dashboard panels. Not for data-level animation (updating bar heights), where D3's interpolation-based transitions produce valid intermediate states.
-
-```js
-function switchView(newData) {
-  if (!document.startViewTransition) {
-    renderChart(newData);  // fallback: instant update
-    return;
-  }
-  document.startViewTransition(() => renderChart(newData));
-}
-```
-
-**Don't combine with D3 transitions**: View Transitions animate a snapshot, not the live DOM. If your callback also starts D3 transitions, you get the View Transition cross-fade *and* the D3 interpolation fighting each other. Pick one per update.
-
-> Observable Plot uses View Transitions for its `plot.update()` method. If your use case is simple charts with standard layouts, Plot handles this automatically.
+**Don't combine with D3 transitions** -- View Transitions animate a snapshot, not the live DOM. Pick one per update.
 
 ## Choosing an Animation Approach
 
@@ -569,45 +323,20 @@ function switchView(newData) {
 | 1,000-10,000 | Canvas + d3.timer | 500-1000ms |
 | 10,000+ | Canvas + Web Worker | 500ms, skip frames if needed |
 
-### Frame Budget
-
-At 60fps you have 16ms per frame. Canvas draw calls are fast, but complex compositing or filters eat into that budget. When animation frames exceed the budget, use progressive rendering (see the `canvas` skill for the `createRenderQueue` pattern and frame profiling techniques).
+At 60fps you have 16ms per frame. When animation frames exceed the budget, see the **canvas** skill for the `createRenderQueue` pattern and frame profiling.
 
 ## Accessibility: prefers-reduced-motion
 
-Respect users who have reduced-motion enabled at the OS level. Check the media query and shorten or disable transitions:
+Check the media query and skip or zero-out transitions:
 
 ```js
-const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+const safeDur = ms => reducedMotion.matches ? 0 : ms;
 
-function safeDuration(ms) {
-  return prefersReducedMotion ? 0 : ms;
-}
-
-// Usage
-selection.transition()
-  .duration(safeDuration(600))
-  .attr("y", d => yScale(d.value));
+selection.transition().duration(safeDur(600)).attr("y", d => yScale(d.value));
 ```
 
-For canvas animations with `d3.timer`, skip straight to the final frame:
-
-```js
-if (prefersReducedMotion) {
-  drawFinalFrame(targets);
-} else {
-  d3.timer((elapsed) => { /* ... */ });
-}
-```
-
-Listen for changes at runtime — users can toggle this while the page is open:
-
-```js
-window.matchMedia("(prefers-reduced-motion: reduce)")
-  .addEventListener("change", (e) => {
-    prefersReducedMotion = e.matches;
-  });
-```
+For canvas animations, skip straight to the final frame. Listen for runtime changes with `reducedMotion.addEventListener("change", ...)` since users can toggle this while the page is open.
 
 ## Common Pitfalls
 
@@ -616,18 +345,18 @@ window.matchMedia("(prefers-reduced-motion: reduce)")
 3. **Transition name collisions**: Unnamed transitions on the same element interrupt each other. Name them: `.transition("move")`, `.transition("color")`.
 4. **Duration too long**: >1 second feels sluggish for UI transitions. Reserve longer durations for storytelling or complex morphs.
 5. **Forgetting `.merge()`**: In the old enter/update pattern, new elements don't get update attrs without `.merge()`. The `.join()` pattern avoids this.
-6. **Interpolating path strings directly**: `d3.interpolateString` on SVG paths produces garbage when paths have different commands. See the **shape-morphing** skill for the right approaches (parametric interpolation or point resampling).
+6. **Interpolating path strings directly**: `d3.interpolateString` on SVG paths produces garbage when paths have different commands. See the **shape-morphing** skill for the right approaches.
 7. **Canvas not clearing**: Forgetting `clearRect` causes trails. Sometimes intentional for effect, but usually a bug.
 
 ## References
 
-- [D3 Transition documentation](https://d3js.org/d3-transition) — API reference for `d3-transition`
-- [General Update Pattern](https://observablehq.com/@d3/selection-join) — canonical enter/update/exit with `.join()`
-- [Object Constancy](https://bost.ocks.org/mike/constancy/) — foundational article on key-based transitions
-- [Animated Transitions in Statistical Data Graphics](https://idl.cs.washington.edu/papers/motion/) — Heer & Robertson's perception research (IEEE InfoVis 2007)
-- [D3 Easing Functions](https://observablehq.com/@d3/easing) — visual reference for all `d3-ease` curves
-- [Staggered Transitions](https://observablehq.com/@d3/staggered-transitions) — staggered delay patterns
-- [prefers-reduced-motion](https://developer.mozilla.org/en-US/docs/Web/CSS/@media/prefers-reduced-motion) — MDN reference for motion preferences
-- [Scrollama](https://github.com/russellsamora/scrollama) — IntersectionObserver-based scrollytelling library
-- [View Transitions API](https://developer.mozilla.org/en-US/docs/Web/API/View_Transition_API) — browser-native view transitions (Baseline 2025)
-- [CSS Scroll-Driven Animations](https://developer.mozilla.org/en-US/docs/Web/CSS/Guides/Scroll-driven_animations) — declarative scroll-linked effects
+- [D3 Transition documentation](https://d3js.org/d3-transition) -- API reference for `d3-transition`
+- [General Update Pattern](https://observablehq.com/@d3/selection-join) -- canonical enter/update/exit with `.join()`
+- [Object Constancy](https://bost.ocks.org/mike/constancy/) -- foundational article on key-based transitions
+- [Animated Transitions in Statistical Data Graphics](https://idl.cs.washington.edu/papers/motion/) -- Heer & Robertson (IEEE InfoVis 2007)
+- [D3 Easing Functions](https://observablehq.com/@d3/easing) -- visual reference for all `d3-ease` curves
+- [Staggered Transitions](https://observablehq.com/@d3/staggered-transitions) -- staggered delay patterns
+- [prefers-reduced-motion](https://developer.mozilla.org/en-US/docs/Web/CSS/@media/prefers-reduced-motion) -- MDN reference
+- [Scrollama](https://github.com/russellsamora/scrollama) -- IntersectionObserver-based scrollytelling library
+- [View Transitions API](https://developer.mozilla.org/en-US/docs/Web/API/View_Transition_API) -- browser-native view transitions (Baseline 2025)
+- [CSS Scroll-Driven Animations](https://developer.mozilla.org/en-US/docs/Web/CSS/Guides/Scroll-driven_animations) -- declarative scroll-linked effects
