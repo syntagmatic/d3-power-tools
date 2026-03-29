@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Bee Swarm Census — Income by Education</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #fafafa; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+  svg { background: #fff; border: 1px solid #e0e0e0; border-radius: 4px; }
+  .axis text { font-size: 12px; fill: #555; }
+  .axis path, .axis line { stroke: #ccc; }
+  .tick line { stroke: #ddd; }
+  .percentile-line { stroke: #999; stroke-width: 1; stroke-dasharray: 4,3; }
+  .percentile-label { font-size: 10px; font-family: monospace; fill: #777; }
+  .leader-line { fill: none; stroke: #888; stroke-width: 0.8; }
+  .callout-text { font-size: 11px; fill: #333; }
+  .callout-title { font-size: 11px; font-weight: 600; fill: #333; }
+  .callout-value { font-family: monospace; font-size: 10px; fill: #555; }
+  .legend-label { font-size: 12px; fill: #444; }
+  .title { font-size: 18px; font-weight: 700; fill: #222; }
+  .subtitle { font-size: 13px; fill: #666; }
+  .box-label { font-size: 10px; font-family: monospace; fill: #777; }
+  .tooltip {
+    position: absolute; pointer-events: none; opacity: 0;
+    background: rgba(255,255,255,0.96); border: 1px solid #ccc; border-radius: 4px;
+    padding: 8px 10px; font-size: 12px; line-height: 1.5; box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+    font-family: system-ui, sans-serif;
+  }
+  .tooltip strong { display: block; margin-bottom: 2px; }
+  .tooltip .val { font-family: monospace; }
+</style>
+</head>
+<body>
+<script>
+(() => {
+  // --- Dimensions ---
+  const width = 1200, height = 800;
+  const margin = { top: 70, right: 200, bottom: 80, left: 80 };
+  const innerW = width - margin.left - margin.right;
+  const innerH = height - margin.top - margin.bottom;
+  const boxPlotH = 40; // height reserved for marginal box plot at bottom
+  const swarmH = innerH - boxPlotH - 20; // gap between swarm and box
+
+  // --- Tol palette (colorblind-safe) ---
+  const tolColors = ["#4477AA", "#228833", "#CCBB44", "#EE6677"];
+  const educationLevels = ["High School", "Bachelor's", "Master's", "Doctorate"];
+  const colorScale = d3.scaleOrdinal().domain(educationLevels).range(tolColors);
+
+  // --- Synthetic data ---
+  const rng = d3.randomLcg(42);
+  const rngNormal = d3.randomNormal.source(rng);
+  const rngUniform = d3.randomUniform.source(rng);
+
+  // Education probabilities shift with income via correlated generation
+  const data = d3.range(400).map(i => {
+    // Draw education first, then income conditioned on education
+    const eduRoll = rngUniform(0, 1)();
+    let education, logMean, logStd;
+    if (eduRoll < 0.35) {
+      education = "High School"; logMean = 10.3; logStd = 0.45;
+    } else if (eduRoll < 0.65) {
+      education = "Bachelor's"; logMean = 10.7; logStd = 0.50;
+    } else if (eduRoll < 0.85) {
+      education = "Master's"; logMean = 11.0; logStd = 0.45;
+    } else {
+      education = "Doctorate"; logMean = 11.2; logStd = 0.50;
+    }
+    const raw = Math.exp(rngNormal(logMean, logStd)());
+    const income = Math.max(15000, Math.min(500000, raw));
+    return { id: i, income, education };
+  });
+
+  // --- Scales ---
+  const xScale = d3.scaleLog()
+    .domain([14000, 550000])
+    .range([0, innerW])
+    .clamp(true);
+
+  // --- Force simulation (pre-computed) ---
+  const r = 3.5;
+  const simNodes = data.map(d => ({ ...d }));
+
+  const simulation = d3.forceSimulation(simNodes)
+    .force("x", d3.forceX(d => xScale(d.income)).strength(0.9))
+    .force("y", d3.forceY(swarmH / 2).strength(0.05))
+    .force("collide", d3.forceCollide(r + 0.8).iterations(3))
+    .stop();
+
+  // Run to convergence
+  simulation.tick(300);
+
+  // --- Statistics ---
+  const incomes = data.map(d => d.income).sort(d3.ascending);
+  const stats = {
+    q1: d3.quantile(incomes, 0.25),
+    median: d3.quantile(incomes, 0.5),
+    q3: d3.quantile(incomes, 0.75),
+    mean: d3.mean(incomes),
+    p10: d3.quantile(incomes, 0.10),
+    p25: d3.quantile(incomes, 0.25),
+    p50: d3.quantile(incomes, 0.50),
+    p75: d3.quantile(incomes, 0.75),
+    p90: d3.quantile(incomes, 0.90),
+    iqr: d3.quantile(incomes, 0.75) - d3.quantile(incomes, 0.25),
+  };
+  stats.whiskerLow = d3.min(incomes.filter(v => v >= stats.q1 - 1.5 * stats.iqr));
+  stats.whiskerHigh = d3.max(incomes.filter(v => v <= stats.q3 + 1.5 * stats.iqr));
+  stats.outliers = incomes.filter(v => v < stats.whiskerLow || v > stats.whiskerHigh);
+
+  // Percentiles to annotate
+  const percentiles = [
+    { p: 0.10, label: "P10" },
+    { p: 0.25, label: "P25" },
+    { p: 0.50, label: "P50 (Median)" },
+    { p: 0.75, label: "P75" },
+    { p: 0.90, label: "P90" },
+  ];
+
+  // --- SVG ---
+  const svg = d3.select("body").append("svg")
+    .attr("width", width).attr("height", height)
+    .attr("viewBox", `0 0 ${width} ${height}`);
+
+  const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+  // --- Title ---
+  svg.append("text").attr("class", "title")
+    .attr("x", margin.left).attr("y", 28)
+    .text("Income Distribution of 400 Synthetic People");
+
+  svg.append("text").attr("class", "subtitle")
+    .attr("x", margin.left).attr("y", 50)
+    .text("Log-normal incomes ($15K\u2013$500K) colored by education level, with percentile markers and marginal box plot");
+
+  // --- X Axis ---
+  const xAxis = d3.axisBottom(xScale)
+    .tickValues([15000, 25000, 50000, 100000, 200000, 500000])
+    .tickFormat(d => d >= 1000 ? `$${d / 1000}K` : `$${d}`);
+
+  g.append("g")
+    .attr("class", "axis")
+    .attr("transform", `translate(0,${innerH})`)
+    .call(xAxis)
+    .call(g => g.select(".domain").remove());
+
+  g.append("text")
+    .attr("x", innerW / 2).attr("y", innerH + 45)
+    .attr("text-anchor", "middle")
+    .attr("fill", "#555").attr("font-size", 13)
+    .text("Annual Income (log scale)");
+
+  // --- Percentile lines ---
+  const pGroup = g.append("g").attr("class", "percentiles");
+
+  percentiles.forEach(({ p, label }) => {
+    const val = d3.quantile(incomes, p);
+    const px = xScale(val);
+
+    pGroup.append("line")
+      .attr("class", "percentile-line")
+      .attr("x1", px).attr("x2", px)
+      .attr("y1", -5).attr("y2", swarmH + 5);
+
+    pGroup.append("text")
+      .attr("class", "percentile-label")
+      .attr("x", px).attr("y", -10)
+      .attr("text-anchor", "middle")
+      .text(`${label}: $${Math.round(val / 1000)}K`);
+  });
+
+  // --- Bee swarm dots ---
+  const swarmGroup = g.append("g");
+
+  const circles = swarmGroup.selectAll("circle")
+    .data(simNodes)
+    .join("circle")
+      .attr("cx", d => d.x)
+      .attr("cy", d => d.y)
+      .attr("r", r)
+      .attr("fill", d => colorScale(d.education))
+      .attr("fill-opacity", 0.8)
+      .attr("stroke", d => d3.color(colorScale(d.education)).darker(0.4))
+      .attr("stroke-width", 0.5);
+
+  // --- Tooltip ---
+  const tooltip = d3.select("body").append("div").attr("class", "tooltip");
+
+  const fmt = d3.format("$,.0f");
+
+  circles
+    .on("pointerenter", (event, d) => {
+      d3.select(event.currentTarget).attr("r", r + 2).attr("fill-opacity", 1).attr("stroke-width", 1.5);
+      tooltip.html(`<strong>${d.education}</strong><span class="val">${fmt(d.income)}</span>`)
+        .style("opacity", 1);
+    })
+    .on("pointermove", (event) => {
+      const tw = tooltip.node().offsetWidth;
+      const th = tooltip.node().offsetHeight;
+      const x = Math.min(event.pageX + 14, window.innerWidth + window.scrollX - tw - 8);
+      const y = Math.max(event.pageY - th - 10, window.scrollY + 8);
+      tooltip.style("left", `${x}px`).style("top", `${y}px`);
+    })
+    .on("pointerleave", (event) => {
+      d3.select(event.currentTarget).attr("r", r).attr("fill-opacity", 0.8).attr("stroke-width", 0.5);
+      tooltip.style("opacity", 0);
+    });
+
+  // --- Leader-line callouts for top earners ---
+  const topEarners = [...simNodes].sort((a, b) => b.income - a.income).slice(0, 5);
+  const calloutGroup = g.append("g");
+
+  topEarners.forEach((d, i) => {
+    const dx = 30 + i * 12;
+    const dy = -(50 + i * 42);
+    const endX = d.x + dx;
+    const endY = d.y + dy;
+
+    // S-curve leader line
+    calloutGroup.append("path")
+      .attr("class", "leader-line")
+      .attr("d", `M${d.x},${d.y} C${d.x + dx * 0.5},${d.y} ${d.x + dx * 0.5},${endY} ${endX},${endY}`);
+
+    // Circle at anchor
+    calloutGroup.append("circle")
+      .attr("cx", d.x).attr("cy", d.y).attr("r", 2)
+      .attr("fill", "#888");
+
+    // Label
+    calloutGroup.append("text")
+      .attr("class", "callout-title")
+      .attr("x", endX + 4).attr("y", endY - 4)
+      .text(`#${i + 1} Earner`);
+
+    calloutGroup.append("text")
+      .attr("class", "callout-value")
+      .attr("x", endX + 4).attr("y", endY + 10)
+      .text(`${fmt(d.income)} \u2014 ${d.education}`);
+  });
+
+  // --- Marginal box plot ---
+  const boxY = swarmH + 20;
+  const boxH = boxPlotH;
+  const boxGroup = g.append("g").attr("transform", `translate(0,${boxY})`);
+
+  // Whisker line
+  boxGroup.append("line")
+    .attr("x1", xScale(stats.whiskerLow)).attr("x2", xScale(stats.whiskerHigh))
+    .attr("y1", boxH / 2).attr("y2", boxH / 2)
+    .attr("stroke", "#666").attr("stroke-width", 1);
+
+  // Whisker caps
+  [stats.whiskerLow, stats.whiskerHigh].forEach(v => {
+    boxGroup.append("line")
+      .attr("x1", xScale(v)).attr("x2", xScale(v))
+      .attr("y1", boxH * 0.25).attr("y2", boxH * 0.75)
+      .attr("stroke", "#666").attr("stroke-width", 1);
+  });
+
+  // IQR box
+  boxGroup.append("rect")
+    .attr("x", xScale(stats.q1))
+    .attr("y", boxH * 0.15)
+    .attr("width", xScale(stats.q3) - xScale(stats.q1))
+    .attr("height", boxH * 0.7)
+    .attr("fill", "#dde4ee").attr("stroke", "#666").attr("stroke-width", 1);
+
+  // Median line
+  boxGroup.append("line")
+    .attr("x1", xScale(stats.median)).attr("x2", xScale(stats.median))
+    .attr("y1", boxH * 0.15).attr("y2", boxH * 0.85)
+    .attr("stroke", "#333").attr("stroke-width", 2);
+
+  // Mean diamond
+  const meanX = xScale(stats.mean);
+  const diamondSize = 5;
+  boxGroup.append("path")
+    .attr("d", `M${meanX},${boxH / 2 - diamondSize} L${meanX + diamondSize},${boxH / 2} L${meanX},${boxH / 2 + diamondSize} L${meanX - diamondSize},${boxH / 2} Z`)
+    .attr("fill", "#c44").attr("stroke", "#c44").attr("stroke-width", 0.5);
+
+  // Outlier dots
+  boxGroup.selectAll(".outlier")
+    .data(stats.outliers)
+    .join("circle")
+      .attr("cx", d => xScale(d))
+      .attr("cy", boxH / 2)
+      .attr("r", 2.5)
+      .attr("fill", "none").attr("stroke", "#999").attr("stroke-width", 0.8);
+
+  // Box labels
+  const boxLabels = [
+    { val: stats.whiskerLow, label: `$${Math.round(stats.whiskerLow / 1000)}K`, y: boxH + 14 },
+    { val: stats.q1, label: `Q1: $${Math.round(stats.q1 / 1000)}K`, y: boxH + 14 },
+    { val: stats.median, label: `Med: $${Math.round(stats.median / 1000)}K`, y: boxH + 14 },
+    { val: stats.q3, label: `Q3: $${Math.round(stats.q3 / 1000)}K`, y: boxH + 14 },
+    { val: stats.whiskerHigh, label: `$${Math.round(stats.whiskerHigh / 1000)}K`, y: boxH + 14 },
+  ];
+
+  boxGroup.selectAll(".box-label")
+    .data(boxLabels)
+    .join("text")
+      .attr("class", "box-label")
+      .attr("x", d => xScale(d.val))
+      .attr("y", d => d.y)
+      .attr("text-anchor", "middle")
+      .text(d => d.label);
+
+  // Mean label
+  boxGroup.append("text")
+    .attr("class", "box-label")
+    .attr("x", meanX).attr("y", -4)
+    .attr("text-anchor", "middle")
+    .attr("fill", "#c44")
+    .text(`Mean: $${Math.round(stats.mean / 1000)}K`);
+
+  // --- Legend ---
+  const legendX = innerW + 30;
+  const legendY = 10;
+  const legendG = g.append("g").attr("transform", `translate(${legendX},${legendY})`);
+
+  legendG.append("text")
+    .attr("font-size", 13).attr("font-weight", 600).attr("fill", "#333")
+    .attr("y", -4).text("Education");
+
+  educationLevels.forEach((level, i) => {
+    const row = legendG.append("g").attr("transform", `translate(0,${i * 24 + 14})`);
+    row.append("circle").attr("cx", 6).attr("cy", 0).attr("r", 5)
+      .attr("fill", colorScale(level)).attr("fill-opacity", 0.8)
+      .attr("stroke", d3.color(colorScale(level)).darker(0.4)).attr("stroke-width", 0.5);
+    row.append("text").attr("class", "legend-label")
+      .attr("x", 18).attr("y", 4).text(level);
+
+    // Count
+    const n = data.filter(d => d.education === level).length;
+    row.append("text").attr("class", "legend-label")
+      .attr("x", 18).attr("y", 18)
+      .attr("font-size", 10).attr("fill", "#888")
+      .text(`n = ${n}`);
+  });
+
+  // Legend for mean diamond
+  const meanLegend = legendG.append("g").attr("transform", `translate(0,${4 * 24 + 30})`);
+  meanLegend.append("path")
+    .attr("d", `M6,-5 L11,0 L6,5 L1,0 Z`)
+    .attr("fill", "#c44");
+  meanLegend.append("text").attr("class", "legend-label")
+    .attr("x", 18).attr("y", 4).text("Mean");
+
+  // Summary stats in legend
+  const summaryG = legendG.append("g").attr("transform", `translate(0,${4 * 24 + 60})`);
+  summaryG.append("text").attr("font-size", 12).attr("font-weight", 600).attr("fill", "#333").text("Summary");
+  const summaryLines = [
+    `n = ${data.length}`,
+    `Median: $${Math.round(stats.median / 1000)}K`,
+    `Mean: $${Math.round(stats.mean / 1000)}K`,
+    `IQR: $${Math.round(stats.q1 / 1000)}K\u2013$${Math.round(stats.q3 / 1000)}K`,
+  ];
+  summaryLines.forEach((line, i) => {
+    summaryG.append("text")
+      .attr("y", 18 + i * 16)
+      .attr("font-size", 11).attr("font-family", "monospace").attr("fill", "#666")
+      .text(line);
+  });
+})();
+</script>
+</body>
+</html>

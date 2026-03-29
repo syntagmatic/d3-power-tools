@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Shape Morphing Gallery</title>
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #f5f5f0;
+    font-family: system-ui, -apple-system, sans-serif;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    min-height: 100vh;
+    padding: 32px 24px;
+  }
+  .container { max-width: 1200px; }
+  h1 {
+    text-align: center;
+    font-size: 22px;
+    font-weight: 600;
+    color: #222;
+    margin-bottom: 20px;
+    letter-spacing: -0.3px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    max-width: 1140px;
+  }
+  .cell {
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  .cell svg { display: block; width: 100%; height: auto; }
+  .cell .label {
+    text-align: center;
+    font-size: 12px;
+    font-weight: 500;
+    color: #555;
+    padding: 6px 0 10px;
+    letter-spacing: 0.2px;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Shape Morphing Gallery</h1>
+  <div class="grid" id="grid"></div>
+</div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(() => {
+  // Tol Bright colorblind-safe palette
+  const tol = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377","#BBBBBB"];
+  const tolMuted = ["#CC6677","#332288","#DDCC77","#117733","#88CCEE","#882255","#44AA99","#999933","#AA4499"];
+
+  const cellW = 370, cellH = 260;
+  const margin = { top: 16, right: 16, bottom: 16, left: 16 };
+  const innerW = cellW - margin.left - margin.right;
+  const innerH = cellH - margin.top - margin.bottom;
+  const morphDur = 1500;
+  const pauseDur = 500;
+
+  const demos = [
+    { label: "Circle \u2194 Rectangle",      init: initCircleRect },
+    { label: "Bar \u2194 Pie",               init: initBarPie },
+    { label: "Star \u2194 Circle",           init: initStarCircle },
+    { label: "Line \u2194 Area",             init: initLineArea },
+    { label: "Scatter \u2194 Bar",           init: initScatterBar },
+    { label: "Horizontal \u2194 Vertical",   init: initHorizVert },
+    { label: "Grouped \u2194 Stacked",       init: initGroupedStacked },
+    { label: "Treemap \u2194 Circle Pack",   init: initTreemapPack },
+    { label: "Donut \u2194 Sunburst",        init: initDonutSunburst },
+  ];
+
+  const grid = d3.select("#grid");
+
+  demos.forEach((demo, i) => {
+    const cell = grid.append("div").attr("class", "cell");
+    const svg = cell.append("svg")
+        .attr("viewBox", `0 0 ${cellW} ${cellH}`)
+        .attr("preserveAspectRatio", "xMidYMid meet");
+    const g = svg.append("g")
+        .attr("transform", `translate(${margin.left},${margin.top})`);
+    cell.append("div").attr("class", "label").text(demo.label);
+    // Stagger: each cell offset by 400ms so they don't sync
+    setTimeout(() => demo.init(g), i * 400);
+  });
+
+  // --- Morph loop utility ---
+  // forward: transition to state B, reverse: transition to state A
+  // 1.5s forward, 0.5s pause, 1.5s reverse, 0.5s pause
+  const loopMorph = (forward, reverse) => {
+    const cycle = () => {
+      forward(() => {
+        setTimeout(() => {
+          reverse(() => {
+            setTimeout(cycle, pauseDur);
+          });
+        }, pauseDur);
+      });
+    };
+    cycle();
+  };
+
+  // Call cb when last element in transition ends
+  const onEnd = (tr, cb) => {
+    let n = tr.size();
+    if (n === 0) { cb(); return tr; }
+    tr.on("end.loop", () => { if (--n === 0) cb(); });
+    return tr;
+  };
+
+  // --- Resample a path string to N [x,y] points ---
+  const resamplePath = (pathStr, n = 128) => {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", pathStr);
+    const len = path.getTotalLength();
+    return d3.range(n).map(i => {
+      const pt = path.getPointAtLength(i / (n - 1) * len);
+      return [pt.x, pt.y];
+    });
+  };
+
+  // Rotate points array to minimize total squared distance to target
+  const bestRotation = (src, tgt) => {
+    const n = src.length;
+    let bestOff = 0, bestDist = Infinity;
+    // Check every 4th offset for speed, then refine
+    const step = Math.max(1, Math.floor(n / 32));
+    for (let off = 0; off < n; off += step) {
+      let dist = 0;
+      for (let i = 0; i < n; i++) {
+        const j = (i + off) % n;
+        const dx = src[j][0] - tgt[i][0], dy = src[j][1] - tgt[i][1];
+        dist += dx * dx + dy * dy;
+      }
+      if (dist < bestDist) { bestDist = dist; bestOff = off; }
+    }
+    // Refine around best
+    const lo = bestOff - step, hi = bestOff + step;
+    for (let off = lo; off <= hi; off++) {
+      const o = ((off % n) + n) % n;
+      let dist = 0;
+      for (let i = 0; i < n; i++) {
+        const j = (i + o) % n;
+        const dx = src[j][0] - tgt[i][0], dy = src[j][1] - tgt[i][1];
+        dist += dx * dx + dy * dy;
+      }
+      if (dist < bestDist) { bestDist = dist; bestOff = o; }
+    }
+    return src.map((_, i) => src[(i + bestOff) % n]);
+  };
+
+  // Points array -> path string
+  const pointsToPath = pts =>
+    "M" + pts.map(p => p[0].toFixed(2) + "," + p[1].toFixed(2)).join("L") + "Z";
+
+  // Interpolate between two point arrays
+  const interpolatePoints = (a, b) => t =>
+    pointsToPath(a.map((p, i) => [
+      p[0] * (1 - t) + b[i][0] * t,
+      p[1] * (1 - t) + b[i][1] * t,
+    ]));
+
+
+  // ============================================================
+  // 1. Circle <-> Rectangle (parametric via cornerRadius)
+  // ============================================================
+  function initCircleRect(g) {
+    const cx = innerW / 2, cy = innerH / 2;
+    const size = Math.min(innerW, innerH) * 0.45;
+    const r = size / 2;
+    const data = d3.range(6).map(i => ({
+      x: (i % 3) * (size * 0.55) + cx - size * 0.55,
+      y: Math.floor(i / 3) * (size * 0.55) + cy - size * 0.27,
+      w: size * 0.45,
+      h: size * 0.45,
+    }));
+
+    const rects = g.selectAll("rect").data(data)
+      .join("rect")
+        .attr("x", d => d.x - d.w / 2)
+        .attr("y", d => d.y - d.h / 2)
+        .attr("width", d => d.w)
+        .attr("height", d => d.h)
+        .attr("rx", d => d.w / 2)  // start as circles
+        .attr("ry", d => d.h / 2)
+        .attr("fill", (_, i) => tol[i]);
+
+    loopMorph(
+      cb => onEnd(rects.transition().duration(morphDur).ease(d3.easeCubicInOut)
+        .attr("rx", 4).attr("ry", 4), cb),
+      cb => onEnd(rects.transition().duration(morphDur).ease(d3.easeCubicInOut)
+        .attr("rx", d => d.w / 2).attr("ry", d => d.h / 2), cb)
+    );
+  }
+
+
+  // ============================================================
+  // 2. Bar <-> Pie (parametric arc interpolation)
+  // ============================================================
+  function initBarPie(g) {
+    const data = [4, 7, 2, 5, 6, 3].map((v, i) => ({ value: v, id: i }));
+    const cx = innerW / 2, cy = innerH / 2;
+    const outerR = Math.min(innerW, innerH) * 0.42;
+    const pie = d3.pie().value(d => d.value).sortValues(null)(data);
+    const arc = d3.arc();
+    const yScale = d3.scaleLinear().domain([0, d3.max(data, d => d.value)]).range([0, outerR]);
+
+    // Bar state: equal-angle arcs with value-driven radius
+    const barParams = (d, i) => {
+      const bw = (2 * Math.PI) / data.length;
+      return { innerRadius: 0, outerRadius: yScale(d.data.value), startAngle: i * bw, endAngle: (i + 1) * bw };
+    };
+    // Pie state: standard wedges
+    const pieParams = d => ({ innerRadius: 0, outerRadius: outerR, startAngle: d.startAngle, endAngle: d.endAngle });
+
+    const paths = g.append("g").attr("transform", `translate(${cx},${cy})`)
+      .selectAll("path").data(pie)
+      .join("path")
+        .attr("fill", (_, i) => tol[i])
+        .attr("stroke", "#fff").attr("stroke-width", 1.5)
+        .each(function(d, i) { this.__arc = pieParams(d); })
+        .attr("d", function() { return arc(this.__arc); });
+
+    const morphTo = (paramFn, cb) => {
+      onEnd(paths.transition().duration(morphDur).ease(d3.easeCubicInOut)
+        .attrTween("d", function(d, i) {
+          const prev = this.__arc;
+          const next = paramFn(d, i);
+          const interp = d3.interpolate(prev, next);
+          return t => { this.__arc = interp(t); return arc(this.__arc); };
+        }), cb);
+    };
+
+    loopMorph(
+      cb => morphTo(barParams, cb),
+      cb => morphTo(pieParams, cb)
+    );
+  }
+
+
+  // ============================================================
+  // 3. Star <-> Circle (point resampling)
+  // ============================================================
+  function initStarCircle(g) {
+    const cx = innerW / 2, cy = innerH / 2;
+    const outerR = Math.min(innerW, innerH) * 0.4;
+    const innerR = outerR * 0.4;
+    const pts = 5;
+    const N = 128;
+
+    // Star path
+    const starPts = d3.range(pts * 2).map(i => {
+      const angle = (i * Math.PI) / pts - Math.PI / 2;
+      const r = i % 2 === 0 ? outerR : innerR;
+      return [cx + r * Math.cos(angle), cy + r * Math.sin(angle)];
+    });
+    const starPath = "M" + starPts.map(p => p.join(",")).join("L") + "Z";
+
+    // Circle path
+    const circlePath = d3.range(N).map(i => {
+      const a = (i / N) * 2 * Math.PI - Math.PI / 2;
+      return [cx + outerR * Math.cos(a), cy + outerR * Math.sin(a)];
+    });
+    const circleStr = pointsToPath(circlePath);
+
+    const starSampled = resamplePath(starPath, N);
+    const circleSampled = resamplePath(circleStr, N);
+    const aligned = bestRotation(starSampled, circleSampled);
+
+    const interpFwd = interpolatePoints(aligned, circleSampled);
+    const interpRev = interpolatePoints(circleSampled, aligned);
+
+    const shape = g.append("path")
+        .attr("d", pointsToPath(aligned))
+        .attr("fill", tol[5]).attr("opacity", 0.85);
+
+    loopMorph(
+      cb => onEnd(shape.transition().duration(morphDur).ease(d3.easeCubicInOut)
+        .attrTween("d", () => interpFwd), cb),
+      cb => onEnd(shape.transition().duration(morphDur).ease(d3.easeCubicInOut)
+        .attrTween("d", () => interpRev), cb)
+    );
+  }
+
+
+  // ============================================================
+  // 4. Line <-> Area
+  // ============================================================
+  function initLineArea(g) {
+    const data = d3.range(20).map(i => ({
+      x: i, y: 0.3 + 0.7 * Math.sin(i * 0.5) * Math.cos(i * 0.3) * Math.sin(i * 0.15 + 1)
+    }));
+    // Normalize y to 0-1
+    const ext = d3.extent(data, d => d.y);
+    data.forEach(d => d.y = (d.y - ext[0]) / (ext[1] - ext[0]));
+
+    const x = d3.scaleLinear().domain([0, data.length - 1]).range([20, innerW - 20]);
+    const y = d3.scaleLinear().domain([0, 1]).range([innerH - 20, 30]);
+
+    const line = d3.line().x(d => x(d.x)).y(d => y(d.y)).curve(d3.curveMonotoneX);
+    const area = d3.area().x(d => x(d.x)).y0(y(0)).y1(d => y(d.y)).curve(d3.curveMonotoneX);
+
+    // Start as line (area with y0 near y1)
+    const areaFlat = d3.area().x(d => x(d.x)).y0(d => y(d.y)).y1(d => y(d.y)).curve(d3.curveMonotoneX);
+
+    const path = g.append("path")
+        .attr("d", areaFlat(data))
+        .attr("fill", tol[4]).attr("fill-opacity", 0)
+        .attr("stroke", tol[0]).attr("stroke-width", 2.5);
+
+    loopMorph(
+      cb => onEnd(path.transition().duration(morphDur).ease(d3.easeCubicInOut)
+        .attr("d", area(data))
+        .attr("fill-opacity", 0.5)
+        .attr("stroke-width", 1.5), cb),
+      cb => onEnd(path.transition().duration(morphDur).ease(d3.easeCubicInOut)
+        .attr("d", areaFlat(data))
+        .attr("fill-opacity", 0)
+        .attr("stroke-width", 2.5), cb)
+    );
+  }
+
+
+  // ============================================================
+  // 5. Scatter <-> Bar
+  // ============================================================
+  function initScatterBar(g) {
+    const n = 8;
+    const data = d3.range(n).map(i => ({ id: i, value: 0.3 + Math.random() * 0.7 }));
+    const x = d3.scaleBand().domain(data.map(d => d.id)).range([20, innerW - 20]).padding(0.25);
+    const y = d3.scaleLinear().domain([0, 1]).range([innerH - 20, 30]);
+    const bw = x.bandwidth();
+
+    const rects = g.selectAll("rect").data(data)
+      .join("rect")
+        .attr("fill", (_, i) => tol[i % tol.length])
+        // Start as "scatter": small squares centered at data point
+        .attr("x", d => x(d.id) + bw / 2 - 6)
+        .attr("y", d => y(d.value) - 6)
+        .attr("width", 12)
+        .attr("height", 12)
+        .attr("rx", 6);
+
+    loopMorph(
+      cb => onEnd(rects.transition().duration(morphDur).ease(d3.easeCubicInOut)
+        .attr("x", d => x(d.id))
+        .attr("y", d => y(d.value))
+        .attr("width", bw)
+        .attr("height", d => innerH - 20 - y(d.value))
+        .attr("rx", 2), cb),
+      cb => onEnd(rects.transition().duration(morphDur).ease(d3.easeCubicInOut)
+        .attr("x", d => x(d.id) + bw / 2 - 6)
+        .attr("y", d => y(d.value) - 6)
+        .attr("width", 12)
+        .attr("height", 12)
+        .attr("rx", 6), cb)
+    );
+  }
+
+
+  // ============================================================
+  // 6. Horizontal <-> Vertical bars
+  // ============================================================
+  function initHorizVert(g) {
+    const n = 6;
+    const data = d3.range(n).map(i => ({ id: i, value: 0.25 + Math.random() * 0.75 }));
+
+    const xBand = d3.scaleBand().domain(data.map(d => d.id)).range([24, innerW - 24]).padding(0.2);
+    const yVal = d3.scaleLinear().domain([0, 1]).range([innerH - 20, 30]);
+
+    const yBand = d3.scaleBand().domain(data.map(d => d.id)).range([24, innerH - 20]).padding(0.2);
+    const xVal = d3.scaleLinear().domain([0, 1]).range([24, innerW - 24]);
+
+    const rects = g.selectAll("rect").data(data)
+      .join("rect")
+        .attr("fill", (_, i) => tol[i % tol.length])
+        // Start vertical
+        .attr("x", d => xBand(d.id))
+        .attr("y", d => yVal(d.value))
+        .attr("width", xBand.bandwidth())
+        .attr("height", d => innerH - 20 - yVal(d.value))
+        .attr("rx", 2);
+
+    loopMorph(
+      cb => onEnd(rects.transition().duration(morphDur).ease(d3.easeCubicInOut)
+        .attr("x", 24)
+        .attr("y", d => yBand(d.id))
+        .attr("width", d => xVal(d.value) - 24)
+        .attr("height", yBand.bandwidth())
+        .attr("rx", 2), cb),
+      cb => onEnd(rects.transition().duration(morphDur).ease(d3.easeCubicInOut)
+        .attr("x", d => xBand(d.id))
+        .attr("y", d => yVal(d.value))
+        .attr("width", xBand.bandwidth())
+        .attr("height", d => innerH - 20 - yVal(d.value))
+        .attr("rx", 2), cb)
+    );
+  }
+
+
+  // ============================================================
+  // 7. Grouped <-> Stacked bars
+  // ============================================================
+  function initGroupedStacked(g) {
+    const groups = ["A", "B", "C", "D"];
+    const series = ["s1", "s2", "s3"];
+    const data = groups.map(grp => {
+      const row = { group: grp };
+      series.forEach(s => row[s] = 10 + Math.floor(Math.random() * 40));
+      return row;
+    });
+
+    const x0 = d3.scaleBand().domain(groups).range([20, innerW - 20]).padding(0.2);
+    const x1 = d3.scaleBand().domain(series).range([0, x0.bandwidth()]).padding(0.08);
+    const yMax = d3.max(data, d => d3.sum(series, s => d[s]));
+    const yGrouped = d3.scaleLinear().domain([0, d3.max(data, d => d3.max(series, s => d[s]))]).range([innerH - 20, 30]);
+    const yStacked = d3.scaleLinear().domain([0, yMax]).range([innerH - 20, 30]);
+    const stackData = d3.stack().keys(series)(data);
+    const color = d3.scaleOrdinal().domain(series).range([tol[0], tol[1], tol[2]]);
+
+    const flatData = [];
+    series.forEach((s, si) => {
+      data.forEach((d, gi) => {
+        flatData.push({ group: d.group, series: s, value: d[s], si, gi, stackRow: stackData[si][gi] });
+      });
+    });
+
+    const rects = g.selectAll("rect").data(flatData)
+      .join("rect")
+        .attr("fill", d => color(d.series))
+        // Start grouped
+        .attr("x", d => x0(d.group) + x1(d.series))
+        .attr("y", d => yGrouped(d.value))
+        .attr("width", x1.bandwidth())
+        .attr("height", d => innerH - 20 - yGrouped(d.value))
+        .attr("rx", 1);
+
+    loopMorph(
+      cb => onEnd(rects.transition().duration(morphDur).ease(d3.easeCubicInOut)
+        .attr("x", d => x0(d.group))
+        .attr("y", d => yStacked(d.stackRow[1]))
+        .attr("width", x0.bandwidth())
+        .attr("height", d => yStacked(d.stackRow[0]) - yStacked(d.stackRow[1])), cb),
+      cb => onEnd(rects.transition().duration(morphDur).ease(d3.easeCubicInOut)
+        .attr("x", d => x0(d.group) + x1(d.series))
+        .attr("y", d => yGrouped(d.value))
+        .attr("width", x1.bandwidth())
+        .attr("height", d => innerH - 20 - yGrouped(d.value)), cb)
+    );
+  }
+
+
+  // ============================================================
+  // 8. Treemap <-> Circle Pack
+  // ============================================================
+  function initTreemapPack(g) {
+    const root = d3.hierarchy({
+      children: d3.range(9).map(i => ({ value: 5 + Math.floor(Math.random() * 20), id: i }))
+    }).sum(d => d.value);
+
+    const treemap = d3.treemap().size([innerW, innerH]).padding(3).round(true);
+    const pack = d3.pack().size([innerW, innerH]).padding(4);
+    const treeRoot = treemap(root.copy());
+    const packRoot = pack(root.copy());
+
+    // Match leaves by index
+    const treeLeaves = treeRoot.leaves();
+    const packLeaves = packRoot.leaves();
+    const N = 64;
+
+    // For each leaf, create resampled paths for both states
+    const morphData = treeLeaves.map((tl, i) => {
+      const pl = packLeaves[i];
+      // Treemap rect path
+      const rx = tl.x0, ry = tl.y0, rw = tl.x1 - tl.x0, rh = tl.y1 - tl.y0;
+      const rectPath = `M${rx},${ry}L${rx + rw},${ry}L${rx + rw},${ry + rh}L${rx},${ry + rh}Z`;
+      // Pack circle path
+      const circlePath = pointsToPath(d3.range(N).map(j => {
+        const a = (j / N) * 2 * Math.PI;
+        return [pl.x + pl.r * Math.cos(a), pl.y + pl.r * Math.sin(a)];
+      }));
+
+      const rectSampled = resamplePath(rectPath, N);
+      const circleSampled = resamplePath(circlePath, N);
+      const aligned = bestRotation(rectSampled, circleSampled);
+
+      return {
+        rectPts: aligned,
+        circlePts: circleSampled,
+        id: i,
+      };
+    });
+
+    const paths = g.selectAll("path").data(morphData)
+      .join("path")
+        .attr("d", d => pointsToPath(d.rectPts))
+        .attr("fill", (_, i) => tolMuted[i % tolMuted.length])
+        .attr("stroke", "#fff").attr("stroke-width", 1.5);
+
+    loopMorph(
+      cb => onEnd(paths.transition().duration(morphDur).ease(d3.easeCubicInOut)
+        .attrTween("d", d => interpolatePoints(d.rectPts, d.circlePts)), cb),
+      cb => onEnd(paths.transition().duration(morphDur).ease(d3.easeCubicInOut)
+        .attrTween("d", d => interpolatePoints(d.circlePts, d.rectPts)), cb)
+    );
+  }
+
+
+  // ============================================================
+  // 9. Donut <-> Sunburst
+  // ============================================================
+  function initDonutSunburst(g) {
+    const root = d3.hierarchy({
+      children: d3.range(4).map(i => ({
+        id: i,
+        children: d3.range(3).map(j => ({ id: `${i}-${j}`, value: 3 + Math.floor(Math.random() * 8) }))
+      }))
+    }).sum(d => d.value);
+
+    const cx = innerW / 2, cy = innerH / 2;
+    const outerR = Math.min(innerW, innerH) * 0.44;
+    const arc = d3.arc();
+    const partition = d3.partition().size([2 * Math.PI, outerR]);
+    const partRoot = partition(root);
+    const nodes = partRoot.descendants().filter(d => d.depth > 0);
+
+    // Donut state: all arcs in a single ring, only leaves visible; inner parents collapsed
+    const donutInner = outerR * 0.5;
+    const pieLeaves = partRoot.leaves();
+    const pieFull = d3.pie().value(d => d.value).sortValues(null)(pieLeaves.map(d => d.data));
+
+    // Build donut params for each node
+    const donutParams = new Map();
+    nodes.forEach(d => {
+      if (d.depth === 1) {
+        // Parent: collapsed to zero-width ring
+        const childAngles = d.children.map(c => {
+          const leaf = pieLeaves.indexOf(c);
+          return pieFull[leaf];
+        });
+        donutParams.set(d, {
+          innerRadius: donutInner - 1,
+          outerRadius: donutInner,
+          startAngle: d3.min(childAngles, c => c.startAngle),
+          endAngle: d3.max(childAngles, c => c.endAngle),
+        });
+      } else {
+        const idx = pieLeaves.indexOf(d);
+        donutParams.set(d, {
+          innerRadius: donutInner,
+          outerRadius: outerR,
+          startAngle: pieFull[idx].startAngle,
+          endAngle: pieFull[idx].endAngle,
+        });
+      }
+    });
+
+    // Sunburst state: full partition layout
+    const sunburstParams = new Map();
+    nodes.forEach(d => {
+      sunburstParams.set(d, {
+        innerRadius: d.y0,
+        outerRadius: d.y1,
+        startAngle: d.x0,
+        endAngle: d.x1,
+      });
+    });
+
+    const color = d3.scaleOrdinal()
+      .domain(nodes.map(d => d.depth === 1 ? d.data.id : d.parent.data.id))
+      .range(tol);
+
+    const gCenter = g.append("g").attr("transform", `translate(${cx},${cy})`);
+    const paths = gCenter.selectAll("path").data(nodes)
+      .join("path")
+        .attr("fill", d => {
+          const base = d.depth === 1 ? d.data.id : d.parent.data.id;
+          const c = d3.hcl(color(base));
+          if (d.depth === 2) c.l = Math.min(95, c.l + 15);
+          return c.toString();
+        })
+        .attr("stroke", "#fff").attr("stroke-width", 1)
+        .each(function(d) { this.__arc = donutParams.get(d); })
+        .attr("d", function() { return arc(this.__arc); });
+
+    const morphTo = (paramMap, cb) => {
+      onEnd(paths.transition().duration(morphDur).ease(d3.easeCubicInOut)
+        .attrTween("d", function(d) {
+          const prev = this.__arc;
+          const next = paramMap.get(d);
+          const interp = d3.interpolate(prev, next);
+          return t => { this.__arc = interp(t); return arc(this.__arc); };
+        }), cb);
+    };
+
+    loopMorph(
+      cb => morphTo(sunburstParams, cb),
+      cb => morphTo(donutParams, cb)
+    );
+  }
+
+})();
+</script>
+</body>
+</html>

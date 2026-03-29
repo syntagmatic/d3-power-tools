@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Parallel Coordinates + Sparkline Table</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    color: #222;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px 16px;
+  }
+  h1 { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { font-size: 13px; color: #666; margin-bottom: 12px; }
+  #chart-container {
+    position: relative;
+    width: 1160px;
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  #chart-container canvas {
+    position: absolute;
+    top: 0; left: 0;
+    pointer-events: none;
+  }
+  #chart-container svg {
+    position: relative;
+    display: block;
+  }
+  .axis text { font-size: 11px; }
+  .axis-label {
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+  }
+  .axis-label:hover { fill: #4477AA; }
+  .brush .selection { fill: #4477AA; fill-opacity: 0.25; stroke: #4477AA; stroke-width: 1; }
+
+  #table-container {
+    width: 1160px;
+    margin-top: 14px;
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .table-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    border-bottom: 1px solid #e8e8e8;
+    background: #f8f8f8;
+  }
+  .table-header h2 { font-size: 14px; font-weight: 600; }
+  .badge {
+    display: inline-block;
+    font-family: 'SF Mono', 'Menlo', monospace;
+    font-size: 12px;
+    font-weight: 600;
+    background: #4477AA;
+    color: #fff;
+    padding: 2px 8px;
+    border-radius: 10px;
+    min-width: 28px;
+    text-align: center;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  thead th {
+    padding: 8px 10px;
+    text-align: left;
+    font-weight: 600;
+    font-size: 12px;
+    color: #555;
+    border-bottom: 2px solid #e0e0e0;
+    background: #fcfcfc;
+  }
+  tbody td {
+    padding: 6px 10px;
+    border-bottom: 1px solid #f0f0f0;
+    white-space: nowrap;
+    vertical-align: middle;
+  }
+  tbody td.num {
+    font-family: 'SF Mono', 'Menlo', monospace;
+    font-size: 12px;
+    text-align: right;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  .spark svg { display: block; }
+</style>
+</head>
+<body>
+
+<h1>City Metrics Explorer</h1>
+<p class="subtitle">Brush axes to filter &mdash; sparkline table updates live. Click axis label to invert.</p>
+<div id="chart-container"></div>
+<div id="table-container">
+  <div class="table-header">
+    <h2>Distribution Summary</h2>
+    <span class="badge" id="count-badge">150</span>
+    <span style="font-size:12px;color:#888">cities selected</span>
+  </div>
+  <table>
+    <thead><tr>
+      <th>Metric</th>
+      <th>Distribution</th>
+      <th style="text-align:right">Min</th>
+      <th style="text-align:right">Median</th>
+      <th style="text-align:right">Max</th>
+    </tr></thead>
+    <tbody id="table-body"></tbody>
+  </table>
+</div>
+
+<script>
+(() => {
+  // --- Palette ---
+  const COLORS = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377","#BBBBBB"];
+
+  // --- Dimensions ---
+  const dims = [
+    { key: "population", label: "Population", fmt: d3.format(",.0f") },
+    { key: "temp",       label: "Avg Temp (C)", fmt: d3.format(".1f") },
+    { key: "elevation",  label: "Elevation (m)", fmt: d3.format(",.0f") },
+    { key: "rainfall",   label: "Rainfall (mm)", fmt: d3.format(",.0f") },
+    { key: "gdp",        label: "GDP ($B)", fmt: d3.format(",.1f") },
+    { key: "density",    label: "Density (/km2)", fmt: d3.format(",.0f") },
+  ];
+  const dimKeys = dims.map(d => d.key);
+
+  const regions = ["North America", "Europe", "East Asia", "South Asia", "Latin America", "Africa"];
+  const regionColor = d3.scaleOrdinal().domain(regions).range(COLORS);
+
+  // --- Synthetic Data (correlated) ---
+  const rng = d3.randomLcg(42);
+  const normal = d3.randomNormal.source(rng);
+  const uniform = d3.randomUniform.source(rng);
+
+  const data = d3.range(150).map(i => {
+    const region = regions[i % 6];
+    const rIdx = regions.indexOf(region);
+
+    // Base values per region to create inter-region variation
+    const basePop = [800, 400, 1200, 900, 500, 300][rIdx];
+    const baseTemp = [12, 10, 15, 28, 24, 26][rIdx];
+    const baseElev = [300, 500, 200, 150, 800, 600][rIdx];
+
+    const pop = Math.max(50, basePop + normal(0, 400)()) * 1000;
+    // Temp correlates inversely with elevation
+    const elev = Math.max(0, baseElev + normal(0, 300)());
+    const temp = baseTemp + normal(0, 4)() - elev * 0.005;
+    // Rainfall correlates with temp in tropics
+    const rainfall = Math.max(50, 600 + temp * 15 + normal(0, 200)());
+    // GDP correlates with population
+    const gdp = Math.max(1, pop * 0.00008 + normal(0, 15)() + [20, 30, 25, 5, 10, 3][rIdx]);
+    // Density correlates with population and inversely with elevation
+    const density = Math.max(10, pop * 0.003 + normal(0, 800)() - elev * 0.5 + [500, 300, 800, 600, 200, 100][rIdx]);
+
+    return { population: pop, temp, elevation: elev, rainfall, gdp, density, region };
+  });
+
+  // --- Chart Layout ---
+  const margin = { top: 40, right: 30, bottom: 12, left: 30 };
+  const width = 1160;
+  const height = 380;
+  const innerW = width - margin.left - margin.right;
+  const innerH = height - margin.top - margin.bottom;
+  const dpr = window.devicePixelRatio || 1;
+
+  // --- Scales ---
+  const xScale = d3.scalePoint().domain(dimKeys).range([0, innerW]).padding(0.05);
+  const yScales = {};
+  const inverted = new Set();
+
+  const buildScale = (key) => {
+    const ext = d3.extent(data, d => d[key]);
+    const s = d3.scaleLinear().domain(ext).nice().range(inverted.has(key) ? [0, innerH] : [innerH, 0]);
+    return s;
+  };
+  dimKeys.forEach(k => { yScales[k] = buildScale(k); });
+
+  // --- Canvas ---
+  const container = d3.select("#chart-container");
+  const canvas = container.append("canvas")
+    .attr("width", width * dpr)
+    .attr("height", height * dpr)
+    .style("width", width + "px")
+    .style("height", height + "px");
+  const ctx = canvas.node().getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  // --- SVG ---
+  const svg = container.append("svg")
+    .attr("width", width)
+    .attr("height", height);
+  const g = svg.append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+  // --- Brushes state ---
+  const filters = {};
+
+  // --- Draw polylines on canvas ---
+  const drawLines = (subset, alpha, strokeFn) => {
+    ctx.lineWidth = 1.2;
+    subset.forEach(d => {
+      ctx.strokeStyle = strokeFn(d, alpha);
+      ctx.beginPath();
+      dimKeys.forEach((k, i) => {
+        const px = margin.left + xScale(k);
+        const py = margin.top + yScales[k](d[k]);
+        i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+      });
+      ctx.stroke();
+    });
+  };
+
+  const render = () => {
+    ctx.clearRect(0, 0, width, height);
+
+    const active = getActive();
+    const isFiltered = active.length < data.length;
+
+    // Background (all, dimmed)
+    if (isFiltered) {
+      drawLines(data, 0.08, (d, a) => {
+        const c = d3.color(regionColor(d.region));
+        c.opacity = a;
+        return c + "";
+      });
+    }
+
+    // Foreground (selected)
+    const fgAlpha = isFiltered ? 0.65 : Math.max(0.1, Math.min(0.6, 80 / data.length));
+    drawLines(active, fgAlpha, (d, a) => {
+      const c = d3.color(regionColor(d.region));
+      c.opacity = a;
+      return c + "";
+    });
+
+    updateTable(active);
+  };
+
+  const getActive = () => {
+    const activeFilters = Object.values(filters);
+    if (activeFilters.length === 0) return data;
+    return data.filter(d => activeFilters.every(f => f(d)));
+  };
+
+  // --- Axes ---
+  const axisGroups = g.selectAll(".axis")
+    .data(dimKeys)
+    .join("g")
+      .attr("class", "axis")
+      .attr("transform", k => `translate(${xScale(k)},0)`);
+
+  axisGroups.each(function(k) {
+    d3.select(this).call(d3.axisLeft(yScales[k]).ticks(6).tickSize(-5))
+      .selectAll("text").style("font-family", "'SF Mono','Menlo',monospace").style("font-size", "10px");
+  });
+
+  // Axis labels
+  axisGroups.append("text")
+    .attr("class", "axis-label")
+    .attr("y", -16)
+    .attr("text-anchor", "middle")
+    .attr("fill", "#333")
+    .text(k => dims.find(d => d.key === k).label)
+    .on("click", (event, k) => {
+      if (inverted.has(k)) inverted.delete(k); else inverted.add(k);
+      yScales[k] = buildScale(k);
+      // Update axis
+      const grp = axisGroups.filter(d => d === k);
+      grp.call(d3.axisLeft(yScales[k]).ticks(6).tickSize(-5))
+        .selectAll("text").style("font-family", "'SF Mono','Menlo',monospace").style("font-size", "10px");
+      // Re-append label
+      grp.selectAll(".axis-label").remove();
+      grp.append("text")
+        .attr("class", "axis-label")
+        .attr("y", -16)
+        .attr("text-anchor", "middle")
+        .attr("fill", inverted.has(k) ? "#EE6677" : "#333")
+        .text(dims.find(d => d.key === k).label)
+        .on("click", arguments.callee);
+      // Update brush filter if active
+      const brushNode = grp.select(".brush").node();
+      if (brushNode) {
+        const sel = d3.brushSelection(brushNode);
+        if (sel) {
+          const [y0, y1] = sel;
+          filters[k] = d => {
+            const v = yScales[k](d[k]);
+            return v >= y0 && v <= y1;
+          };
+        }
+      }
+      render();
+    });
+
+  // --- Brushes ---
+  const brushWidth = 24;
+  const brush = d3.brushY()
+    .extent([[-brushWidth / 2, 0], [brushWidth / 2, innerH]])
+    .on("brush end", function(event, k) {
+      if (!event.selection) {
+        delete filters[k];
+      } else {
+        const [y0, y1] = event.selection;
+        filters[k] = d => {
+          const v = yScales[k](d[k]);
+          return v >= y0 && v <= y1;
+        };
+      }
+      render();
+    });
+
+  axisGroups.append("g")
+    .attr("class", "brush")
+    .call(brush);
+
+  // --- Legend ---
+  const legend = svg.append("g")
+    .attr("transform", `translate(${margin.left}, ${height - 8})`);
+  regions.forEach((r, i) => {
+    const lx = i * 130;
+    legend.append("rect").attr("x", lx).attr("y", -10).attr("width", 10).attr("height", 10)
+      .attr("rx", 2).attr("fill", regionColor(r));
+    legend.append("text").attr("x", lx + 14).attr("y", 0)
+      .style("font-size", "11px").style("fill", "#555").text(r);
+  });
+
+  // --- Sparkline Table ---
+  const sparkW = 140, sparkH = 24, sparkPad = 2;
+  const tbody = d3.select("#table-body");
+
+  const updateTable = (active) => {
+    d3.select("#count-badge").text(active.length);
+
+    const rows = tbody.selectAll("tr").data(dims, d => d.key);
+
+    const enter = rows.enter().append("tr");
+    enter.append("td").style("font-weight", "500");
+    enter.append("td").attr("class", "spark");
+    enter.append("td").attr("class", "num");
+    enter.append("td").attr("class", "num");
+    enter.append("td").attr("class", "num");
+
+    const all = enter.merge(rows);
+
+    all.each(function(dim) {
+      const tr = d3.select(this);
+      const vals = active.map(d => d[dim.key]).sort(d3.ascending);
+      const mn = d3.min(vals);
+      const md = d3.median(vals);
+      const mx = d3.max(vals);
+
+      tr.select("td:nth-child(1)").text(dim.label);
+      tr.select("td:nth-child(3)").text(vals.length ? dim.fmt(mn) : "--");
+      tr.select("td:nth-child(4)").text(vals.length ? dim.fmt(md) : "--");
+      tr.select("td:nth-child(5)").text(vals.length ? dim.fmt(mx) : "--");
+
+      // Sparkline: distribution histogram
+      const sparkTd = tr.select("td.spark");
+      sparkTd.selectAll("*").remove();
+
+      if (vals.length === 0) return;
+
+      const fullVals = data.map(d => d[dim.key]);
+      const fullExt = d3.extent(fullVals);
+      const nBins = 30;
+      const binGen = d3.bin().domain(fullExt).thresholds(nBins);
+      const bins = binGen(vals);
+
+      const sx = d3.scaleLinear().domain(fullExt).range([sparkPad, sparkW - sparkPad]);
+      const sy = d3.scaleLinear().domain([0, d3.max(bins, b => b.length)]).range([sparkH - sparkPad, sparkPad]);
+      const barW = Math.max(1, (sparkW - 2 * sparkPad) / nBins - 0.5);
+
+      const sparkSvg = sparkTd.append("svg")
+        .attr("width", sparkW).attr("height", sparkH)
+        .attr("role", "img")
+        .attr("aria-label", `${dim.label} distribution: min ${dim.fmt(mn)}, median ${dim.fmt(md)}, max ${dim.fmt(mx)}`);
+
+      sparkSvg.selectAll("rect").data(bins).join("rect")
+        .attr("x", b => sx(b.x0))
+        .attr("y", b => sy(b.length))
+        .attr("width", barW)
+        .attr("height", b => sparkH - sparkPad - sy(b.length))
+        .attr("fill", "#4477AA")
+        .attr("opacity", 0.7);
+
+      // Median marker
+      sparkSvg.append("line")
+        .attr("x1", sx(md)).attr("x2", sx(md))
+        .attr("y1", 0).attr("y2", sparkH)
+        .attr("stroke", "#EE6677").attr("stroke-width", 1.5)
+        .attr("stroke-dasharray", "2,2");
+    });
+
+    rows.exit().remove();
+  };
+
+  // --- Initial render ---
+  render();
+})();
+</script>
+</body>
+</html>

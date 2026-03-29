@@ -77,9 +77,11 @@ Reads manifest, runs `gemini -p --sandbox --yolo` with 5 parallel workers. Skips
 
 When working alongside other Claude sessions, use `scripts/coord.sh` to coordinate. State lives in `.git/coordination/` (shared across worktrees, containers, and host).
 
+**On startup, always run `scripts/coord.sh ensure` before doing any work.** This auto-registers the session (name and env derived from context) or heartbeats if already registered. No arguments needed.
+
 ```bash
-# On startup: register yourself
-scripts/coord.sh register <name> <env>   # env: host, worktree, container
+# Auto-register (run this first — idempotent, cheap)
+scripts/coord.sh ensure
 
 # Declare what you're working on
 scripts/coord.sh status "Rewriting projection section"

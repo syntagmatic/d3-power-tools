@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Force-Directed Clustering</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a2e;
+    color: #e0e0e0;
+    font-family: system-ui, -apple-system, sans-serif;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    overflow: hidden;
+  }
+  #container {
+    position: relative;
+    background: #16213e;
+    border-radius: 8px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+  }
+  canvas, svg {
+    position: absolute;
+    top: 0;
+    left: 0;
+  }
+  #tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: rgba(22, 33, 62, 0.95);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 13px;
+    line-height: 1.5;
+    display: none;
+    white-space: nowrap;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.3);
+  }
+  #tooltip .label { font-weight: 600; margin-bottom: 2px; }
+  #tooltip .stat { font-family: monospace; color: #aaa; }
+  #tooltip .cluster-dot {
+    display: inline-block;
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  h1 {
+    position: absolute;
+    top: 16px;
+    left: 24px;
+    font-size: 18px;
+    font-weight: 600;
+    color: #e0e0e0;
+    z-index: 10;
+  }
+  .legend {
+    position: absolute;
+    top: 16px;
+    right: 24px;
+    font-size: 12px;
+    z-index: 10;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    margin-bottom: 4px;
+  }
+  .legend-swatch {
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    margin-right: 8px;
+    flex-shrink: 0;
+  }
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="edges-canvas"></canvas>
+  <canvas id="nodes-canvas"></canvas>
+  <svg id="overlay"></svg>
+  <h1>Force-Directed Clustering</h1>
+  <div class="legend" id="legend"></div>
+  <div id="tooltip"></div>
+</div>
+
+<script>
+(() => {
+  // --- Dimensions ---
+  const fullWidth = 1200, fullHeight = 800;
+  const margin = { top: 50, right: 160, bottom: 30, left: 30 };
+  const width = fullWidth - margin.left - margin.right;
+  const height = fullHeight - margin.top - margin.bottom;
+
+  const container = d3.select("#container")
+    .style("width", `${fullWidth}px`)
+    .style("height", `${fullHeight}px`);
+
+  // --- Tol Bright + Muted palette (7 colorblind-safe colors) ---
+  const clusterColors = [
+    "#4477AA", // blue (Tol bright)
+    "#EE6677", // red (Tol bright)
+    "#228833", // green (Tol bright)
+    "#CCBB44", // yellow (Tol bright)
+    "#66CCEE", // cyan (Tol bright)
+    "#AA3377", // purple (Tol bright)
+    "#BBBBBB"  // grey (Tol bright)
+  ];
+  const clusterNames = [
+    "Engineering", "Marketing", "Research",
+    "Operations", "Design", "Finance", "Support"
+  ];
+
+  const colorScale = d3.scaleOrdinal()
+    .domain(d3.range(7))
+    .range(clusterColors);
+
+  // --- Legend ---
+  const legend = d3.select("#legend");
+  clusterNames.forEach((name, i) => {
+    const item = legend.append("div").attr("class", "legend-item");
+    item.append("div").attr("class", "legend-swatch")
+      .style("background", clusterColors[i]);
+    item.append("span").text(name);
+  });
+
+  // --- Synthetic data: 400 nodes, 7 clusters, ~600 edges (80% intra) ---
+  const rng = d3.randomLcg(42);
+  const randUniform = d3.randomUniform.source(rng);
+  const randInt = d3.randomInt.source(rng);
+  const randNormal = d3.randomNormal.source(rng);
+
+  const nNodes = 400;
+  const nClusters = 7;
+  const nodesPerCluster = Math.floor(nNodes / nClusters);
+
+  const nodes = d3.range(nNodes).map(i => ({
+    id: i,
+    cluster: i < nodesPerCluster * nClusters
+      ? Math.floor(i / nodesPerCluster)
+      : randInt(0, nClusters)(),
+    value: Math.max(2, randNormal(10, 4)())
+  }));
+
+  // Build adjacency for neighbor lookup
+  const adjacency = new Map(nodes.map(d => [d.id, new Set()]));
+
+  const clusterGroups = d3.group(nodes, d => d.cluster);
+  const links = [];
+  const edgeSet = new Set();
+  const targetEdges = 600;
+  const intraRatio = 0.8;
+  const targetIntra = Math.floor(targetEdges * intraRatio);
+  const targetInter = targetEdges - targetIntra;
+
+  const addEdge = (s, t) => {
+    if (s === t) return false;
+    const key = s < t ? `${s}-${t}` : `${t}-${s}`;
+    if (edgeSet.has(key)) return false;
+    edgeSet.add(key);
+    links.push({ source: s, target: t });
+    adjacency.get(s).add(t);
+    adjacency.get(t).add(s);
+    return true;
+  };
+
+  // Intra-cluster edges
+  let intraCount = 0;
+  for (let attempt = 0; attempt < targetIntra * 10 && intraCount < targetIntra; attempt++) {
+    const c = randInt(0, nClusters)();
+    const group = clusterGroups.get(c);
+    if (group.length < 2) continue;
+    const a = group[randInt(0, group.length)()];
+    const b = group[randInt(0, group.length)()];
+    if (addEdge(a.id, b.id)) intraCount++;
+  }
+
+  // Inter-cluster edges
+  let interCount = 0;
+  const allNodes = [...nodes];
+  for (let attempt = 0; attempt < targetInter * 10 && interCount < targetInter; attempt++) {
+    const a = allNodes[randInt(0, nNodes)()];
+    const b = allNodes[randInt(0, nNodes)()];
+    if (a.cluster !== b.cluster && addEdge(a.id, b.id)) interCount++;
+  }
+
+  // Compute degree
+  nodes.forEach(d => { d.degree = adjacency.get(d.id).size; });
+
+  // --- Radius scale ---
+  const radiusScale = d3.scaleSqrt()
+    .domain(d3.extent(nodes, d => d.value))
+    .range([3, 14]);
+
+  // --- Canvas setup ---
+  const dpr = devicePixelRatio;
+
+  const setupCanvas = (id) => {
+    const canvas = d3.select(`#${id}`)
+      .attr("width", fullWidth * dpr)
+      .attr("height", fullHeight * dpr)
+      .style("width", `${fullWidth}px`)
+      .style("height", `${fullHeight}px`)
+      .node();
+    const ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+    return ctx;
+  };
+
+  const edgeCtx = setupCanvas("edges-canvas");
+  const nodeCtx = setupCanvas("nodes-canvas");
+
+  // SVG overlay for pointer events
+  const svg = d3.select("#overlay")
+    .attr("width", fullWidth)
+    .attr("height", fullHeight)
+    .style("pointer-events", "all");
+
+  // Invisible rect to capture events
+  svg.append("rect")
+    .attr("width", fullWidth)
+    .attr("height", fullHeight)
+    .attr("fill", "transparent");
+
+  // --- Force simulation ---
+  const simulation = d3.forceSimulation(nodes)
+    .force("link", d3.forceLink(links).id(d => d.id).distance(30).strength(0.3))
+    .force("charge", d3.forceManyBody().strength(-60).distanceMax(300).theta(0.9))
+    .force("center", d3.forceCenter(margin.left + width / 2, margin.top + height / 2))
+    .force("collide", d3.forceCollide(d => radiusScale(d.value) + 1.5).iterations(2))
+    .force("x", d3.forceX(margin.left + width / 2).strength(0.03))
+    .force("y", d3.forceY(margin.top + height / 2).strength(0.03))
+    .velocityDecay(0.4)
+    .alphaDecay(0.02)
+    .on("tick", render);
+
+  // Cluster pull: nudge nodes toward their cluster leader
+  const leaders = new Map();
+  for (const [c, group] of clusterGroups) {
+    leaders.set(c, group.reduce((a, b) => a.value > b.value ? a : b));
+  }
+  const clusterLinks = nodes
+    .filter(d => d !== leaders.get(d.cluster))
+    .map(d => ({ source: d, target: leaders.get(d.cluster) }));
+  simulation.force("cluster", d3.forceLink(clusterLinks).strength(0.04).distance(40));
+
+  // --- Quadtree (rebuilt each tick) ---
+  let quadtree;
+
+  // --- Highlight state ---
+  let hoveredNode = null;
+  let neighborSet = new Set();
+
+  // --- Render ---
+  function render() {
+    quadtree = d3.quadtree()
+      .x(d => d.x)
+      .y(d => d.y)
+      .addAll(nodes);
+
+    drawEdges();
+    drawNodes();
+  }
+
+  function drawEdges() {
+    edgeCtx.clearRect(0, 0, fullWidth, fullHeight);
+
+    if (hoveredNode) {
+      // Dim non-neighbor edges
+      edgeCtx.globalAlpha = 0.04;
+      edgeCtx.strokeStyle = "#556";
+      edgeCtx.lineWidth = 0.5;
+      edgeCtx.beginPath();
+      for (const l of links) {
+        if (neighborSet.has(l.source.id) && neighborSet.has(l.target.id) &&
+            (l.source.id === hoveredNode.id || l.target.id === hoveredNode.id)) continue;
+        edgeCtx.moveTo(l.source.x, l.source.y);
+        edgeCtx.lineTo(l.target.x, l.target.y);
+      }
+      edgeCtx.stroke();
+
+      // Highlight neighbor edges
+      edgeCtx.globalAlpha = 0.8;
+      edgeCtx.strokeStyle = "#fff";
+      edgeCtx.lineWidth = 1.5;
+      edgeCtx.beginPath();
+      for (const l of links) {
+        if ((l.source.id === hoveredNode.id || l.target.id === hoveredNode.id) &&
+            neighborSet.has(l.source.id) && neighborSet.has(l.target.id)) {
+          edgeCtx.moveTo(l.source.x, l.source.y);
+          edgeCtx.lineTo(l.target.x, l.target.y);
+        }
+      }
+      edgeCtx.stroke();
+    } else {
+      edgeCtx.globalAlpha = 0.15;
+      edgeCtx.strokeStyle = "#8899aa";
+      edgeCtx.lineWidth = 0.5;
+      edgeCtx.beginPath();
+      for (const l of links) {
+        edgeCtx.moveTo(l.source.x, l.source.y);
+        edgeCtx.lineTo(l.target.x, l.target.y);
+      }
+      edgeCtx.stroke();
+    }
+    edgeCtx.globalAlpha = 1;
+  }
+
+  function drawNodes() {
+    nodeCtx.clearRect(0, 0, fullWidth, fullHeight);
+
+    // Batch by cluster for fewer style changes
+    const grouped = d3.group(nodes, d => d.cluster);
+
+    if (hoveredNode) {
+      // Draw dimmed nodes first
+      for (const [cluster, group] of grouped) {
+        nodeCtx.fillStyle = colorScale(cluster);
+        nodeCtx.globalAlpha = 0.12;
+        nodeCtx.beginPath();
+        for (const d of group) {
+          if (neighborSet.has(d.id)) continue;
+          const r = radiusScale(d.value);
+          nodeCtx.moveTo(d.x + r, d.y);
+          nodeCtx.arc(d.x, d.y, r, 0, Math.PI * 2);
+        }
+        nodeCtx.fill();
+      }
+
+      // Draw highlighted neighbors
+      for (const [cluster, group] of grouped) {
+        nodeCtx.fillStyle = colorScale(cluster);
+        nodeCtx.globalAlpha = 1;
+        nodeCtx.beginPath();
+        for (const d of group) {
+          if (!neighborSet.has(d.id) || d.id === hoveredNode.id) continue;
+          const r = radiusScale(d.value);
+          nodeCtx.moveTo(d.x + r, d.y);
+          nodeCtx.arc(d.x, d.y, r, 0, Math.PI * 2);
+        }
+        nodeCtx.fill();
+      }
+
+      // Draw hovered node with ring
+      const h = hoveredNode;
+      const hr = radiusScale(h.value);
+      nodeCtx.globalAlpha = 1;
+      nodeCtx.fillStyle = colorScale(h.cluster);
+      nodeCtx.beginPath();
+      nodeCtx.arc(h.x, h.y, hr, 0, Math.PI * 2);
+      nodeCtx.fill();
+      nodeCtx.strokeStyle = "#fff";
+      nodeCtx.lineWidth = 2.5;
+      nodeCtx.beginPath();
+      nodeCtx.arc(h.x, h.y, hr + 2, 0, Math.PI * 2);
+      nodeCtx.stroke();
+    } else {
+      for (const [cluster, group] of grouped) {
+        nodeCtx.fillStyle = colorScale(cluster);
+        nodeCtx.globalAlpha = 0.9;
+        nodeCtx.beginPath();
+        for (const d of group) {
+          const r = radiusScale(d.value);
+          nodeCtx.moveTo(d.x + r, d.y);
+          nodeCtx.arc(d.x, d.y, r, 0, Math.PI * 2);
+        }
+        nodeCtx.fill();
+      }
+    }
+    nodeCtx.globalAlpha = 1;
+  }
+
+  // --- Tooltip ---
+  const tooltip = d3.select("#tooltip");
+
+  function showTooltip(d, event) {
+    const neighbors = adjacency.get(d.id);
+    tooltip
+      .style("display", "block")
+      .html(`
+        <div class="label">
+          <span class="cluster-dot" style="background:${colorScale(d.cluster)}"></span>
+          ${clusterNames[d.cluster]} &mdash; Node ${d.id}
+        </div>
+        <div class="stat">Degree: ${d.degree}</div>
+        <div class="stat">Value: ${d.value.toFixed(1)}</div>
+      `);
+
+    const tx = Math.min(d.x + 16, fullWidth - 170);
+    const ty = Math.max(d.y - 40, 10);
+    tooltip.style("left", `${tx}px`).style("top", `${ty}px`);
+  }
+
+  function hideTooltip() {
+    tooltip.style("display", "none");
+  }
+
+  // --- Pointer events with quadtree hit detection ---
+  svg.on("pointermove", (event) => {
+    const [mx, my] = d3.pointer(event);
+    const nearest = quadtree ? quadtree.find(mx, my, 20) : null;
+
+    if (nearest && nearest !== hoveredNode) {
+      hoveredNode = nearest;
+      neighborSet = new Set([nearest.id, ...adjacency.get(nearest.id)]);
+      showTooltip(nearest, event);
+      drawEdges();
+      drawNodes();
+      svg.style("cursor", "pointer");
+    } else if (!nearest && hoveredNode) {
+      hoveredNode = null;
+      neighborSet = new Set();
+      hideTooltip();
+      drawEdges();
+      drawNodes();
+      svg.style("cursor", "default");
+    }
+  });
+
+  svg.on("pointerleave", () => {
+    hoveredNode = null;
+    neighborSet = new Set();
+    hideTooltip();
+    drawEdges();
+    drawNodes();
+  });
+
+  // --- Drag with fx/fy and reheat ---
+  let dragTarget = null;
+
+  const drag = d3.drag()
+    .subject((event) => {
+      const [mx, my] = d3.pointer(event);
+      return quadtree ? quadtree.find(mx, my, 20) : null;
+    })
+    .on("start", (event) => {
+      dragTarget = event.subject;
+      if (!dragTarget) return;
+      if (!event.active) simulation.alphaTarget(0.3).restart();
+      dragTarget.fx = dragTarget.x;
+      dragTarget.fy = dragTarget.y;
+    })
+    .on("drag", (event) => {
+      if (!dragTarget) return;
+      dragTarget.fx = event.x;
+      dragTarget.fy = event.y;
+    })
+    .on("end", (event) => {
+      if (!dragTarget) return;
+      if (!event.active) simulation.alphaTarget(0);
+      dragTarget.fx = null;
+      dragTarget.fy = null;
+      dragTarget = null;
+    });
+
+  svg.call(drag);
+
+})();
+</script>
+</body>
+</html>

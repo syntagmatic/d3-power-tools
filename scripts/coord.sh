@@ -5,7 +5,8 @@
 # to containers via the project mount, auto-gitignored).
 #
 # Usage:
-#   coord.sh register <name> <env>        Register this session
+#   coord.sh ensure                       Auto-register or heartbeat (run first)
+#   coord.sh register <name> <env>        Register this session manually
 #   coord.sh heartbeat                    Update heartbeat
 #   coord.sh status <description>         Set current task
 #   coord.sh files <file>...              Declare active files
@@ -101,6 +102,53 @@ log_action() {
 }
 
 # --- session commands ---
+
+# Auto-derive a session name from environment
+auto_session_name() {
+  # Use COORD_SESSION_NAME if set (containers), otherwise generate from context
+  if [ -n "${COORD_SESSION_NAME:-}" ]; then
+    echo "$COORD_SESSION_NAME"
+    return
+  fi
+  local branch
+  branch="$(git symbolic-ref --short HEAD 2>/dev/null || echo "detached")"
+  local dir_hash
+  dir_hash="$(wdir_hash)"
+  # e.g. "main-a1b2c3d4" or "session/haikus-a1b2c3d4"
+  echo "${branch//\//-}-${dir_hash}"
+}
+
+auto_session_env() {
+  if [ -n "${COORD_SESSION_ENV:-}" ]; then
+    echo "$COORD_SESSION_ENV"
+  elif [ -n "${CONTAINER_NAME:-}" ] || [ -f /.dockerenv ]; then
+    echo "container"
+  elif [[ "$(pwd)" == *".worktrees"* ]] || [[ "$(pwd)" == *"worktree"* ]]; then
+    echo "worktree"
+  else
+    echo "host"
+  fi
+}
+
+# Idempotent registration — no-op if already registered and alive
+cmd_ensure() {
+  local self_path="$SESSIONS/.self.$(wdir_hash)"
+  if [ -f "$self_path" ]; then
+    local sid
+    sid=$(cat "$self_path")
+    local f
+    f=$(session_file "$sid")
+    if [ -f "$f" ]; then
+      # Already registered — just heartbeat
+      cmd_heartbeat
+      return
+    fi
+  fi
+  # Not registered — auto-register
+  local name="${1:-$(auto_session_name)}"
+  local env="${2:-$(auto_session_env)}"
+  cmd_register "$name" "$env"
+}
 
 cmd_register() {
   local name="${1:?Usage: coord.sh register <name> <env>}"
@@ -420,6 +468,7 @@ gc_stale() {
 # --- dispatch ---
 
 case "${1:-}" in
+  ensure)      shift; cmd_ensure "$@" ;;
   register)    shift; cmd_register "$@" ;;
   heartbeat)   cmd_heartbeat ;;
   status)      shift; cmd_status "$@" ;;
@@ -437,7 +486,7 @@ case "${1:-}" in
   *)
     echo "Usage: coord.sh <command> [args...]"
     echo
-    echo "Session:  register <name> <env> | heartbeat | status <desc>"
+    echo "Session:  ensure | register <name> <env> | heartbeat | status <desc>"
     echo "          files <file>... | done | deregister"
     echo "Query:    list | conflicts"
     echo "Tasks:    task-add <title> [desc] | task-claim <id> | task-done <id>"
