@@ -1,19 +1,36 @@
 #!/usr/bin/env python3
 """Generate blocks using Gemini CLI. Reads manifest.json, outputs to blocks/{version}/gem/."""
 import json
-import subprocess
 import os
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from staging import create_staging_dir, cleanup_staging_dir
+
 PROJ = Path(__file__).resolve().parent.parent
 MANIFEST = PROJ / "blocks" / "manifest.json"
-VERSION = sys.argv[1] if len(sys.argv) > 1 else "v0"
+MAX_PARALLEL = 5
+
+# Parse args
+args = sys.argv[1:]
+all_skills = "--all-skills" in args
+args = [a for a in args if a != "--all-skills"]
+MODEL = None
+for i, a in enumerate(args):
+    if a == "--model" and i + 1 < len(args):
+        MODEL = args[i + 1]
+        args = args[:i] + args[i + 2:]
+        break
+
+VERSION = args[0] if args else "v0"
+ONLY_IDS = set(args[1:]) if len(args) > 1 else None
+
 OUTDIR = PROJ / "blocks" / VERSION / "gem"
 LOGFILE = PROJ / "temp" / f"generate-blocks-gemini-{VERSION}.log"
-MAX_PARALLEL = 5
 
 OUTDIR.mkdir(parents=True, exist_ok=True)
 
@@ -25,25 +42,33 @@ def run_block(idx, block):
         print(f"[{idx}] SKIP {bid} (exists)")
         return ("skip", bid)
 
+    staging = create_staging_dir(bid, block["skills"], PROJ, all_skills=all_skills)
+
+    # Write to staging dir, then copy out (Gemini sandbox blocks symlinks)
+    staging_outfile = staging / f"{bid}.html"
     prompt = (
-        f"Build this D3.js visualization and save it as blocks/{VERSION}/gem/{bid}.html\n\n"
+        f"Build this D3.js visualization and save it as {bid}.html\n\n"
         f"IMPORTANT: The output file must contain ONLY valid HTML starting with "
         f"<!DOCTYPE html>. Do not include any markdown fences or explanation.\n\n"
         f"{block['prompt']}"
     )
-
     print(f"[{idx}] START {bid}")
     t0 = time.time()
 
     try:
+        cmd = ["gemini", "-p", prompt, "--sandbox", "--yolo"]
+        if MODEL:
+            cmd.extend(["--model", MODEL])
         result = subprocess.run(
-            ["gemini", "-p", prompt, "--sandbox", "--yolo"],
+            cmd,
             capture_output=True, text=True, timeout=300,
-            cwd=str(PROJ),
+            cwd=str(staging),
         )
     except subprocess.TimeoutExpired:
         print(f"[{idx}] TIMEOUT {bid}")
         return ("fail", bid, "timeout")
+    finally:
+        cleanup_staging_dir(staging)
 
     elapsed = time.time() - t0
 
@@ -51,6 +76,10 @@ def run_block(idx, block):
     if "429" in result.stderr or "RESOURCE_EXHAUSTED" in result.stderr:
         print(f"[{idx}] THROTTLED {bid} ({elapsed:.0f}s)")
         return ("throttle", bid)
+
+    # Copy from staging dir to output dir
+    if staging_outfile.exists():
+        shutil.copy2(staging_outfile, outfile)
 
     # Check output file
     if outfile.exists() and outfile.stat().st_size > 0:
@@ -74,7 +103,12 @@ def run_block(idx, block):
 def main():
     manifest = json.loads(MANIFEST.read_text())
     blocks = manifest["blocks"]
-    print(f"Generating {len(blocks)} blocks with up to {MAX_PARALLEL} parallel jobs\n")
+
+    if ONLY_IDS:
+        blocks = [b for b in blocks if b["id"] in ONLY_IDS]
+
+    mode = "all skills" if all_skills else "manifest skills"
+    print(f"Generating {len(blocks)} blocks ({mode}) with up to {MAX_PARALLEL} parallel jobs\n")
 
     results = {"pass": 0, "fail": 0, "skip": 0, "throttle": 0}
     throttle_count = 0

@@ -2,21 +2,28 @@
 """Generate blocks using Claude Code CLI. Reads manifest.json, outputs to blocks/{version}/."""
 import json
 import subprocess
-import os
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from staging import create_staging_dir, cleanup_staging_dir, parse_skill_reads
+
 PROJ = Path(__file__).resolve().parent.parent
 MANIFEST = PROJ / "blocks" / "manifest.json"
-VERSION = sys.argv[1] if len(sys.argv) > 1 else "v1"
-OUTDIR = PROJ / "blocks" / VERSION
-LOGFILE = PROJ / "temp" / f"generate-blocks-claude-{VERSION}.log"
 MAX_PARALLEL = 5
 
-# Optional: only generate specific block IDs (pass as args after version)
-ONLY_IDS = set(sys.argv[2:]) if len(sys.argv) > 2 else None
+# Parse args
+args = sys.argv[1:]
+all_skills = "--all-skills" in args
+args = [a for a in args if a != "--all-skills"]
+
+VERSION = args[0] if args else "v1"
+ONLY_IDS = set(args[1:]) if len(args) > 1 else None
+
+OUTDIR = PROJ / "blocks" / VERSION
+LOGFILE = PROJ / "temp" / f"generate-blocks-claude-{VERSION}.json"
 
 OUTDIR.mkdir(parents=True, exist_ok=True)
 
@@ -27,37 +34,53 @@ def run_block(idx, block, defaults):
 
     if outfile.exists() and outfile.stat().st_size > 0:
         print(f"[{idx}] SKIP {bid} (exists)")
-        return ("skip", bid)
+        return None
 
-    skills = ", ".join(block["skills"])
     suffix = defaults.get("suffix", "")
+    abs_outpath = str(outfile)
     prompt = (
-        f"Build a standalone D3.js visualization as a single HTML file.\n"
-        f"Skills to use: {skills}\n\n"
+        f"Build a standalone D3.js visualization as a single HTML file.\n\n"
         f"{block['prompt']}\n\n"
         f"{suffix}\n"
         f"Generate ALL synthetic data inline. No external data files.\n"
-        f"Write the complete file to blocks/{VERSION}/{bid}.html"
+        f"Write the complete file to {abs_outpath}"
     )
 
-    print(f"[{idx}] START {bid}")
+    staging = create_staging_dir(bid, block["skills"], PROJ, all_skills=all_skills)
+    print(f"[{idx}] START {bid} (skills: {', '.join(block['skills'])})")
     t0 = time.time()
 
     try:
         result = subprocess.run(
             [
                 "claude", "-p", prompt,
-                "--allowedTools", "Write,Read,Bash",
-                "--max-turns", "3",
+                "--allowedTools", "Write,Read",
+                "--max-turns", "5",
+                "--output-format", "stream-json",
+                "--verbose",
             ],
             capture_output=True, text=True, timeout=300,
-            cwd=str(PROJ),
+            cwd=str(staging),
         )
     except subprocess.TimeoutExpired:
         print(f"[{idx}] TIMEOUT {bid}")
-        return ("fail", bid, "timeout")
+        return {"bid": bid, "status": "fail", "error": "timeout",
+                "skills_requested": block["skills"], "skills_triggered": [],
+                "skills_missed": block["skills"], "elapsed_s": 300}
+    finally:
+        cleanup_staging_dir(staging)
 
     elapsed = time.time() - t0
+
+    # Parse which skills were read
+    triggered = parse_skill_reads(result.stdout)
+    record = {
+        "bid": bid,
+        "skills_requested": block["skills"],
+        "skills_triggered": triggered,
+        "skills_missed": [s for s in block["skills"] if s not in triggered],
+        "elapsed_s": round(elapsed, 1),
+    }
 
     # Check output file
     if outfile.exists() and outfile.stat().st_size > 100:
@@ -65,17 +88,32 @@ def run_block(idx, block, defaults):
         first_line = content.split("\n")[0].lower()
         if "<!doctype" in first_line or "<html" in first_line:
             lines = len(content.splitlines())
-            print(f"[{idx}] PASS {bid} ({lines} lines, {elapsed:.0f}s)")
-            return ("pass", bid)
+            record["status"] = "pass"
+            record["lines"] = lines
+            print(f"[{idx}] PASS {bid} ({lines} lines, {elapsed:.0f}s, read: {triggered})")
+            return record
         else:
+            record["status"] = "fail"
+            record["error"] = "invalid html"
             print(f"[{idx}] FAIL {bid} (not valid HTML)")
             outfile.unlink()
-            return ("fail", bid, "invalid html")
+            return record
     else:
+        record["status"] = "fail"
+        # With stream-json, errors are in stdout; stderr may be empty
+        err_content = result.stderr[:2000] if result.stderr else ""
+        if not err_content and result.stdout:
+            for line in result.stdout.splitlines():
+                try:
+                    event = json.loads(line)
+                    if event.get("type") == "result" and event.get("is_error"):
+                        err_content = event.get("result", "unknown error")
+                        break
+                except (json.JSONDecodeError, ValueError):
+                    pass
+        record["error"] = err_content or "no output"
         print(f"[{idx}] FAIL {bid} (no output file)")
-        errfile = OUTDIR / f".{bid}.stderr"
-        errfile.write_text(result.stderr[:2000] if result.stderr else "no stderr")
-        return ("fail", bid, "no file")
+        return record
 
 
 def main():
@@ -88,14 +126,14 @@ def main():
 
     # Filter to only missing blocks
     missing = [b for b in blocks if not (OUTDIR / f"{b['id']}.html").exists()]
-    print(f"{len(missing)} blocks to generate (of {len(blocks)} selected), up to {MAX_PARALLEL} parallel\n")
+    mode = "all skills" if all_skills else "manifest skills"
+    print(f"{len(missing)} blocks to generate (of {len(blocks)} selected), {mode}, up to {MAX_PARALLEL} parallel\n")
 
     if not missing:
         print("All blocks already exist. Done.")
         return
 
-    results = {"pass": 0, "fail": 0, "skip": 0}
-    log_lines = []
+    records = []
 
     with ThreadPoolExecutor(max_workers=MAX_PARALLEL) as pool:
         futures = {}
@@ -105,17 +143,35 @@ def main():
 
         for f in as_completed(futures):
             r = f.result()
-            status = r[0]
-            results[status] += 1
-            log_lines.append(f"{r[1]}: {status}")
+            if r is not None:
+                records.append(r)
+
+    records.sort(key=lambda r: r["bid"])
+    counts = {"pass": 0, "fail": 0}
+    all_missed = []
+    for r in records:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+        all_missed.extend(r.get("skills_missed", []))
+
+    missed_counts = Counter(all_missed)
+
+    report = {
+        "version": VERSION,
+        "mode": "all_skills" if all_skills else "manifest_only",
+        "summary": counts,
+        "skills_missed_counts": dict(missed_counts.most_common()),
+        "blocks": records,
+    }
 
     LOGFILE.parent.mkdir(parents=True, exist_ok=True)
-    LOGFILE.write_text("\n".join(sorted(log_lines)) + "\n")
+    LOGFILE.write_text(json.dumps(report, indent=2) + "\n")
 
     print(f"\n=== DONE ===")
-    print(f"Pass: {results['pass']}  Fail: {results['fail']}  Skip: {results['skip']}")
+    print(f"Pass: {counts.get('pass', 0)}  Fail: {counts.get('fail', 0)}")
+    if missed_counts:
+        print(f"Skills never read: {dict(missed_counts.most_common(10))}")
     print(f"Output: {OUTDIR}")
-    print(f"Log: {LOGFILE}")
+    print(f"Report: {LOGFILE}")
 
 
 if __name__ == "__main__":
