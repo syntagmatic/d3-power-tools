@@ -1,304 +1,53 @@
 ---
 name: linked-views
-description: "Coordinate multiple D3.js visualizations that share state. Use this skill when the user wants linked charts, crossfilter-style filtering, coordinated brushing across views, overview+detail patterns, shared selection highlighting, master-detail layouts, synchronized zoom/pan, or any multi-view dashboard where interacting with one chart updates others. Covers event bus architecture, shared state management, coordinated brushing, zoom propagation, state serialization, and performance patterns for keeping linked views responsive."
+description: "Design patterns for multi-chart dashboards. Use this skill to choose the right layout (Overview+Detail, Cross-filtering), manage scale consistency, and handle visual feedback (Ghost/Active patterns). Covers cognitive load limits, complementarity, and state serialization for shareable views."
 ---
 
 # Linked Views
 
-A single chart shows one question. Linked views let the viewer ask a question in one chart and see the answer ripple across others — brushing a time range in a line chart instantly filters a scatter plot, a histogram, and a map. The power is combinatorial: N views give N simultaneous angles on the same data without N separate mental models, but only if the coordination is fast enough to feel like a single instrument.
+A single chart answers one question; linked views let the viewer ask a question in one chart and see the answer ripple across others. The power is combinatorial: N views provide N simultaneous angles on the same data. The judgment is ensuring these views coalesce into a single "instrument" rather than a fragmented cockpit of disconnected widgets.
 
-For brush mechanics and lasso selection, see `brushing`. For scale construction, see `scales`. For zoom API details, see `navigation`. For faceted layouts of the same chart type, see `small-multiples`. For data reshaping, see `data-gathering`. For parallel coordinates linking, see `parallel-coordinates`.
+For the technical "wiring" (d3.dispatch, stores, framework bridges), see `coordination`. For brush mechanics, see `brushing`. For faceted layouts of the same chart type, see `small-multiples`.
 
 ## When Not to Link
 
-Linking views has a real cost: every added view splits attention and forces context-switching. Baldonado et al.'s eight guidelines (AVI 2000) distill the tradeoffs. The four that matter most in practice:
+Linking has a cognitive cost. Every view splits attention. Follow the principles of **Parsimony** and **Complementarity**:
 
-- **Parsimony** — use the fewest views necessary. Each added view has cognitive cost (working memory holds ~4 chunks — Cowan 2001). Beyond 3-4 simultaneously active views, viewers forget which chart they brushed. If you need 6+ views, group them into 2-3 clusters with clear hierarchy (overview panel + detail panels).
-- **Complementarity** — link views only when different encodings reveal correlations or disparities invisible in any single view. If brushing price range highlights points on a map with no spatial pattern, the link teaches nothing. Every link should answer: "what does this selection look like from that angle?"
-- **Self-evidence** — make the relationships between views visually obvious. If the user can't tell that brushing view A affects view B, the link is useless. Use highlight animation, color flash, or consistent encoding across views (same color scale, same axis orientation).
-- **Attention management** — guide the user's attention to the right view. Render the source chart first, then let linked charts update within 1-2 frames (see Render Queue below). Change blindness is real — users focused on one chart may miss updates in peripheral views.
+- **Parsimony (Cowan's 4-chunk limit):** Use the fewest views necessary. Beyond 3–4 simultaneously active views, viewers struggle to track which interaction caused which update. Group 6+ views into hierarchical clusters (one "driver" panel + several "detail" panels).
+- **Complementarity:** Link views only when different encodings reveal correlations or disparities invisible in any single view. If a link doesn't answer "what does this selection look like from *that* angle?", remove it.
+- **Attention Management:** Guide the user. Render the "source" chart instantly; let linked "target" charts follow 1–2 frames later (see `coordination` for render priority). This maintains the user's focus on the chart they are touching.
 
-Two additional traps beyond Baldonado:
+## Design Patterns
 
-- **Linking everything to everything creates update storms.** Chart A brushes, which updates chart B, which fires a filter change, which updates chart A. Be explicit about which interactions propagate and which are local-only.
-- **Small multiples often beat linked views.** When comparing the same measure across categories, small multiples (one chart per category, shared scale) impose lower cognitive load than a linked scatter + bar + table. Use linked views when the dimensions are heterogeneous — spatial + temporal + categorical — not when they're facets of the same thing.
+### 1. Overview + Detail (Focus + Context)
+One chart shows the "big picture" (e.g., a timeline of 10 years), while another shows a high-resolution "detail" (e.g., a specific month). Brushing the overview updates the detail chart's scale domain.
 
-## Coordination Architecture
+### 2. Cross-filtering
+Multiple histograms or charts acting as simultaneous filters. Brushing any dimension filters the data shown in **all** other dimensions. See the `coordination` skill for high-performance bitmap indexing to handle large datasets.
 
-Three patterns, chosen by how many charts need wiring:
-
-1. **Direct coupling** (2 charts) — wire chart A's output directly to chart B's input. No abstraction needed. Adding a third chart makes this O(n^2) in wiring complexity.
-2. **Event bus with `d3.dispatch`** (3-8 charts) — named event channels. Charts emit events and subscribe independently. The standard choice because adding a chart means adding one subscriber, not rewiring everything.
-3. **Shared state store** (complex state, undo/redo) — a plain object holds full view state, mutations go through a single function that notifies subscribers. Use when you need time-travel debugging or URL-serialized state.
-
-```js
-function createStore(initialState) {
-  let state = { ...initialState };
-  const listeners = new Set();
-  return {
-    getState: () => state,
-    setState(updates) {
-      const prev = state;
-      state = { ...state, ...updates };
-      for (const fn of listeners) fn(state, prev);
-    },
-    subscribe(fn) {
-      listeners.add(fn);
-      return () => listeners.delete(fn); // returns unsubscribe
-    },
-  };
-}
-```
-
-## Selection Model
-
-Multiple charts must agree on "the same datum." Never link by array index — sorting, filtering, or async loading breaks the mapping. Use a stable key (an ID column, a composite key).
-
-```js
-class SelectionModel {
-  #keys = new Set();
-  #dispatch = d3.dispatch("change");
-
-  select(keys, source) {
-    this.#keys = new Set(keys);
-    this.#dispatch.call("change", null, { keys: this.#keys, source });
-  }
-  toggle(key, source) {
-    this.#keys.has(key) ? this.#keys.delete(key) : this.#keys.add(key);
-    this.#dispatch.call("change", null, { keys: new Set(this.#keys), source });
-  }
-  clear(source) {
-    this.#keys.clear();
-    this.#dispatch.call("change", null, { keys: this.#keys, source });
-  }
-  // Empty selection = everything selected — avoids the "blank dashboard" trap
-  // where clearing a brush makes all charts go empty
-  isSelected(key) { return this.#keys.size === 0 || this.#keys.has(key); }
-  get size() { return this.#keys.size; }
-  get keys() { return this.#keys; }
-  on(event, fn) { this.#dispatch.on(event, fn); return this; }
-}
-```
-
-Each chart translates its native interaction into the shared key-based model: scatter emits 2D brush keys, histogram emits bin keys, table emits toggle on row click, map emits region keys. Each chart skips events it originated via `source` check — this is the primary defense against feedback loops.
-
-## Bitmap Index for 100K+ Rows (Crossfilter Pattern)
-
-The original crossfilter library used sorted indexes with incremental filtering. For multi-dimension AND queries — "show me rows where price is in [10,50] AND date is in March AND region is West" — a bitmap approach is simpler to implement and often faster. Each dimension gets a bitmask where bit `i` is 1 if row `i` passes that dimension's filter. AND all masks together to get the intersection. Bit operations on typed arrays are cache-friendly and branch-free, so filtering 500K rows across 5 dimensions takes under 2ms.
-
-Why bitmaps beat naive iteration: iterating 500K rows per dimension per frame is O(N * D). Bitmaps reduce this to O(N/32 * D) word-level AND operations — a 32x constant-factor improvement, and the tight loop plays well with CPU cache prefetching.
-
-```js
-class BitFilter {
-  #n; #masks;
-  constructor(n) { this.#n = n; this.#masks = new Map(); }
-
-  set(dim, predicate, data) {
-    const words = Math.ceil(this.#n / 32);
-    const mask = new Uint32Array(words);
-    for (let i = 0; i < this.#n; i++) {
-      if (predicate(data[i])) mask[i >> 5] |= 1 << (i & 31);
-    }
-    this.#masks.set(dim, mask);
-  }
-  clear(dim) { this.#masks.delete(dim); }
-
-  // AND all dimension masks — rows passing every active filter
-  filtered() {
-    const words = Math.ceil(this.#n / 32);
-    const result = new Uint32Array(words).fill(0xFFFFFFFF);
-    for (const mask of this.#masks.values()) {
-      for (let w = 0; w < words; w++) result[w] &= mask[w];
-    }
-    // Extract set bit indices using bit-twiddling
-    const indices = [];
-    for (let w = 0; w < words; w++) {
-      let bits = result[w];
-      while (bits) {
-        const bit = bits & -bits;          // isolate lowest set bit
-        indices.push((w << 5) + Math.log2(bit));
-        bits ^= bit;                       // clear it
-      }
-    }
-    return indices;
-  }
-
-  // For histograms: count passing rows per bin without extracting indices.
-  // Much faster when you need aggregates, not individual rows.
-  count() {
-    const words = Math.ceil(this.#n / 32);
-    let total = 0;
-    const result = new Uint32Array(words).fill(0xFFFFFFFF);
-    for (const mask of this.#masks.values()) {
-      for (let w = 0; w < words; w++) result[w] &= mask[w];
-    }
-    for (let w = 0; w < words; w++) {
-      // popcount via bit manipulation
-      let v = result[w];
-      v = v - ((v >> 1) & 0x55555555);
-      v = (v & 0x33333333) + ((v >> 2) & 0x33333333);
-      total += (((v + (v >> 4)) & 0x0F0F0F0F) * 0x01010101) >> 24;
-    }
-    return total;
-  }
-}
-```
-
-**Incremental updates:** When the user drags a brush, only one dimension changes. Recompute only that dimension's mask, then re-AND. The other masks are already cached in the `Map`. This is what makes crossfilter feel instant during brush drag.
-
-**When to skip bitmaps:** Below ~5K rows, plain `Array.filter` with a Set lookup is fast enough and far simpler to debug. The bitmap overhead (allocation, bit extraction) only pays off when N is large enough that the 32x speedup matters.
-
-## Feedback Loops and Update Storms
-
-Zoom/brush propagation is the most common source of infinite loops. Three strategies, from simplest to most robust:
-
-1. **Check `event.sourceEvent`** — programmatic calls (like `selection.call(zoom.transform, t)`) have `sourceEvent === null`. Skip those. Sufficient for most two-chart cases.
-2. **Boolean guard flag** — set `syncing = true` before propagating, skip if already syncing. Use when multiple charts chain-react and `sourceEvent` alone is insufficient.
-3. **Compare transforms** — skip if `k`, `x`, `y` are unchanged. Additional safety net for floating-point edge cases.
-
-```js
-let syncing = false;
-.on("zoom", (event) => {
-  if (!event.sourceEvent || syncing) return;
-  syncing = true;
-  propagateToOtherCharts(event.transform);
-  syncing = false;
-});
-```
-
-**Update storms** happen when multiple dimensions fire filter changes simultaneously (e.g., resetting all brushes). Each change triggers a full re-render of all views. The fix is `requestAnimationFrame` coalescing — batch all state changes into one render pass per frame (see Performance below).
-
-**Ownership hierarchy** (a fourth strategy): designate one view as the sole writer for each piece of shared state. Others read from it but cannot write. This prevents bidirectional update storms structurally — no boolean guards needed. The pattern comes from Observable's `viewof` model but works in plain JS:
-
-```js
-function createOwnedState(owner) {
-  let value;
-  const listeners = new Set();
-  return {
-    get: () => value,
-    set(v, source) {
-      if (source !== owner) return; // only owner can write
-      value = v;
-      for (const fn of listeners) fn(value);
-    },
-    subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
-  };
-}
-// Timeline owns time range; scatter owns point selection
-const timeRange = createOwnedState("timeline");
-const pointSelection = createOwnedState("scatter");
-```
-
-Use this when you have 4+ views and the boolean guard approach becomes brittle. For 2-3 views, the `sourceEvent` check is simpler and sufficient.
+### 3. Ghost + Active Layering
+Show the filtered subset against the full dataset to maintain context.
+- **Background (Ghost):** The full dataset, rendered in light gray. Static.
+- **Foreground (Active):** The filtered subset, rendered in accent colors. Dynamic.
+- **Density Scaling:** When selection is small, KDE/Density curves will naturally "spike." Scale the active curve height by `subset.length / total.length` to keep it visually comparable to the ghost.
 
 ## Scale Domain Strategies
 
-**Fixed domain (stable):** Compute once from the full dataset, never change. Prevents jarring scale jumps during brushing — the viewer's spatial memory of "high values are at the top" stays valid.
+- **Fixed Domain (Stable):** Compute once from the full dataset. This preserves the viewer's spatial memory (e.g., "high values are at the top"). Best for fast-moving brushes.
+- **Auto-rescale (Responsive):** Recompute the scale domain on filter change to reveal local structure. **Pitfall:** Rescaling *during* a brush drag is jarring. **Strategy:** Use fixed domains during the "drag" and only trigger the transition to the auto-rescaled domain on the brush "end."
 
-**Auto-rescale (responsive):** Recompute domain when filter changes. Reveals local structure but destroys spatial consistency. Only rescale on brush *end*, not during drag — rescaling 60x/sec during a drag makes the chart feel like it's fighting the user:
+## User Experience
 
-```js
-brush.on("brush", () => { /* use fixed domain during drag */ });
-brush.on("end", () => {
-  const filtered = getFiltered();
-  yScale.domain([0, d3.max(filtered, d => d.value)]).nice();
-  yAxisG.transition().duration(300).call(d3.axisLeft(yScale));
-});
-```
+### State Serialization (Shareable Views)
+Encode the dashboard state in the URL. Serialize filters, selection keys, and zoom transforms (`k, x, y`). Use `history.replaceState` so users can share a specific "slice" of the data simply by copying the link.
 
-## State Serialization and Undo
+### Tooltip Coordination
+Multiple charts showing tooltips simultaneously is "noisy." Use a single shared tooltip element. When the pointer is over Chart A, hide any tooltips from Chart B and anchor the shared tooltip to the cursor.
 
-Encode view state in the URL so users can share specific views. Serialize filter, selection (as comma-joined keys), and zoom transform (k,x,y). Push with `history.replaceState`.
+### Animation and Feedback
+- **Highlighting:** Use a color flash or subtle scale boost on linked elements within 50ms of an interaction.
+- **Transitions:** Use 300ms transitions on brush *end*. Avoid transitions during the *drag* itself to maintain 60fps responsiveness.
 
-For undo/redo, keep a state history stack. Snapshot on meaningful interactions (brush `end`, not during drag). Discard future states on new action (`stack.length = index`). Use `structuredClone` for snapshots.
+## Scaling to Large Data
 
-## Performance
-
-### Debouncing Brush Events
-
-Brushes fire ~60x/sec during drag. Do cheap updates (opacity toggle, canvas foreground/background swap) immediately; debounce expensive updates (histogram recomputation, aggregation) with `setTimeout(..., 16)` or, better, fold them into the RAF coalescing pattern below.
-
-### requestAnimationFrame Coalescing
-
-When multiple state changes fire in the same frame (e.g., resetting three brushes at once), batch into one render. Without this, you get three full re-renders in one frame — the update storm problem.
-
-```js
-let renderPending = false;
-function scheduleRender() {
-  if (renderPending) return;
-  renderPending = true;
-  requestAnimationFrame(() => { renderPending = false; renderAll(store.getState()); });
-}
-store.subscribe(scheduleRender);
-```
-
-### Ghost/Active Pattern
-
-Show filtered subsets against the full dataset using two layers: a static ghost (all data, dimmed) and a dynamic foreground (filtered subset, vivid). This works for three view types:
-
-**Discrete bins (histograms, bars):** Background bars show total counts in gray. Foreground bars show filtered counts with accent color. Same bin thresholds, same y-scale — only the heights change. See `blocks/05-crossfilter-flight-explorer.html`.
-
-**Continuous densities (KDE, violins, area charts):** Background paths show full-data density in gray. Foreground paths recompute KDE from the filtered subset. **Critical pitfall:** KDE on a small subset with the same bandwidth produces artificially tall peaks — 5 points selected from 200 can spike 10x higher than the full dataset. Fix: scale the density by `subset.length / fullGroup.length` so visual height represents proportion, not raw density. Without this, selecting a few points sends the curve shooting outside the chart bounds.
-
-```js
-const density = kde(gaussian, bandwidth, subsetValues)(ticks);
-const scale = subset.length / fullGroup.length;
-const scaled = density.map(([x, y]) => [x, y * scale]);
-foregroundPath.datum(scaled).attr("d", area);
-```
-
-**Canvas scatter:** Maintain background (all data, dimmed) and foreground (selected, vivid) canvas layers. On brush, only repaint the foreground. The background stays static. This cuts render cost roughly in half.
-
-### Render Queue
-
-When multiple charts need updating, render the chart the user is interacting with first, then queue others at lower priority via `requestAnimationFrame`. The source chart responds instantly; linked charts follow within 1-2 frames. The viewer perceives the system as responsive because the chart under their hand never lags.
-
-## Common Pitfalls
-
-**Memory leaks from event listeners.** Destroyed charts still subscribed to the store keep receiving events, causing errors or phantom renders. Store the unsubscribe function returned by `subscribe()` and call it on teardown.
-
-**Stale closures.** A listener captures the initial scale in its closure. When scales update, the listener uses the old one. Read current state from the store at render time, not from a closed-over variable.
-
-**Brush visual not cleared on reset.** When another chart clears the selection, a brush overlay remains visible in the originating chart. Programmatically clear with `brushGroup.call(brush.move, null)` in the reset handler.
-
-**Tooltip fights.** Multiple charts showing tooltips simultaneously is noisy and distracting. Use a single shared tooltip element positioned by whichever chart the pointer is currently over.
-
-**Transitions during continuous interaction.** A 300ms transition on a linked histogram feels fine on brush *end* but makes the chart feel sluggish during brush *drag*. Skip transitions during continuous events; animate only on `end`.
-
-**Linking charts with incompatible data granularity.** A scatter plot shows individual rows; a bar chart shows category aggregates. Brushing the bar chart selects a category, but the scatter plot needs row keys. The selection model must translate between granularities — typically by expanding a category selection into its constituent row keys.
-
-## Scaling Cross-Filtering Beyond the Browser
-
-The bitmap index above handles up to ~500K rows in-browser. Beyond that, you need a different architecture. As of March 2026, two approaches dominate:
-
-| Approach | Scale | Where it runs | D3 integration |
-|----------|-------|---------------|----------------|
-| Array.filter + Set | <5K rows | Browser | Direct |
-| Bitmap (above) | 5K-500K | Browser | Direct |
-| crossfilter2 sorted index | <1M | Browser | Drop-in library |
-| Falcon prefetch (CHI 2019) | Millions-billions | Browser + optional DB | Data layer only — feeds D3 charts |
-| Mosaic + DuckDB-WASM | Millions-billions | Browser (WASM) or server | Implement MosaicClient interface |
-
-**Falcon** (Moritz/Howe/Heer) precomputes aggregation cubes for the actively-brushed dimension, achieving 50fps brush updates invariant of dataset size. The cost shifts to a brief pause when switching which view you brush. For Falcon's prefetch pattern and data cube construction, see `brushing`.
-
-**Mosaic** (Heer et al., IEEE TVCG 2024) routes filter predicates as SQL WHERE clauses to DuckDB. Its Coordinator automatically builds data cube indexes for filter groups, making cross-filtering over 10M+ records feasible in the browser via DuckDB-WASM. Custom D3 charts participate by implementing a `MosaicClient` with `query()` (returns SQL) and `queryResult()` (receives filtered data) methods — you keep your D3 rendering code and gain server-backed coordination. Use Mosaic when data exceeds browser memory (>50MB) or when cross-filtering requires aggregation over large datasets.
-
-## When to Use a Framework
-
-Hand-rolling with `d3.dispatch` or the store pattern gives full control but requires wiring every interaction manually. Two frameworks offer meaningful shortcuts:
-
-**Vega-Lite selections** collapse event handling, state management, predicate testing, cross-view propagation, and visual feedback into a few JSON properties. Useful for prototyping a coordination design before investing in D3 implementation — build it in Vega-Lite, verify it works, then re-implement with d3.dispatch if you need custom rendering or Canvas/WebGL performance. The selection model concept maps directly to the `SelectionModel` class above. Limitations: SVG-only (caps at ~10K-50K marks), fixed interaction vocabulary (point and interval, no lasso or custom brushes), and you get Vega's rendering, not yours.
-
-**Observable Plot** (which wraps D3 internally) provides a `selection` interaction option (as of March 2026) that handles brush-to-filter patterns with less boilerplate than raw D3. Worth considering for dashboards with standard chart types, but drops you back to D3 for anything custom.
-
-**Decision rule:** if data fits in memory, you need custom rendering, or your interactions go beyond click/brush/filter, hand-roll with D3. If data exceeds memory, use Mosaic. If you're prototyping coordination logic quickly, Vega-Lite saves time — then migrate to D3 when you hit its limits.
-
-## References
-
-- [Crossfilter](https://square.github.io/crossfilter/) — fast multidimensional filter library; study its sorted-index approach alongside the bitmap alternative above
-- [d3.parcoords](https://github.com/syntagmatic/parallel-coordinates) — pioneering multi-axis linked brushing
-- [Linking Views](https://www.cs.ubc.ca/~tmm/vadbook/ch13-linkedviews.pdf) — Tamara Munzner's Visualization Analysis & Design, Chapter 13
-- [Dynamic Queries](https://www.cs.umd.edu/~ben/papers/Shneiderman1994Dynamic.pdf) — Shneiderman's direct manipulation filtering (CHI 1994)
-- [Baldonado et al. (AVI 2000)](https://courses.ischool.berkeley.edu/i247/f05/readings/Baldonado_MultipleViews_AVI00.pdf) — eight guidelines for multiple views; parsimony and self-evidence are the ones most often violated
-- [Mosaic (TVCG 2024)](https://idl.cs.washington.edu/files/2024-Mosaic-TVCG.pdf) — database-backed linked views with DuckDB; see [Mosaic GitHub](https://github.com/uwdata/mosaic)
-- [Falcon (CHI 2019)](https://www.domoritz.de/papers/2019-Falcon-CHI.pdf) — prefetch-based cross-filtering for billion-scale data
+If your dataset exceeds browser memory (>10M rows) or requires complex SQL aggregation, consider **Mosaic + DuckDB-WASM**. Mosaic routes filter predicates as SQL WHERE clauses, allowing D3 to act as the rendering layer for a database-backed dashboard.

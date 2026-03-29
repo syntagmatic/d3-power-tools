@@ -84,7 +84,9 @@ How to reveal relationships in data through selection, comparison, and coordinat
 
 **[brushing](skills/brushing/SKILL.md)** — Ask questions with your hand. Intersection brushing, lasso, fisheye, cross-chart linking, SVG and Canvas selection state.
 
-**[linked-views](skills/linked-views/SKILL.md)** — Make separate charts into one instrument. d3.dispatch, shared state, crossfilter bitmap indexing, coordinated brushing/zoom, overview+detail.
+**[linked-views](skills/linked-views/SKILL.md)** — Design dashboards where interactions in one chart ripple across others. Cognitive load limits, overview+detail patterns, ghost/active layering, and state serialization.
+
+**[coordination](skills/coordination/SKILL.md)** — The technical foundation for multi-chart communication. `d3.dispatch` namespacing, shared state stores, framework bridges (React/Vue/Angular), and bitmap indexing for 100K+ rows.
 
 **[distributions](skills/distributions/SKILL.md)** — Show the shape of data, not just summaries. Box plots, violins, ridgelines, bee swarms, strip/jitter, density, QQ plots, KDE.
 
@@ -114,7 +116,9 @@ How to show what happened, what's happening, and what things become.
 
 **[time-series](skills/time-series/SKILL.md)** — Time as a first-class dimension. scaleTime vs scaleUtc, horizon charts, swimlanes, Gantt, cycle plots, real-time streaming, LTTB downsampling.
 
-**[motion](skills/motion/SKILL.md)** — Guide the eye with movement. Enter/update/exit, canvas animation, staggering, scrollytelling, mid-flight interruption.
+**[motion](skills/motion/SKILL.md)** — Guide the eye with movement. Enter/update/exit transitions, canvas animation, staggering, and mid-flight interruption.
+
+**[choreography](skills/choreography/SKILL.md)** — Orchestrate multi-stage transitions and scrollytelling narratives. `async/await` with `transition.end()`, stage management, and "Sticky Graphic" patterns.
 
 **[shape-morphing](skills/shape-morphing/SKILL.md)** — Show continuity between states. circle↔rect, bar↔pie, arbitrary path morphing via point resampling, projection transitions.
 

@@ -28,18 +28,10 @@ Renamed all meta skills for the power-tool theme. Auditing skills kept separate 
 
 Deleted `notes/archive/` (178K, 7 files). Lessons in CONVICTIONS.md, content in git history.
 
----
-
-## Infrastructure
-
-**Eval as CI.** Wire encoding-integrity metamorphic checks (scaling, permutation, subset, shift) as the first automated eval. Run on every skill commit. If scores drop, the commit is a regression.
-
-**Asymmetric evaluation.** Claude generates, a symbolic checker or different model scores. The only way to break shared-bias evaluation.
-
-**Frontmatter audit.** Review name and description across all skills for consistency and trigger accuracy. Bad descriptions mean wrong skills load.
-
 ## Ongoing
 
-**Self-visualization as regression suite.** Skill dependency graph, block × skill matrix, audit scorecard. The project should be its own best test case.
+- **Standardize Chart Communication:** Use `d3.dispatch` with mandatory namespacing (`event.id`) and a shared `state` object. Document bridge patterns for React (Context/Hooks), Vue (Provide/Inject), and Angular (runOutsideAngular) to avoid update storms.
+- **Choreography Skill:** Formalize multi-stage sequencing using `async/await` with `transition.end()`. Include staggering patterns and the "Sticky Graphic" scrollytelling layout as a standard orchestration pattern.
+- **Self-visualization as regression suite.** Skill dependency graph, block × skill matrix, audit scorecard. The project should be its own best test case.
 
 **Ship it.** Distribution, discovery, onboarding.
