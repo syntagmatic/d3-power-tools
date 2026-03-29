@@ -5,47 +5,29 @@ description: "D3.js geographic maps and spatial visualization: projections, chor
 
 # Geographic Maps
 
-D3's geographic stack is its deepest subsystem — spherical math, streaming geometry, topological operations — and production maps require architectural decisions that simple examples don't reveal.
+Production maps require architectural decisions that simple examples don't reveal.
 
-Related: `shape-morphing` (projection transitions), `color` (choropleth palettes, bivariate palettes, dark mode maps), `visual-texture` (accessible pattern choropleth), `canvas` (DPR, batching), `canvas-accessibility` (keyboard nav for canvas maps), `scales` (choropleth classification — quantize, quantile, threshold).
+Related: `shape-morphing` (projection transitions), `color` (choropleth palettes, bivariate, dark mode), `visual-texture` (pattern choropleth), `canvas` (DPR, batching), `canvas-accessibility` (keyboard nav), `scales` (classification).
 
-```
-GeoJSON / TopoJSON ──► topojson.feature() / mesh() / merge() / neighbors()
-        ↓
-[lon, lat] ──► projection ──► [x, y]
-        ↓
-d3.geoPath(projection) ──► SVG <path> or Canvas ctx
-        ↓
-layers: tiles → fills → borders → points → labels → legend
-```
+Pipeline: GeoJSON/TopoJSON -> `topojson.feature()/mesh()/merge()` -> projection `[lon,lat]->[x,y]` -> `d3.geoPath` -> SVG/Canvas. Layer order: tiles -> fills -> borders -> points -> labels -> legend.
 
 ## Canonical Data Sources
 
-**Never synthesize geometry.** Always load from the canonical TopoJSON atlases — pre-cut at the antimeridian, correctly wound, topologically consistent.
+**Never synthesize geometry.** Always load from canonical TopoJSON atlases -- pre-cut at antimeridian, correctly wound, topologically consistent.
 
 ```js
 import * as topojson from "https://cdn.jsdelivr.net/npm/topojson-client@3/+esm";
-
-// US — counties, states, nation
 const us = await d3.json("https://cdn.jsdelivr.net/npm/us-atlas@3/counties-10m.json");
 const counties  = topojson.feature(us, us.objects.counties).features;
 const states    = topojson.feature(us, us.objects.states).features;
 const stateMesh = topojson.mesh(us, us.objects.states, (a, b) => a !== b); // internal borders only
 const nation    = topojson.merge(us, us.objects.states.geometries);        // dissolved outline
 
-// World — countries, land
 const world     = await d3.json("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json");
 const countries = topojson.feature(world, world.objects.countries).features;
 const land      = topojson.feature(world, world.objects.land);
 const borders   = topojson.mesh(world, world.objects.countries, (a, b) => a !== b);
 ```
-
-| Dataset | Use case |
-|---------|----------|
-| `us-atlas@3/counties-10m.json` | US county choropleth, full detail |
-| `us-atlas@3/states-10m.json` | US state-level (smaller, no counties) |
-| `world-atlas@2/countries-110m.json` | World thematic, coarse |
-| `world-atlas@2/countries-50m.json` | World with coastal detail |
 
 Fit to the **merged outline**, not individual features:
 ```js
@@ -53,7 +35,7 @@ const projection = d3.geoAlbersUsa().fitSize([width, height], nation);
 const projection = d3.geoEqualEarth().fitSize([width, height], { type: "Sphere" }); // world: fit Sphere
 ```
 
-Choropleth rendering order — fills, internal borders (mesh), outer boundary:
+Choropleth rendering order -- fills, internal borders (mesh), outer boundary:
 ```js
 const path = d3.geoPath(projection, ctx);
 for (const f of features) {
@@ -68,43 +50,30 @@ ctx.strokeStyle = "#333"; ctx.lineWidth = 1; ctx.stroke();
 
 ## Projection Selection
 
-| Need | Projection | Properties |
-|------|-----------|------------|
-| Equal-area world | `d3.geoEqualEarth()` | Equal-area, pseudocylindrical |
-| Web map (familiar) | `d3.geoMercator()` | Conformal, extreme polar distortion |
-| USA with AK/HI inset | `d3.geoAlbersUsa()` | Composite, equal-area |
-| Continent, equal-area | `d3.geoAlbers()` | Two standard parallels |
-| Globe view | `d3.geoOrthographic()` | Perspective, shows hemisphere |
-| Low distortion | `d3.geoNaturalEarth1()` | Compromise |
-| Great-circle lines | `d3.geoGnomonic()` | All great circles → straight lines |
-| Thematic world | `d3.geoWinkel3()` | Requires d3-geo-projection |
-| Polar regions | `d3.geoAzimuthalEqualArea()` | Centered on pole |
-| Small country/city | `d3.geoTransverseMercator()` | Minimal distortion in narrow N-S strip |
+### Distortion Properties
 
-### Distortion Property
+- **Equal-area** (mandatory for choropleth, density, hex bins, cartograms) -- area distortion misleads about magnitude. EqualEarth (world), Albers/ConicEqualArea (continent), AzimuthalEqualArea (polar).
+- **Conformal** (navigation, weather, tile basemaps) -- preserves local angles/shapes. Mercator is conformal; that's why tiles use it, not because it's good.
+- **Compromise** (reference maps, general-purpose) -- minimizes all distortions, maximizes none. NaturalEarth1, Robinson, Winkel3.
 
-- **Equal-area** (mandatory for choropleth, density, hex bins, cartograms) — area distortion misleads about magnitude. EqualEarth (world), Albers/ConicEqualArea (continent), AzimuthalEqualArea (polar).
-- **Conformal** (navigation, weather, tile basemaps) — preserves local angles/shapes. Mercator is conformal; that's why tiles use it, not because it's good.
-- **Compromise** (reference maps, general-purpose) — minimizes all distortions, maximizes none. NaturalEarth1, Robinson, Winkel3.
-
-Regional maps: E-W → conic, N-S → transverse cylindrical, round → azimuthal. See [Projection Wizard](https://projectionwizard.org/).
+Regional maps: E-W extent -> conic, N-S extent -> transverse cylindrical, round -> azimuthal. See [Projection Wizard](https://projectionwizard.org/).
 
 ```js
 d3.geoConicEqualArea().rotate([-15, 0]).center([0, 52]).parallels([35, 65])  // Europe
 d3.geoAlbers().rotate([96, 0]).center([0, 38]).parallels([29.5, 45.5])       // Contiguous US
 ```
 
-**Rotation** re-centers the projection. Longitudes negated: center on `[lon, lat]` → rotate `[-lon, -lat]`. Three angles: `[λ, φ, γ]` — yaw, pitch, roll.
+**Rotation** re-centers the projection. Longitudes negated: center on `[lon, lat]` -> rotate `[-lon, -lat]`. Three angles: `[lambda, phi, gamma]` -- yaw, pitch, roll.
 
 ## Topology Operations
 
-TopoJSON encodes shared borders once — ~80% smaller, plus `mesh()` for borders, `merge()` for dissolving, `neighbors()` for adjacency.
+TopoJSON encodes shared borders once -- ~80% smaller, plus `mesh()` for borders, `merge()` for dissolving, `neighbors()` for adjacency.
 
-**Dissolve regions** (e.g., Census divisions from states):
-```js
-const geos = us.objects.states.geometries.filter(g => fips.includes(String(g.id).padStart(2, "0")));
-const merged = topojson.merge(us, geos);
-```
+**Dissolve regions** (e.g., Census divisions from states): `topojson.merge(us, filteredGeometries)`.
+
+**Selective mesh** -- borders between groups: `topojson.mesh(us, us.objects.states, (a, b) => a !== b && regionOf.get(a.id) !== regionOf.get(b.id))`. Filter `(a, b) => a !== b` = internal; `a === b` = outer boundary.
+
+**FIPS codes** in US Atlas are numbers. Pad when joining: `String(id).padStart(5, "0")`. State = 2 digits, county = 5.
 
 **Adjacency** for four-color assignment:
 ```js
@@ -116,24 +85,9 @@ neighbors.forEach((nbrs, i) => {
 });
 ```
 
-**Selective mesh** — borders between groups: `topojson.mesh(us, us.objects.states, (a, b) => a !== b && regionOf.get(a.id) !== regionOf.get(b.id))`. Filter `(a, b) => a !== b` = internal borders; `a === b` = outer boundary.
-
-**FIPS codes** in US Atlas are numbers (`"06"` → `6`). Pad when joining: `String(id).padStart(5, "0")`. State = 2 digits, county = 5 (state prefix + 3-digit county).
-
 ## Bivariate Choropleth
 
-Two variables on a 3x3 color matrix — each maps to 3 quantile bins, cross-product gives 9 cells:
-```js
-const qx = d3.scaleQuantile(data.map(d => d.income), [0, 1, 2]);
-const qy = d3.scaleQuantile(data.map(d => d.education), [0, 1, 2]);
-const biColors = [                                       // Joshua Stevens palette
-  ["#e8e8e8", "#ace4e4", "#5ac8c8"],
-  ["#dfb0d6", "#a5add3", "#5698b9"],
-  ["#be64ac", "#8c62aa", "#3b4994"],
-];
-const biColor = f => biColors[qy(f.properties.education)]?.[qx(f.properties.income)] ?? "#ccc";
-```
-The legend must be a 3x3 grid with axis labels — without it, bivariate choropleths are unreadable.
+Two variables on a 3x3 color matrix -- each `scaleQuantile` into `[0,1,2]`, cross-product gives 9 cells. Joshua Stevens palette: `[["#e8e8e8","#ace4e4","#5ac8c8"],["#dfb0d6","#a5add3","#5698b9"],["#be64ac","#8c62aa","#3b4994"]]`. Lookup: `biColors[qy(val)]?.[qx(val)] ?? "#ccc"`. The legend must be a 3x3 grid with axis labels -- without it, bivariate choropleths are unreadable.
 
 ## Bubble Maps and Cartograms
 
@@ -147,9 +101,9 @@ const sim = d3.forceSimulation(nodes)
   .stop();
 for (let i = 0; i < 120; i++) sim.tick();
 ```
-`strength(0.8)` anchors near true location. Lower (~0.3) → **Dorling cartogram**. At ~0.05, collision dominates completely.
+`strength(0.8)` anchors near true location. Lower (~0.3) -> **Dorling cartogram**. At ~0.05, collision dominates.
 
-**Non-contiguous cartogram** — scale each feature around its centroid via `geoTransform`:
+**Non-contiguous cartogram** -- scale each feature around its centroid via `geoTransform`:
 ```js
 function scaledPath(feature, scaleFactor) {
   const [cx, cy] = path.centroid(feature);
@@ -162,24 +116,19 @@ function scaledPath(feature, scaleFactor) {
 
 ## Hex Bin Maps
 
-Aggregate points into hexagonal bins:
 ```js
 import { hexbin as d3Hexbin } from "https://cdn.jsdelivr.net/npm/d3-hexbin@0.2/+esm";
-const hexbin = d3Hexbin().x(d => d.x).y(d => d.y).radius(12)
-  .extent([[0, 0], [width, height]]);
+const hexbin = d3Hexbin().x(d => d.x).y(d => d.y).radius(12).extent([[0, 0], [width, height]]);
 const bins = hexbin(projected);
 const areaScale = d3.scaleSqrt([0, d3.max(bins, d => d.length)], [0, hexbin.radius()]);
-sel.selectAll("path").data(bins).join("path")
-    .attr("transform", d => `translate(${d.x},${d.y})`)
-    .attr("d", d => hexbin.hexagon(areaScale(d.length)));
 ```
-Start radius at `Math.min(width, height) / 40`. Bins are in screen space — under Mercator they cover more real-world area near poles. Use equal-area projections.
+Start radius at `Math.min(width, height) / 40`. Bins are in screen space -- under Mercator they cover more real-world area near poles. Use equal-area projections.
 
 ## Flow Maps
 
 D3 renders `LineString` as geodesic curves automatically. **Always `scaleSqrt` for stroke width.**
 
-Curved arcs for many flows from one hub — perpendicular control point:
+Curved arcs for many flows from one hub -- perpendicular control point:
 ```js
 function curvedArc(source, target, projection, curvature = 0.3) {
   const [sx, sy] = projection(source), [tx, ty] = projection(target);
@@ -190,15 +139,7 @@ function curvedArc(source, target, projection, curvature = 0.3) {
 
 ## Geographic Labels
 
-**Pole of inaccessibility** (polylabel) — point farthest from any edge, always inside the polygon. Better than centroid for concave shapes (Florida's centroid lands in the Gulf):
-```js
-import polylabel from "https://cdn.jsdelivr.net/npm/polylabel@2/+esm";
-const projCoords = f.geometry.coordinates.map(ring =>
-  ring.map(([lon, lat]) => projection([lon, lat]) ?? [0, 0])
-);
-const [x, y] = polylabel(projCoords, 1.0);
-```
-For MultiPolygon, use the largest polygon by projected area. For collision avoidance, use force simulation (same pattern as bubble maps). See `annotation` skill for rectangular text collision.
+**Pole of inaccessibility** (polylabel) -- point farthest from any edge, always inside the polygon. Better than centroid for concave shapes (Florida's centroid lands in the Gulf). Project coordinates first, then `polylabel(projCoords, 1.0)`. Import from `https://cdn.jsdelivr.net/npm/polylabel@2/+esm`. For MultiPolygon, use the largest polygon by projected area.
 
 ## Versor Rotation (Globe Drag)
 
@@ -218,21 +159,11 @@ d3.drag()
     render();
   });
 ```
-Simple 2-axis drag (`λ += event.dx * 0.5; φ -= event.dy * 0.5`) works for demos but locks at poles. Back-hemisphere: second projection with `clipAngle(180)`, draw at `globalAlpha = 0.15` underneath.
+Simple 2-axis drag (`lambda += dx * 0.5; phi -= dy * 0.5`) works for demos but locks at poles. Back-hemisphere: second projection with `clipAngle(180)`, draw at `globalAlpha = 0.15`.
 
 ## Canvas Multi-Layer Architecture
 
-```
-┌─────────────────────────┐
-│   SVG overlay           │ ← tooltips, hover highlight, legend
-├─────────────────────────┤
-│   Interaction canvas    │ ← cursor tracking, selection highlight
-├─────────────────────────┤
-│   Data canvas           │ ← choropleth fills, borders
-├─────────────────────────┤
-│   Tile canvas           │ ← raster tiles
-└─────────────────────────┘
-```
+Stack (bottom to top): tile canvas (raster tiles) -> data canvas (choropleth fills, borders) -> interaction canvas (selection highlight) -> SVG overlay (tooltips, legend).
 
 ### Color-Pick Hit Detection
 
@@ -245,9 +176,9 @@ features.forEach((f, i) => {
   hctx.beginPath(); hiddenPath(f);
   hctx.fillStyle = `rgb(${r},${g},${b})`; hctx.fill();
 });
-// Lookup: hctx.getImageData(mx, my, 1, 1).data → decode RGB → indexToFeature.get()
+// Lookup: hctx.getImageData(mx, my, 1, 1).data -> decode RGB -> indexToFeature.get()
 ```
-Supports 16.7M features. Disable anti-aliasing (`imageSmoothingEnabled = false`, no strokes) or edge colors blend. `d3.geoContains` is simpler but O(n) — fine for <=200 features.
+Supports 16.7M features. Disable anti-aliasing (`imageSmoothingEnabled = false`, no strokes) or edge colors blend. `d3.geoContains` is simpler but O(n) -- fine for <=200 features.
 
 ### Batch by Fill Color
 
@@ -263,27 +194,17 @@ for (const [c, group] of byColor) {
 
 ### Dark Mode
 
-Design separate schemes, don't invert. Dark gray background (`#1a1a2e`, not pure black), mid-gray borders (`#444`), off-white labels with text shadow. Multi-hue sequential (viridis, plasma) outperforms single-hue. See `color` skill.
+Design separate schemes, don't invert. Dark gray background (`#1a1a2e`, not black), mid-gray borders (`#444`), off-white labels with text shadow. Multi-hue sequential (viridis, plasma) outperforms single-hue.
 
 ## Projection-Based Zoom (Canvas)
 
-Re-project on every zoom — avoids stroke scaling:
-```js
-const [baseScale, baseTranslate] = [projection.scale(), projection.translate()];
-function zoomed({ transform }) {
-  projection.scale(baseScale * transform.k)
-    .translate([transform.x + transform.k * baseTranslate[0],
-                transform.y + transform.k * baseTranslate[1]]);
-  render();
-}
-```
-Viewport-cull at high zoom — skip features outside visible bounds.
+Re-project on every zoom -- avoids stroke scaling. Save `baseScale`/`baseTranslate`, then in `zoomed({transform})`: `projection.scale(baseScale * transform.k).translate([transform.x + transform.k * baseTranslate[0], transform.y + transform.k * baseTranslate[1]])`. Viewport-cull at high zoom -- skip features outside visible bounds.
 
 ## Projection Transitions
 
 ### Screen-Space Interpolation
 
-Interpolate projected [x, y] between two projections — works for any pair but clips abruptly:
+Interpolate projected [x, y] between two projections -- works for any pair but clips abruptly:
 ```js
 function interpolateProjection(proj0, proj1) {
   return t => d3.geoTransform({
@@ -294,17 +215,12 @@ function interpolateProjection(proj0, proj1) {
     }
   });
 }
-svg.selectAll("path").transition().duration(2000)
-  .attrTween("d", d => {
-    const interp = interpolateProjection(proj0, proj1);
-    return t => d3.geoPath(interp(t))(d);
-  });
 ```
-**Pitfall**: when one projection clips a point the other shows, paths vanish. Mitigate by pre-clipping to the intersection of both visible regions, or cross-fading opacity.
+**Pitfall**: when one projection clips a point the other shows, paths vanish. Mitigate by pre-clipping to intersection of both visible regions, or cross-fading opacity.
 
 ### Parameter Interpolation (Preferred)
 
-Within the same projection type — interpolate parameters directly, no artifacts:
+Within the same projection type -- interpolate parameters directly, no artifacts:
 ```js
 const r0 = projection.rotate(), r1 = [-lon, -lat, 0];
 svg.transition().duration(1000).tween("rotate", () => {
@@ -312,16 +228,11 @@ svg.transition().duration(1000).tween("rotate", () => {
   return t => { projection.rotate(interp(t)); svg.selectAll("path").attr("d", path); };
 });
 ```
-Between types in the same family (conic → conic), interpolating `.scale()/.translate()/.rotate()` is smoother. For orthographic, animate `clipAngle` 90→180 to soften pop-in: `t < 0.5 ? 90 + t * 180 : 180`.
+Between types in the same family (conic -> conic), interpolating `.scale()/.translate()/.rotate()` is smoother. For orthographic, animate `clipAngle` 90->180 to soften pop-in.
 
 ## Large Geometry LOD
 
-Pre-simplify with topojson CLI:
-```bash
-topojson -q 1e6 -o counties-full.json counties.geojson
-topojson -q 1e4 -s 1e-7 -o counties-simple.json counties.geojson
-```
-Client-side:
+Client-side simplification:
 ```js
 import { presimplify, simplify } from "https://cdn.jsdelivr.net/npm/topojson-simplify@3/+esm";
 const simplified = simplify(presimplify(topology), 0.01);
@@ -344,58 +255,25 @@ const simplified = simplify(presimplify(topology), 0.01);
 
 ### MapLibre GL JS + D3 Overlay
 
-Bridge via `d3.geoTransform` that delegates to MapLibre's projection:
-```js
-const svg = d3.select(map.getCanvasContainer()).append("svg")
-  .style("position", "absolute").style("pointer-events", "none");
-function projectPoint(lon, lat) {
-  const p = map.project(new maplibregl.LngLat(lon, lat));
-  this.stream.point(p.x, p.y);
-}
-const path = d3.geoPath().projection(d3.geoTransform({ point: projectPoint }));
-function update() { svg.selectAll("path").attr("d", path); }
-map.on("viewreset", update).on("move", update).on("moveend", update);
-```
-Set `pointer-events: all` on D3 elements needing clicks. [PMTiles](https://github.com/protomaps/PMTiles) serves tiles from static storage — no tile server.
-
-| Approach | Max features | Zoom | Bundle |
-|----------|-------------|------|--------|
-| D3 SVG | ~5K | 1-3 | ~50KB |
-| D3 Canvas + quadtree | ~100K-500K | 1-5 | ~55KB |
-| MapLibre GL JS | ~500K | 0-22 | ~300KB |
-| d3-tile + raster | unlimited | 0-19 | ~55KB |
+Bridge via `d3.geoTransform` that calls `map.project(new maplibregl.LngLat(lon, lat))` inside `point()`. Append SVG to `map.getCanvasContainer()`, re-render on `viewreset`/`move`/`moveend`. Set `pointer-events: all` on D3 elements needing clicks. [PMTiles](https://github.com/protomaps/PMTiles) serves tiles from static storage.
 
 ## Common Pitfalls
 
-1. **Coordinate order.** GeoJSON is `[longitude, latitude]`, not `[lat, lon]`. Google Maps, Leaflet, many databases use `[lat, lon]`.
-2. **AlbersUsa gotchas.** No `rotate()`, `center()`, or `clipAngle()`. `invert()` returns `null` outside composite regions. Cannot use with `d3.tile`.
-3. **Antimeridian cutting.** Features crossing 180 need cutting. D3 handles in rendering, but raw coordinates may artifact. Fix: `d3.geoProject` CLI.
-4. **Winding order.** RFC 7946: counterclockwise outer rings. Reversed winding fills the globe minus your target. Detect: `d3.geoArea()` > 2pi. Fix: `@turf/rewind`.
-5. **Null projections.** `projection([lon, lat])` returns `null` outside clip region. Guard: `?? [NaN, NaN]`.
-6. **Stroke scaling on zoom.** Transforming `<g>` scales strokes. Fix: divide by `transform.k`, `vector-effect: non-scaling-stroke` (SVG only), or re-project.
-7. **FIPS type mismatch.** TopoJSON stores as numbers; CSV has leading-zero strings. Normalize before joining.
-8. **Hidden canvas anti-aliasing.** Color-picking breaks at edges. `imageSmoothingEnabled = false`, no strokes.
-9. **Re-projecting every frame.** `geoPath` for 3000+ features at 60fps is slow. Geometric zoom for SVG, viewport-cull for Canvas.
-10. **`d3.geoArea` units.** Returns steradians. Multiply by 6371 squared for km squared.
-11. **Forgetting the Sphere.** World maps need `{ type: "Sphere" }` for water and graticule clipping.
-12. **`topojson.mesh` filter.** `(a, b) => a !== b` = internal. `a === b` = outer. No filter = all. Backwards = doubled strokes.
-13. **Mercator for choropleth.** Polar areas appear larger. Use equal-area projections.
-14. **Synthesizing geometry.** Never create GeoJSON by hand. Use `us-atlas`/`world-atlas`.
+1. **AlbersUsa gotchas.** No `rotate()`, `center()`, or `clipAngle()`. `invert()` returns `null` outside composite regions. Cannot use with `d3.tile`.
+2. **Winding order.** RFC 7946: counterclockwise outer rings. Reversed winding fills the globe minus your target. Detect: `d3.geoArea()` > 2pi. Fix: `@turf/rewind`.
+3. **Null projections.** `projection([lon, lat])` returns `null` outside clip region. Guard: `?? [NaN, NaN]`.
+4. **Stroke scaling on zoom.** Transforming `<g>` scales strokes. Fix: divide by `transform.k`, `vector-effect: non-scaling-stroke` (SVG only), or re-project.
+5. **Hidden canvas anti-aliasing.** Color-picking breaks at edges. `imageSmoothingEnabled = false`, no strokes.
+6. **Re-projecting every frame.** `geoPath` for 3000+ features at 60fps is slow. Geometric zoom for SVG, viewport-cull for Canvas.
+7. **`d3.geoArea` units.** Returns steradians. Multiply by 6371^2 for km^2.
+8. **Forgetting the Sphere.** World maps need `{ type: "Sphere" }` for water and graticule clipping.
+9. **Mercator for choropleth.** Polar areas appear larger. Use equal-area projections.
+10. **Synthesizing geometry.** Never create GeoJSON by hand. Use `us-atlas`/`world-atlas`.
 
 ## References
 
-- [D3 Geo](https://d3js.org/d3-geo) — projection and path API
-- [D3 Geo Projection (extended)](https://github.com/d3/d3-geo-projection)
-- [TopoJSON spec](https://github.com/topojson/topojson-specification) and [client API](https://github.com/topojson/topojson-client)
-- [topojson-simplify](https://github.com/topojson/topojson-simplify)
-- [d3-tile](https://github.com/d3/d3-tile) — raster tile rendering
-- [d3-hexbin](https://github.com/d3/d3-hexbin)
-- [d3-geo-voronoi](https://github.com/Fil/d3-geo-voronoi) — spherical Voronoi
-- [polylabel](https://github.com/mapbox/polylabel) — pole of inaccessibility
-- [versor](https://github.com/Fil/versor) — quaternion rotation for globes
+- [D3 Geo](https://d3js.org/d3-geo) -- projection and path API
+- [TopoJSON client API](https://github.com/topojson/topojson-client)
 - [US Atlas](https://github.com/topojson/us-atlas) / [World Atlas](https://github.com/topojson/world-atlas)
-- [Joshua Stevens: Bivariate Choropleth](https://www.joshuastevens.net/cartography/make-a-bivariate-choropleth-map/)
-- [Projection Wizard](https://projectionwizard.org/) — Snyder's systematic projection selection
-- [MapLibre GL JS](https://maplibre.org/projects/gl-js/) — WebGL tile rendering
-- [PMTiles](https://github.com/protomaps/PMTiles) — serverless tile archives
-- [d3-geo-polygon](https://github.com/Fil/d3-geo-polygon) — polyhedral projections
+- [versor](https://github.com/Fil/versor) -- quaternion rotation for globes
+- [Projection Wizard](https://projectionwizard.org/) -- systematic projection selection

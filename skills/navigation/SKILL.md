@@ -23,8 +23,6 @@ Add zoom when the data has **detail across scales** — information that only ap
 
 ## Geometric vs Semantic: The Real Choice
 
-D3's `d3-zoom` manages transform state (translate + scale) and maps pointer, wheel, and touch gestures to smooth, interruptible transitions.
-
 ```
 user gesture (wheel/pinch/drag)
          ↓
@@ -39,9 +37,9 @@ user gesture (wheel/pinch/drag)
     redraw axes + data
 ```
 
-**Geometric zoom** applies the transform to a container — everything scales uniformly, like pinch-to-zoom on a photo. Simple to implement but text and strokes scale too, which makes labels unreadable at extremes. Best for maps and diagrams where the visual metaphor is "getting closer."
+**Geometric zoom** applies the transform to a container — everything scales uniformly, like pinch-to-zoom on a photo. Text and strokes scale too, making labels unreadable at extremes. Best for maps and diagrams where the visual metaphor is "getting closer."
 
-**Semantic zoom** rescales the data domain and repositions elements — text and marks stay constant size. The viewer sees more detail without the visual distortion of giant strokes. Best for data charts where you want axes to update and points to stay legible.
+**Semantic zoom** rescales the data domain and repositions elements — text and marks stay constant size. Best for data charts where axes should update and points stay legible.
 
 **Choose geometric when** the content is inherently spatial (maps, floor plans, node-link diagrams) and scaling artifacts are acceptable or counter-scaled.
 **Choose semantic when** the chart has axes that should update with zoom level, or when consistent mark size matters for readability.
@@ -50,23 +48,12 @@ Related skills: `scales` (rescaled axes), `canvas` (quadtree culling, LOD), `bru
 
 ## Geometric Zoom (SVG)
 
-Apply transform to a `<g>` — simple, but text and strokes scale too.
-
 ```js
 const g = svg.append("g");
-svg.call(d3.zoom().scaleExtent([1, 10]).on("zoom", ({ transform }) => {
-  g.attr("transform", transform);
-}));
+svg.call(d3.zoom().scaleExtent([1, 10]).on("zoom", ({ transform }) => g.attr("transform", transform)));
 ```
 
-Counter-scale strokes/text to prevent ballooning at high zoom:
-
-```js
-g.selectAll("circle").attr("r", 4 / transform.k).attr("stroke-width", 1 / transform.k);
-g.selectAll("text").attr("font-size", `${12 / transform.k}px`);
-```
-
-CSS `vector-effect: non-scaling-stroke` works for strokes but not `r`, `font-size`, or `stroke-dasharray`.
+Counter-scale strokes/text to prevent ballooning: `attr("r", 4 / transform.k)`, `attr("font-size", `${12 / transform.k}px`)`. CSS `vector-effect: non-scaling-stroke` works for strokes but not `r`, `font-size`, or `stroke-dasharray`.
 
 ## Semantic Zoom (SVG)
 
@@ -84,34 +71,17 @@ function zoomed({ transform }) {
 
 `rescaleX(xScale)` returns a new scale with inverse-transformed domain — domain narrows as you zoom in. Always pass the **original** scale, not a previously rescaled one, or the transform compounds on itself.
 
-**X-only or Y-only zoom:** Only call `rescaleX`, ignore `rescaleY`. For a clean constraint:
-
-```js
-const constrained = d3.zoomIdentity.translate(transform.x, 0).scale(transform.k);
-```
+**X-only zoom:** Only call `rescaleX`, ignore `rescaleY`. Constrain: `d3.zoomIdentity.translate(transform.x, 0).scale(transform.k)`.
 
 ## Canvas Zoom
 
-Canvas has no DOM to transform — redraw each frame.
-
-**Geometric** — apply canvas transform, draw axes outside:
+Canvas has no DOM to transform — redraw each frame. Attach `d3-zoom` to an SVG overlay stacked over Canvas: SVG captures pointer events and renders crisp axes; Canvas handles heavy data rendering.
 
 ```js
-function zoomed({ transform }) {
-  ctx.save();
-  ctx.clearRect(0, 0, width, height);
-  ctx.translate(transform.x, transform.y);
-  ctx.scale(transform.k, transform.k);
-  drawData(ctx, data);
-  ctx.restore();
-  drawAxes(ctx);
-}
-```
+svg.append("rect").attr("width", width).attr("height", height)
+  .attr("fill", "none").attr("pointer-events", "all");
 
-**Semantic** — rescale coordinates, cull to viewport:
-
-```js
-function zoomed({ transform }) {
+svg.call(d3.zoom().scaleExtent([1, 40]).on("zoom", ({ transform }) => {
   const zx = transform.rescaleX(xScale), zy = transform.rescaleY(yScale);
   const [xMin, xMax] = zx.domain(), [yMin, yMax] = zy.domain();
   ctx.clearRect(0, 0, width, height);
@@ -122,27 +92,13 @@ function zoomed({ transform }) {
     ctx.arc(zx(d.x), zy(d.y), 3, 0, Math.PI * 2);
   }
   ctx.fill();
-}
-```
-
-For large datasets, use `quadtree.visit()` to enumerate only visible points. See `canvas` skill.
-
-## SVG Overlay for Canvas/WebGL Zoom
-
-Attach `d3-zoom` to an SVG layer stacked over Canvas/WebGL. SVG captures pointer events and provides DOM interaction (tooltips, axes); heavy data rendering stays on Canvas/WebGL. This separation means you get crisp axes at every zoom level without redrawing them on Canvas.
-
-```js
-// Transparent rect so SVG captures events in empty space
-svg.append("rect").attr("width", width).attr("height", height)
-  .attr("fill", "none").attr("pointer-events", "all");
-
-svg.call(d3.zoom().scaleExtent([1, 40]).on("zoom", ({ transform }) => {
-  // Canvas: redraw data
-  drawData(ctx, data, transform);
-  // SVG: rescaled axes
-  xAxisGroup.call(d3.axisBottom(transform.rescaleX(xScale)));
+  xAxisGroup.call(d3.axisBottom(zx));  // SVG axes stay crisp
 }));
 ```
+
+For geometric canvas zoom, apply `ctx.translate(transform.x, transform.y)` and `ctx.scale(transform.k, transform.k)` before drawing, then restore. Draw axes outside the transformed context.
+
+For large datasets, use `quadtree.visit()` to enumerate only visible points. See `canvas` skill.
 
 ## Zoom Constraints
 
@@ -157,7 +113,7 @@ d3.zoom()
 
 ## Programmatic Zoom
 
-**Zoom to fit** — compute the bounding box of a data subset, calculate scale to fill the viewport:
+**Zoom to fit** — compute bounding box, calculate scale to fill viewport:
 
 ```js
 function zoomToFit(selection, data, padding = 20) {
@@ -173,16 +129,11 @@ function zoomToFit(selection, data, padding = 20) {
 }
 ```
 
-Always use `transition()` for programmatic zoom — instant transform changes are disorienting because the viewer loses spatial context. D3 uses `d3.interpolateZoom` (van Wijk & Nuij) for smooth transitions between distant zoom states.
-
-```js
-selection.transition().duration(500).call(zoom.transform, d3.zoomIdentity); // reset
-svg.transition().call(zoom.scaleBy, 2, [cx, cy]); // zoom centered on point
-```
+Always use `transition()` for programmatic zoom — instant changes disorient the viewer. D3 uses `d3.interpolateZoom` (van Wijk & Nuij) for smooth transitions between distant zoom states.
 
 ## Minimap (Overview + Detail)
 
-A minimap gives the viewer spatial context during deep zoom — without it, they lose track of where they are in the dataset. Essential when `scaleExtent` allows more than ~5x zoom.
+Essential when `scaleExtent` allows more than ~5x zoom — gives the viewer spatial context during deep zoom.
 
 ```js
 const mScale = 0.15;
@@ -198,17 +149,16 @@ function updateMinimap(transform) {
 
 minimap.on("click", (event) => {
   const [px, py] = d3.pointer(event);
-  const pt = { x: mx.invert(px), y: my.invert(py) };
   const k = d3.zoomTransform(svg.node()).k;
   svg.transition().duration(750).call(zoom.transform,
     d3.zoomIdentity.translate(width / 2, height / 2).scale(k)
-      .translate(-xScale(pt.x), -yScale(pt.y)));
+      .translate(-xScale(mx.invert(px)), -yScale(my.invert(py))));
 });
 ```
 
 ## Brush-to-Zoom (Focus + Context)
 
-Brush in a context chart drives zoom in the main chart. The `sourceEvent` check prevents infinite loops — brush updates zoom, zoom updates brush:
+Brush in a context chart drives zoom in the main chart. The `sourceEvent` check prevents infinite loops:
 
 ```js
 function brushed({ selection }) {
@@ -218,7 +168,6 @@ function brushed({ selection }) {
   svg.call(zoom.transform, d3.zoomIdentity.translate(xScale.range()[0] - sx0 * k, 0).scale(k));
 }
 
-// Inverse: zoom updates brush
 function zoomed({ transform, sourceEvent }) {
   if (sourceEvent?.type === "brush") return;
   const [d0, d1] = transform.rescaleX(xScale).domain();
@@ -228,7 +177,7 @@ function zoomed({ transform, sourceEvent }) {
 
 ## Level-of-Detail (LOD)
 
-Show different representations at different zoom levels — density heatmap zoomed out, individual points zoomed in, labeled points at maximum zoom. This matches how the viewer's task changes: at overview they want patterns, zoomed in they want specifics.
+Show different representations at different zoom levels — density heatmap zoomed out, individual points zoomed in, labeled points at maximum zoom.
 
 ```js
 const zx = transform.rescaleX(xScale), zy = transform.rescaleY(yScale);
@@ -237,11 +186,11 @@ else if (transform.k < 8) drawPoints(ctx, data, zx, zy, { labels: false });
 else drawPoints(ctx, data, zx, zy, { labels: true });
 ```
 
-Smooth LOD transitions: cross-fade by interpolating `globalAlpha` in the crossover range (e.g., k = 1.5–2.5). Hard cuts between LOD levels are jarring and make the viewer think data changed.
+Smooth LOD transitions: cross-fade by interpolating `globalAlpha` in the crossover range (e.g., k = 1.5–2.5). Hard cuts between LOD levels are jarring.
 
 ### LOD State Machine with Hysteresis
 
-Naive threshold checks cause flickering when the user hovers near a boundary — zoom in at k=2 triggers "points" mode, the tiniest zoom-out at k=1.99 snaps back to "density." Fix with hysteresis: use different thresholds for zooming in vs. out.
+Naive threshold checks cause flickering near boundaries — zoom in at k=2 triggers "points," the tiniest zoom-out at k=1.99 snaps back to "density." Fix with hysteresis: different thresholds for zooming in vs. out.
 
 ```js
 const LOD_STATES = [
@@ -252,17 +201,15 @@ const LOD_STATES = [
 
 let lodIndex = 0;
 function updateLOD(k) {
-  // Check if we should move to a higher-detail state
   while (lodIndex < LOD_STATES.length - 1 && k >= LOD_STATES[lodIndex + 1].enterAbove)
     lodIndex++;
-  // Check if we should move to a lower-detail state
   while (lodIndex > 0 && k < LOD_STATES[lodIndex].exitBelow)
     lodIndex--;
   return LOD_STATES[lodIndex].name;
 }
 ```
 
-The hysteresis band (here 0.5–1.5 units wide) should be proportional to the zoom speed your users exhibit. Wider bands for touch (coarse, fast gestures), narrower for wheel (fine control). Google Maps uses this pattern at every scale transition.
+The hysteresis band (here 0.5–1.5 units wide) should be proportional to zoom speed. Wider bands for touch (coarse, fast gestures), narrower for wheel (fine control). Google Maps uses this pattern at every scale transition.
 
 ## Touch and Gestures
 
@@ -272,9 +219,9 @@ The hysteresis band (here 0.5–1.5 units wide) should be proportional to the zo
 svg, canvas { touch-action: none; }  /* d3-zoom handles all touch */
 ```
 
-Without `touch-action: none`, the browser intercepts pinch as page zoom and drag as scroll — the chart never receives the events.
+Without `touch-action: none`, the browser intercepts pinch as page zoom and drag as scroll.
 
-Filter single-touch on mobile to prevent accidental zoom while scrolling — otherwise any finger drag on the chart triggers panning instead of page scroll:
+Filter single-touch to prevent accidental zoom while scrolling:
 
 ```js
 zoom.filter((event) => {
@@ -315,7 +262,7 @@ function zoomed({ transform }) {
 }
 ```
 
-Essential for Canvas with 10K+ elements — without rAF gating, fast wheel scrolling queues dozens of redraws per frame. For SVG with <1K elements, direct updates are fine.
+Essential for Canvas with 10K+ elements — without rAF gating, fast wheel scrolling queues dozens of redraws per frame.
 
 ## Common Pitfalls
 
@@ -323,29 +270,16 @@ Essential for Canvas with 10K+ elements — without rAF gating, fast wheel scrol
 
 2. **Transform state desync.** D3 stores the transform on the element via `__zoom`. Setting a transform manually (e.g., `g.attr("transform", ...)`) without `zoom.transform` causes the stored state to diverge — next gesture jumps.
 
-3. **Infinite loops in linked views.** View A updates B, B's handler updates A. Guard with `syncing` flag or check `event.sourceEvent === null`.
+3. **`rescaleX` with stale scales.** Always pass the original scale to `rescaleX`, not a previously rescaled copy. The transform already encodes cumulative zoom — applying it to an already-rescaled scale doubles the effect.
 
-4. **Geometric zoom of text.** Font size scales with zoom, becoming unreadable at low zoom and oversized at high zoom. Either counter-scale (`fontSize / k`) or use semantic zoom.
+4. **`scaleExtent([1, ...])` prevents zoom-out.** Set minimum to a fraction (e.g., 0.5) if you want the viewer to see more than the initial viewport.
 
-5. **`rescaleX` with stale scales.** Always pass the original scale to `rescaleX`, not a previously rescaled copy. The transform already encodes cumulative zoom — applying it to an already-rescaled scale doubles the effect.
+5. **Wheel zoom hijacks page scroll.** Use `zoom.filter()` to require a modifier key (Ctrl+wheel) or only enable zoom on focus. D3-zoom v3+ passes wheel events through at zoom limits so page scroll resumes naturally. If you override `wheelDelta`, preserve this pass-through behavior.
 
-6. **`scaleExtent([1, ...])` prevents zoom-out.** Set minimum to a fraction (e.g., 0.5) if you want the viewer to see more than the initial viewport.
-
-7. **Wheel zoom hijacks page scroll.** If the chart doesn't fill the viewport, wheel events get captured before the page can scroll. Use `zoom.filter()` to require a modifier key (Ctrl+wheel) or only enable zoom on focus. A subtler fix: let wheel events pass through to page scroll when the user is already at the zoom limit. `scaleExtent` does this by default as of d3-zoom v3 — wheel events that would exceed the extent are not consumed, so page scroll resumes naturally. If you override `wheelDelta`, preserve this pass-through behavior or users get trapped.
-
-8. **Programmatic zoom without transition.** `svg.call(zoom.transform, t)` is instant — the viewer loses spatial context and can't track what moved. Almost always use `svg.transition().duration(500).call(zoom.transform, t)`.
-
-9. **Canvas zoom without clearing.** Forgetting `ctx.clearRect()` produces layered artifacts — each frame draws on top of the previous one.
-
-## Scroll-Driven Animations vs. d3-zoom
-
-CSS scroll-driven animations (`animation-timeline: scroll()`) let you bind keyframe animations to scroll position with zero JS — useful for scrollytelling where chart elements animate as the user scrolls through a narrative. As of March 2026, shipped in Chrome and Edge; Firefox and Safari support is partial.
-
-**Don't use them for interactive zoom.** Scroll-driven CSS can't manage the `{x, y, k}` transform matrix that `rescaleX`/`rescaleY` depend on. For anything with axes, pan, or continuous zoom state, `d3-zoom` remains the right tool. The overlap is narrow: if your "zoom" is really "scroll position drives an animation," CSS handles it natively. If the user needs to pan, pinch, or zoom to arbitrary levels, that's `d3-zoom`.
+6. **Programmatic zoom without transition.** `svg.call(zoom.transform, t)` is instant — the viewer loses spatial context. Almost always use `svg.transition().duration(500).call(zoom.transform, t)`.
 
 ## References
 
-- [D3 Zoom](https://d3js.org/d3-zoom) — API reference
 - [Zoom to Bounding Box](https://observablehq.com/@d3/zoom-to-bounding-box) — programmatic zoom-to-fit
 - [Semantic Zoom](https://observablehq.com/@d3/semantic-zoom) — rescaleX/rescaleY pattern
 - [Smooth Zooming](https://www.win.tue.nl/~vanwijk/zoompan.pdf) — van Wijk & Nuij, 2003
