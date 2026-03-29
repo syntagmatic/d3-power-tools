@@ -162,7 +162,7 @@ The workshop. Each tool does one job.
 
 **Code guides**
 
-**[square-tool](meta/square-tool/SKILL.md)** — D3 code style. Chaining indentation, margin convention, `.join()` with key functions, `selection.call()`, reusable chart closures.
+**[d3-idioms](meta/d3-idioms/SKILL.md)** — D3 code style. Chaining indentation, margin convention, `.join()` with key functions, `selection.call()`, reusable chart closures.
 
 **[jig-template](meta/jig-template/SKILL.md)** — Multi-skill assembly. Layer stacks, state architecture, dirty-flag rendering, performance budgets, composition archetypes.
 
