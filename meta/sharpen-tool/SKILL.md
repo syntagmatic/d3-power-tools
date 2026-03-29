@@ -1,17 +1,17 @@
 ---
 name: sharpen-tool
-description: "Compress and simplify a D3 power-tools SKILL.md for clarity and token efficiency. Use this skill when the user says 'sharpen', 'simplify skill', 'compress skill', 'shorten skill', or wants to reduce a SKILL.md's line count while preserving all teaching value."
+description: "Audit, compress, and simplify a D3 power-tools SKILL.md. Use this skill when the user says 'sharpen', 'check skill', 'audit skill', 'simplify skill', 'compress skill', or wants to verify/reduce a SKILL.md while preserving all teaching value."
 ---
 
-# Simplify Skill
+# Sharpen Skill
 
-Simplify the D3 power-tools skill at `$ARGUMENTS`.
+Audit and simplify the D3 power-tools skill at `$ARGUMENTS`.
 
 Read the full SKILL.md, then work through three phases: triage, compress, verify.
 
 ## Phase 1 — Triage
 
-Before editing anything, build a section inventory. For each `##` section, note its line count and classify it:
+Before editing, build a section inventory. For each `##` section, note its line count and classify it:
 
 | Classification | Meaning | Action |
 |---|---|---|
@@ -20,13 +20,13 @@ Before editing anything, build a section inventory. For each `##` section, note 
 | **reference** | Covered better in another skill | Replace with one-line cross-skill pointer |
 | **cut** | Niche, rarely needed, or derivable from core sections | Remove entirely |
 
-Decision criteria for each section:
+Decision criteria:
 - How often does a developer need this pattern? (weekly → core, rarely → cut candidate)
 - Is this the *owning* skill for this pattern, or does another skill cover it better?
 - Can a developer who understands the core sections derive this one without help?
-- Does the section duplicate infrastructure (state management, Worker setup, DOM boilerplate) that appears elsewhere in this file?
+- Does the section duplicate infrastructure that appears elsewhere in this file?
 
-**Show the triage table to the user and get approval before proceeding.** This is where the biggest gains come from — cutting or replacing entire sections beats line-level compression.
+**Show the triage table to the user and get approval before proceeding.**
 
 ### Hard constraints — never cut these
 - Architecture diagrams (ASCII art flow diagrams)
@@ -37,39 +37,50 @@ Decision criteria for each section:
 
 ### Skill map for cross-references
 
-When classifying sections as "reference," point to the right owner. Consult the project's CLAUDE.md skill listing for the full map. Common ownership boundaries:
-- Zoom/pan mechanics → `navigation`
-- DPR, resize, container sizing → `responsive`
-- Quadtree hit detection, typed arrays → `canvas`
-- Color scales, palettes, CVD → `color`
-- Brushing, lasso, linked selection → `brushing`
-- ARIA, keyboard nav, screen readers → `canvas-accessibility`
-- Tooltip positioning, leader lines → `annotation`
-- Data loading, reshaping, binning → `data-gathering`
-- Enter/update/exit, transitions → `motion`
+When classifying sections as "reference," point to the right owner. Consult CLAUDE.md for the full map. Common ownership boundaries:
+- Zoom/pan → `navigation` · DPR/resize → `responsive` · Quadtree/typed arrays → `canvas`
+- Color/palettes/CVD → `color` · Brushing/lasso → `brushing` · ARIA/keyboard → `canvas-accessibility`
+- Tooltips/leaders → `annotation` · Data loading/reshape → `data-gathering` · Transitions → `motion`
 
 ## Phase 2 — Compress
 
-Apply these techniques to sections classified as "compress," ordered by typical impact:
+Apply to sections classified as "compress," ordered by typical impact:
 
-1. **Collapse variants.** When multiple sub-patterns share structure (filter types, layout variants, chart flavors), show one canonical form in full. Describe each variant's delta in 2-3 lines of code + 1 line of prose. Don't repeat shared scaffolding.
-
-2. **Extract shared infrastructure.** If the same state object, Worker setup, event wiring, or DOM scaffold appears in multiple sections, define it once and reference it. "Uses the state pattern from §Chart↔Table Toggle" beats repeating 15 lines.
-
-3. **Strip code boilerplate.** Remove SVG/container creation, `role`/`aria-label`, style resets, option destructuring. Show only the D3 pattern being taught.
-
-4. **Remove wrapper functions.** Don't wrap examples in `function fooChart(container, data, opts) { ... }` unless the wrapper IS the pattern (like a reusable chart closure).
-
-5. **Tighten prose.** Cut sentences that restate what the code shows. One line of context before a code block is enough. Remove "Note that..." / "It's important to..." filler.
-
-6. **Use terse D3 v7 syntax.** `d3.scaleLinear([0,1], [0,w])` shorthand. Chain ≤3 `.attr()` calls on one line. Comma-separated `const` for related variables.
+1. **Collapse variants.** Show one canonical form in full. Describe each variant's delta in 2-3 lines of code + 1 line of prose.
+2. **Extract shared infrastructure.** Define repeated state/Worker/DOM scaffolding once, reference it elsewhere.
+3. **Strip code boilerplate.** Remove SVG/container creation, `role`/`aria-label`, style resets. Show only the D3 pattern.
+4. **Remove wrapper functions** unless the wrapper IS the pattern (reusable chart closure).
+5. **Tighten prose.** One line of context before a code block is enough. Cut "Note that..." filler.
+6. **Use terse D3 v7 syntax.** `d3.scaleLinear([0,1], [0,w])` shorthand. Chain ≤3 `.attr()` on one line.
 
 ## Phase 3 — Verify
 
-1. **Coverage diff.** List every implementable pattern from the original. Verify each one is either still present or explicitly referenced to another skill. A developer should be able to implement any pattern from the compressed version alone (or by following one cross-skill pointer).
+### Coverage diff
 
-2. **Run `/check-skill`** on the compressed file to catch undefined variables, dangling function references, and code/prose mismatches.
+List every implementable pattern from the original. Verify each is still present or explicitly cross-referenced. A developer should be able to implement any pattern from the compressed version alone (or by following one pointer).
 
-3. **Eval check (if available).** If `meta/evals/eval.config.json` lists evals targeting this skill, run them before and after compression. If structural check scores drop, the compression cut too deep — restore that section.
+### Audit checks
 
-4. **Report.** Original lines → compressed lines, compression ratio, and which sections were triaged as reference/cut.
+Scan the file for errors introduced by compression:
+
+**Undefined variables.** For each variable in a code block, verify it's defined in the same block, a prior block in the same section, or is a clearly external input (`data`, `svg`, `width`, `height`, `d3.*`). Each section's code blocks are independent — variables from other sections don't carry over. Watch for: helper variables (`n`, `gap`, `r`) from removed wrappers, scale variables referenced across sections, unstored return values.
+
+**Dangling function references.** Functions called but not defined. Two patterns: wrapper removed but call remains; function inlined but old name persists elsewhere. Fix by inlining the body, restoring the definition, or replacing with equivalent code.
+
+**Cryptic one-liners.** API calls with non-obvious argument patterns or techniques described by name only without showing how. Fine if cross-referenced; flag only genuinely opaque ones.
+
+**Incorrect URLs.** Data file paths missing CDN prefix, broken Observable/GitHub links. Use WebFetch to verify if unsure.
+
+**Code/prose mismatch.** Prose says "X" but code shows "Y". Section headers that no longer match content.
+
+For each issue found:
+```
+Line N: [category] description
+  Fix: what to change
+```
+
+If no issues: "Clean — no issues found." Then apply all fixes.
+
+### Report
+
+Original lines → compressed lines, compression ratio, sections triaged as reference/cut.

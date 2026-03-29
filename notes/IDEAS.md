@@ -20,9 +20,9 @@ Six skills compressed: cartography 401→279, data-gathering 394→195, webgl 38
 
 Deleted 3 redundant examples (966 lines): color-compositing (compositing-gallery covers it), layout-morph (shape-morph covers point resampling), hierarchy-patterns (layout-switcher covers all 8 layouts). Network examples kept (3 different chart types). Test config updated.
 
-### 4. Consolidate meta skills (11 → 6)
+### ~~4. Consolidate meta skills~~ ✓ Partially done
 
-Four auditing skills (visual-critic, encoding-integrity, interaction-stress-test, perceptual-red-team) → one `audit` skill with sections. Two maintenance skills (check-skill, sharpen-tool) → one `skill-maintenance` skill. Keep idiomatic-d3, cross-skill-composition, skill-eval, adversarial-eval as-is.
+Merged check-skill into sharpen-tool (checking is part of sharpening). Auditing skills (visual-critic, encoding-integrity, interaction-stress-test, perceptual-red-team) kept separate — research confirms decomposed single-criterion evaluation outperforms combined prompts (lost-in-the-middle, attention dilution, instruction omission at scale).
 
 ### 5. Clean up archive
 

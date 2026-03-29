@@ -164,8 +164,7 @@ Skills for testing, evaluating, and improving other skills.
 - `meta/idiomatic-d3/` — D3 code style and review: method chaining indentation (2-space new selection, 4-space same), margin convention, .join() data joins with key functions, selection.call() composition, scales-as-functions, reusable chart closure pattern, naming conventions, event handling, import patterns, code review checklist, anti-patterns
 - `meta/cross-skill-composition/` — architectural patterns for combining skills: layer stack (Canvas+SVG+HTML), SVG vs Canvas decision framework, initialization sequence, state architecture (data/view/interaction), dirty-flag rendering, performance budgets, composition archetypes (explorer, narrative, dashboard, spatial, morpher), resize contract, Canvas↔SVG handoff
 - `meta/adversarial-eval/` — calibrate auditing skills: blind evaluation protocol, context contamination rules, inter-rater reliability
-- `meta/check-skill/` — audit a skill for dangling references, broken code examples, incorrect descriptions
-- `meta/sharpen-tool/` — compress and simplify a SKILL.md for clarity and token efficiency
+- `meta/sharpen-tool/` — audit, compress, and simplify a SKILL.md: check for dangling references and broken code, then triage and compress for clarity and token efficiency
 - `meta/skill-eval/` — evaluate skill effectiveness with before/after comparisons and iterative improvement
 
 #### Auditing skills
