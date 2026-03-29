@@ -163,7 +163,7 @@ Skills for testing, evaluating, and improving other skills.
 
 #### Code guides
 - `meta/square-tool/` — D3 code style: method chaining indentation, margin convention, .join() data joins, selection.call() composition, reusable chart closure pattern, naming conventions, anti-patterns
-- `meta/jig-tool/` — multi-skill assembly: layer stack (Canvas+SVG+HTML), SVG vs Canvas decision, state architecture, dirty-flag rendering, composition archetypes, resize contract
+- `meta/jig-template/` — multi-skill assembly: layer stack (Canvas+SVG+HTML), SVG vs Canvas decision, state architecture, dirty-flag rendering, composition archetypes, resize contract
 
 #### Inspection tools
 - `meta/polish-tool/` — design quality: color harmony, typographic hierarchy, whitespace, data-ink ratio, overall feel (screenshot-based)

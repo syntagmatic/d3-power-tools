@@ -1,13 +1,13 @@
 ---
 name: square-tool
-description: "D3.js code style and convention review. Trigger words: 'square', 'check style', 'review code', 'idiomatic D3'. Checks method chaining indentation (2-space new selection, 4-space same), margin convention, .join() data joins with key functions, selection.call() composition, scales-as-functions, reusable chart closure pattern, naming conventions, event handling (this vs arrow functions), anti-patterns. Related skills: `scales`, `motion`, `data-gathering`, `jig-tool`."
+description: "D3.js code style and convention review. Trigger words: 'square', 'check style', 'review code', 'idiomatic D3'. Checks method chaining indentation (2-space new selection, 4-space same), margin convention, .join() data joins with key functions, selection.call() composition, scales-as-functions, reusable chart closure pattern, naming conventions, event handling (this vs arrow functions), anti-patterns. Related skills: `scales`, `motion`, `data-gathering`, `jig-template`."
 ---
 
 # Square Tool
 
 D3 code that follows the library's conventions is code others can read, debug, and extend. Break them and you lose the visual structure that makes chains parseable, the data binding that makes updates correct, and the composition patterns that keep charts maintainable. Every rule here explains what goes wrong when you ignore it — and when ignoring it is the right call.
 
-Related skills: `motion` (`.join()` with enter/update/exit callbacks), `data-gathering` (accessor patterns), `jig-tool` (structural patterns for multi-layer apps).
+Related skills: `motion` (`.join()` with enter/update/exit callbacks), `data-gathering` (accessor patterns), `jig-template` (structural patterns for multi-layer apps).
 
 ## Method Chaining & Indentation
 

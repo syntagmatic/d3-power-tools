@@ -1,9 +1,9 @@
 ---
-name: jig-tool
+name: jig-template
 description: "Architectural patterns for combining multiple D3 skills into one visualization — the jig that holds pieces in alignment. Trigger: 'jig', 'compose', 'combine skills', 'layer stack', 'multi-view architecture'. Use when layering Canvas+SVG, coordinating linked views, sequencing initialization, managing shared state, budgeting performance across composed concerns, or deciding SVG vs Canvas tradeoffs."
 ---
 
-# Jig Tool
+# Jig Template
 
 A single chart shows one relationship. Composition lets the viewer hold multiple relationships in mind at once — brush a scatterplot and watch a histogram reshape, revealing that high-revenue companies cluster in one industry. The architecture exists to make that moment of connection feel instant and seamless. When the glue is wrong, latency breaks the cognitive link and the viewer sees two charts instead of one insight.
 
