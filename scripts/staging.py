@@ -127,32 +127,104 @@ def cleanup_staging_dir(staging: Path):
 
 
 def parse_skill_reads(stream_output: str) -> list[str]:
-    """Extract skill names from Claude stream-json tool_use Read events.
-
-    Looks for Read tool calls targeting skills/*/SKILL.md paths.
-    """
+    """Extract skill names from Claude stream-json tool_use Read events."""
     skills_read = []
+    for event in _iter_events(stream_output):
+        if event.get("type") != "assistant":
+            continue
+        for block in event.get("message", {}).get("content", []):
+            if block.get("type") != "tool_use" or block.get("name") != "Read":
+                continue
+            file_path = block.get("input", {}).get("file_path", "")
+            m = re.search(r"skills/([^/]+)/SKILL\.md", file_path)
+            if m and m.group(1) not in skills_read:
+                skills_read.append(m.group(1))
+    return skills_read
+
+
+def parse_stream_report(stream_output: str) -> dict:
+    """Parse stream-json output into a structured report of what happened.
+
+    Returns a dict with turns (tool calls + text), final result, cost, and usage.
+    """
+    turns = []
+    result_event = None
+    system_info = None
+
+    for event in _iter_events(stream_output):
+        etype = event.get("type", "")
+
+        if etype == "system":
+            system_info = {
+                "model": event.get("model"),
+                "cli_version": event.get("claude_code_version"),
+                "tools": event.get("tools", []),
+            }
+
+        elif etype == "assistant":
+            msg = event.get("message", {})
+            usage = msg.get("usage", {})
+            turn = {"tools": [], "text": ""}
+            if usage:
+                turn["tokens_in"] = usage.get("input_tokens", 0) + usage.get("cache_read_input_tokens", 0)
+                turn["tokens_out"] = usage.get("output_tokens", 0)
+            for block in msg.get("content", []):
+                btype = block.get("type")
+                if btype == "tool_use":
+                    name = block.get("name", "")
+                    inp = block.get("input", {})
+                    entry = {"tool": name}
+                    if name == "Write":
+                        entry["file"] = inp.get("file_path", "")
+                        entry["size"] = len(inp.get("content", ""))
+                    elif name == "Read":
+                        entry["file"] = inp.get("file_path", "")
+                    elif name == "Bash":
+                        entry["command"] = inp.get("command", "")[:200]
+                    else:
+                        entry["input"] = str(inp)[:200]
+                    turn["tools"].append(entry)
+                elif btype == "text":
+                    text = block.get("text", "").strip()
+                    if text:
+                        turn["text"] = (turn["text"] + " " + text).strip()
+            turns.append(turn)
+
+        elif etype == "tool_result":
+            if event.get("is_error") and turns:
+                last = turns[-1]
+                if not last.get("error"):
+                    last["error"] = str(event.get("content", ""))[:500]
+
+        elif etype == "result":
+            result_event = {
+                "is_error": event.get("is_error", False),
+                "stop_reason": event.get("stop_reason"),
+                "text": str(event.get("result", ""))[:500],
+                "cost_usd": event.get("total_cost_usd"),
+                "duration_ms": event.get("duration_ms"),
+                "num_turns": event.get("num_turns"),
+            }
+            usage = event.get("usage", {})
+            if usage:
+                result_event["total_tokens_in"] = usage.get("input_tokens", 0) + usage.get("cache_read_input_tokens", 0)
+                result_event["total_tokens_out"] = usage.get("output_tokens", 0)
+
+    return {
+        "system": system_info,
+        "turns": turns,
+        "turn_count": len(turns),
+        "result": result_event,
+    }
+
+
+def _iter_events(stream_output: str):
+    """Yield parsed JSON events from stream-json output."""
     for line in stream_output.splitlines():
         line = line.strip()
         if not line:
             continue
         try:
-            event = json.loads(line)
+            yield json.loads(line)
         except (json.JSONDecodeError, ValueError):
             continue
-
-        if event.get("type") != "assistant":
-            continue
-
-        message = event.get("message", {})
-        for block in message.get("content", []):
-            if block.get("type") != "tool_use" or block.get("name") != "Read":
-                continue
-            file_path = block.get("input", {}).get("file_path", "")
-            m = re.search(r"skills/([^/]+)/SKILL\.md", file_path)
-            if m:
-                skill_name = m.group(1)
-                if skill_name not in skills_read:
-                    skills_read.append(skill_name)
-
-    return skills_read

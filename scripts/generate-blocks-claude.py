@@ -8,7 +8,7 @@ from collections import Counter
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from staging import create_staging_dir, cleanup_staging_dir, parse_skill_reads
+from staging import create_staging_dir, cleanup_staging_dir, parse_skill_reads, parse_stream_report
 
 PROJ = Path(__file__).resolve().parent.parent
 MANIFEST = PROJ / "blocks" / "manifest.json"
@@ -33,6 +33,126 @@ OUTDIR = PROJ / "blocks" / VERSION
 LOGFILE = PROJ / "temp" / f"generate-blocks-claude-{VERSION}.json"
 
 OUTDIR.mkdir(parents=True, exist_ok=True)
+FAILURES_DIR = OUTDIR / "failures"
+
+
+def _save_failure_report(bid, error, report, skills_requested):
+    """Save a JSON failure report and an HTML viewer for it."""
+    FAILURES_DIR.mkdir(parents=True, exist_ok=True)
+
+    data = {
+        "bid": bid,
+        "error": error,
+        "version": VERSION,
+        "model": MODEL or "claude-opus-4-6",
+        "skills_requested": skills_requested,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        **report,
+    }
+
+    json_path = FAILURES_DIR / f"{bid}.json"
+    json_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+
+    # Generate HTML viewer
+    html_path = FAILURES_DIR / f"{bid}.html"
+    turns_html = []
+    for i, turn in enumerate(report.get("turns", []), 1):
+        tools_parts = []
+        for t in turn.get("tools", []):
+            if t["tool"] == "Read":
+                tools_parts.append(f'<span class="tool read">Read</span> {_esc(t.get("file", ""))}'  )
+            elif t["tool"] == "Write":
+                tools_parts.append(f'<span class="tool write">Write</span> {_esc(t.get("file", ""))} ({t.get("size", 0)} chars)')
+            elif t["tool"] == "Bash":
+                tools_parts.append(f'<span class="tool bash">Bash</span> <code>{_esc(t.get("command", ""))}</code>')
+            else:
+                tools_parts.append(f'<span class="tool other">{_esc(t["tool"])}</span> {_esc(t.get("input", "")[:100])}')
+        tools_str = "<br>".join(tools_parts) if tools_parts else '<span class="no-tools">no tool calls</span>'
+        text = _esc(turn.get("text", ""))[:500]
+        text_str = f'<div class="turn-text">{text}</div>' if text else ""
+        error_str = ""
+        if turn.get("error"):
+            error_str = f'<div class="turn-error">{_esc(turn["error"])}</div>'
+        tokens = ""
+        if turn.get("tokens_in") or turn.get("tokens_out"):
+            tokens = f' <span class="tokens">{turn.get("tokens_in", 0):,}in / {turn.get("tokens_out", 0):,}out</span>'
+        turns_html.append(
+            f'<div class="turn"><div class="turn-num">Turn {i}{tokens}</div>'
+            f'<div class="turn-body">{tools_str}{text_str}{error_str}</div></div>')
+
+    result_info = report.get("result") or {}
+    result_class = "result-error" if result_info.get("is_error") else "result-ok"
+    result_text = _esc(result_info.get("text", "")) or "(empty)"
+
+    # Summary stats
+    cost = result_info.get("cost_usd")
+    duration = result_info.get("duration_ms")
+    total_in = result_info.get("total_tokens_in")
+    total_out = result_info.get("total_tokens_out")
+    stats_parts = []
+    if cost is not None:
+        stats_parts.append(f"${cost:.4f}")
+    if duration is not None:
+        stats_parts.append(f"{duration / 1000:.1f}s")
+    if total_in is not None:
+        stats_parts.append(f"{total_in:,} tokens in")
+    if total_out is not None:
+        stats_parts.append(f"{total_out:,} tokens out")
+    stop = result_info.get("stop_reason")
+    if stop and stop != "end_turn":
+        stats_parts.append(f"stop: {stop}")
+    stats_line = " &middot; ".join(stats_parts) if stats_parts else ""
+
+    skills_line = ", ".join(skills_requested) if skills_requested else "none (baseline run)"
+
+    html = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Failure: {_esc(bid)}</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; color: #222; background: #fafafa; }}
+  h1 {{ font-size: 20px; font-weight: 400; margin: 0 0 4px; }} h1 b {{ font-weight: 600; }}
+  .meta {{ color: #888; font-size: 13px; margin-bottom: 8px; }}
+  .meta span {{ display: inline-block; margin-right: 16px; }}
+  .error-badge {{ background: #d33; color: #fff; padding: 2px 8px; border-radius: 3px; font-size: 12px; font-weight: 600; }}
+  .stats {{ color: #666; font-size: 13px; margin-bottom: 20px; padding: 8px 12px; background: #fff; border: 1px solid #e8e8e8; border-radius: 4px; }}
+  .turn {{ display: flex; gap: 12px; margin-bottom: 8px; padding: 8px 12px; background: #fff; border: 1px solid #e8e8e8; border-radius: 4px; }}
+  .turn-num {{ font-size: 11px; color: #999; font-weight: 600; white-space: nowrap; min-width: 48px; padding-top: 2px; }}
+  .turn-body {{ font-size: 13px; line-height: 1.5; }}
+  .tokens {{ font-weight: 400; color: #bbb; font-size: 10px; display: block; }}
+  .tool {{ font-size: 11px; font-weight: 600; padding: 1px 5px; border-radius: 3px; }}
+  .tool.read {{ background: #e3f2fd; color: #1565c0; }}
+  .tool.write {{ background: #e8f5e9; color: #2e7d32; }}
+  .tool.bash {{ background: #fff3e0; color: #e65100; }}
+  .tool.other {{ background: #f3e5f5; color: #7b1fa2; }}
+  .no-tools {{ color: #bbb; font-style: italic; font-size: 12px; }}
+  .turn-text {{ color: #555; font-size: 12px; margin-top: 4px; white-space: pre-wrap; }}
+  .turn-error {{ color: #d33; font-size: 12px; margin-top: 4px; }}
+  .result {{ margin-top: 20px; padding: 12px; border-radius: 4px; font-size: 13px; }}
+  .result-error {{ background: #fde; border: 1px solid #d33; }}
+  .result-ok {{ background: #f5f5f5; border: 1px solid #ddd; }}
+  code {{ font-size: 12px; background: #f0f0f0; padding: 1px 4px; border-radius: 2px; }}
+  a {{ color: #1565c0; text-decoration: none; }} a:hover {{ text-decoration: underline; }}
+</style></head><body>
+<p><a href="../../../blocks-latest.html">&larr; blocks</a></p>
+<h1><b>Failure:</b> {_esc(bid)}</h1>
+<div class="meta">
+  <span class="error-badge">{_esc(error)}</span>
+  <span>{_esc(data.get("model", ""))}</span>
+  <span>{report.get("turn_count", 0)} turns</span>
+  <span>{_esc(data.get("timestamp", ""))}</span>
+</div>
+<div class="meta">Skills: {skills_line}</div>
+{f'<div class="stats">{stats_line}</div>' if stats_line else ""}
+{"".join(turns_html)}
+<div class="result {result_class}"><b>Result:</b> {result_text}</div>
+</body></html>"""
+
+    html_path.write_text(html)
+
+
+def _esc(s):
+    """HTML-escape a string."""
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
 def run_block(idx, block, defaults):
@@ -58,6 +178,7 @@ def run_block(idx, block, defaults):
     print(f"[{idx}] START {bid} (skills: {', '.join(skills_list) or 'none'})")
     t0 = time.time()
 
+    stream_file = OUTDIR / f".{bid}.stream"
     try:
         cmd = [
             "claude", "-p", prompt,
@@ -69,18 +190,34 @@ def run_block(idx, block, defaults):
         ]
         if MODEL:
             cmd.extend(["--model", MODEL])
-        result = subprocess.run(
-            cmd,
-            capture_output=True, text=True, timeout=300,
-            cwd=str(staging),
-        )
-    except subprocess.TimeoutExpired:
-        print(f"[{idx}] TIMEOUT {bid}")
-        return {"bid": bid, "status": "fail", "error": "timeout",
-                "skills_requested": block["skills"], "skills_triggered": [],
-                "skills_missed": block["skills"], "elapsed_s": 300}
+        with open(stream_file, "w") as sf:
+            proc = subprocess.Popen(
+                cmd, stdout=sf, stderr=subprocess.PIPE, text=True,
+                cwd=str(staging))
+            try:
+                _, stderr = proc.communicate(timeout=300)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                stream = stream_file.read_text() if stream_file.exists() else ""
+                print(f"[{idx}] TIMEOUT {bid}")
+                report = parse_stream_report(stream)
+                _save_failure_report(bid, "timeout", report, skills_list)
+                return {"bid": bid, "status": "fail", "error": "timeout",
+                        "skills_requested": block["skills"],
+                        "skills_triggered": parse_skill_reads(stream),
+                        "skills_missed": block["skills"], "elapsed_s": 300}
+
+        class _Result:
+            pass
+        result = _Result()
+        result.stdout = stream_file.read_text() if stream_file.exists() else ""
+        result.stderr = stderr
+        result.returncode = proc.returncode
     finally:
         cleanup_staging_dir(staging)
+        if stream_file.exists():
+            stream_file.unlink()
 
     elapsed = time.time() - t0
 
@@ -107,6 +244,8 @@ def run_block(idx, block, defaults):
         else:
             record["status"] = "fail"
             record["error"] = "invalid html"
+            report = parse_stream_report(result.stdout)
+            _save_failure_report(bid, "invalid html", report, skills_list)
             print(f"[{idx}] FAIL {bid} (not valid HTML)")
             outfile.unlink()
             return record
@@ -124,6 +263,8 @@ def run_block(idx, block, defaults):
                 except (json.JSONDecodeError, ValueError):
                     pass
         record["error"] = err_content or "no output"
+        report = parse_stream_report(result.stdout)
+        _save_failure_report(bid, record["error"], report, skills_list)
         print(f"[{idx}] FAIL {bid} (no output file)")
         return record
 
