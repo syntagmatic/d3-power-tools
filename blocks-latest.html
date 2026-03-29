@@ -49,6 +49,17 @@
   }
   .filter-bar input::placeholder { color: var(--color-text-faint); }
   .filter-count { font-size: 13px; color: var(--color-text-muted); }
+
+  .card { position: fixed; z-index: 100; background: var(--color-bg, #fff); border: 1px solid var(--color-border, #ddd);
+    border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.12); padding: 12px 14px; font-size: 12px;
+    line-height: 1.6; max-width: 320px; pointer-events: auto; }
+  .card-status { font-weight: 600; margin-bottom: 6px; }
+  .card-status.pass { color: #2e7d32; }
+  .card-status.fail { color: #d33; }
+  .card-row { display: flex; justify-content: space-between; gap: 16px; color: var(--color-text-muted, #666); }
+  .card-row .label { color: var(--color-text-faint, #999); }
+  .card-skills { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--color-border-light, #eee); color: var(--color-text-muted, #666); }
+  .card-skills .missed { color: var(--color-danger, #d33); }
 </style>
 </head>
 <body>
@@ -95,33 +106,71 @@
     const filter = document.getElementById("filter");
     const filterCount = document.getElementById("filter-count");
 
-    function tip(d) {
-      if (!d || !d.status) return "";
-      const parts = [];
-      if (d.status === "pass") parts.push("PASS");
-      else parts.push("FAIL" + (d.error ? ": " + d.error : ""));
-      if (d.elapsed_s != null) parts.push(d.elapsed_s + "s");
-      if (d.cost_usd != null) parts.push("$" + d.cost_usd.toFixed(3));
-      if (d.tokens_in != null) parts.push(d.tokens_in.toLocaleString() + " tok in");
-      if (d.tokens_out != null) parts.push(d.tokens_out.toLocaleString() + " tok out");
-      if (d.lines != null) parts.push(d.lines + " lines");
-      if (d.turn_count != null) parts.push(d.turn_count + " turns");
-      if (d.skills_triggered && d.skills_triggered.length)
-        parts.push("skills: " + d.skills_triggered.join(", "));
-      if (d.skills_missed && d.skills_missed.length)
-        parts.push("missed: " + d.skills_missed.join(", "));
-      return parts.join(" \u00b7 ");
+    // Rich tooltip card
+    const card = document.createElement("div");
+    card.className = "card";
+    card.style.display = "none";
+    document.body.appendChild(card);
+    let cardTimer = null;
+
+    function showCard(el, d) {
+      if (!d || typeof d === "string") {
+        card.innerHTML = `<div class="card-status pass">${(d || "").toUpperCase()}</div>`;
+      } else {
+        const status = d.status || "";
+        const rows = [];
+        if (d.elapsed_s != null) rows.push(`<span class="label">time</span> <span>${d.elapsed_s}s</span>`);
+        if (d.cost_usd != null) rows.push(`<span class="label">cost</span> <span>$${d.cost_usd.toFixed(3)}</span>`);
+        if (d.tokens_in != null || d.tokens_out != null)
+          rows.push(`<span class="label">tokens</span> <span>${(d.tokens_in||0).toLocaleString()} in / ${(d.tokens_out||0).toLocaleString()} out</span>`);
+        if (d.lines != null) rows.push(`<span class="label">output</span> <span>${d.lines} lines</span>`);
+        if (d.turn_count != null) rows.push(`<span class="label">turns</span> <span>${d.turn_count}</span>`);
+        const skillsHtml = [];
+        if (d.skills_triggered?.length)
+          skillsHtml.push(d.skills_triggered.join(", "));
+        if (d.skills_missed?.length)
+          skillsHtml.push(`<span class="missed">missed: ${d.skills_missed.join(", ")}</span>`);
+        card.innerHTML = `
+          <div class="card-status ${status}">${status === "fail" ? "FAIL" + (d.error ? ": " + d.error : "") : "PASS"}</div>
+          ${rows.map(r => `<div class="card-row">${r}</div>`).join("")}
+          ${skillsHtml.length ? `<div class="card-skills">${skillsHtml.join(" · ")}</div>` : ""}`;
+      }
+      const r = el.getBoundingClientRect();
+      card.style.display = "";
+      const cw = card.offsetWidth, ch = card.offsetHeight;
+      let x = r.left + r.width / 2 - cw / 2;
+      let y = r.top - ch - 6;
+      if (y < 4) y = r.bottom + 6;
+      if (x < 4) x = 4;
+      if (x + cw > window.innerWidth - 4) x = window.innerWidth - cw - 4;
+      card.style.left = x + "px";
+      card.style.top = y + "px";
     }
+
+    function hideCard() { card.style.display = "none"; }
+
+    document.addEventListener("pointerover", e => {
+      const a = e.target.closest("[data-vc]");
+      if (!a) return;
+      clearTimeout(cardTimer);
+      const [bidx, key] = a.dataset.vc.split("|");
+      const d = blocks[+bidx]?.[key];
+      if (d) showCard(a, d);
+    });
+    document.addEventListener("pointerout", e => {
+      if (e.target.closest("[data-vc]")) cardTimer = setTimeout(hideCard, 200);
+    });
+    card.addEventListener("pointerover", () => clearTimeout(cardTimer));
+    card.addEventListener("pointerout", () => cardTimer = setTimeout(hideCard, 200));
 
     function vcell(b, key, dir) {
       const d = b[key];
       if (!d) return "";
-      // Handle both string ("pass"/"fail") and object ({status:"pass",...}) formats
       const status = typeof d === "string" ? d : d.status;
       if (!status) return "";
-      const t = (typeof d === "object" ? tip(d) : status.toUpperCase()).replace(/"/g, "&quot;");
-      if (status === "pass") return `<a href="${dir}/${b.id}.html" title="${t}">\u2713</a>`;
-      if (status === "fail") return `<a href="${dir}/failures/${b.id}.html" class="status-fail" title="${t}">\u2717</a>`;
+      const vc = `data-vc="${blocks.indexOf(b)}|${key}"`;
+      if (status === "pass") return `<a href="${dir}/${b.id}.html" ${vc}>\u2713</a>`;
+      if (status === "fail") return `<a href="${dir}/failures/${b.id}.html" class="status-fail" ${vc}>\u2717</a>`;
       return "";
     }
 
