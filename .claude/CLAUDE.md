@@ -169,7 +169,7 @@ Skills for testing, evaluating, and improving other skills.
 - `meta/visual-critic/` — design quality: color harmony, typographic hierarchy, whitespace, data-ink ratio, overall feel (screenshot-based)
 - `meta/encoding-integrity/` — data honesty: lie factor, zero baselines, dual-axis risk, metamorphic relations (scaling, permutation, subset, shift), data join correctness
 - `meta/stress-test/` — interaction robustness: update storms, stale closures, feedback loops, transition handoff conflicts
-- `meta/scope-tool/` — cognitive clarity: working memory limits, animation congruence, spaghetti threshold, color overload
+- `meta/cognitive-load/` — cognitive clarity: working memory limits, animation congruence, spaghetti threshold, color overload
 
 #### Workshop tools
 - `meta/calibrate-tool/` — measure skill effectiveness: with/without comparison for content skills, blind evaluation protocol for auditing skills

@@ -1,9 +1,9 @@
 ---
-name: scope-tool
+name: cognitive-load
 description: "Audit D3.js visualizations for cognitive overload and perceptual failure modes. Trigger words: 'scope', 'check clarity', 'cognitive load'. Screenshot the output and assess whether the viewer can extract insights without being overwhelmed. Evaluates execution quality of complex charts — a 16-cell SPLOM can be readable or overwhelming depending on how it's done. Flags real perceptual failures, not chart type choices."
 ---
 
-# Scope Tool
+# Cognitive Load
 
 A visualization can be technically perfect but fail because it exceeds the viewer's cognitive bandwidth. This skill audits whether the viewer can actually extract insights from the visualization without being overwhelmed.
 

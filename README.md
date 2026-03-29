@@ -174,7 +174,7 @@ The workshop. Each tool does one job.
 
 **[stress-test](meta/stress-test/SKILL.md)** — Interaction robustness. Update storms, stale closures, feedback loops, transition handoff conflicts.
 
-**[scope-tool](meta/scope-tool/SKILL.md)** — Cognitive clarity. Working memory limits, animation congruence, spaghetti threshold, color overload.
+**[cognitive-load](meta/cognitive-load/SKILL.md)** — Cognitive clarity. Working memory limits, animation congruence, spaghetti threshold, color overload.
 
 **Workshop tools**
 
