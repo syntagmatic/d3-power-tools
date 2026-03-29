@@ -15,15 +15,15 @@ Measure whether a skill improves Claude's output, diagnose why it doesn't, and f
 run eval → compare with-skill vs baseline → diagnose → fix → re-run
 ```
 
-The eval runner at `meta/evals/run-evals.py` sends a prompt through `claude -p` twice — once from the project root (skills loaded) and once from a bare directory (no skills) — then tests the generated HTML and runs structural checks.
+The eval runner at `evals/run-evals.py` sends a prompt through `claude -p` twice — once from the project root (skills loaded) and once from a bare directory (no skills) — then tests the generated HTML and runs structural checks.
 
 ```bash
-python3 meta/evals/run-evals.py                    # all evals
-python3 meta/evals/run-evals.py --id scatter-10k   # one eval
-python3 meta/evals/run-evals.py --runs 3           # variance check
+python3 evals/run-evals.py                    # all evals
+python3 evals/run-evals.py --id scatter-10k   # one eval
+python3 evals/run-evals.py --runs 3           # variance check
 ```
 
-Results go to `meta/evals/results/<eval-id>/<mode>/output.html`. Read both output files and compare directly — don't rely solely on structural checks.
+Results go to `evals/results/<eval-id>/<mode>/output.html`. Read both output files and compare directly — don't rely solely on structural checks.
 
 The verdict: **BETTER** (with-skill uses techniques baseline doesn't), **SAME** (equivalent), or **WORSE** (baseline is better — skill is misleading).
 
@@ -39,7 +39,7 @@ When SAME or WORSE, determine which of three things to fix:
 
 ### Writing Evals
 
-Add entries to `meta/evals/eval.config.json`:
+Add entries to `evals/eval.config.json`:
 
 ```json
 {

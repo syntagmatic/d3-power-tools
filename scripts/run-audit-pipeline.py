@@ -24,9 +24,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 PROJ = Path(__file__).resolve().parent.parent
 TEST_SCRIPT = PROJ / "scripts" / "test-viz.py"
-ANCHORS_FILE = PROJ / "meta" / "evals" / "audit-anchors.json"
-OUTPUT_DIR = PROJ / "temp" / "audit-pipeline"
-PERSIST_FILE = PROJ / "meta" / "evals" / "audit-history.json"
+ANCHORS_FILE = PROJ / "evals" / "audit-anchors.json"
+OUTPUT_DIR = PROJ / "evals" / "runs"
+HISTORY_FILE = PROJ / "evals" / "audit-history.json"
 
 TOOLS = {
     "polish": PROJ / "meta" / "visual-critic" / "SKILL.md",
@@ -38,6 +38,29 @@ TOOLS = {
 WEIGHTS = {"polish": 0.30, "level": 0.25, "scope": 0.25, "stress": 0.20}
 
 MANIFEST = json.loads((PROJ / "blocks" / "manifest.json").read_text())
+
+
+def git_sha():
+    """Get current git SHA for versioning."""
+    try:
+        r = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                           capture_output=True, text=True, cwd=str(PROJ))
+        return r.stdout.strip()
+    except Exception:
+        return "unknown"
+
+
+def git_skill_shas():
+    """Get last-modified SHA for each auditing skill."""
+    shas = {}
+    for name, path in TOOLS.items():
+        try:
+            r = subprocess.run(["git", "log", "-1", "--format=%h", "--", str(path)],
+                               capture_output=True, text=True, cwd=str(PROJ))
+            shas[name] = r.stdout.strip()
+        except Exception:
+            shas[name] = "unknown"
+    return shas
 
 
 def parse_block_range(spec):
@@ -60,7 +83,7 @@ def parse_block_range(spec):
 
 # === Phase 1: Render Tests ===
 
-def run_render_tests(blocks, round_dir):
+def run_render_tests(blocks, round_dir, block_set):
     """Run test-viz.py on each block, collect screenshots and pass/fail."""
     ss_dir = round_dir / "screenshots"
     ss_dir.mkdir(parents=True, exist_ok=True)
@@ -68,7 +91,7 @@ def run_render_tests(blocks, round_dir):
 
     for b in blocks:
         bid = b["id"]
-        html_path = PROJ / "blocks" / "v1" / f"{bid}.html"
+        html_path = PROJ / "blocks" / block_set / f"{bid}.html"
         ss_path = ss_dir / f"{bid}.png"
         wait = b.get("wait_for", "svg")
 
@@ -165,14 +188,14 @@ def run_single_audit(bid, tool_name, skill_path, screenshot_path, html_path, aud
     return ("fail", bid, tool_name, "no output")
 
 
-def run_audits(blocks, render_results, round_dir, parallel, model):
+def run_audits(blocks, render_results, round_dir, parallel, model, block_set):
     """Run all audit tools on all blocks."""
     tasks = []
     for b in blocks:
         bid = b["id"]
         rr = render_results.get(bid, {})
         ss = rr.get("screenshot")
-        html_path = PROJ / "blocks" / "v1" / f"{bid}.html"
+        html_path = PROJ / "blocks" / block_set / f"{bid}.html"
         audit_dir = round_dir / "audits" / bid
         audit_dir.mkdir(parents=True, exist_ok=True)
 
@@ -209,7 +232,7 @@ def run_audits(blocks, render_results, round_dir, parallel, model):
 
 # === Phase 3: Aggregate Scores ===
 
-def aggregate(blocks, render_results, round_dir, round_num):
+def aggregate(blocks, render_results, round_dir, round_num, block_set, model):
     """Read audit JSONs, compute composites, compare to anchors."""
     anchors = {}
     if ANCHORS_FILE.exists():
@@ -257,20 +280,24 @@ def aggregate(blocks, render_results, round_dir, round_num):
     out.write_text(json.dumps(scores, indent=2, ensure_ascii=False))
 
     # Append to history
-    history_path = OUTPUT_DIR / "history.json"
     history = {"rounds": []}
-    if history_path.exists():
+    if HISTORY_FILE.exists():
         try:
-            history = json.loads(history_path.read_text())
+            history = json.loads(HISTORY_FILE.read_text())
         except json.JSONDecodeError:
             pass
 
     history["rounds"].append({
         "round": round_num,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "git_sha": git_sha(),
+        "skill_shas": git_skill_shas(),
+        "block_set": block_set,
+        "model": model,
         "blocks": scores
     })
-    history_path.write_text(json.dumps(history, indent=2, ensure_ascii=False))
+    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    HISTORY_FILE.write_text(json.dumps(history, indent=2, ensure_ascii=False))
 
     # Summary
     composites = [s["composite"] for s in scores.values() if s["composite"] is not None]
@@ -292,8 +319,7 @@ def aggregate(blocks, render_results, round_dir, round_num):
 
 def generate_report(round_dir, round_num):
     """Generate a D3 heatmap of audit results."""
-    history_path = OUTPUT_DIR / "history.json"
-    history = json.loads(history_path.read_text())
+    history = json.loads(HISTORY_FILE.read_text())
 
     report_html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -317,12 +343,14 @@ def generate_report(round_dir, round_num):
 </head>
 <body>
 <h1><b>Audit Pipeline</b> — Round {round_num}</h1>
-<p class="meta">Generated {time.strftime("%Y-%m-%d %H:%M")}</p>
+<p class="meta">Generated {time.strftime("%Y-%m-%d %H:%M")} · <span id="meta-info"></span></p>
 <div id="chart"></div>
 <script>
 const history = {json.dumps(history, ensure_ascii=False)};
 const current = history.rounds[history.rounds.length - 1];
 const prev = history.rounds.length > 1 ? history.rounds[history.rounds.length - 2] : null;
+document.getElementById("meta-info").textContent =
+  `${{current.block_set || "v1"}} blocks · git ${{current.git_sha || "?"}} · ${{current.model || "sonnet"}}`;
 const dims = ["render", "polish", "level", "stress", "scope", "composite"];
 const dimLabels = ["Render", "Polish", "Level", "Stress", "Scope", "Composite"];
 const blocks = Object.keys(current.blocks).sort();
@@ -420,11 +448,11 @@ dims.forEach((dim, col) => {{
 def main():
     parser = argparse.ArgumentParser(description="Audit pipeline for D3 Power Tools blocks")
     parser.add_argument("--blocks", default="85-93", help="Block range, e.g. '85-93' or '1-105'")
+    parser.add_argument("--block-set", default="v1", help="Block set: 'v0', 'v0/gem', or 'v1'")
     parser.add_argument("--round", type=int, default=None, help="Round number (auto-increments)")
     parser.add_argument("--skip-render", action="store_true", help="Reuse previous screenshots")
     parser.add_argument("--parallel", type=int, default=4, help="Max parallel audit subprocesses")
     parser.add_argument("--model", default="sonnet", help="Model for audit subprocesses")
-    parser.add_argument("--persist", action="store_true", help="Copy results to git-tracked file")
     args = parser.parse_args()
 
     blocks = parse_block_range(args.blocks)
@@ -432,13 +460,24 @@ def main():
         print(f"No blocks match range '{args.blocks}'")
         sys.exit(1)
 
+    # Verify block set directory exists
+    block_set_dir = PROJ / "blocks" / args.block_set
+    if not block_set_dir.is_dir():
+        print(f"Block set directory not found: {block_set_dir}")
+        sys.exit(1)
+
+    # Filter to blocks that exist in this set
+    existing = [b for b in blocks if (block_set_dir / f"{b['id']}.html").exists()]
+    if len(existing) < len(blocks):
+        print(f"Note: {len(blocks) - len(existing)} blocks not in {args.block_set}, running {len(existing)}")
+    blocks = existing
+
     # Determine round number
-    history_path = OUTPUT_DIR / "history.json"
     if args.round:
         round_num = args.round
-    elif history_path.exists():
+    elif HISTORY_FILE.exists():
         try:
-            h = json.loads(history_path.read_text())
+            h = json.loads(HISTORY_FILE.read_text())
             round_num = max((r["round"] for r in h["rounds"]), default=0) + 1
         except (json.JSONDecodeError, KeyError):
             round_num = 1
@@ -448,10 +487,11 @@ def main():
     round_dir = OUTPUT_DIR / f"round-{round_num}"
     round_dir.mkdir(parents=True, exist_ok=True)
 
+    sha = git_sha()
     print(f"=== Audit Pipeline Round {round_num} ===")
-    print(f"Blocks: {args.blocks} ({len(blocks)} blocks)")
+    print(f"Blocks: {args.blocks} ({len(blocks)} blocks, set: {args.block_set})")
     print(f"Tools: {', '.join(TOOLS.keys())}")
-    print(f"Model: {args.model}, parallel: {args.parallel}\n")
+    print(f"Model: {args.model}, parallel: {args.parallel}, git: {sha}\n")
 
     # Phase 1
     if args.skip_render:
@@ -459,7 +499,6 @@ def main():
         rr_path = prev_round / "render-results.json"
         if rr_path.exists():
             render_results = json.loads(rr_path.read_text())
-            # Copy screenshots
             ss_src = prev_round / "screenshots"
             ss_dst = round_dir / "screenshots"
             ss_dst.mkdir(parents=True, exist_ok=True)
@@ -468,30 +507,27 @@ def main():
             print(f"Phase 1: Reusing {len(render_results)} render results from round {round_num - 1}\n")
         else:
             print("Phase 1: No previous render results, running tests...")
-            render_results = run_render_tests(blocks, round_dir)
+            render_results = run_render_tests(blocks, round_dir, args.block_set)
     else:
         print("Phase 1: Render tests")
-        render_results = run_render_tests(blocks, round_dir)
+        render_results = run_render_tests(blocks, round_dir, args.block_set)
 
     # Phase 2
     print("Phase 2: Audit evaluations")
-    run_audits(blocks, render_results, round_dir, args.parallel, args.model)
+    run_audits(blocks, render_results, round_dir, args.parallel, args.model, args.block_set)
 
     # Phase 3
     print("Phase 3: Aggregation")
-    scores = aggregate(blocks, render_results, round_dir, round_num)
+    aggregate(blocks, render_results, round_dir, round_num, args.block_set, args.model)
 
     # Phase 4
     print("\nPhase 4: Report")
     generate_report(round_dir, round_num)
 
-    if args.persist:
-        PERSIST_FILE.write_text((OUTPUT_DIR / "history.json").read_text())
-        print(f"  Persisted to {PERSIST_FILE}")
-
     print(f"\n=== Done ===")
     print(f"Results: {round_dir}")
     print(f"Report:  {round_dir / 'report.html'}")
+    print(f"History: {HISTORY_FILE}")
 
 
 if __name__ == "__main__":

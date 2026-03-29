@@ -6,13 +6,13 @@ Measures whether skills improve Claude's D3 output by running each prompt
 with and without skills, then comparing render success and structural quality.
 
 Usage:
-  python3 meta/evals/run-evals.py                           # run all evals
-  python3 meta/evals/run-evals.py --id scatter-10k-brush    # run one eval
-  python3 meta/evals/run-evals.py --baseline-only           # skip with-skill runs
-  python3 meta/evals/run-evals.py --skill-only              # skip baseline runs
-  python3 meta/evals/run-evals.py --runs 3                  # multiple runs for variance
+  python3 evals/run-evals.py                           # run all evals
+  python3 evals/run-evals.py --id scatter-10k-brush    # run one eval
+  python3 evals/run-evals.py --baseline-only           # skip with-skill runs
+  python3 evals/run-evals.py --skill-only              # skip baseline runs
+  python3 evals/run-evals.py --runs 3                  # multiple runs for variance
 
-Results go to meta/evals/results/ (configurable in eval.config.json).
+Results go to evals/results/ (configurable in eval.config.json).
 """
 
 import argparse
