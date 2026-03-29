@@ -1,10 +1,9 @@
 """Staging directory helpers for block generation.
 
-Creates per-block staging dirs with symlinked skills so Claude/Gemini
+Creates per-block staging dirs with copied skills so Claude/Gemini
 discover them via native mechanisms (.claude/CLAUDE.md and .gemini/skills/).
 """
 import json
-import os
 import re
 import shutil
 from pathlib import Path
@@ -36,7 +35,7 @@ def create_staging_dir(
     *,
     all_skills: bool = False,
 ) -> Path:
-    """Create a staging directory with symlinked skills.
+    """Create a staging directory with copied skills.
 
     Args:
         bid: Block ID (used as directory name).
@@ -55,23 +54,23 @@ def create_staging_dir(
 
     skill_names = _all_skill_names(proj) if all_skills else skills
 
-    # Symlink skills for Claude (skills/{name}/SKILL.md)
+    # Copy skills for Claude (skills/{name}/SKILL.md)
     for name in skill_names:
         src = proj / CLAUDE_SKILLS_DIR / name / "SKILL.md"
         if not src.exists():
             continue
         dest_dir = staging / CLAUDE_SKILLS_DIR / name
         dest_dir.mkdir(parents=True)
-        os.symlink(src, dest_dir / "SKILL.md")
+        shutil.copy2(src, dest_dir / "SKILL.md")
 
-    # Symlink skills for Gemini (.gemini/skills/{name}/SKILL.md)
+    # Copy skills for Gemini (.gemini/skills/{name}/SKILL.md)
     for name in skill_names:
         src = proj / GEMINI_SKILLS_DIR / name / "SKILL.md"
         if not src.exists():
             continue
         dest_dir = staging / GEMINI_SKILLS_DIR / name
         dest_dir.mkdir(parents=True)
-        os.symlink(src, dest_dir / "SKILL.md")
+        shutil.copy2(src, dest_dir / "SKILL.md")
 
     # Write .claude/CLAUDE.md
     _write_claude_md(staging, skill_names, proj)

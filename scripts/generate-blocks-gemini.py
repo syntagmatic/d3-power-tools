@@ -65,21 +65,22 @@ def run_block(idx, block):
             cwd=str(staging),
         )
     except subprocess.TimeoutExpired:
+        cleanup_staging_dir(staging)
         print(f"[{idx}] TIMEOUT {bid}")
         return ("fail", bid, "timeout")
-    finally:
-        cleanup_staging_dir(staging)
 
     elapsed = time.time() - t0
 
     # Check for rate limit
     if "429" in result.stderr or "RESOURCE_EXHAUSTED" in result.stderr:
+        cleanup_staging_dir(staging)
         print(f"[{idx}] THROTTLED {bid} ({elapsed:.0f}s)")
         return ("throttle", bid)
 
-    # Copy from staging dir to output dir
+    # Copy from staging dir to output dir, then clean up
     if staging_outfile.exists():
         shutil.copy2(staging_outfile, outfile)
+    cleanup_staging_dir(staging)
 
     # Check output file
     if outfile.exists() and outfile.stat().st_size > 0:
