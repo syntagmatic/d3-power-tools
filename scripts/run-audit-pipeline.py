@@ -31,13 +31,13 @@ SCREENSHOT_DIR = PROJ / "temp" / "audit-screenshots"
 REPORT_FILE = PROJ / "evals" / "report.html"
 
 TOOLS = {
-    "polish": PROJ / "meta" / "visual-critic" / "SKILL.md",
-    "level":  PROJ / "meta" / "encoding-integrity" / "SKILL.md",
-    "stress": PROJ / "meta" / "stress-test" / "SKILL.md",
-    "scope":  PROJ / "meta" / "cognitive-load" / "SKILL.md",
+    "visual_critic":       PROJ / "meta" / "visual-critic" / "SKILL.md",
+    "encoding_integrity":  PROJ / "meta" / "encoding-integrity" / "SKILL.md",
+    "stress_test":         PROJ / "meta" / "stress-test" / "SKILL.md",
+    "cognitive_load":      PROJ / "meta" / "cognitive-load" / "SKILL.md",
 }
 
-WEIGHTS = {"polish": 0.30, "level": 0.25, "scope": 0.25, "stress": 0.20}
+WEIGHTS = {"visual_critic": 0.30, "encoding_integrity": 0.25, "cognitive_load": 0.25, "stress_test": 0.20}
 
 MODEL_IDS = {
     "sonnet": "claude-sonnet-4-6",
@@ -122,7 +122,7 @@ def run_render(blocks, block_set):
 # === Phase 2: Audit ===
 
 def build_prompt(tool_name, skill_content, ss_path, html_path, out_path):
-    if tool_name == "stress":
+    if tool_name == "stress_test":
         fmt = '{"score":<1-10>,"flags":["<failed_check_names>"],"note":"<1 sentence>"}'
     else:
         fmt = '{"score":<1-10>,"note":"<1 sentence what works or doesn\'t>"}'
@@ -230,7 +230,7 @@ def write_run(blocks, render_results, audit_results, block_set, model, tag):
         for tool in TOOLS:
             if tool in audits:
                 entry[tool] = audits[tool]["score"]
-                if tool == "stress":
+                if tool == "stress_test":
                     flags = audits[tool].get("flags", [])
                     if flags:
                         entry["flags"] = flags
@@ -325,8 +325,8 @@ def generate_report():
 <div id="chart"></div>
 <script>
 const runs = {json.dumps(runs, ensure_ascii=False)};
-const dims = ["render","polish","level","stress","scope","composite"];
-const labels = ["Render","Polish","Level","Stress","Scope","Comp"];
+const dims = ["render","visual_critic","encoding_integrity","stress_test","cognitive_load","composite"];
+const labels = ["Render","Visual Critic","Encoding","Stress","Cognitive","Comp"];
 const sel = document.getElementById("run-select");
 runs.forEach((r,i) => {{
   const o = document.createElement("option");
