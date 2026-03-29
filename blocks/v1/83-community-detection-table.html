@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Community Detection with Linked Table</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #fafafa; color: #222; }
+  .header { padding: 12px 24px 8px; border-bottom: 1px solid #e0e0e0; }
+  h1 { font-size: 1.15rem; font-weight: 600; letter-spacing: -0.01em; }
+  .subtitle { font-size: 0.78rem; color: #666; margin-top: 2px; }
+  .layout { display: flex; height: calc(100vh - 56px); }
+  .network-panel { flex: 0 0 58%; position: relative; overflow: hidden; border-right: 1px solid #e0e0e0; }
+  .table-panel { flex: 1; overflow-y: auto; overflow-x: hidden; }
+  svg { display: block; }
+  .hull { pointer-events: none; }
+  .node { cursor: pointer; }
+  .link { stroke: #bbb; stroke-opacity: 0.35; }
+
+  /* Table */
+  table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 0.76rem; }
+  thead { position: sticky; top: 0; z-index: 2; }
+  th {
+    background: #f3f3f3; border-bottom: 2px solid #ddd; padding: 7px 10px;
+    text-align: left; font-weight: 600; cursor: pointer; user-select: none;
+    white-space: nowrap; font-size: 0.72rem; text-transform: uppercase;
+    letter-spacing: 0.04em; color: #555;
+  }
+  th:hover { background: #eaeaea; }
+  th.num { text-align: right; }
+  th .arrow { font-size: 0.6rem; margin-left: 3px; opacity: 0.6; }
+  td { padding: 5px 10px; border-bottom: 1px solid #eee; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: "SF Mono", Monaco, "Cascadia Code", monospace; font-size: 0.72rem; }
+  tr.data-row { background: #fff; transition: background 0.15s; }
+  tr.data-row:nth-child(even of .data-row) { background: #fafafa; }
+  tr.data-row:hover { background: #eef4ff; }
+  tr.data-row.highlighted { background: #d2e3fc; }
+  tr.data-row.dimmed { opacity: 0.35; }
+  tr.group-header { background: #eaeaea; cursor: pointer; transition: background 0.15s; }
+  tr.group-header td { font-weight: 600; padding: 7px 10px; font-size: 0.78rem; }
+  tr.group-header:hover { background: #ddd; }
+  tr.group-header.highlighted { background: #c9daf8; }
+  .comm-dot {
+    display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+    margin-right: 5px; vertical-align: middle;
+  }
+  .bar-cell { position: relative; min-width: 80px; }
+  .bar-fill {
+    position: absolute; left: 0; top: 2px; bottom: 2px;
+    border-radius: 2px; opacity: 0.18;
+  }
+  .bar-label { position: relative; z-index: 1; }
+  .tooltip {
+    position: absolute; pointer-events: none; background: rgba(255,255,255,0.96);
+    border: 1px solid #ccc; border-radius: 4px; padding: 6px 10px;
+    font-size: 0.72rem; line-height: 1.45; box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    display: none; z-index: 10;
+  }
+  .tooltip b { font-weight: 600; }
+  [aria-live] { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Community Detection with Linked Table</h1>
+  <p class="subtitle" id="subtitle"></p>
+</div>
+<div class="layout">
+  <div class="network-panel" id="net-panel">
+    <svg id="network"></svg>
+    <div class="tooltip" id="tip"></div>
+  </div>
+  <div class="table-panel" id="table-panel">
+    <table id="table" role="grid">
+      <thead><tr id="thead-row"></tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+</div>
+<div aria-live="polite" id="live-region"></div>
+<script>
+(() => {
+  // Tol Bright palette (colorblind-safe, 5 communities)
+  const palette = ["#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE"];
+  const commNames = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"];
+
+  // --- Deterministic RNG ---
+  const rng = d3.randomLcg(42);
+  const rand = () => rng();
+
+  // --- Generate synthetic network: 5 communities, 100 nodes ---
+  const commSizes = [24, 22, 20, 18, 16];
+  const nodes = [];
+  let id = 0;
+  commSizes.forEach((size, ci) => {
+    for (let i = 0; i < size; i++) {
+      nodes.push({ id: id++, label: `${commNames[ci][0]}${i + 1}`, community: ci, degree: 0, betweenness: 0 });
+    }
+  });
+
+  const links = [];
+  const linkSet = new Set();
+  const addLink = (s, t) => {
+    if (s === t) return false;
+    const key = s < t ? `${s}-${t}` : `${t}-${s}`;
+    if (linkSet.has(key)) return false;
+    linkSet.add(key);
+    links.push({ source: s, target: t });
+    nodes[s].degree++;
+    nodes[t].degree++;
+    return true;
+  };
+
+  // Intra-community edges: dense connectivity
+  const groups = commSizes.map((_, ci) => nodes.filter(n => n.community === ci));
+  for (const grp of groups) {
+    for (let i = 0; i < grp.length; i++) {
+      for (let j = i + 1; j < grp.length; j++) {
+        if (rand() < 0.38) addLink(grp[i].id, grp[j].id);
+      }
+    }
+  }
+  // Inter-community edges: sparse bridges
+  for (let i = 0; i < 50; i++) {
+    const ci = Math.floor(rand() * 5);
+    let cj = Math.floor(rand() * 4);
+    if (cj >= ci) cj++;
+    const g1 = groups[ci], g2 = groups[cj];
+    addLink(g1[Math.floor(rand() * g1.length)].id, g2[Math.floor(rand() * g2.length)].id);
+  }
+
+  // --- Approximate betweenness centrality (Brandes, 25 BFS samples) ---
+  const adj = nodes.map(() => []);
+  links.forEach(e => { adj[e.source].push(e.target); adj[e.target].push(e.source); });
+  const btwn = new Float64Array(nodes.length);
+  const nSamples = 25;
+  for (let s = 0; s < nSamples; s++) {
+    const src = Math.floor(rand() * nodes.length);
+    const dist = new Int32Array(nodes.length).fill(-1);
+    const sigma = new Float64Array(nodes.length);
+    const delta = new Float64Array(nodes.length);
+    dist[src] = 0;
+    sigma[src] = 1;
+    const queue = [src], order = [];
+    const preds = nodes.map(() => []);
+    while (queue.length) {
+      const v = queue.shift();
+      order.push(v);
+      for (const w of adj[v]) {
+        if (dist[w] < 0) { dist[w] = dist[v] + 1; queue.push(w); }
+        if (dist[w] === dist[v] + 1) { sigma[w] += sigma[v]; preds[w].push(v); }
+      }
+    }
+    for (let i = order.length - 1; i >= 0; i--) {
+      const w = order[i];
+      for (const v of preds[w]) delta[v] += (sigma[v] / sigma[w]) * (1 + delta[w]);
+      if (w !== src) btwn[w] += delta[w];
+    }
+  }
+  const maxBtwn = d3.max(btwn) || 1;
+  nodes.forEach((n, i) => { n.betweenness = +(btwn[i] / nSamples).toFixed(3); });
+
+  // Modularity
+  const m2 = links.length * 2;
+  let Q = 0;
+  for (const e of links) {
+    if (nodes[e.source].community === nodes[e.target].community) {
+      Q += 1 - (nodes[e.source].degree * nodes[e.target].degree) / m2;
+    }
+  }
+  Q = +(Q / links.length).toFixed(2);
+
+  document.getElementById("subtitle").textContent =
+    `${nodes.length} nodes \u00b7 ${links.length} edges \u00b7 ${commSizes.length} communities \u00b7 modularity Q = ${Q}`;
+
+  // --- Dispatch for linked views ---
+  const dispatch = d3.dispatch("highlightNode", "highlightCommunity", "clear");
+
+  // --- Network layout ---
+  const netPanel = document.getElementById("net-panel");
+  const W = netPanel.clientWidth || 700;
+  const H = netPanel.clientHeight || 740;
+  const svg = d3.select("#network").attr("width", W).attr("height", H);
+  const tip = d3.select("#tip");
+
+  const rScale = d3.scaleSqrt().domain(d3.extent(nodes, d => d.degree)).range([3.5, 11]);
+  const btwnBarScale = d3.scaleLinear().domain([0, d3.max(nodes, d => d.betweenness)]).range([0, 100]);
+
+  // Simulation nodes/links (copies so originals stay clean)
+  const simNodes = nodes.map(d => ({ ...d }));
+  const simLinks = links.map(d => ({ source: d.source, target: d.target }));
+
+  // Community centroids for clustering force
+  const commCentroids = () => {
+    const cx = new Float64Array(5), cy = new Float64Array(5), cn = new Float64Array(5);
+    for (const n of simNodes) {
+      cx[n.community] += n.x || 0;
+      cy[n.community] += n.y || 0;
+      cn[n.community]++;
+    }
+    return { x: cx.map((v, i) => v / (cn[i] || 1)), y: cy.map((v, i) => v / (cn[i] || 1)) };
+  };
+
+  // Custom clustering force: gently pull toward community centroid
+  const forceCluster = () => {
+    const strength = 0.04;
+    let ns;
+    const force = (alpha) => {
+      const c = commCentroids();
+      for (const n of ns) {
+        n.vx += (c.x[n.community] - n.x) * strength * alpha;
+        n.vy += (c.y[n.community] - n.y) * strength * alpha;
+      }
+    };
+    force.initialize = (nodes) => { ns = nodes; };
+    return force;
+  };
+
+  const simulation = d3.forceSimulation(simNodes)
+    .force("link", d3.forceLink(simLinks).id(d => d.id)
+      .distance(d => d.source.community === d.target.community ? 28 : 70)
+      .strength(d => d.source.community === d.target.community ? 0.35 : 0.02))
+    .force("charge", d3.forceManyBody().strength(-60).distanceMax(200))
+    .force("center", d3.forceCenter(W / 2, H / 2))
+    .force("collide", d3.forceCollide(d => rScale(d.degree) + 1.5))
+    .force("cluster", forceCluster())
+    .on("tick", ticked);
+
+  // SVG layers: hulls behind links behind nodes
+  const hullG = svg.append("g").attr("class", "hull-layer");
+  const linkG = svg.append("g").attr("class", "link-layer");
+  const nodeG = svg.append("g").attr("class", "node-layer");
+
+  const linkEls = linkG.selectAll("line").data(simLinks).join("line")
+    .attr("class", "link")
+    .attr("stroke-width", 0.7);
+
+  const nodeEls = nodeG.selectAll("circle").data(simNodes, d => d.id).join("circle")
+    .attr("class", "node")
+    .attr("r", d => rScale(d.degree))
+    .attr("fill", d => palette[d.community])
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 1.2)
+    .call(d3.drag()
+      .on("start", (e, d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on("drag", (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on("end", (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; }));
+
+  // Pointer events on nodes
+  nodeEls
+    .on("pointerenter", (e, d) => {
+      tip.style("display", "block")
+        .html(`<b>${d.label}</b> &middot; ${commNames[d.community]}<br>Degree: ${d.degree}<br>Betweenness: ${d.betweenness.toFixed(3)}`);
+    })
+    .on("pointermove", (e) => {
+      const r = netPanel.getBoundingClientRect();
+      tip.style("left", (e.clientX - r.left + 14) + "px")
+        .style("top", (e.clientY - r.top - 10) + "px");
+    })
+    .on("pointerleave", () => { tip.style("display", "none"); })
+    .on("pointerdown", (e, d) => { e.stopPropagation(); dispatch.call("highlightNode", null, d.id); });
+
+  svg.on("pointerdown", () => dispatch.call("clear"));
+
+  function ticked() {
+    linkEls
+      .attr("x1", d => d.source.x).attr("y1", d => d.source.y)
+      .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
+    nodeEls.attr("cx", d => d.x).attr("cy", d => d.y);
+    drawHulls();
+  }
+
+  // Expand hull points outward from centroid for padding
+  function expandHull(pts, pad) {
+    if (pts.length < 3) return pts;
+    const cx = d3.mean(pts, p => p[0]);
+    const cy = d3.mean(pts, p => p[1]);
+    return pts.map(([x, y]) => {
+      const dx = x - cx, dy = y - cy;
+      const len = Math.sqrt(dx * dx + dy * dy) || 1;
+      return [x + (dx / len) * pad, y + (dy / len) * pad];
+    });
+  }
+
+  let highlightedComm = null;
+  function drawHulls(hComm) {
+    if (hComm !== undefined) highlightedComm = hComm;
+    hullG.selectAll("path").remove();
+    for (let ci = 0; ci < 5; ci++) {
+      const pts = simNodes.filter(n => n.community === ci).map(n => [n.x, n.y]);
+      if (pts.length < 3) continue;
+      const hull = d3.polygonHull(pts);
+      if (!hull) continue;
+      const expanded = expandHull(hull, 14);
+      hullG.append("path")
+        .attr("d", `M${expanded.map(p => p.join(",")).join("L")}Z`)
+        .attr("fill", palette[ci])
+        .attr("fill-opacity", ci === highlightedComm ? 0.22 : 0.07)
+        .attr("stroke", palette[ci])
+        .attr("stroke-opacity", ci === highlightedComm ? 0.5 : 0.15)
+        .attr("stroke-width", ci === highlightedComm ? 2 : 1)
+        .attr("stroke-linejoin", "round")
+        .style("pointer-events", "none");
+    }
+  }
+
+  // --- Table ---
+  const columns = [
+    { key: "label", label: "Node", type: "string" },
+    { key: "degree", label: "Degree", type: "number", format: d3.format("d") },
+    { key: "betweenness", label: "Betweenness", type: "number", format: d3.format(".3f"), bar: true },
+    { key: "community", label: "Community", type: "category" }
+  ];
+
+  const thead = d3.select("#thead-row");
+  const theadCells = thead.selectAll("th").data(columns).join("th")
+    .attr("class", d => d.type === "number" ? "num" : "")
+    .text(d => d.label)
+    .on("pointerdown", (e, col) => toggleSort(col));
+
+  let sortKey = "betweenness", sortDir = -1; // default: betweenness descending
+
+  function toggleSort(col) {
+    if (sortKey === col.key) sortDir *= -1;
+    else { sortKey = col.key; sortDir = col.type === "number" ? -1 : 1; }
+    theadCells.select(".arrow").remove();
+    theadCells.filter(d => d.key === sortKey)
+      .append("span").attr("class", "arrow").text(sortDir > 0 ? " \u25B2" : " \u25BC");
+    renderTable();
+  }
+
+  const tbody = d3.select("#tbody");
+
+  function renderTable() {
+    tbody.selectAll("*").remove();
+    for (let ci = 0; ci < 5; ci++) {
+      let group = [...nodes.filter(n => n.community === ci)];
+      group.sort((a, b) => {
+        const cmp = sortKey === "label"
+          ? d3.ascending(a[sortKey], b[sortKey])
+          : d3.ascending(a[sortKey], b[sortKey]);
+        return cmp * sortDir;
+      });
+
+      // Community group header
+      const hdr = tbody.append("tr").attr("class", "group-header").attr("data-comm", ci);
+      hdr.append("td").attr("colspan", columns.length)
+        .html(`<span class="comm-dot" style="background:${palette[ci]}"></span>` +
+          `${commNames[ci]} &mdash; ${group.length} nodes, avg degree ${d3.format(".1f")(d3.mean(group, d => d.degree))}`);
+      hdr.on("pointerdown", () => dispatch.call("highlightCommunity", null, ci));
+
+      // Data rows
+      for (const node of group) {
+        const tr = tbody.append("tr").attr("class", "data-row").attr("data-id", node.id);
+        for (const col of columns) {
+          const td = tr.append("td");
+          if (col.type === "number" && col.bar) {
+            td.attr("class", "num bar-cell");
+            td.append("div").attr("class", "bar-fill")
+              .style("width", btwnBarScale(node[col.key]) + "%")
+              .style("background", palette[node.community]);
+            td.append("span").attr("class", "bar-label").text(col.format(node[col.key]));
+          } else if (col.type === "number") {
+            td.attr("class", "num").text(col.format(node[col.key]));
+          } else if (col.type === "category") {
+            td.html(`<span class="comm-dot" style="background:${palette[node.community]}"></span>${commNames[node.community]}`);
+          } else {
+            td.text(node[col.key]);
+          }
+        }
+        tr.on("pointerdown", (e) => { e.stopPropagation(); dispatch.call("highlightNode", null, node.id); });
+      }
+    }
+  }
+
+  // Initial sort indicator
+  theadCells.filter(d => d.key === sortKey)
+    .append("span").attr("class", "arrow").text(sortDir > 0 ? " \u25B2" : " \u25BC");
+  renderTable();
+
+  // --- Dispatch handlers ---
+  dispatch.on("highlightNode", (nodeId) => {
+    const nd = simNodes.find(n => n.id === nodeId);
+    const neighborSet = new Set();
+    simLinks.forEach(l => {
+      if (l.source.id === nodeId) neighborSet.add(l.target.id);
+      if (l.target.id === nodeId) neighborSet.add(l.source.id);
+    });
+
+    nodeEls.transition().duration(250)
+      .attr("opacity", d => d.id === nodeId || neighborSet.has(d.id) ? 1 : 0.12)
+      .attr("stroke", d => d.id === nodeId ? "#222" : "#fff")
+      .attr("stroke-width", d => d.id === nodeId ? 2.5 : 1.2)
+      .attr("r", d => d.id === nodeId ? rScale(d.degree) + 3 : rScale(d.degree));
+
+    linkEls.transition().duration(250)
+      .attr("stroke-opacity", d =>
+        d.source.id === nodeId || d.target.id === nodeId ? 0.65 : 0.03)
+      .attr("stroke", d =>
+        d.source.id === nodeId || d.target.id === nodeId ? "#666" : "#bbb");
+
+    drawHulls(null);
+
+    // Table: highlight row, dim others
+    tbody.selectAll("tr.data-row")
+      .classed("highlighted", function() { return +this.dataset.id === nodeId; })
+      .classed("dimmed", function() { return +this.dataset.id !== nodeId; });
+    tbody.selectAll("tr.group-header").classed("highlighted", false);
+    const row = tbody.select(`tr[data-id="${nodeId}"]`);
+    if (row.node()) row.node().scrollIntoView({ block: "nearest", behavior: "smooth" });
+
+    const n = nodes[nodeId];
+    document.getElementById("live-region").textContent =
+      `Selected ${n.label}, community ${commNames[n.community]}, degree ${n.degree}, betweenness ${n.betweenness}`;
+  });
+
+  dispatch.on("highlightCommunity", (ci) => {
+    nodeEls.transition().duration(250)
+      .attr("opacity", d => d.community === ci ? 1 : 0.1)
+      .attr("stroke", d => d.community === ci ? "#222" : "#fff")
+      .attr("stroke-width", d => d.community === ci ? 1.5 : 1.2)
+      .attr("r", d => rScale(d.degree));
+
+    linkEls.transition().duration(250)
+      .attr("stroke-opacity", d =>
+        d.source.community === ci && d.target.community === ci ? 0.5 : 0.02)
+      .attr("stroke", d =>
+        d.source.community === ci && d.target.community === ci ? "#888" : "#bbb");
+
+    drawHulls(ci);
+
+    tbody.selectAll("tr.data-row")
+      .classed("highlighted", false)
+      .classed("dimmed", function() {
+        const nid = +this.dataset.id;
+        return nodes[nid].community !== ci;
+      });
+    tbody.selectAll("tr.group-header")
+      .classed("highlighted", function() { return +this.dataset.comm === ci; });
+
+    // Scroll to community header
+    const hdr = tbody.select(`tr[data-comm="${ci}"]`);
+    if (hdr.node()) hdr.node().scrollIntoView({ block: "start", behavior: "smooth" });
+
+    document.getElementById("live-region").textContent =
+      `Highlighted community ${commNames[ci]}, ${groups[ci].length} nodes`;
+  });
+
+  dispatch.on("clear", () => {
+    nodeEls.transition().duration(200)
+      .attr("opacity", 1).attr("stroke", "#fff").attr("stroke-width", 1.2)
+      .attr("r", d => rScale(d.degree));
+    linkEls.transition().duration(200)
+      .attr("stroke-opacity", 0.35).attr("stroke", "#bbb");
+    drawHulls(null);
+    tbody.selectAll("tr").classed("highlighted", false).classed("dimmed", false);
+  });
+})();
+</script>
+</body>
+</html>
