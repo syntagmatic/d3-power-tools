@@ -24,9 +24,9 @@ Deleted 3 redundant examples (966 lines): color-compositing (compositing-gallery
 
 Renamed all meta skills for the power-tool theme. Auditing skills kept separate (research-backed): polish-tool (design), level-tool (honesty), stress-tool (robustness), scope-tool (clarity). Merged adversarial-eval + skill-eval → calibrate-tool. Code guides: square-tool (style), jig-tool (architecture). check-skill merged into sharpen-tool.
 
-### 5. Clean up archive
+### ~~5. Clean up archive~~ ✓ Done
 
-`notes/archive/` has 178K of process logs. Lessons already distilled in CONVICTIONS.md. Delete the directory; content lives in git.
+Deleted `notes/archive/` (178K, 7 files). Lessons in CONVICTIONS.md, content in git history.
 
 ---
 
