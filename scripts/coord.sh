@@ -219,6 +219,19 @@ cmd_files() {
   jq --argjson files "$files_json" --arg now "$(now_iso)" \
     '.files_active = $files | .heartbeat = $now' "$f" > "$tmp"
   mv "$tmp" "$f"
+
+  # Warn if any claimed file overlaps with another session
+  for other in "$SESSIONS"/*.json; do
+    [ -f "$other" ] || continue
+    local other_sid
+    other_sid=$(jq -r '.session_id' "$other")
+    [ "$other_sid" = "$sid" ] && continue
+    for arg in "$@"; do
+      if jq -e --arg p "$arg" '.files_active | index($p)' "$other" >/dev/null 2>&1; then
+        printf "\033[33mWARN\033[0m %s also claimed by %s\n" "$arg" "$other_sid" >&2
+      fi
+    done
+  done
 }
 
 cmd_done() {
@@ -453,35 +466,54 @@ gc_stale() {
     if [ "$env" != "container" ]; then
       kill -0 "$pid" 2>/dev/null || dead=true
     else
-      [ "$age" -gt 30 ] && dead=true
+      # Containers can't PID-check across hosts; use longer timeout
+      [ "$age" -gt 120 ] && dead=true
     fi
 
     if [ "$dead" = true ]; then
       [ "$quiet" != "quiet" ] && echo "Removing stale session: $sid (${age}m old)"
       rm -f "$f"
       [ -f "$TASKS_FILE" ] && release_tasks "$sid"
-      rm -f "$SESSIONS/.self."*  # clean up orphaned self files
+      # Clean up only this session's self-file, not all of them
+      for sf in "$SESSIONS"/.self.*; do
+        [ -f "$sf" ] && [ "$(cat "$sf")" = "$sid" ] && rm -f "$sf"
+      done
     fi
   done
 }
 
 # --- dispatch ---
 
+# Auto-heartbeat on any command if registered
+_maybe_heartbeat() {
+  local self_path="$SESSIONS/.self.$(wdir_hash)"
+  if [ -f "$self_path" ]; then
+    local sid f tmp
+    sid=$(cat "$self_path")
+    f=$(session_file "$sid")
+    if [ -f "$f" ]; then
+      tmp="$f.tmp.$$"
+      jq --arg now "$(now_iso)" '.heartbeat = $now' "$f" > "$tmp"
+      mv "$tmp" "$f"
+    fi
+  fi
+}
+
 case "${1:-}" in
   ensure)      shift; cmd_ensure "$@" ;;
   register)    shift; cmd_register "$@" ;;
   heartbeat)   cmd_heartbeat ;;
-  status)      shift; cmd_status "$@" ;;
-  files)       shift; cmd_files "$@" ;;
+  status)      _maybe_heartbeat; shift; cmd_status "$@" ;;
+  files)       _maybe_heartbeat; shift; cmd_files "$@" ;;
   done)        cmd_done ;;
   deregister)  cmd_deregister ;;
-  list|ls)     cmd_list ;;
-  conflicts)   cmd_conflicts ;;
-  task-add)    shift; cmd_task_add "$@" ;;
-  task-claim)  shift; cmd_task_claim "$@" ;;
-  task-done)   shift; cmd_task_done "$@" ;;
-  task-note)   shift; cmd_task_note "$@" ;;
-  task-list|tasks) cmd_task_list ;;
+  list|ls)     _maybe_heartbeat; cmd_list ;;
+  conflicts)   _maybe_heartbeat; cmd_conflicts ;;
+  task-add)    _maybe_heartbeat; shift; cmd_task_add "$@" ;;
+  task-claim)  _maybe_heartbeat; shift; cmd_task_claim "$@" ;;
+  task-done)   _maybe_heartbeat; shift; cmd_task_done "$@" ;;
+  task-note)   _maybe_heartbeat; shift; cmd_task_note "$@" ;;
+  task-list|tasks) _maybe_heartbeat; cmd_task_list ;;
   gc)          gc_stale ;;
   *)
     echo "Usage: coord.sh <command> [args...]"
