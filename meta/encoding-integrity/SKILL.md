@@ -1,9 +1,9 @@
 ---
-name: level-tool
+name: encoding-integrity
 description: "Audit D3.js visualizations for honest and robust data encoding — like a builder's level, checks if the representation is straight. Trigger words: 'level', 'check encoding', 'audit honesty', 'lie factor', 'metamorphic test'. Combines static honesty checks (zero baselines, lie factor, area encoding, dual-axis risk, binning bias) with metamorphic robustness testing (do visual properties scale correctly when data changes?)."
 ---
 
-# Level Tool
+# Encoding Integrity
 
 A visualization has encoding integrity when it faithfully represents data now AND would continue to do so with different data. This skill audits both dimensions in a single pass.
 

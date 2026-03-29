@@ -170,9 +170,9 @@ The workshop. Each tool does one job.
 
 **[visual-critic](meta/visual-critic/SKILL.md)** — Design quality. Color harmony, typographic hierarchy, whitespace, data-ink ratio, overall feel.
 
-**[level-tool](meta/level-tool/SKILL.md)** — Data honesty. Lie factor, zero baselines, metamorphic relations, data join correctness.
+**[encoding-integrity](meta/encoding-integrity/SKILL.md)** — Data honesty. Lie factor, zero baselines, metamorphic relations, data join correctness.
 
-**[stress-tool](meta/stress-tool/SKILL.md)** — Interaction robustness. Update storms, stale closures, feedback loops, transition handoff conflicts.
+**[stress-test](meta/stress-test/SKILL.md)** — Interaction robustness. Update storms, stale closures, feedback loops, transition handoff conflicts.
 
 **[scope-tool](meta/scope-tool/SKILL.md)** — Cognitive clarity. Working memory limits, animation congruence, spaghetti threshold, color overload.
 

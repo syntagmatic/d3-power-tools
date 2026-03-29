@@ -167,8 +167,8 @@ Skills for testing, evaluating, and improving other skills.
 
 #### Inspection tools
 - `meta/visual-critic/` — design quality: color harmony, typographic hierarchy, whitespace, data-ink ratio, overall feel (screenshot-based)
-- `meta/level-tool/` — data honesty: lie factor, zero baselines, dual-axis risk, metamorphic relations (scaling, permutation, subset, shift), data join correctness
-- `meta/stress-tool/` — interaction robustness: update storms, stale closures, feedback loops, transition handoff conflicts
+- `meta/encoding-integrity/` — data honesty: lie factor, zero baselines, dual-axis risk, metamorphic relations (scaling, permutation, subset, shift), data join correctness
+- `meta/stress-test/` — interaction robustness: update storms, stale closures, feedback loops, transition handoff conflicts
 - `meta/scope-tool/` — cognitive clarity: working memory limits, animation congruence, spaghetti threshold, color overload
 
 #### Workshop tools
