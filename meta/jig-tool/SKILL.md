@@ -1,11 +1,11 @@
 ---
 name: jig-tool
-description: "Architectural patterns for combining multiple D3 visualization skills into a single application. Use this skill when building any non-trivial visualization that layers Canvas rendering with SVG interaction, coordinates multiple views, sequences initialization, manages shared state, or needs a performance budget across composed concerns. Also use when the user asks about SVG vs Canvas tradeoffs, layer stacking, resize handling across mixed renderers, or how to wire brushing/zoom/animation/accessibility together in one visualization."
+description: "Architectural patterns for combining multiple D3 skills into one visualization — the jig that holds pieces in alignment. Trigger: 'jig', 'compose', 'combine skills', 'layer stack', 'multi-view architecture'. Use when layering Canvas+SVG, coordinating linked views, sequencing initialization, managing shared state, budgeting performance across composed concerns, or deciding SVG vs Canvas tradeoffs."
 ---
 
-# Cross-Skill Composition
+# Jig Tool
 
-A single chart shows one relationship. Composition lets the viewer hold multiple relationships in mind at once — brush a scatterplot and watch a histogram reshape, revealing that high-revenue companies cluster in one industry. The architecture exists to make that moment of connection feel instant and seamless. When the glue is wrong, latency breaks the cognitive link between views and the viewer sees two charts instead of one insight.
+A single chart shows one relationship. Composition lets the viewer hold multiple relationships in mind at once — brush a scatterplot and watch a histogram reshape, revealing that high-revenue companies cluster in one industry. The architecture exists to make that moment of connection feel instant and seamless. When the glue is wrong, latency breaks the cognitive link and the viewer sees two charts instead of one insight.
 
 ## The Layer Stack
 
@@ -30,7 +30,7 @@ Collapse based on complexity:
 | Hit detection on lines/paths | Add hidden hit canvas |
 | Controls, legend, or data table | Add HTML layer |
 
-All layers share identical coordinate systems. Container is `position: relative`; children `position: absolute`. Key detail: `ctx.translate(margin.left, margin.top)` once after setup so Canvas coordinates match SVG's `g` transform.
+All layers share identical coordinate systems. Container `position: relative`; children `position: absolute`. Key: `ctx.translate(margin.left, margin.top)` once so Canvas matches SVG's `g` transform.
 
 ## SVG vs Canvas Decision
 
@@ -41,21 +41,11 @@ All layers share identical coordinate systems. Container is `position: relative`
 | **5K–100K** | Canvas | Canvas + render queue |
 | **100K+** | Canvas + typed arrays | WebGL |
 
-But element count is only one factor:
-- **Interaction type**: 2K SVG circles with hover = fine. 2K with drag-to-reorder = stutter (reflow per frame).
-- **Update frequency**: Force simulation at 300 nodes redraws 60×/sec — Canvas even at low counts.
-- **Shape complexity**: 500 complex paths (geo boundaries) slower in SVG than 5000 circles.
+Element count isn't the only factor — 2K SVG circles with drag-to-reorder stutter (reflow per frame), force sims need Canvas even at 300 nodes, and 500 complex geo paths are slower in SVG than 5K circles.
 
-### The Hybrid Pattern
+**Hybrid pattern:** Canvas for data marks, SVG for interaction chrome (axes, brushes, focus rings, tooltips). Not a compromise — the optimal architecture for high counts with full accessibility.
 
-**Canvas for data marks, SVG for interaction chrome.** Not a compromise — the optimal architecture. Canvas renders per-datum marks; SVG renders axes, brushes, focus rings, tooltips. The viewer gets smooth interaction at high element counts without losing the browser's built-in accessibility and event handling for chrome elements.
-
-### The Handoff Pattern
-
-1. **Animate in Canvas** — smooth 60fps morphing
-2. **On end, render final state in SVG** — interactive, accessible
-
-Useful for layout transitions where animation needs Canvas but resting state needs SVG interactivity. The viewer experiences fluid motion, then lands in a state where every element is clickable and screen-reader-visible.
+**Handoff pattern:** Animate in Canvas (smooth 60fps), render final state in SVG (interactive, accessible). For layout transitions where motion needs Canvas but resting state needs interactivity.
 
 ## Initialization Sequence
 
@@ -72,19 +62,13 @@ Useful for layout transitions where animation needs Canvas but resting state nee
 10. Theme apply             (color)
 ```
 
-The ordering prevents three real bugs: scales built before container measurement (width=0), interactions bound before elements exist (silent no-ops), and selection managers firing before all views initialize (cascade during setup). Wrap steps 4-10 in `render(width, height)` — resize, data change, and theme change all call it.
+This ordering prevents: scales with width=0 (measure before build), silent no-op event listeners (bind after render), and cascade during setup (interactions after all views init). Wrap steps 4–10 in `render(width, height)` — resize, data change, and theme change all call it.
 
-### What Re-Runs When
-
-| Trigger | Steps |
-|---------|-------|
-| Resize | 3-10 (layer stack resizes, scales recompute, everything redraws) |
-| Data change | 1, 4-10 (scales may need new domains) |
-| Theme change | 7, 10 only (Canvas re-reads CSS properties; SVG auto-updates if using CSS classes) |
+**What re-runs:** Resize → steps 3–10. Data change → 1, 4–10 (scales need new domains). Theme change → 7, 10 only (Canvas re-reads CSS; SVG auto-updates via classes).
 
 ## State Architecture
 
-Three kinds of state. Mixing them causes bugs.
+Three kinds — mixing them causes bugs.
 
 **Data State** — raw dataset, cleaned. Never mutated by interaction. `Object.freeze(data)`.
 
@@ -92,111 +76,62 @@ Three kinds of state. Mixing them causes bugs.
 
 **Interaction State** — selection sets, brush extents, zoom transforms, hover targets. Flows between skills via `d3.dispatch` or `createStore` (see `linked-views`).
 
-**Key rule:** Interaction state references data by **key**, never by index or object reference. Keys survive sorting, filtering, data updates. Indices don't.
+**Key rule:** Interaction state references data by **key**, never by index or object reference. Keys survive sorting, filtering, data updates.
 
 ### The Dirty Flag
 
 Coalesce layer redraws into one `requestAnimationFrame`:
 
 ```js
-let dirtyLayers = 0;
-const LAYER_DATA = 1, LAYER_HIGHLIGHT = 2, LAYER_AXES = 4;
+let dirty = 0;
+const DATA = 1, HIGHLIGHT = 2, AXES = 4;
 
 function markDirty(layers) {
-  dirtyLayers |= layers;
-  if (dirtyLayers) requestAnimationFrame(flush);
+  dirty |= layers;
+  requestAnimationFrame(flush);
 }
 function flush() {
-  if (dirtyLayers & LAYER_DATA) drawData(dataCtx, data, scales);
-  if (dirtyLayers & LAYER_HIGHLIGHT) drawHighlight(hlCtx, selected, scales);
-  if (dirtyLayers & LAYER_AXES) updateAxes(g, scales);
-  dirtyLayers = 0;
+  if (dirty & DATA) drawData(dataCtx, data, scales);
+  if (dirty & HIGHLIGHT) drawHighlight(hlCtx, selected, scales);
+  if (dirty & AXES) updateAxes(g, scales);
+  dirty = 0;
 }
 
-// Brush → only highlight redraws
-selection.on("change", () => markDirty(LAYER_HIGHLIGHT));
-// Zoom → all layers redraw
-zoom.on("zoom", () => markDirty(LAYER_DATA | LAYER_HIGHLIGHT | LAYER_AXES));
+selection.on("change", () => markDirty(HIGHLIGHT));
+zoom.on("zoom", () => markDirty(DATA | HIGHLIGHT | AXES));
 ```
 
-Without this, a brush event that updates three views triggers three separate `requestAnimationFrame` calls that all run in the same frame anyway — but with stale intermediate states visible between them.
+Without this, a brush event updating three views triggers three RAF calls in the same frame with stale intermediate states.
 
 ## Performance Budgets
 
-### The 16.6ms Frame Budget
+### When the 16.6ms Frame Budget Is Exceeded
 
-Example: brush event on 10K rows:
-
-| Step | Cost | Skill |
-|------|------|-------|
-| Brush event handler | ~0.5ms | brushing |
-| Filter 10K rows | ~1ms | linked-views |
-| Re-bin histogram | ~0.5ms | scales |
-| Canvas scatter redraw (10K) | ~3ms | canvas |
-| Canvas histogram (20 bars) | ~0.5ms | canvas |
-| SVG axis transition | ~1ms | scales |
-| Quadtree rebuild | ~2ms | canvas |
-| **Total** | **~8.5ms** | |
-
-### When Exceeded
-
-1. **Split cheap/expensive.** Highlight immediately; debounce histogram rebin 16ms after last brush event. The viewer sees instant feedback on the primary view while secondary views catch up imperceptibly.
-2. **Progressive rendering** for data layer (see `canvas` `createRenderQueue`).
-3. **Skip transitions during continuous interaction.** Apply only on brush `end`. Transitions during dragging compound with the next frame's work.
+1. **Split cheap/expensive.** Highlight immediately; debounce histogram rebin 16ms later.
+2. **Progressive rendering** for data layer (`canvas` `createRenderQueue`).
+3. **Skip transitions during continuous interaction.** Apply only on brush `end`.
 4. **Offload filtering to Worker** — see `canvas` for transfer pattern.
 5. **Bitmap indexing** — `BitFilter` from `linked-views` for 100K+ rows.
 
 ## Composition Archetypes
 
-### The Explorer
+**Explorer** — Multiple linked views; brush one, all respond. Insight from cross-view correlation. Challenge: N view updates per brush frame; dirty-flag keeps it under 16.6ms.
 
-**Viewer experience:** "I can ask questions by selecting, and every view answers simultaneously." The viewer brushes a scatterplot and sees a histogram reshape, a table re-sort, a map re-shade — all within the same frame. The insight comes from cross-view correlation: patterns invisible in any single view become obvious when views respond together.
+**Narrative** — Scroll/step-driven sequence; transitions show data transforming under different lenses. Challenge: choreographing exit→update→enter across annotations, scales, and data.
 
-Multiple views of one dataset, all linked. Shared `SelectionModel`, each view subscribes, skips own events. Canvas data + SVG interaction. Key challenge: every brush frame triggers N view updates — dirty-flag with layer granularity keeps it under 16.6ms.
+**Dashboard** — CSS Grid of charts sharing dataset and color scale, each answering a different question. Challenge: per-chart `ResizeObserver`; shared color scale must use full-data domain or colors shift on filter.
 
-**When it works:** Multivariate data where the viewer needs to find which dimensions correlate. Three to four linked views is the sweet spot — beyond that, the viewer can't track all responses to a single brush action.
+**Spatial Explorer** — Map + overlaid data + zoom LOD + linked panels. Challenge: projection, DPR, viewBox, zoom transform all compose and must agree.
 
-### The Narrative
-
-**Viewer experience:** "The data reveals itself in a guided sequence, each step building on the last." The viewer scrolls or clicks through stages, and transitions show how the same data transforms under different lenses. The power is in the *transition* — watching bars sort, scales shift, and annotations appear tells a story that a static sequence of charts cannot.
-
-Scroll/step-driven sequence. Linear state machine. Key challenge: transition choreography — exit annotations, update scales, enter data, enter annotations, sequenced with delays.
-
-**When it works:** When you have a specific argument to make and the viewer's exploration would be unproductive without guidance. Falls apart when the argument requires the viewer to compare non-adjacent steps — they can't scroll to two places at once.
-
-### The Dashboard
-
-**Viewer experience:** "I see all KPIs at a glance and can drill into any one." Each chart answers a different question; filtering one filters all. The viewer builds context from the ensemble, not from any single panel.
-
-CSS Grid of charts sharing dataset and color scale. `createStore` with filter predicates. Key challenge: responsive layout with per-chart `ResizeObserver`. Shared color scale must use full-data domain (not filtered), or colors shift meaning when filters change.
-
-**When it works:** Monitoring and operational contexts where the viewer returns repeatedly and knows what each panel means. Fails as an analytical tool — too many panels compete for attention and none gets deep enough to reveal structure.
-
-### The Spatial Explorer
-
-**Viewer experience:** "I can see where things happen and what they look like up close." Zoom reveals detail; linked panels show attributes of the visible region. The map provides spatial context that no other layout can.
-
-Map + overlaid data + zoom LOD + linked panels. Projection = scale (data-to-screen transform). Key challenge: coordinate system composition — projection, DPR, viewBox, zoom transform all compose and all must agree.
-
-**When it works:** Data with meaningful geographic or spatial coordinates. If location is incidental (company headquarters on a map of revenue data), a scatterplot is almost always better.
-
-### The Layout Morpher
-
-**Viewer experience:** "I can see the same data reorganize itself, revealing different structure each time." Switching from treemap to sunburst preserves object constancy — the viewer tracks individual nodes through the transition and understands that depth emphasis has replaced size emphasis.
-
-Switch layout algorithms with smooth transitions. Key challenge: shape interpolation (rect-to-arc requires point resampling — see `shape-morphing`).
-
-**When it works:** When two layouts reveal genuinely different aspects of the same hierarchy. If the viewer learns nothing new from the second layout, the transition is decoration.
+**Layout Morpher** — Switch layout algorithms with smooth transitions preserving object constancy. Challenge: shape interpolation requires point resampling (see `shape-morphing`).
 
 ## When Not to Compose
 
-Composition adds complexity that compounds: resize handling, state synchronization, initialization ordering, memory from multiple canvases. Don't pay that cost without a viewer benefit.
+Composition adds complexity that compounds (resize, state sync, init ordering, memory). Don't pay that cost without a viewer benefit.
 
-- **Single question, single chart.** If one scatterplot answers the question, adding a linked histogram just adds cognitive load. The viewer's eye has to travel between panels, and the connection between them may not be worth the effort.
-- **Linked views with no cross-view insight.** Two views of the same dimension (a bar chart and a table of the same column) give the viewer two places to look but nothing new to see. Link views that show *different* dimensions so brushing one reveals a pattern in the other.
-- **Dashboards with more than 6-8 panels.** Beyond this, the viewer cannot track which panels responded to a filter action. Each additional panel dilutes attention. If the viewer has to scroll to see all panels, the "at a glance" benefit is gone.
-- **Narrative with no transitions.** If each step is a completely new chart with no shared elements, scrollytelling adds complexity (state machine, scroll observer, transition choreography) for a slideshow that would work as static images.
-- **Morphing between unrelated layouts.** Animating from a bar chart to a map preserves no object constancy and teaches the viewer nothing — it just looks like the screen is melting.
+- **Single question, single chart.** If one scatterplot answers the question, a linked histogram just adds cognitive load.
+- **Linked views with no cross-view insight.** Two views of the same dimension give the viewer two places to look but nothing new. Link views showing *different* dimensions.
+- **Dashboards beyond 6–8 panels.** The viewer can't track which panels responded to a filter. If scrolling is needed, the "at a glance" benefit is gone.
 
 ## The Resize Contract
 
@@ -211,11 +146,7 @@ Composition adds complexity that compounds: resize handling, state synchronizati
 | `annotation` | Recompute positions, re-check collision |
 | `canvas-accessibility` | Update hidden DOM positions, resize focus ring |
 
-### Debouncing
-
-Canvas-only: 0ms (redraw is cheap). Canvas+SVG hybrid: 100ms. Full dashboard: 150ms. The tradeoff: shorter debounce = more responsive resize, but SVG reflows during intermediate sizes are wasted work.
-
-### Preserving Interaction State
+Debounce: Canvas-only 0ms, Canvas+SVG hybrid 100ms, full dashboard 150ms.
 
 Brush extents are pixel coordinates — stale after resize. Re-map:
 
@@ -223,32 +154,22 @@ Brush extents are pixel coordinates — stale after resize. Re-map:
 function remapBrush(brushG, brush, oldX, newX) {
   const sel = d3.brushSelection(brushG.node());
   if (!sel) return;
-  const [d0, d1] = sel.map(oldX.invert);
-  brushG.call(brush.move, [newX(d0), newX(d1)]);
+  brushG.call(brush.move, sel.map(oldX.invert).map(d => newX(d)));
 }
 ```
 
 ## Common Composition Pitfalls
 
-1. **Scales built before container measured.** `range([0, width])` where width=0. Fix: measure inside `ResizeObserver` or after `requestAnimationFrame`.
-
-2. **Canvas/SVG coordinate mismatch.** Canvas origin at (0,0) but SVG offset by margin. Fix: `ctx.translate(margin.left, margin.top)` once.
-
-3. **Zoom transform on wrong layer.** Canvas: `ctx.translate(t.x, t.y); ctx.scale(t.k, t.k)`. SVG: `attr("transform")`. Mixing = double-offset.
-
-4. **Selection manager fires during init.** Chart A sets default selection → triggers chart B's listener before B finishes init. Fix: defer interaction binding to step 8, or guard with `initialized` flag.
-
-5. **Resize destroys brush state.** Scale ranges change, pixel extent invalid. Fix: convert to data coords before, back after (see `remapBrush`).
-
-6. **Theme change doesn't reach Canvas.** CSS auto-updates SVG, but Canvas must re-read `getComputedStyle` and redraw.
-
-7. **Progressive render interrupted by interaction.** Stale queued frames overwrite fresh highlight. Fix: cancel render queue on interaction, redraw immediately.
-
-8. **Accessibility tree stale after filter.** Hidden DOM mirror built at init but never updated. Fix: update in same `flush()` that redraws Canvas.
-
-9. **Quadtree stale after zoom.** Built in data coords but hit detection uses pixel coords. Either rebuild with zoomed positions or inverse-transform mouse coords.
-
-10. **Too many layers.** Each canvas at 2× DPR costs ~7.7MB (1200×800). Five = 38MB. Merge layers that always redraw together.
+1. **Scales built before container measured.** `range([0, 0])`. Fix: measure in `ResizeObserver` or after RAF.
+2. **Canvas/SVG coordinate mismatch.** Fix: `ctx.translate(margin.left, margin.top)` once.
+3. **Zoom transform on wrong layer.** Canvas vs SVG transform APIs differ; mixing = double-offset.
+4. **Selection manager fires during init.** Fix: defer interaction binding to step 8 or guard with `initialized` flag.
+5. **Resize destroys brush state.** Fix: convert to data coords before resize, back after (see `remapBrush`).
+6. **Theme change doesn't reach Canvas.** CSS auto-updates SVG; Canvas must re-read `getComputedStyle` and redraw.
+7. **Progressive render interrupted by interaction.** Fix: cancel render queue on interaction, redraw immediately.
+8. **Accessibility tree stale after filter.** Fix: update hidden DOM in same `flush()` that redraws Canvas.
+9. **Quadtree stale after zoom.** Fix: rebuild with zoomed positions or inverse-transform mouse coords.
+10. **Too many layers.** Each 2× DPR canvas at 1200×800 ≈ 7.7MB. Five = 38MB. Merge layers that always redraw together.
 
 ## References
 

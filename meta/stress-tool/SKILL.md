@@ -1,9 +1,9 @@
 ---
 name: stress-tool
-description: "Audit D3.js visualizations for interaction race conditions, infinite loops, and 'update storms'. Use this skill to stress-test linked views, brushing, and zooming logic. Flags stale closures in event listeners, redundant re-renders, and 'fights' between different input methods (e.g., mouse vs. touch). Ensures high-performance interaction via RAF coalescing and 'Dirty Flag' patterns."
+description: "Audit D3.js visualizations for interaction race conditions, infinite loops, and 'update storms'. Trigger words: 'stress', 'check interactions', 'race conditions'. Use this skill to stress-test linked views, brushing, and zooming logic. Flags stale closures in event listeners, redundant re-renders, and 'fights' between different input methods (e.g., mouse vs. touch). Ensures high-performance interaction via RAF coalescing and 'Dirty Flag' patterns."
 ---
 
-# Interaction Stress-Test: The 'Race Condition' Hunter
+# Stress Tool
 
 Interactive D3 visualizations are prone to subtle bugs that only appear during rapid user input. This skill acts as an adversarial auditor for **Interaction Robustness**.
 

@@ -3,7 +3,7 @@ name: calibrate-tool
 description: "Measure and tune skill effectiveness. For content skills: compare with-skill vs baseline output. For auditing skills (polish-tool, level-tool, stress-tool, scope-tool): blind evaluation against human anchors. Use when the user says 'calibrate', 'eval', 'test the skill', 'is this skill working', or wants to measure whether a skill improves output."
 ---
 
-# Calibrate
+# Calibrate Tool
 
 Measure whether a skill improves Claude's output, diagnose why it doesn't, and fix the right thing. Two modes: content skills (does the skill improve generated code?) and auditing skills (does the auditor score honestly?).
 

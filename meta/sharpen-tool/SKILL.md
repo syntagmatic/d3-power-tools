@@ -3,7 +3,7 @@ name: sharpen-tool
 description: "Audit, compress, and simplify a D3 power-tools SKILL.md. Use this skill when the user says 'sharpen', 'check skill', 'audit skill', 'simplify skill', 'compress skill', or wants to verify/reduce a SKILL.md while preserving all teaching value."
 ---
 
-# Sharpen Skill
+# Sharpen Tool
 
 Audit and simplify the D3 power-tools skill at `$ARGUMENTS`.
 
