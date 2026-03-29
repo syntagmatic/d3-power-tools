@@ -25,9 +25,9 @@ When rendering more than ~500 elements, use Canvas for the data layer and SVG fo
 Create these symlinks in the project root (gitignored):
 
 ```bash
-ln -s scripts/worktree.sh branch
-ln -s scripts/claude-container.sh box
-ln -s scripts/claude-container-shell.sh shell
+ln -s ../dotfiles/scripts/worktree.sh branch
+ln -s ../dotfiles/scripts/gemini-claude-container.sh box
+ln -s ../dotfiles/scripts/claude-container-shell.sh shell
 ```
 
 - `./branch <name>` — start a new Claude Code session in a git worktree
