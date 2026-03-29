@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Zoomable Circle Packing — Wikipedia Categories</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px;
+  }
+  #breadcrumb {
+    font-size: 14px;
+    color: #555;
+    margin-bottom: 10px;
+    min-height: 22px;
+    display: flex;
+    align-items: center;
+    gap: 0;
+  }
+  #breadcrumb span {
+    cursor: pointer;
+    padding: 2px 4px;
+    border-radius: 3px;
+    transition: background 0.15s;
+  }
+  #breadcrumb span:hover { background: #e8e8e8; color: #222; }
+  #breadcrumb .sep { color: #aaa; cursor: default; padding: 0 2px; }
+  #breadcrumb .sep:hover { background: none; color: #aaa; }
+  #breadcrumb .current { font-weight: 600; color: #222; cursor: default; }
+  #breadcrumb .current:hover { background: none; }
+  #tooltip {
+    position: fixed;
+    pointer-events: none;
+    background: rgba(0,0,0,0.84);
+    color: #fff;
+    padding: 7px 11px;
+    border-radius: 5px;
+    font-size: 13px;
+    line-height: 1.4;
+    opacity: 0;
+    transition: opacity 0.12s;
+    z-index: 10;
+    max-width: 260px;
+  }
+  #tooltip strong { display: block; margin-bottom: 2px; }
+  svg { cursor: pointer; display: block; }
+</style>
+</head>
+<body>
+<div id="breadcrumb"></div>
+<svg id="viz"></svg>
+<div id="tooltip"></div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(() => {
+  // Tol Bright — 6 categories, 6 colors
+  const tolBright = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377"];
+
+  // --- Synthetic data: ~300 Wikipedia articles in 6 categories ---
+  const categories = {
+    Science: {
+      Physics: ["Quantum Mechanics","Relativity","Thermodynamics","Electromagnetism","Optics","Nuclear Physics","Particle Physics","Astrophysics","Condensed Matter","Plasma Physics"],
+      Biology: ["Genetics","Ecology","Evolution","Microbiology","Botany","Zoology","Cell Biology","Neuroscience","Marine Biology","Immunology","Virology"],
+      Chemistry: ["Organic Chemistry","Inorganic Chemistry","Biochemistry","Physical Chemistry","Analytical Chemistry","Polymer Science","Electrochemistry"],
+      Mathematics: ["Algebra","Geometry","Calculus","Statistics","Number Theory","Topology","Combinatorics","Graph Theory","Linear Algebra"],
+      "Earth Science": ["Geology","Meteorology","Oceanography","Seismology","Paleontology","Volcanology","Climatology"]
+    },
+    Arts: {
+      "Visual Arts": ["Painting","Sculpture","Photography","Printmaking","Ceramics","Digital Art","Installation Art","Street Art"],
+      Music: ["Classical Music","Jazz","Rock Music","Electronic Music","Folk Music","Opera","Hip Hop","World Music","Blues","Reggae"],
+      Literature: ["Poetry","Novel","Drama","Essay","Short Story","Science Fiction","Fantasy Literature","Mythology"],
+      "Performing Arts": ["Theater","Dance","Mime","Circus Arts","Puppetry","Musical Theatre","Stand-up Comedy"],
+      Film: ["Documentary","Animation","Independent Film","Film Noir","Silent Film","Experimental Film","Horror Film","Comedy Film"]
+    },
+    History: {
+      "Ancient History": ["Ancient Egypt","Roman Empire","Ancient Greece","Mesopotamia","Ancient China","Indus Valley","Persian Empire","Maya Civilization"],
+      "Medieval History": ["Byzantine Empire","Crusades","Viking Age","Feudalism","Black Death","Mongol Empire","Islamic Golden Age","Hanseatic League"],
+      "Modern History": ["Industrial Revolution","World War I","World War II","Cold War","Space Race","Civil Rights Movement","Decolonization","Digital Revolution","Globalization"],
+      "Art History": ["Renaissance","Baroque","Impressionism","Modernism","Art Nouveau","Surrealism","Pop Art"],
+      Archaeology: ["Excavation Methods","Carbon Dating","Pompeii","Stonehenge","Tutankhamun","Dead Sea Scrolls","Rosetta Stone"]
+    },
+    Technology: {
+      "Computer Science": ["Algorithms","Artificial Intelligence","Machine Learning","Databases","Operating Systems","Computer Networks","Cryptography","Software Engineering","Programming Languages","Quantum Computing"],
+      Engineering: ["Civil Engineering","Mechanical Engineering","Electrical Engineering","Aerospace Engineering","Chemical Engineering","Biomedical Engineering","Robotics","Materials Science"],
+      "Information Technology": ["Cloud Computing","Cybersecurity","Internet of Things","Blockchain","Big Data","DevOps","Edge Computing"],
+      Transportation: ["Automobiles","Aviation","Railways","Space Travel","Electric Vehicles","Maritime Transport","Hyperloop"],
+      Energy: ["Solar Energy","Wind Power","Nuclear Energy","Hydropower","Fossil Fuels","Geothermal Energy","Hydrogen Fuel","Energy Storage"]
+    },
+    Geography: {
+      "Physical Geography": ["Mountains","Rivers","Deserts","Glaciers","Volcanoes","Islands","Caves","Waterfalls","Coral Reefs"],
+      "Human Geography": ["Urbanization","Migration","Population Density","Cultural Geography","Economic Geography","Political Geography","Language Distribution"],
+      Cartography: ["Map Projections","GIS","Remote Sensing","Topographic Maps","Nautical Charts","Satellite Imagery"],
+      Continents: ["Africa","Asia","Europe","North America","South America","Antarctica","Oceania","Arctic Region","Middle East","Central America"],
+      Oceans: ["Pacific Ocean","Atlantic Ocean","Indian Ocean","Southern Ocean","Arctic Ocean"]
+    },
+    Sports: {
+      "Team Sports": ["Football","Basketball","Baseball","Cricket","Rugby","Volleyball","Ice Hockey","Field Hockey","Handball","Water Polo"],
+      "Individual Sports": ["Tennis","Golf","Boxing","Swimming","Athletics","Cycling","Gymnastics","Fencing","Archery","Triathlon"],
+      "Winter Sports": ["Skiing","Figure Skating","Snowboarding","Biathlon","Curling","Bobsled","Ice Climbing"],
+      "Water Sports": ["Surfing","Sailing","Rowing","Diving","Kayaking","Windsurfing","Kiteboarding"],
+      "Combat Sports": ["Judo","Karate","Taekwondo","Wrestling","Mixed Martial Arts","Sumo"]
+    }
+  };
+
+  // Seeded PRNG for reproducible article "word counts"
+  let seed = 42;
+  const rand = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+
+  const rootData = { name: "Wikipedia", children: [] };
+  const topKeys = Object.keys(categories);
+  topKeys.forEach((cat, ci) => {
+    const catNode = { name: cat, children: [], _ci: ci };
+    for (const [subName, articles] of Object.entries(categories[cat])) {
+      const subNode = { name: subName, children: [], _ci: ci };
+      for (const art of articles) {
+        // Skewed distribution: few long articles, many short
+        const words = Math.round(800 + Math.pow(rand(), 0.5) * 48000);
+        subNode.children.push({ name: art, value: words, _ci: ci });
+      }
+      catNode.children.push(subNode);
+    }
+    rootData.children.push(catNode);
+  });
+
+  // --- Layout ---
+  const W = 1200, H = 800;
+  const diameter = Math.min(W, H) - 40;
+  const offsetX = (W - diameter) / 2;
+  const offsetY = (H - diameter) / 2;
+
+  const root = d3.hierarchy(rootData)
+    .sum(d => d.value || 0)
+    .sort((a, b) => b.value - a.value);
+
+  d3.pack()
+    .size([diameter, diameter])
+    .padding(d => d.depth === 0 ? 14 : d.depth === 1 ? 8 : 3)
+    (root);
+
+  // --- Color ---
+  const colorScale = d3.scaleOrdinal()
+    .domain(d3.range(6))
+    .range(tolBright);
+
+  const categoryOf = d => {
+    let ci = d.data._ci;
+    if (ci == null) ci = d.ancestors().find(a => a.data._ci != null)?.data._ci ?? 0;
+    return ci;
+  };
+
+  const fillColor = d => {
+    if (d.depth === 0) return "#fafafa";
+    const base = d3.hcl(colorScale(categoryOf(d)));
+    if (!d.children) {
+      // Leaf: light tint, boosted chroma for small marks
+      base.c = Math.min(130, (base.c || 0) + 20);
+      base.l = 88;
+      return base.formatHex();
+    }
+    // Subcategory circles
+    base.l = 92;
+    base.c = (base.c || 0) * 0.4;
+    return base.formatHex();
+  };
+
+  const strokeColor = d => {
+    if (d.depth === 0) return "#ccc";
+    const base = d3.hcl(colorScale(categoryOf(d)));
+    base.l = Math.max(30, 55 - d.depth * 10);
+    base.c = Math.min(100, (base.c || 0) * 0.8);
+    return base.formatHex();
+  };
+
+  // --- SVG ---
+  const svg = d3.select("#viz")
+    .attr("width", W)
+    .attr("height", H)
+    .attr("viewBox", `0 0 ${W} ${H}`);
+
+  const mainG = svg.append("g")
+    .attr("transform", `translate(${offsetX},${offsetY})`);
+
+  // State
+  let focus = root;
+  let view = [root.x, root.y, root.r * 2];
+
+  // Circles
+  const circles = mainG.append("g")
+    .selectAll("circle")
+    .data(root.descendants())
+    .join("circle")
+      .attr("fill", fillColor)
+      .attr("stroke", d => d.depth > 0 ? strokeColor(d) : "#ccc")
+      .attr("stroke-width", d => d.depth === 0 ? 1.5 : d.depth === 1 ? 1.5 : d.children ? 1 : 0.5)
+      .attr("stroke-opacity", d => d.children ? 0.7 : 0.3)
+      .attr("pointer-events", "all")
+      .on("click", (event, d) => {
+        event.stopPropagation();
+        if (d.children) {
+          zoomTo(focus === d ? (d.parent || root) : d);
+        } else {
+          if (focus !== d.parent) zoomTo(d.parent);
+        }
+      })
+      .on("pointerenter", (event, d) => {
+        if (!d.children) showTooltip(event, d);
+        d3.select(event.currentTarget)
+          .attr("stroke-width", d.children ? 2.5 : 1.5)
+          .attr("stroke-opacity", 1);
+      })
+      .on("pointermove", (event) => {
+        d3.select("#tooltip")
+          .style("left", (event.clientX + 14) + "px")
+          .style("top", (event.clientY - 12) + "px");
+      })
+      .on("pointerleave", (event, d) => {
+        d3.select("#tooltip").style("opacity", 0);
+        d3.select(event.currentTarget)
+          .attr("stroke-width", d.depth === 0 ? 1.5 : d.depth === 1 ? 1.5 : d.children ? 1 : 0.5)
+          .attr("stroke-opacity", d.children ? 0.7 : 0.3);
+      });
+
+  // Labels
+  const labels = mainG.append("g")
+    .attr("pointer-events", "none")
+    .attr("text-anchor", "middle")
+    .selectAll("text")
+    .data(root.descendants())
+    .join("text")
+      .attr("font-family", "system-ui, -apple-system, sans-serif")
+      .attr("fill", "#333")
+      .attr("dy", "0.35em")
+      .text(d => d.data.name);
+
+  // Background click: zoom out
+  svg.on("click", () => {
+    if (focus !== root) zoomTo(focus.parent || root);
+  });
+
+  // --- Tooltip ---
+  function showTooltip(event, d) {
+    const cat = d.ancestors().find(a => a.depth === 1)?.data.name || "";
+    const sub = d.ancestors().find(a => a.depth === 2)?.data.name || "";
+    d3.select("#tooltip")
+      .style("opacity", 1)
+      .style("left", (event.clientX + 14) + "px")
+      .style("top", (event.clientY - 12) + "px")
+      .html(`<strong>${d.data.name}</strong>${cat} › ${sub}<br>${d.data.value.toLocaleString()} words`);
+  }
+
+  // --- LOD: determine which labels to show ---
+  function visibleLabels(focusNode, kt) {
+    const result = [];
+    for (const d of root.descendants()) {
+      const apparentR = d.r * kt;
+      const isFocusLabel = d === focusNode && d.children;
+
+      // Determine visibility by relationship to focus
+      let show = false;
+      if (isFocusLabel) show = true;
+      else if (d.parent === focusNode) show = true;
+      else if (!d.children && d.parent && d.parent.parent === focusNode) show = true;
+
+      if (!show) continue;
+
+      // Size threshold: skip tiny circles
+      const fontSize = isFocusLabel
+        ? Math.min(14, apparentR * 0.12)
+        : d.children
+          ? Math.min(13, apparentR * 0.28)
+          : Math.min(12, apparentR * 0.35);
+
+      if (fontSize < 6) continue;
+      if (!isFocusLabel && apparentR < 10) continue;
+
+      // Estimate text width, skip if it exceeds circle diameter
+      const textW = d.data.name.length * fontSize * 0.55;
+      if (!isFocusLabel && textW > apparentR * 1.8) {
+        // Truncate name if possible
+        const maxChars = Math.floor((apparentR * 1.8) / (fontSize * 0.55));
+        if (maxChars < 4) continue;
+      }
+
+      result.push({ datum: d, fontSize, isFocusLabel, apparentR });
+    }
+    return result;
+  }
+
+  // --- Zoom ---
+  function zoomTo(target) {
+    focus = target;
+    updateBreadcrumb();
+
+    const targetView = [target.x, target.y, target.r * 2];
+    const startView = view.slice();
+
+    const transition = svg.transition()
+      .duration(750)
+      .tween("zoom", () => {
+        const interp = d3.interpolateZoom(startView, targetView);
+        return t => {
+          const vt = interp(t);
+          view = vt;
+          applyView(vt, t < 1);
+        };
+      })
+      .on("end", () => {
+        view = targetView;
+        applyView(targetView, false);
+      });
+  }
+
+  function applyView(vt, animating) {
+    const kt = diameter / vt[2];
+
+    circles
+      .attr("cx", d => (d.x - vt[0]) * kt + diameter / 2)
+      .attr("cy", d => (d.y - vt[1]) * kt + diameter / 2)
+      .attr("r", d => Math.max(0, d.r * kt));
+
+    // LOD labels
+    const vis = visibleLabels(focus, kt);
+    const visSet = new Set(vis.map(v => v.datum));
+
+    labels.each(function(d) {
+      const el = d3.select(this);
+      const info = vis.find(v => v.datum === d);
+      if (!info) {
+        el.attr("opacity", 0);
+        return;
+      }
+
+      const sx = (d.x - vt[0]) * kt + diameter / 2;
+      const sy = (d.y - vt[1]) * kt + diameter / 2;
+
+      let yPos = sy;
+      if (info.isFocusLabel) {
+        // Focus label at the top of its circle
+        yPos = sy - info.apparentR + info.fontSize + 6;
+      }
+
+      // Truncate text if needed
+      const maxW = info.apparentR * 1.8;
+      const charW = info.fontSize * 0.55;
+      const maxChars = Math.floor(maxW / charW);
+      let displayName = d.data.name;
+      if (displayName.length > maxChars && !info.isFocusLabel) {
+        displayName = displayName.slice(0, Math.max(3, maxChars - 1)) + "…";
+      }
+
+      el.attr("transform", `translate(${sx},${yPos})`)
+        .attr("font-size", info.fontSize + "px")
+        .attr("font-weight", info.isFocusLabel || d.children ? 600 : 400)
+        .attr("fill", info.isFocusLabel ? "#666" : d.children ? "#333" : "#444")
+        .attr("opacity", animating ? 0.7 : 1)
+        .text(displayName);
+    });
+  }
+
+  // --- Breadcrumb ---
+  function updateBreadcrumb() {
+    const path = focus.ancestors().reverse();
+    const bc = d3.select("#breadcrumb");
+    bc.html("");
+    path.forEach((d, i) => {
+      if (i > 0) bc.append("span").attr("class", "sep").text(" › ");
+      const span = bc.append("span").text(d.data.name);
+      if (i === path.length - 1) {
+        span.attr("class", "current");
+      } else {
+        span.on("click", (event) => {
+          event.stopPropagation();
+          zoomTo(d);
+        });
+      }
+    });
+  }
+
+  // --- Initial render ---
+  zoomTo(root);
+})();
+</script>
+</body>
+</html>

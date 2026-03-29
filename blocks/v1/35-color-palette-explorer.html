@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Color Palette Explorer</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    color: #222;
+    display: flex;
+    justify-content: center;
+    padding: 20px;
+  }
+  .container { width: 1200px; max-width: 100%; }
+  h1 { font-size: 1.4rem; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { font-size: 0.85rem; color: #666; margin-bottom: 16px; }
+
+  .controls {
+    display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px;
+  }
+  .controls button {
+    font-family: inherit; font-size: 0.8rem; padding: 6px 14px;
+    border: 1.5px solid #ccc; border-radius: 4px;
+    background: #fff; color: #444; cursor: pointer;
+    transition: all 0.15s;
+  }
+  .controls button:hover { border-color: #888; }
+  .controls button.active {
+    background: #333; color: #fff; border-color: #333;
+  }
+
+  .panels {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: auto auto;
+    gap: 20px;
+  }
+  .panel {
+    background: #fff; border: 1px solid #e0e0e0; border-radius: 6px;
+    padding: 16px; overflow: hidden;
+  }
+  .panel-title {
+    font-size: 0.8rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.04em; color: #666; margin-bottom: 10px;
+  }
+
+  .bar-panel { grid-column: 1; grid-row: 1; }
+  .matrix-panel { grid-column: 2; grid-row: 1; }
+  .cvd-panel { grid-column: 1 / -1; grid-row: 2; }
+
+  .swatch-row {
+    display: flex; gap: 3px; margin-bottom: 6px; align-items: center;
+  }
+  .swatch-label {
+    font-size: 0.7rem; color: #666; width: 80px; text-align: right;
+    padding-right: 6px; flex-shrink: 0;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+  }
+  .swatch {
+    height: 28px; flex: 1; border-radius: 3px; min-width: 0;
+  }
+
+  .matrix-cell {
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    font-size: 0.65rem;
+  }
+
+  .cvd-strips {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+  }
+  .cvd-strip-title {
+    font-size: 0.72rem; font-weight: 500; color: #555; margin-bottom: 6px;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Color Palette Explorer</h1>
+  <p class="subtitle">Compare colorblind-safe palettes. WCAG contrast matrix shows ratios between all pairs. CVD strips simulate dichromatic vision.</p>
+  <div class="controls" id="controls"></div>
+  <div class="panels">
+    <div class="panel bar-panel">
+      <div class="panel-title">Palette Swatches &amp; Bar Chart</div>
+      <div id="bar-chart"></div>
+    </div>
+    <div class="panel matrix-panel">
+      <div class="panel-title">WCAG Contrast Matrix</div>
+      <div id="contrast-matrix"></div>
+    </div>
+    <div class="panel cvd-panel">
+      <div class="panel-title">Color Vision Deficiency Simulation</div>
+      <div class="cvd-strips" id="cvd-strips"></div>
+    </div>
+  </div>
+</div>
+<script>
+(() => {
+  // --- Palette definitions ---
+  const palettes = {
+    "Tol Bright":   ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377","#BBBBBB"],
+    "Tol Vibrant":  ["#EE7733","#0077BB","#33BBEE","#EE3377","#CC3311","#009988","#BBBBBB"],
+    "Tol Muted":    ["#CC6677","#332288","#DDCC77","#117733","#88CCEE","#882255","#44AA99","#999933","#AA4499"],
+    "Tol Light":    ["#77AADD","#EE8866","#EEDD88","#FFAABB","#99DDFF","#44BB99","#BBCC33","#AAAA00","#DDDDDD"],
+    "Tableau10":    d3.schemeTableau10.slice(),
+    "Category10":   d3.schemeCategory10.slice(),
+  };
+
+  // Synthetic data: categories with values, enough texture to be interesting
+  const categories = ["Energy","Health","Transport","Education","Defense","Agriculture","Tech","Housing","Science"];
+
+  function genData(n) {
+    const rng = d3.randomNormal(50, 20);
+    return categories.slice(0, n).map((c, i) => ({
+      name: c,
+      value: Math.max(5, Math.round(rng() + i * 7)),
+    }));
+  }
+
+  let currentPalette = "Tol Bright";
+
+  // --- WCAG contrast ---
+  function relativeLuminance(hex) {
+    const [r, g, b] = [1, 3, 5].map(i => {
+      const c = parseInt(hex.slice(i, i + 2), 16) / 255;
+      return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  }
+  function contrastRatio(a, b) {
+    const l1 = relativeLuminance(a), l2 = relativeLuminance(b);
+    return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+  }
+
+  // --- CVD simulation (Brettel/Vienot) ---
+  function hexToRgb(hex) {
+    return [1,3,5].map(i => parseInt(hex.slice(i, i+2), 16));
+  }
+  function rgbToHex(r, g, b) {
+    return "#" + [r,g,b].map(v => Math.round(Math.min(255, Math.max(0, v))).toString(16).padStart(2,"0")).join("");
+  }
+
+  // sRGB linearize / delinearize
+  function srgbToLinear(c) {
+    const v = c / 255;
+    return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  }
+  function linearToSrgb(c) {
+    const v = c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1/2.4) - 0.055;
+    return Math.round(Math.min(255, Math.max(0, v * 255)));
+  }
+
+  // Vienot 1999 simulation matrices
+  const cvdMatrices = {
+    protanopia: [
+      [0.152286, 1.052583, -0.204868],
+      [0.114503, 0.786281,  0.099216],
+      [-0.003882, -0.048116, 1.051998],
+    ],
+    deuteranopia: [
+      [0.367322, 0.860646, -0.227968],
+      [0.280085, 0.672501,  0.047413],
+      [-0.011820, 0.042940, 0.968881],
+    ],
+    tritanopia: [
+      [1.255528, -0.076749, -0.178779],
+      [-0.078411, 0.930809,  0.147602],
+      [0.004733, 0.691367,  0.303900],
+    ],
+  };
+
+  function simulateCVD(hex, type) {
+    const [r, g, b] = hexToRgb(hex).map(srgbToLinear);
+    const m = cvdMatrices[type];
+    const sr = m[0][0]*r + m[0][1]*g + m[0][2]*b;
+    const sg = m[1][0]*r + m[1][1]*g + m[1][2]*b;
+    const sb = m[2][0]*r + m[2][1]*g + m[2][2]*b;
+    return rgbToHex(linearToSrgb(sr), linearToSrgb(sg), linearToSrgb(sb));
+  }
+
+  // --- Controls ---
+  const controlsDiv = d3.select("#controls");
+  Object.keys(palettes).forEach(name => {
+    controlsDiv.append("button")
+      .classed("active", name === currentPalette)
+      .text(name)
+      .on("pointerdown", function() {
+        currentPalette = name;
+        controlsDiv.selectAll("button").classed("active", false);
+        d3.select(this).classed("active", true);
+        update();
+      });
+  });
+
+  // --- Bar chart ---
+  function renderBarChart() {
+    const colors = palettes[currentPalette];
+    const data = genData(colors.length);
+    const container = d3.select("#bar-chart");
+    container.selectAll("*").remove();
+
+    const margin = {top: 10, right: 16, bottom: 30, left: 50};
+    const totalW = 520, totalH = 300;
+    const w = totalW - margin.left - margin.right;
+    const h = totalH - margin.top - margin.bottom;
+
+    const svg = container.append("svg")
+      .attr("viewBox", `0 0 ${totalW} ${totalH}`)
+      .attr("width", "100%")
+      .style("max-height", `${totalH}px`);
+
+    const g = svg.append("g")
+      .attr("transform", `translate(${margin.left},${margin.top})`);
+
+    const x = d3.scaleBand().domain(data.map(d => d.name)).range([0, w]).padding(0.2);
+    const y = d3.scaleLinear().domain([0, d3.max(data, d => d.value) * 1.1]).range([h, 0]);
+    const color = d3.scaleOrdinal().domain(data.map(d => d.name)).range(colors);
+
+    // Axes
+    g.append("g")
+      .attr("transform", `translate(0,${h})`)
+      .call(d3.axisBottom(x).tickSize(0))
+      .select(".domain").remove();
+
+    g.append("g")
+      .call(d3.axisLeft(y).ticks(5).tickSize(-w).tickFormat(d3.format("d")))
+      .call(g => g.select(".domain").remove())
+      .call(g => g.selectAll(".tick line").attr("stroke", "#e8e8e8"))
+      .call(g => g.selectAll(".tick text").attr("fill", "#888").style("font-size", "0.7rem"));
+
+    // Bars with transition
+    const bars = g.selectAll("rect").data(data);
+    bars.enter().append("rect")
+      .attr("x", d => x(d.name))
+      .attr("width", x.bandwidth())
+      .attr("y", h)
+      .attr("height", 0)
+      .attr("fill", d => color(d.name))
+      .attr("rx", 2)
+      .transition().duration(400).ease(d3.easeCubicOut)
+      .attr("y", d => y(d.value))
+      .attr("height", d => h - y(d.value));
+
+    // Value labels
+    g.selectAll(".val-label").data(data).enter()
+      .append("text")
+      .attr("class", "val-label")
+      .attr("x", d => x(d.name) + x.bandwidth() / 2)
+      .attr("y", d => y(d.value) - 5)
+      .attr("text-anchor", "middle")
+      .attr("fill", "#555")
+      .style("font-size", "0.7rem")
+      .style("font-family", '"SF Mono", Monaco, "Cascadia Code", monospace')
+      .text(d => d.value)
+      .style("opacity", 0)
+      .transition().delay(300).duration(200)
+      .style("opacity", 1);
+
+    // Hover interaction
+    g.selectAll("rect")
+      .style("cursor", "pointer")
+      .on("pointerenter", function(event, d) {
+        d3.select(this).attr("opacity", 0.75);
+      })
+      .on("pointerleave", function() {
+        d3.select(this).attr("opacity", 1);
+      });
+  }
+
+  // --- Contrast matrix ---
+  function renderContrastMatrix() {
+    const colors = palettes[currentPalette];
+    const n = colors.length;
+    const container = d3.select("#contrast-matrix");
+    container.selectAll("*").remove();
+
+    const cellSize = Math.min(50, Math.floor(460 / (n + 1)));
+    const labelW = 52;
+    const totalW = labelW + cellSize * n;
+    const totalH = labelW + cellSize * n;
+
+    const svg = container.append("svg")
+      .attr("viewBox", `0 0 ${totalW} ${totalH}`)
+      .attr("width", "100%")
+      .style("max-height", `${totalH}px`);
+
+    // Background palette labels — top row
+    colors.forEach((c, i) => {
+      svg.append("rect")
+        .attr("x", labelW + i * cellSize)
+        .attr("y", 0)
+        .attr("width", cellSize)
+        .attr("height", labelW - 2)
+        .attr("fill", c)
+        .attr("rx", 2);
+    });
+
+    // Left column
+    colors.forEach((c, i) => {
+      svg.append("rect")
+        .attr("x", 0)
+        .attr("y", labelW + i * cellSize)
+        .attr("width", labelW - 2)
+        .attr("height", cellSize)
+        .attr("fill", c)
+        .attr("rx", 2);
+    });
+
+    // Matrix cells
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < n; j++) {
+        const ratio = contrastRatio(colors[i], colors[j]);
+        const cx = labelW + j * cellSize;
+        const cy = labelW + i * cellSize;
+
+        // Background encodes pass/fail
+        const passAA = ratio >= 4.5;
+        const passAALarge = ratio >= 3;
+        const bg = i === j ? "#f5f5f5" : passAA ? "#d4edda" : passAALarge ? "#fff3cd" : "#f8d7da";
+
+        svg.append("rect")
+          .attr("x", cx + 1)
+          .attr("y", cy + 1)
+          .attr("width", cellSize - 2)
+          .attr("height", cellSize - 2)
+          .attr("fill", bg)
+          .attr("rx", 2);
+
+        if (i !== j) {
+          svg.append("text")
+            .attr("x", cx + cellSize / 2)
+            .attr("y", cy + cellSize / 2 + 1)
+            .attr("text-anchor", "middle")
+            .attr("dominant-baseline", "central")
+            .attr("fill", "#333")
+            .style("font-size", `${Math.max(8, cellSize * 0.24)}px`)
+            .style("font-family", '"SF Mono", Monaco, "Cascadia Code", monospace')
+            .style("font-weight", passAA ? "600" : "400")
+            .text(ratio.toFixed(1));
+        }
+      }
+    }
+
+    // Legend below matrix
+    const legendY = totalH + 4;
+    const legendData = [
+      {color: "#d4edda", label: "AA ≥4.5"},
+      {color: "#fff3cd", label: "Large ≥3"},
+      {color: "#f8d7da", label: "Fail <3"},
+    ];
+    // Append a small legend row
+    const leg = container.append("div")
+      .style("display", "flex").style("gap", "12px").style("margin-top", "8px")
+      .style("justify-content", "center");
+    legendData.forEach(d => {
+      const item = leg.append("span").style("display", "flex").style("align-items", "center").style("gap", "4px");
+      item.append("span").style("width", "12px").style("height", "12px").style("background", d.color)
+        .style("border", "1px solid #ccc").style("border-radius", "2px").style("display", "inline-block");
+      item.append("span").style("font-size", "0.7rem").style("color", "#666").text(d.label);
+    });
+  }
+
+  // --- CVD strips ---
+  function renderCVDStrips() {
+    const colors = palettes[currentPalette];
+    const container = d3.select("#cvd-strips");
+    container.selectAll("*").remove();
+
+    const types = [
+      {key: "normal", label: "Normal Vision"},
+      {key: "protanopia", label: "Protanopia (~2% males)"},
+      {key: "deuteranopia", label: "Deuteranopia (~6% males)"},
+      {key: "tritanopia", label: "Tritanopia (~0.01%)"},
+    ];
+
+    types.forEach(({key, label}) => {
+      const strip = container.append("div");
+      strip.append("div").attr("class", "cvd-strip-title").text(label);
+
+      const simColors = key === "normal"
+        ? colors
+        : colors.map(c => simulateCVD(c, key));
+
+      // Render swatches as a row of rectangles
+      const swatchH = 36;
+      const svg = strip.append("svg")
+        .attr("viewBox", `0 0 ${colors.length * 40} ${swatchH + 18}`)
+        .attr("width", "100%")
+        .style("max-height", `${swatchH + 22}px`);
+
+      const bandW = (colors.length * 40) / colors.length;
+
+      simColors.forEach((c, i) => {
+        svg.append("rect")
+          .attr("x", i * bandW + 1)
+          .attr("y", 0)
+          .attr("width", bandW - 2)
+          .attr("height", swatchH)
+          .attr("fill", c)
+          .attr("rx", 3);
+
+        // Hex label below
+        svg.append("text")
+          .attr("x", i * bandW + bandW / 2)
+          .attr("y", swatchH + 12)
+          .attr("text-anchor", "middle")
+          .attr("fill", "#888")
+          .style("font-size", "6.5px")
+          .style("font-family", '"SF Mono", Monaco, "Cascadia Code", monospace')
+          .text(c.toUpperCase());
+      });
+    });
+  }
+
+  // --- Update all ---
+  function update() {
+    renderBarChart();
+    renderContrastMatrix();
+    renderCVDStrips();
+  }
+
+  update();
+})();
+</script>
+</body>
+</html>

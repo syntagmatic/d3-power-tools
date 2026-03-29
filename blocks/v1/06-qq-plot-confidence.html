@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Normal QQ Plot with Confidence Envelope</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+  }
+  .mono { font-family: "SF Mono", Monaco, "Cascadia Code", monospace; }
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: white;
+    border: 1px solid #bbb;
+    border-radius: 4px;
+    padding: 8px 11px;
+    font-size: 12px;
+    line-height: 1.5;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.13);
+    opacity: 0;
+    transition: opacity 0.12s;
+  }
+  .tooltip .label { color: #666; font-size: 11px; }
+  .tooltip .value { font-family: "SF Mono", Monaco, "Cascadia Code", monospace; color: #222; }
+</style>
+</head>
+<body>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Beasley-Springer-Moro rational approximation for inverse normal CDF ---
+function normalQuantile(p) {
+  if (p <= 0) return -Infinity;
+  if (p >= 1) return Infinity;
+  if (p === 0.5) return 0;
+  const a = [
+    -3.969683028665376e+01, 2.209460984245205e+02,
+    -2.759285104469687e+02, 1.383577518672690e+02,
+    -3.066479806614716e+01, 2.506628277459239e+00
+  ];
+  const b = [
+    -5.447609879822406e+01, 1.615858368580409e+02,
+    -1.556989798598866e+02, 6.680131188771972e+01,
+    -1.328068155288572e+01
+  ];
+  const c = [
+    -7.784894002430293e-03, -3.223964580411365e-01,
+    -2.400758277161838e+00, -2.549732539343734e+00,
+     4.374664141464968e+00, 2.938163982698783e+00
+  ];
+  const dd = [
+    7.784695709041462e-03, 3.224671290700398e-01,
+    2.445134137142996e+00, 3.754408661907416e+00
+  ];
+  const pLow = 0.02425, pHigh = 1 - pLow;
+  let q, r;
+  if (p < pLow) {
+    q = Math.sqrt(-2 * Math.log(p));
+    return (((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) /
+           ((((dd[0]*q+dd[1])*q+dd[2])*q+dd[3])*q+1);
+  } else if (p <= pHigh) {
+    q = p - 0.5;
+    r = q * q;
+    return (((((a[0]*r+a[1])*r+a[2])*r+a[3])*r+a[4])*r+a[5])*q /
+           (((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+1);
+  } else {
+    q = Math.sqrt(-2 * Math.log(1 - p));
+    return -(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) /
+            ((((dd[0]*q+dd[1])*q+dd[2])*q+dd[3])*q+1);
+  }
+}
+
+// Normal PDF
+const normalPDF = (x) => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+
+// --- Tol palette ---
+const tolBright = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377","#BBBBBB"];
+const colorPoint = tolBright[0];       // blue for points
+const colorEnvelope = tolBright[4];    // cyan for envelope
+const colorDiag = "#888";
+const colorOutside = tolBright[1];     // rose for points outside envelope
+const colorHist = tolBright[0];
+const colorFit = tolBright[1];
+
+// --- Synthetic data: 80% N(0,1) + 20% N(2.5, 0.8) — skewed mixture ---
+const rng = d3.randomLcg(42);
+const normal01 = d3.randomNormal.source(rng)(0, 1);
+const normalShifted = d3.randomNormal.source(rng)(3.5, 0.6);
+const n = 200;
+const raw = Array.from({ length: n }, () => rng() < 0.8 ? normal01() : normalShifted());
+
+// Standardize
+const rawMean = d3.mean(raw);
+const rawStd = d3.deviation(raw);
+const values = raw.map(v => (v - rawMean) / rawStd).sort(d3.ascending);
+
+// Theoretical quantiles via Hazen plotting position
+const qqData = values.map((v, i) => {
+  const p = (i + 0.5) / n;
+  const z = normalQuantile(p);
+  return { theoretical: z, sample: v, rawValue: raw.sort(d3.ascending)[i], p, index: i };
+});
+
+// Confidence bands: 95% pointwise envelope
+const bands = qqData.map(d => {
+  const f = normalPDF(d.theoretical);
+  const se = Math.sqrt(d.p * (1 - d.p) / n) / f;
+  return {
+    z: d.theoretical,
+    lower: d.theoretical - 1.96 * se,
+    upper: d.theoretical + 1.96 * se
+  };
+});
+
+// Mark points outside envelope
+qqData.forEach((d, i) => {
+  d.outside = d.sample < bands[i].lower || d.sample > bands[i].upper;
+});
+
+// --- Layout ---
+const totalW = 1200, totalH = 800;
+const margin = { top: 60, right: 40, bottom: 60, left: 70 };
+const width = totalW - margin.left - margin.right;
+const height = totalH - margin.top - margin.bottom;
+
+// Inset histogram dimensions
+const insetMargin = { top: 20, right: 12, bottom: 30, left: 36 };
+const insetW = 260, insetH = 180;
+const insetInnerW = insetW - insetMargin.left - insetMargin.right;
+const insetInnerH = insetH - insetMargin.top - insetMargin.bottom;
+const insetX = width - insetW - 20;
+const insetY = 20;
+
+// --- Scales ---
+const axisExtent = d3.max([
+  Math.abs(d3.min(qqData, d => d.theoretical)),
+  Math.abs(d3.max(qqData, d => d.theoretical)),
+  Math.abs(d3.min(qqData, d => d.sample)),
+  Math.abs(d3.max(qqData, d => d.sample)),
+  Math.abs(d3.min(bands, d => d.lower)),
+  Math.abs(d3.max(bands, d => d.upper))
+]) + 0.3;
+
+const x = d3.scaleLinear().domain([-axisExtent, axisExtent]).range([0, width]).nice();
+const y = d3.scaleLinear().domain([-axisExtent, axisExtent]).range([height, 0]).nice();
+
+// --- SVG ---
+const svg = d3.select("body").append("svg")
+    .attr("width", totalW)
+    .attr("height", totalH)
+    .attr("viewBox", `0 0 ${totalW} ${totalH}`)
+    .style("max-width", "100%")
+    .style("height", "auto");
+
+const g = svg.append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+// --- Title ---
+svg.append("text")
+    .attr("x", totalW / 2).attr("y", 28)
+    .attr("text-anchor", "middle")
+    .attr("fill", "#222")
+    .style("font-size", "18px")
+    .style("font-weight", 600)
+    .text("Normal QQ Plot — Skewed Mixture (80% Normal + 20% Shifted)");
+
+svg.append("text")
+    .attr("x", totalW / 2).attr("y", 48)
+    .attr("text-anchor", "middle")
+    .attr("fill", "#777")
+    .style("font-size", "13px")
+    .text("95% confidence envelope highlights tail deviations from normality");
+
+// --- Confidence envelope ---
+const envelopeArea = d3.area()
+    .x(d => x(d.z))
+    .y0(d => y(d.lower))
+    .y1(d => y(d.upper))
+    .curve(d3.curveMonotoneX);
+
+g.append("path")
+    .datum(bands)
+    .attr("d", envelopeArea)
+    .attr("fill", colorEnvelope)
+    .attr("fill-opacity", 0.18)
+    .attr("stroke", colorEnvelope)
+    .attr("stroke-opacity", 0.35)
+    .attr("stroke-width", 1);
+
+// --- Diagonal (reference line) ---
+const diagExtent = [x.domain()[0], x.domain()[1]];
+g.append("line")
+    .attr("x1", x(diagExtent[0])).attr("y1", y(diagExtent[0]))
+    .attr("x2", x(diagExtent[1])).attr("y2", y(diagExtent[1]))
+    .attr("stroke", colorDiag)
+    .attr("stroke-width", 1.2)
+    .attr("stroke-dasharray", "6,4");
+
+// --- Axes ---
+const xAxis = d3.axisBottom(x).ticks(10);
+const yAxis = d3.axisLeft(y).ticks(10);
+
+g.append("g")
+    .attr("transform", `translate(0,${height})`)
+    .call(xAxis)
+    .call(g => g.select(".domain").attr("stroke", "#ccc"))
+    .call(g => g.selectAll(".tick line").attr("stroke", "#ddd"));
+
+g.append("g")
+    .call(yAxis)
+    .call(g => g.select(".domain").attr("stroke", "#ccc"))
+    .call(g => g.selectAll(".tick line").attr("stroke", "#ddd"));
+
+// Axis labels
+g.append("text")
+    .attr("x", width / 2).attr("y", height + 45)
+    .attr("text-anchor", "middle")
+    .attr("fill", "#555")
+    .style("font-size", "13px")
+    .text("Theoretical Quantiles (Standard Normal)");
+
+g.append("text")
+    .attr("x", -height / 2).attr("y", -52)
+    .attr("text-anchor", "middle")
+    .attr("transform", "rotate(-90)")
+    .attr("fill", "#555")
+    .style("font-size", "13px")
+    .text("Sample Quantiles (Standardized)");
+
+// --- QQ points ---
+const dots = g.selectAll(".qq-dot")
+    .data(qqData)
+    .join("circle")
+    .attr("class", "qq-dot")
+    .attr("cx", d => x(d.theoretical))
+    .attr("cy", d => y(d.sample))
+    .attr("r", 3.5)
+    .attr("fill", d => d.outside ? colorOutside : colorPoint)
+    .attr("fill-opacity", d => d.outside ? 0.85 : 0.7)
+    .attr("stroke", d => d.outside ? colorOutside : colorPoint)
+    .attr("stroke-opacity", 0.9)
+    .attr("stroke-width", 0.8)
+    .style("cursor", "pointer");
+
+// --- Tooltip ---
+const tooltip = d3.select("body").append("div").attr("class", "tooltip");
+
+// Voronoi for hover
+const delaunay = d3.Delaunay.from(qqData, d => x(d.theoretical), d => y(d.sample));
+
+// Highlight circle
+const highlight = g.append("circle")
+    .attr("r", 6)
+    .attr("fill", "none")
+    .attr("stroke", "#333")
+    .attr("stroke-width", 1.5)
+    .attr("opacity", 0);
+
+g.append("rect")
+    .attr("width", width).attr("height", height)
+    .attr("fill", "none")
+    .attr("pointer-events", "all")
+    .on("pointermove", (event) => {
+      const [mx, my] = d3.pointer(event);
+      const i = delaunay.find(mx, my);
+      const d = qqData[i];
+      const px = x(d.theoretical) + margin.left;
+      const py = y(d.sample) + margin.top;
+
+      highlight
+          .attr("cx", x(d.theoretical))
+          .attr("cy", y(d.sample))
+          .attr("stroke", d.outside ? colorOutside : colorPoint)
+          .attr("opacity", 1);
+
+      const statusText = d.outside
+          ? '<span style="color:#EE6677;font-weight:600">Outside 95% envelope</span>'
+          : '<span style="color:#4477AA">Within envelope</span>';
+
+      tooltip.html(`
+        <div class="label">Rank ${d.index + 1} of ${n}</div>
+        <div><span class="label">Theoretical z: </span><span class="value">${d.theoretical.toFixed(3)}</span></div>
+        <div><span class="label">Sample z: </span><span class="value">${d.sample.toFixed(3)}</span></div>
+        <div><span class="label">Raw value: </span><span class="value">${d.rawValue.toFixed(2)}</span></div>
+        <div style="margin-top:3px">${statusText}</div>
+      `)
+        .style("opacity", 1);
+
+      const tw = tooltip.node().offsetWidth;
+      const th = tooltip.node().offsetHeight;
+      const tx = Math.min(event.pageX + 14, window.innerWidth + window.scrollX - tw - 10);
+      const ty = Math.max(event.pageY - th - 10, window.scrollY + 8);
+      tooltip.style("left", `${tx}px`).style("top", `${ty}px`);
+    })
+    .on("pointerleave", () => {
+      highlight.attr("opacity", 0);
+      tooltip.style("opacity", 0);
+    });
+
+// --- Envelope boundary labels ---
+const labelIdx = Math.round(n * 0.92);
+const labelBand = bands[labelIdx];
+
+g.append("text")
+    .attr("x", x(labelBand.z) + 6)
+    .attr("y", y(labelBand.upper) - 6)
+    .attr("fill", colorEnvelope)
+    .attr("font-size", "11px")
+    .attr("font-weight", 600)
+    .text("95% envelope");
+
+// --- Count outside ---
+const nOutside = qqData.filter(d => d.outside).length;
+
+g.append("text")
+    .attr("x", 10).attr("y", 16)
+    .attr("fill", "#555")
+    .attr("font-size", "12px")
+    .html(`${nOutside} of ${n} points outside envelope — right tail deviation from normality`);
+
+// ============================
+// INSET: Histogram + fitted normal
+// ============================
+const insetG = g.append("g")
+    .attr("transform", `translate(${insetX},${insetY})`);
+
+// Background
+insetG.append("rect")
+    .attr("x", -6).attr("y", -6)
+    .attr("width", insetW + 12).attr("height", insetH + 12)
+    .attr("rx", 5)
+    .attr("fill", "white")
+    .attr("stroke", "#ddd")
+    .attr("stroke-width", 1);
+
+insetG.append("text")
+    .attr("x", insetW / 2).attr("y", 10)
+    .attr("text-anchor", "middle")
+    .attr("fill", "#444")
+    .attr("font-size", "12px")
+    .attr("font-weight", 600)
+    .text("Distribution with Normal Fit");
+
+const insetArea = insetG.append("g")
+    .attr("transform", `translate(${insetMargin.left},${insetMargin.top})`);
+
+// Histogram bins on standardized values
+const bins = d3.bin()
+    .domain([-3.5, 3.5])
+    .thresholds(22)(values);
+
+const histX = d3.scaleLinear().domain([-3.5, 3.5]).range([0, insetInnerW]);
+const histY = d3.scaleLinear()
+    .domain([0, d3.max(bins, b => b.length / n / (b.x1 - b.x0))])
+    .range([insetInnerH, 0])
+    .nice();
+
+// Bars (density scale)
+insetArea.selectAll(".hist-bar")
+    .data(bins)
+    .join("rect")
+    .attr("class", "hist-bar")
+    .attr("x", d => histX(d.x0) + 0.5)
+    .attr("y", d => histY(d.length / n / (d.x1 - d.x0)))
+    .attr("width", d => Math.max(0, histX(d.x1) - histX(d.x0) - 1))
+    .attr("height", d => insetInnerH - histY(d.length / n / (d.x1 - d.x0)))
+    .attr("fill", colorHist)
+    .attr("fill-opacity", 0.35)
+    .attr("stroke", colorHist)
+    .attr("stroke-opacity", 0.5)
+    .attr("stroke-width", 0.5);
+
+// Fitted normal overlay
+const fitLine = d3.line()
+    .x(d => histX(d[0]))
+    .y(d => histY(d[1]))
+    .curve(d3.curveBasis);
+
+const fitPts = d3.range(-3.5, 3.51, 0.05).map(z => [z, normalPDF(z)]);
+
+insetArea.append("path")
+    .datum(fitPts)
+    .attr("d", fitLine)
+    .attr("fill", "none")
+    .attr("stroke", colorFit)
+    .attr("stroke-width", 2)
+    .attr("stroke-opacity", 0.85);
+
+// Inset axes
+insetArea.append("g")
+    .attr("transform", `translate(0,${insetInnerH})`)
+    .call(d3.axisBottom(histX).ticks(5).tickSize(3))
+    .call(g => g.select(".domain").attr("stroke", "#ccc"))
+    .call(g => g.selectAll(".tick text").attr("font-size", "9px"));
+
+insetArea.append("g")
+    .call(d3.axisLeft(histY).ticks(4).tickSize(3))
+    .call(g => g.select(".domain").attr("stroke", "#ccc"))
+    .call(g => g.selectAll(".tick text").attr("font-size", "9px"));
+
+// Inset x label
+insetArea.append("text")
+    .attr("x", insetInnerW / 2).attr("y", insetInnerH + 24)
+    .attr("text-anchor", "middle")
+    .attr("fill", "#777")
+    .attr("font-size", "10px")
+    .text("Standardized Value");
+
+// Legend for inset
+const legendG = insetArea.append("g").attr("transform", `translate(${insetInnerW - 75}, 4)`);
+
+legendG.append("line").attr("x1", 0).attr("x2", 16).attr("y1", 0).attr("y2", 0)
+    .attr("stroke", colorFit).attr("stroke-width", 2);
+legendG.append("text").attr("x", 20).attr("y", 4)
+    .attr("fill", "#666").attr("font-size", "10px").text("Normal fit");
+
+legendG.append("rect").attr("x", 0).attr("y", 10).attr("width", 16).attr("height", 8)
+    .attr("fill", colorHist).attr("fill-opacity", 0.4);
+legendG.append("text").attr("x", 20).attr("y", 18)
+    .attr("fill", "#666").attr("font-size", "10px").text("Data");
+
+// --- Annotation: tail deviation callout ---
+const tailPoints = qqData.filter(d => d.outside && d.theoretical > 1);
+if (tailPoints.length > 0) {
+  const tp = tailPoints[Math.floor(tailPoints.length / 2)];
+  const ax = x(tp.theoretical), ay = y(tp.sample);
+  const dx = -70, dy = -40;
+
+  const callout = g.append("g").attr("class", "callout");
+
+  callout.append("line")
+      .attr("x1", ax).attr("y1", ay)
+      .attr("x2", ax + dx).attr("y2", ay + dy)
+      .attr("stroke", "#888")
+      .attr("stroke-width", 0.8);
+
+  callout.append("circle")
+      .attr("cx", ax).attr("cy", ay)
+      .attr("r", 3)
+      .attr("fill", "none")
+      .attr("stroke", colorOutside)
+      .attr("stroke-width", 1.5);
+
+  // Background for text
+  callout.append("rect")
+      .attr("x", ax + dx - 62).attr("y", ay + dy - 14)
+      .attr("width", 124).attr("height", 30)
+      .attr("rx", 3)
+      .attr("fill", "white").attr("opacity", 0.9);
+
+  callout.append("text")
+      .attr("x", ax + dx).attr("y", ay + dy)
+      .attr("text-anchor", "middle")
+      .attr("fill", "#555")
+      .attr("font-size", "11px")
+      .text("Right tail heavier");
+
+  callout.append("text")
+      .attr("x", ax + dx).attr("y", ay + dy + 13)
+      .attr("text-anchor", "middle")
+      .attr("fill", "#888")
+      .attr("font-size", "10px")
+      .text("than normal (shifted component)");
+}
+
+// --- Source line ---
+svg.append("text")
+    .attr("x", totalW - 10).attr("y", totalH - 8)
+    .attr("text-anchor", "end")
+    .attr("fill", "#aaa")
+    .attr("font-size", "10px")
+    .text("Synthetic data: 80% N(0,1) + 20% N(2.5, 0.8), n = 200");
+
+</script>
+</body>
+</html>

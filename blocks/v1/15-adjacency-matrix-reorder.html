@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Adjacency Matrix with Reorderable Rows & Columns</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa; color: #333;
+  }
+  #controls {
+    padding: 14px 24px; display: flex; gap: 10px; align-items: center;
+    border-bottom: 1px solid #e0e0e0; background: #fff;
+  }
+  #controls span {
+    font-size: 13px; font-weight: 600; color: #555; margin-right: 2px;
+    letter-spacing: 0.02em; text-transform: uppercase;
+  }
+  button {
+    padding: 6px 16px; border: 1px solid #bbb; border-radius: 5px;
+    background: #fff; cursor: pointer; font-size: 13px;
+    font-family: inherit; transition: all 0.15s;
+  }
+  button:hover { background: #f0f0f0; border-color: #999; }
+  button.active { background: #4477AA; color: #fff; border-color: #336699; }
+  #tooltip {
+    position: fixed; pointer-events: none; background: rgba(20,20,30,0.88);
+    color: #fff; padding: 7px 12px; border-radius: 5px; font-size: 12px;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    white-space: nowrap; opacity: 0; transition: opacity 0.12s;
+    z-index: 10; line-height: 1.5;
+  }
+  .row-label, .col-label {
+    font-size: 10px; fill: #444; cursor: default;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+  }
+  .bar-label {
+    font-size: 9px; fill: #666;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+  }
+  .section-title {
+    font-size: 11px; font-weight: 600; fill: #555;
+    letter-spacing: 0.03em;
+  }
+  .legend-label { font-size: 10px; fill: #666; }
+  .legend-title { font-size: 11px; font-weight: 600; fill: #555; }
+  svg text { user-select: none; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <span>Order:</span>
+  <button class="active" data-order="name">Name</button>
+  <button data-order="degree">Degree</button>
+  <button data-order="community">Community</button>
+</div>
+<div id="tooltip"></div>
+<svg id="chart"></svg>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(() => {
+  // --- Seeded PRNG ---
+  let seed = 42;
+  const rand = () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
+
+  // --- Generate 35 nodes in 5 communities ---
+  const communityNames = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"];
+  const communitySize = 7;
+  const nodes = [];
+  communityNames.forEach((c, ci) => {
+    for (let i = 0; i < communitySize; i++) {
+      nodes.push({ id: `${c[0]}${i + 1}`, community: ci, communityName: c, index: nodes.length });
+    }
+  });
+  const n = nodes.length;
+
+  // --- Generate ~200 weighted edges ---
+  const edges = [];
+  const edgeSet = new Set();
+  const addEdge = (i, j, w) => {
+    const key = Math.min(i, j) + "-" + Math.max(i, j);
+    if (i === j || edgeSet.has(key)) return false;
+    edgeSet.add(key);
+    edges.push({ source: i, target: j, weight: w });
+    return true;
+  };
+
+  // Dense within-community (~55% of possible pairs)
+  for (let ci = 0; ci < 5; ci++) {
+    const base = ci * communitySize;
+    for (let a = base; a < base + communitySize; a++) {
+      for (let b = a + 1; b < base + communitySize; b++) {
+        if (rand() < 0.55) addEdge(a, b, Math.ceil(rand() * 5));
+      }
+    }
+  }
+  // Sparse between communities (~4%)
+  for (let ci = 0; ci < 5; ci++) {
+    for (let cj = ci + 1; cj < 5; cj++) {
+      for (let a = ci * communitySize; a < ci * communitySize + communitySize; a++) {
+        for (let b = cj * communitySize; b < cj * communitySize + communitySize; b++) {
+          if (rand() < 0.04) addEdge(a, b, Math.ceil(rand() * 3));
+        }
+      }
+    }
+  }
+  // Top up to ~200 with random inter-community edges
+  while (edges.length < 200) {
+    const a = Math.floor(rand() * n), b = Math.floor(rand() * n);
+    if (nodes[a].community !== nodes[b].community) addEdge(a, b, Math.ceil(rand() * 4));
+  }
+
+  // Build adjacency lookup (symmetric)
+  const adj = new Map();
+  edges.forEach(e => {
+    adj.set(`${e.source}-${e.target}`, e.weight);
+    adj.set(`${e.target}-${e.source}`, e.weight);
+  });
+
+  // Compute degree per node
+  nodes.forEach((nd, i) => {
+    nd.degree = edges.reduce((acc, e) => acc + (e.source === i || e.target === i ? 1 : 0), 0);
+  });
+
+  // --- Layout ---
+  const matrixSize = 520;
+  const cellSize = matrixSize / n;
+  const margin = { top: 90, right: 160, bottom: 70, left: 90 };
+  const totalW = margin.left + matrixSize + margin.right;
+  const totalH = margin.top + matrixSize + margin.bottom;
+
+  // Tol Bright palette for 5 communities
+  const tolBright = ["#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE"];
+  const communityColor = d3.scaleOrdinal().domain([0, 1, 2, 3, 4]).range(tolBright);
+
+  // Weight color: sequential blue ramp (0 = transparent/white)
+  const maxWeight = d3.max(edges, d => d.weight);
+  const weightColor = d3.scaleSequential(d3.interpolateBlues).domain([0, maxWeight]);
+
+  const svg = d3.select("#chart")
+    .attr("width", totalW)
+    .attr("height", totalH)
+    .attr("viewBox", `0 0 ${totalW} ${totalH}`);
+
+  const tooltip = d3.select("#tooltip");
+
+  // --- Ordering functions ---
+  const orders = {
+    name: d3.range(n).sort((a, b) => d3.ascending(nodes[a].id, nodes[b].id)),
+    degree: d3.range(n).sort((a, b) =>
+      d3.descending(nodes[a].degree, nodes[b].degree) || d3.ascending(nodes[a].id, nodes[b].id)),
+    community: d3.range(n).sort((a, b) =>
+      d3.ascending(nodes[a].community, nodes[b].community)
+      || d3.descending(nodes[a].degree, nodes[b].degree)
+      || d3.ascending(nodes[a].id, nodes[b].id))
+  };
+
+  let currentOrder = orders.name;
+  const pos = new Map();
+  const updatePos = () => currentOrder.forEach((nodeIdx, visualIdx) => pos.set(nodeIdx, visualIdx));
+  updatePos();
+
+  const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+  // --- Title ---
+  svg.append("text")
+    .attr("x", totalW / 2).attr("y", 28)
+    .attr("text-anchor", "middle")
+    .attr("font-size", 16).attr("font-weight", 700).attr("fill", "#222")
+    .text("Network Adjacency Matrix — 5 Communities, 35 Nodes");
+
+  svg.append("text")
+    .attr("x", totalW / 2).attr("y", 46)
+    .attr("text-anchor", "middle")
+    .attr("font-size", 12).attr("fill", "#888")
+    .text(`${edges.length} weighted edges · Reorder rows & columns to reveal structure`);
+
+  // --- Matrix border ---
+  g.append("rect")
+    .attr("width", matrixSize).attr("height", matrixSize)
+    .attr("fill", "none").attr("stroke", "#ccc").attr("stroke-width", 1);
+
+  // --- Community bracket lines (drawn along top and left when ordered by community) ---
+  const bracketG = g.append("g").attr("class", "brackets").attr("opacity", 0);
+
+  // --- Highlight overlays ---
+  const rowHighRect = g.append("rect")
+    .attr("width", matrixSize).attr("height", cellSize)
+    .attr("fill", "#000").attr("opacity", 0).style("pointer-events", "none");
+  const colHighRect = g.append("rect")
+    .attr("width", cellSize).attr("height", matrixSize)
+    .attr("fill", "#000").attr("opacity", 0).style("pointer-events", "none");
+
+  // --- Build cell data ---
+  const cellData = [];
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      const w = i === j ? -1 : (adj.get(`${i}-${j}`) || 0);
+      cellData.push({ row: i, col: j, weight: w });
+    }
+  }
+
+  const cellsG = g.append("g").attr("class", "cells");
+  const cells = cellsG.selectAll("rect")
+    .data(cellData, d => `${d.row}-${d.col}`)
+    .join("rect")
+      .attr("x", d => pos.get(d.col) * cellSize)
+      .attr("y", d => pos.get(d.row) * cellSize)
+      .attr("width", cellSize - 0.5)
+      .attr("height", cellSize - 0.5)
+      .attr("fill", d => {
+        if (d.weight === -1) return "#f5f0e0";
+        if (d.weight === 0) return "#fff";
+        return weightColor(d.weight);
+      })
+      .attr("stroke", d => d.weight > 0 ? "rgba(255,255,255,0.4)" : "none")
+      .attr("stroke-width", 0.5);
+
+  // --- Row labels (left) ---
+  const rowLabels = g.append("g").attr("class", "row-labels")
+    .selectAll("text")
+    .data(nodes, d => d.id)
+    .join("text")
+      .attr("class", "row-label")
+      .attr("x", -6)
+      .attr("y", d => pos.get(d.index) * cellSize + cellSize / 2)
+      .attr("dy", "0.35em")
+      .attr("text-anchor", "end")
+      .attr("fill", d => communityColor(d.community))
+      .text(d => d.id);
+
+  // --- Column labels (top, rotated) ---
+  const colLabels = g.append("g").attr("class", "col-labels")
+    .selectAll("text")
+    .data(nodes, d => d.id)
+    .join("text")
+      .attr("class", "col-label")
+      .attr("transform", d =>
+        `translate(${pos.get(d.index) * cellSize + cellSize / 2},-6) rotate(-55)`)
+      .attr("text-anchor", "start")
+      .attr("fill", d => communityColor(d.community))
+      .text(d => d.id);
+
+  // --- Side bar chart: degree ---
+  const barX = matrixSize + 18;
+  const barMaxW = 70;
+  const barScale = d3.scaleLinear()
+    .domain([0, d3.max(nodes, d => d.degree)])
+    .range([0, barMaxW]);
+
+  // Bar chart header
+  g.append("text")
+    .attr("class", "section-title")
+    .attr("x", barX + barMaxW / 2).attr("y", -50)
+    .attr("text-anchor", "middle")
+    .text("Degree");
+
+  // Axis line for bars
+  g.append("line")
+    .attr("x1", barX).attr("x2", barX)
+    .attr("y1", 0).attr("y2", matrixSize)
+    .attr("stroke", "#ddd").attr("stroke-width", 1);
+
+  const barsG = g.append("g").attr("class", "degree-bars");
+  const bars = barsG.selectAll("rect")
+    .data(nodes, d => d.id)
+    .join("rect")
+      .attr("x", barX + 2)
+      .attr("y", d => pos.get(d.index) * cellSize + 1)
+      .attr("width", d => Math.max(1, barScale(d.degree)))
+      .attr("height", Math.max(1, cellSize - 2))
+      .attr("fill", d => communityColor(d.community))
+      .attr("opacity", 0.85)
+      .attr("rx", 1.5);
+
+  const barLabelsG = g.append("g").attr("class", "bar-labels");
+  const barLabelsEl = barLabelsG.selectAll("text")
+    .data(nodes, d => d.id)
+    .join("text")
+      .attr("class", "bar-label")
+      .attr("x", d => barX + barScale(d.degree) + 6)
+      .attr("y", d => pos.get(d.index) * cellSize + cellSize / 2)
+      .attr("dy", "0.35em")
+      .text(d => d.degree);
+
+  // --- Hover interaction ---
+  let hoverRow = -1, hoverCol = -1;
+
+  // Invisible overlay for pointer capture
+  const overlay = g.append("rect")
+    .attr("width", matrixSize).attr("height", matrixSize)
+    .attr("fill", "none").attr("pointer-events", "all")
+    .style("cursor", "crosshair");
+
+  const highlightBar = g.append("rect")
+    .attr("x", barX + 2)
+    .attr("height", Math.max(1, cellSize - 2))
+    .attr("fill", "#333").attr("opacity", 0)
+    .attr("rx", 1.5).style("pointer-events", "none");
+
+  const onPointerMove = (event) => {
+    const [mx, my] = d3.pointer(event, g.node());
+    const vc = Math.floor(mx / cellSize);
+    const vr = Math.floor(my / cellSize);
+
+    if (vc < 0 || vc >= n || vr < 0 || vr >= n) {
+      clearHighlight();
+      return;
+    }
+
+    if (vr === hoverRow && vc === hoverCol) {
+      // Just update tooltip position
+      tooltip.style("left", (event.clientX + 14) + "px")
+        .style("top", (event.clientY - 28) + "px");
+      return;
+    }
+
+    hoverRow = vr;
+    hoverCol = vc;
+    const rowIdx = currentOrder[vr];
+    const colIdx = currentOrder[vc];
+
+    // Highlight row and column
+    rowHighRect.attr("y", vr * cellSize).attr("opacity", 0.06);
+    colHighRect.attr("x", vc * cellSize).attr("opacity", 0.06);
+
+    // Highlight corresponding bar
+    highlightBar
+      .attr("y", vr * cellSize + 1)
+      .attr("width", Math.max(1, barScale(nodes[rowIdx].degree)))
+      .attr("opacity", 0.15);
+
+    // Dim non-highlighted row/col labels
+    rowLabels.attr("font-weight", d => d.index === rowIdx ? 700 : 400)
+      .attr("opacity", d => d.index === rowIdx ? 1 : 0.4);
+    colLabels.attr("font-weight", d => d.index === colIdx ? 700 : 400)
+      .attr("opacity", d => d.index === colIdx ? 1 : 0.4);
+
+    // Tooltip
+    const rn = nodes[rowIdx], cn = nodes[colIdx];
+    if (rowIdx === colIdx) {
+      tooltip.style("opacity", 1).html(
+        `<b>${rn.id}</b> (${communityNames[rn.community]})<br>Degree: ${rn.degree}`
+      );
+    } else {
+      const w = adj.get(`${rowIdx}-${colIdx}`) || 0;
+      tooltip.style("opacity", 1).html(
+        `<b>${rn.id}</b> ↔ <b>${cn.id}</b><br>` +
+        (w > 0 ? `Weight: ${w}` : `No connection`)
+      );
+    }
+    tooltip.style("left", (event.clientX + 14) + "px")
+      .style("top", (event.clientY - 28) + "px");
+  };
+
+  const clearHighlight = () => {
+    hoverRow = hoverCol = -1;
+    rowHighRect.attr("opacity", 0);
+    colHighRect.attr("opacity", 0);
+    highlightBar.attr("opacity", 0);
+    tooltip.style("opacity", 0);
+    rowLabels.attr("font-weight", 400).attr("opacity", 1);
+    colLabels.attr("font-weight", 400).attr("opacity", 1);
+  };
+
+  overlay.on("pointermove", onPointerMove).on("pointerleave", clearHighlight);
+
+  // --- Reorder animation ---
+  const reorder = (orderKey) => {
+    currentOrder = orders[orderKey];
+    updatePos();
+
+    const t = d3.transition().duration(600).ease(d3.easeCubicInOut);
+
+    cells.transition(t)
+      .attr("x", d => pos.get(d.col) * cellSize)
+      .attr("y", d => pos.get(d.row) * cellSize);
+
+    rowLabels.transition(t)
+      .attr("y", d => pos.get(d.index) * cellSize + cellSize / 2);
+
+    colLabels.transition(t)
+      .attr("transform", d =>
+        `translate(${pos.get(d.index) * cellSize + cellSize / 2},-6) rotate(-55)`);
+
+    bars.transition(t)
+      .attr("y", d => pos.get(d.index) * cellSize + 1);
+
+    barLabelsEl.transition(t)
+      .attr("y", d => pos.get(d.index) * cellSize + cellSize / 2);
+
+    // Show community brackets when community order is active
+    bracketG.transition(t).attr("opacity", orderKey === "community" ? 1 : 0);
+  };
+
+  // Build community bracket indicators
+  (() => {
+    const commOrder = orders.community;
+    let ci = 0;
+    for (let g = 0; g < 5; g++) {
+      const start = ci;
+      while (ci < n && nodes[commOrder[ci]].community === nodes[commOrder[start]].community) ci++;
+      const count = ci - start;
+      const y0 = start * cellSize;
+      const h = count * cellSize;
+      // Left bracket
+      bracketG.append("rect")
+        .attr("x", -margin.left + 8).attr("y", y0)
+        .attr("width", 4).attr("height", h)
+        .attr("fill", communityColor(g)).attr("rx", 2);
+      // Top bracket
+      bracketG.append("rect")
+        .attr("x", y0).attr("y", -margin.top + 34)
+        .attr("width", h).attr("height", 4)
+        .attr("fill", communityColor(g)).attr("rx", 2);
+    }
+  })();
+
+  // Button handling
+  d3.selectAll("#controls button").on("click", function () {
+    d3.selectAll("#controls button").classed("active", false);
+    d3.select(this).classed("active", true);
+    reorder(this.dataset.order);
+    clearHighlight();
+  });
+
+  // --- Legends (bottom) ---
+  const legendY = margin.top + matrixSize + 22;
+  const legendG = svg.append("g").attr("transform", `translate(${margin.left},${legendY})`);
+
+  // Weight legend
+  legendG.append("text").attr("class", "legend-title").attr("y", 0).text("Edge Weight");
+  const wBarW = 140, wBarH = 10;
+  const defs = svg.append("defs");
+  const grad = defs.append("linearGradient").attr("id", "wgrad");
+  [0, 0.2, 0.4, 0.6, 0.8, 1].forEach(t => {
+    grad.append("stop")
+      .attr("offset", `${t * 100}%`)
+      .attr("stop-color", weightColor(t * maxWeight));
+  });
+  legendG.append("rect")
+    .attr("y", 8).attr("width", wBarW).attr("height", wBarH)
+    .attr("fill", "url(#wgrad)").attr("stroke", "#ccc").attr("rx", 2);
+  const wScale = d3.scaleLinear().domain([0, maxWeight]).range([0, wBarW]);
+  d3.range(0, maxWeight + 1).forEach(v => {
+    legendG.append("text").attr("class", "legend-label")
+      .attr("x", wScale(v)).attr("y", 32).attr("text-anchor", "middle").text(v);
+  });
+
+  // Community legend
+  const commLG = legendG.append("g").attr("transform", `translate(${wBarW + 50}, 0)`);
+  commLG.append("text").attr("class", "legend-title").attr("y", 0).text("Community");
+  communityNames.forEach((c, i) => {
+    const x = i * 70;
+    commLG.append("rect")
+      .attr("x", x).attr("y", 8).attr("width", 12).attr("height", wBarH)
+      .attr("fill", communityColor(i)).attr("rx", 2);
+    commLG.append("text").attr("class", "legend-label")
+      .attr("x", x + 16).attr("y", 17).text(c);
+  });
+
+  // No-edge and diagonal legend
+  const miscLG = legendG.append("g").attr("transform", `translate(${wBarW + 50 + 5 * 70 + 10}, 0)`);
+  miscLG.append("rect").attr("y", 8).attr("width", 12).attr("height", wBarH)
+    .attr("fill", "#f5f0e0").attr("stroke", "#ccc").attr("rx", 2);
+  miscLG.append("text").attr("class", "legend-label").attr("x", 16).attr("y", 17).text("Self");
+})();
+</script>
+</body>
+</html>

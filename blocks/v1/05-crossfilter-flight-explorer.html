@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Crossfilter Flight Explorer</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px 20px;
+    color: #333;
+  }
+  .header {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    margin-bottom: 8px;
+    width: 1160px;
+    max-width: 100%;
+  }
+  .header h1 {
+    font-size: 20px;
+    font-weight: 700;
+    margin: 0;
+    letter-spacing: -0.3px;
+  }
+  #counter {
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    font-size: 13px;
+    color: #666;
+  }
+  #counter .count {
+    font-weight: 600;
+    color: #4477AA;
+  }
+  #reset-btn {
+    margin-left: auto;
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 5px 14px;
+    border: 1px solid #bbb;
+    border-radius: 5px;
+    background: #fff;
+    cursor: pointer;
+    color: #444;
+    transition: all 0.15s ease;
+  }
+  #reset-btn:hover { background: #f0f0f0; border-color: #999; }
+  #reset-btn:active { background: #e4e4e4; }
+  #reset-btn.hidden { opacity: 0.3; pointer-events: none; }
+  .subtitle {
+    font-size: 13px;
+    color: #888;
+    margin-bottom: 16px;
+    width: 1160px;
+    max-width: 100%;
+  }
+  .panel-label {
+    font-size: 13px;
+    font-weight: 600;
+    fill: #444;
+  }
+  .bar-bg { fill: #e0e0e0; }
+  .bar-fg { fill: #4477AA; transition: fill 0.2s; }
+  .bar-fg.dimmed { fill: #4477AA; opacity: 0.4; }
+  .axis text { font-size: 11px; fill: #666; }
+  .axis path { stroke: #ccc; }
+  .axis line { stroke: #e0e0e0; }
+  .brush .selection {
+    fill: #4477AA;
+    fill-opacity: 0.12;
+    stroke: #4477AA;
+    stroke-opacity: 0.6;
+    stroke-width: 1.5;
+  }
+  .brush .handle {
+    fill: #4477AA;
+    fill-opacity: 0.4;
+  }
+  .grid line {
+    stroke: #f0f0f0;
+    stroke-dasharray: 2,3;
+  }
+  .grid path { display: none; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Crossfilter Flight Explorer</h1>
+  <span id="counter">Showing <span class="count">2,000</span> of 2,000 flights</span>
+  <button id="reset-btn" class="hidden">Reset All</button>
+</div>
+<div class="subtitle">Brush any histogram to filter. Other charts show only matching flights.</div>
+<div id="chart"></div>
+
+<script type="module">
+// ── Synthetic data: 2000 flights with bimodal departure peaks ──
+const N = 2000;
+
+// Bimodal departure hour: peaks at 7:30 and 17:30 (morning rush, evening rush)
+const genHour = () => {
+  const peak = Math.random() < 0.55 ? 7.5 : 17.5;
+  const spread = peak < 10 ? 2.2 : 2.8;
+  return Math.max(0, Math.min(23.99, d3.randomNormal(peak, spread)()));
+};
+
+// Delay: mostly on time or early, right-skewed tail of long delays
+// Correlate with departure hour — evening flights delayed more
+const genDelay = (hour) => {
+  const base = hour > 14 ? 8 : -2; // afternoon/evening flights run later
+  const r = Math.random();
+  if (r < 0.25) return base + d3.randomNormal(-8, 4)();  // early
+  if (r < 0.7) return base + d3.randomNormal(5, 12)();    // roughly on time
+  if (r < 0.92) return base + d3.randomNormal(35, 20)();  // moderate delay
+  return base + d3.randomNormal(90, 35)();                 // severe delay
+};
+
+// Distance: multimodal (regional hops, medium haul, transcontinental)
+const genDistance = () => {
+  const r = Math.random();
+  if (r < 0.35) return d3.randomNormal(400, 150)();   // regional
+  if (r < 0.7) return d3.randomNormal(1200, 350)();   // medium
+  return d3.randomNormal(2500, 500)();                 // long haul
+};
+
+const data = d3.range(N).map(i => {
+  const hour = genHour();
+  return {
+    id: i,
+    departure_hour: hour,
+    delay_minutes: Math.round(Math.max(-15, Math.min(200, genDelay(hour)))),
+    distance_miles: Math.round(Math.max(80, Math.min(3500, genDistance()))),
+  };
+});
+
+// ── Layout ──
+const width = 1160;
+const panelHeight = 220;
+const margin = { top: 32, right: 24, bottom: 34, left: 54 };
+const innerW = width - margin.left - margin.right;
+const innerH = panelHeight - margin.top - margin.bottom;
+const totalHeight = panelHeight * 3 + 8;
+
+const svg = d3.select("#chart")
+  .append("svg")
+    .attr("width", width)
+    .attr("height", totalHeight);
+
+// ── Panel configurations ──
+const panels = [
+  {
+    key: "departure_hour",
+    label: "Departure Hour",
+    accessor: d => d.departure_hour,
+    thresholds: d3.range(0, 25, 1),
+    domain: [0, 24],
+    tickFormat: d => `${d}:00`,
+    tickValues: [0, 3, 6, 9, 12, 15, 18, 21, 24],
+  },
+  {
+    key: "delay_minutes",
+    label: "Delay (minutes)",
+    accessor: d => d.delay_minutes,
+    thresholds: d3.range(-20, 210, 10),
+    domain: [-20, 200],
+    tickFormat: d => d > 0 ? `+${d}` : d,
+    tickValues: null,
+  },
+  {
+    key: "distance_miles",
+    label: "Distance (miles)",
+    accessor: d => d.distance_miles,
+    thresholds: d3.range(0, 3700, 150),
+    domain: [0, 3600],
+    tickFormat: d => d >= 1000 ? `${(d / 1000).toFixed(1)}k` : d,
+    tickValues: d3.range(0, 3601, 600),
+  },
+];
+
+// ── Crossfilter state: brush extents per dimension ──
+const filters = new Map();
+
+// Intersection logic: a flight passes if it satisfies ALL active filters.
+// For histogram rebinning, exclude the current panel's filter (crossfilter semantics:
+// each chart shows "what would match if I changed only MY brush").
+const passesFilter = (d, excludeKey) => {
+  for (const [key, [lo, hi]] of filters) {
+    if (key === excludeKey) continue;
+    const cfg = panels.find(p => p.key === key);
+    const val = cfg.accessor(d);
+    if (val < lo || val > hi) return false;
+  }
+  return true;
+};
+
+const countFiltered = () => {
+  if (filters.size === 0) return N;
+  return data.filter(d => passesFilter(d)).length;
+};
+
+// ── Build panels ──
+const panelState = [];
+
+panels.forEach((cfg, i) => {
+  const g = svg.append("g")
+    .attr("transform", `translate(0, ${i * panelHeight + i * 4})`);
+
+  const inner = g.append("g")
+    .attr("transform", `translate(${margin.left}, ${margin.top})`);
+
+  // Label
+  g.append("text")
+    .attr("class", "panel-label")
+    .attr("x", margin.left)
+    .attr("y", 18)
+    .text(cfg.label);
+
+  // Scales
+  const x = d3.scaleLinear().domain(cfg.domain).range([0, innerW]);
+
+  // Bin all data for background (ghost bars)
+  const allBins = d3.bin()
+    .value(cfg.accessor)
+    .domain(cfg.domain)
+    .thresholds(cfg.thresholds)(data);
+
+  const maxCount = d3.max(allBins, b => b.length);
+  const y = d3.scaleLinear().domain([0, maxCount]).nice().range([innerH, 0]);
+
+  // Grid lines
+  inner.append("g")
+    .attr("class", "grid")
+    .call(d3.axisLeft(y).ticks(4).tickSize(-innerW).tickFormat(""));
+
+  // Background bars — ghost layer showing total counts
+  inner.selectAll(".bar-bg")
+    .data(allBins)
+    .join("rect")
+      .attr("class", "bar-bg")
+      .attr("x", d => x(d.x0) + 1)
+      .attr("width", d => Math.max(0, x(d.x1) - x(d.x0) - 2))
+      .attr("y", d => y(d.length))
+      .attr("height", d => innerH - y(d.length))
+      .attr("rx", 1);
+
+  // Foreground bars — filtered subset
+  const fgBars = inner.selectAll(".bar-fg")
+    .data(allBins)
+    .join("rect")
+      .attr("class", "bar-fg")
+      .attr("x", d => x(d.x0) + 1)
+      .attr("width", d => Math.max(0, x(d.x1) - x(d.x0) - 2))
+      .attr("y", d => y(d.length))
+      .attr("height", d => innerH - y(d.length))
+      .attr("rx", 1);
+
+  // X axis
+  const xAxisGen = d3.axisBottom(x).tickSizeOuter(0);
+  if (cfg.tickValues) xAxisGen.tickValues(cfg.tickValues);
+  if (cfg.tickFormat) xAxisGen.tickFormat(cfg.tickFormat);
+  inner.append("g")
+    .attr("class", "axis")
+    .attr("transform", `translate(0, ${innerH})`)
+    .call(xAxisGen);
+
+  // Y axis
+  inner.append("g")
+    .attr("class", "axis")
+    .call(d3.axisLeft(y).ticks(4).tickSizeOuter(0));
+
+  // Brush
+  const brush = d3.brushX()
+    .extent([[0, 0], [innerW, innerH]])
+    .on("brush end", (event) => {
+      if (event.selection) {
+        const [px0, px1] = event.selection;
+        filters.set(cfg.key, [x.invert(px0), x.invert(px1)]);
+      } else {
+        filters.delete(cfg.key);
+      }
+      updateAll(event.type === "brush");
+    });
+
+  const brushG = inner.append("g")
+    .attr("class", "brush")
+    .call(brush);
+
+  panelState.push({ cfg, x, y, allBins, fgBars, brush, brushG });
+});
+
+// ── Update logic ──
+function updateAll(isDragging = false) {
+  // Update counter
+  const n = countFiltered();
+  const counterEl = d3.select("#counter");
+  counterEl.select(".count").text(d3.format(",")(n));
+
+  // Show/hide reset button
+  d3.select("#reset-btn").classed("hidden", filters.size === 0);
+
+  panelState.forEach(({ cfg, x, y, allBins, fgBars }) => {
+    // Re-bin filtered data (excluding this panel's own filter)
+    const filtered = data.filter(d => passesFilter(d, cfg.key));
+    const filteredBins = d3.bin()
+      .value(cfg.accessor)
+      .domain(cfg.domain)
+      .thresholds(cfg.thresholds)(filtered);
+
+    // During drag: skip transitions for responsiveness.
+    // On brush end: animate smoothly.
+    const bars = fgBars.data(filteredBins);
+    if (isDragging) {
+      bars
+        .attr("y", d => y(d.length))
+        .attr("height", d => innerH - y(d.length));
+    } else {
+      bars.transition().duration(250).ease(d3.easeCubicOut)
+        .attr("y", d => y(d.length))
+        .attr("height", d => innerH - y(d.length));
+    }
+  });
+}
+
+// ── Reset button ──
+d3.select("#reset-btn").on("click", () => {
+  filters.clear();
+  panelState.forEach(({ brush, brushG }) => {
+    brushG.call(brush.move, null);
+  });
+  updateAll();
+});
+</script>
+</body>
+</html>

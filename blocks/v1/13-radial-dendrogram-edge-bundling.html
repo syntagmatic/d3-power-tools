@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Radial Dendrogram with Hierarchical Edge Bundling</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 16px 20px;
+  }
+  h2 { font-size: 17px; color: #333; margin-bottom: 2px; }
+  .subtitle { font-size: 12px; color: #888; margin-bottom: 6px; }
+  .controls {
+    display: flex; align-items: center; gap: 16px;
+    margin-bottom: 8px; font-size: 13px; color: #555;
+  }
+  .controls label { display: flex; align-items: center; gap: 6px; }
+  .controls input[type="range"] { width: 200px; accent-color: #4477AA; }
+  .controls .val {
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    font-size: 12px; min-width: 28px; text-align: right;
+  }
+  #container { position: relative; }
+  canvas, svg { position: absolute; top: 0; left: 0; }
+  svg { pointer-events: all; }
+  svg text {
+    font-size: 9.5px; fill: #555;
+    transition: fill 0.15s;
+  }
+  .legend {
+    display: flex; gap: 12px; flex-wrap: wrap;
+    justify-content: center; margin-top: 4px; font-size: 11px; color: #555;
+  }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .legend-swatch {
+    width: 10px; height: 10px; border-radius: 2px;
+  }
+</style>
+</head>
+<body>
+<h2>Software Module Dependencies &mdash; Hierarchical Edge Bundling</h2>
+<p class="subtitle">Hover a node to trace its imports and exports. Adjust tension to bundle or splay edges.</p>
+<div class="controls">
+  <label>Tension:
+    <input type="range" id="tension" min="0" max="1" step="0.01" value="0.85">
+    <span class="val" id="tension-val">0.85</span>
+  </label>
+  <span id="info" style="color:#888; font-size:12px;"></span>
+</div>
+<div id="container"></div>
+<div class="legend" id="legend"></div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(() => {
+"use strict";
+
+// ── Tol colorblind-safe palette ──
+const tolColors = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377","#BBBBBB"];
+
+// ── Synthetic data: ~120 leaves across 7 top-level modules ──
+const modules = [
+  { name: "core",     subs: ["runtime","compiler","scheduler","memory","events"] },
+  { name: "network",  subs: ["http","websocket","tcp","dns","proxy"] },
+  { name: "storage",  subs: ["cache","database","filesystem","queue"] },
+  { name: "auth",     subs: ["oauth","jwt","session","rbac"] },
+  { name: "ui",       subs: ["layout","forms","charts","animation","theme"] },
+  { name: "api",      subs: ["rest","graphql","middleware","validation"] },
+  { name: "testing",  subs: ["unit","integration","mocks","fixtures"] },
+];
+
+const fileNames = ["index","types","utils","config","main","handler","factory","service","adapter","plugin","stream","worker"];
+
+// Build hierarchy data for d3.stratify
+const rows = [{ id: "root", parent: "" }];
+const leafIds = [];
+
+const rng = d3.randomLcg(42);
+modules.forEach((mod, mi) => {
+  const modId = `root.${mod.name}`;
+  rows.push({ id: modId, parent: "root", module: mod.name });
+  mod.subs.forEach(sub => {
+    const subId = `${modId}.${sub}`;
+    rows.push({ id: subId, parent: modId, module: mod.name });
+    // 3-5 files per submodule
+    const nFiles = 3 + Math.floor(rng() * 3);
+    const picked = d3.shuffle(fileNames.slice(), rng).slice(0, nFiles);
+    picked.forEach(file => {
+      const leafId = `${subId}.${file}`;
+      rows.push({ id: leafId, parent: subId, module: mod.name });
+      leafIds.push(leafId);
+    });
+  });
+});
+
+// Generate ~80 cross-module dependency edges
+const edges = [];
+const edgeSet = new Set();
+while (edges.length < 80) {
+  const si = Math.floor(rng() * leafIds.length);
+  const ti = Math.floor(rng() * leafIds.length);
+  if (si === ti) continue;
+  const s = leafIds[si], t = leafIds[ti];
+  // cross-module only
+  const sMod = s.split(".")[1], tMod = t.split(".")[1];
+  if (sMod === tMod) continue;
+  const key = s + "|" + t;
+  if (edgeSet.has(key)) continue;
+  edgeSet.add(key);
+  edges.push({ source: s, target: t });
+}
+
+// ── Layout ──
+const width = 1200, height = 800;
+const cx = width / 2, cy = height / 2;
+const outerRadius = Math.min(cx, cy) - 30;
+const innerRadius = outerRadius - 110; // room for labels
+
+const stratify = d3.stratify().id(d => d.id).parentId(d => d.parent || null);
+const root = stratify(rows);
+
+const cluster = d3.cluster()
+  .size([2 * Math.PI, innerRadius])
+  .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth);
+
+cluster(root);
+
+const leaves = root.leaves();
+const nodesById = new Map(root.descendants().map(d => [d.data.id, d]));
+
+// Color scale: top-level module → Tol color
+const moduleNames = modules.map(m => m.name);
+const color = d3.scaleOrdinal().domain(moduleNames).range(tolColors);
+const nodeModule = d => {
+  const anc = d.ancestors().find(a => a.depth === 1);
+  return anc ? anc.data.id.split(".")[1] : null;
+};
+
+// ── LCA paths via node.path() ──
+const linkPaths = edges.map(e => {
+  const src = nodesById.get(e.source);
+  const tgt = nodesById.get(e.target);
+  if (!src || !tgt) return null;
+  return { path: src.path(tgt), source: src, target: tgt };
+}).filter(Boolean);
+
+// Precompute Cartesian coords for every node in the hierarchy
+root.each(d => {
+  const angle = d.x - Math.PI / 2;
+  d.cx = d.y * Math.cos(angle);
+  d.cy = d.y * Math.sin(angle);
+});
+
+// Build connection index for fast hover lookup
+const connectionsByLeaf = new Map();
+leaves.forEach(l => connectionsByLeaf.set(l, { incoming: [], outgoing: [] }));
+linkPaths.forEach((lp, i) => {
+  const se = connectionsByLeaf.get(lp.source);
+  const te = connectionsByLeaf.get(lp.target);
+  if (se) se.outgoing.push(i);
+  if (te) te.incoming.push(i);
+});
+
+// ── Canvas setup (DPR-aware) ──
+const container = d3.select("#container")
+  .style("width", `${width}px`)
+  .style("height", `${height}px`);
+
+const dpr = devicePixelRatio || 1;
+const canvas = container.append("canvas")
+  .attr("width", width * dpr).attr("height", height * dpr)
+  .style("width", `${width}px`).style("height", `${height}px`)
+  .node();
+
+const ctx = canvas.getContext("2d");
+ctx.scale(dpr, dpr);
+
+// ── SVG overlay for labels and interaction targets ──
+const svg = container.append("svg")
+  .attr("width", width).attr("height", height)
+  .style("pointer-events", "none");
+
+const g = svg.append("g")
+  .attr("transform", `translate(${cx},${cy})`);
+
+// Leaf dots (SVG, for crisp hover targets)
+const leafGroup = g.selectAll(".leaf")
+  .data(leaves)
+  .join("g")
+    .attr("class", "leaf")
+    .attr("transform", d => `translate(${d.cx},${d.cy})`)
+    .style("pointer-events", "all")
+    .style("cursor", "pointer");
+
+leafGroup.append("circle")
+  .attr("r", 3.5)
+  .attr("fill", d => color(nodeModule(d)))
+  .attr("stroke", "#fff")
+  .attr("stroke-width", 0.8);
+
+// Radial labels — flip left-side labels so they read left-to-right
+leafGroup.append("text")
+  .attr("transform", d => {
+    const angleDeg = d.x * 180 / Math.PI;
+    return d.x < Math.PI
+      ? `rotate(${angleDeg - 90}) translate(8,0)`
+      : `rotate(${angleDeg + 90}) translate(-8,0)`;
+  })
+  .attr("text-anchor", d => d.x < Math.PI ? "start" : "end")
+  .attr("dy", "0.32em")
+  .text(d => {
+    // Show submodule.file (skip root and module prefix)
+    const parts = d.data.id.split(".");
+    return parts.slice(-2).join(".");
+  });
+
+// ── Draw edges on Canvas ──
+let currentBeta = 0.15; // beta = 1 - tension
+let hoveredNode = null;
+
+function drawEdges() {
+  ctx.clearRect(0, 0, width, height);
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  const line = d3.line()
+    .curve(d3.curveBundle.beta(currentBeta))
+    .x(d => d.cx)
+    .y(d => d.cy)
+    .context(ctx);
+
+  // Determine highlighted edge indices
+  let hlSet = null;
+  if (hoveredNode) {
+    const conn = connectionsByLeaf.get(hoveredNode);
+    if (conn) hlSet = new Set([...conn.incoming, ...conn.outgoing]);
+  }
+
+  // First pass: dim or normal edges
+  linkPaths.forEach((lp, i) => {
+    if (hlSet && hlSet.has(i)) return; // draw highlighted in second pass
+    ctx.beginPath();
+    line(lp.path);
+    if (hlSet) {
+      ctx.strokeStyle = "rgba(180,180,180,0.06)";
+      ctx.lineWidth = 0.5;
+    } else {
+      // Color by source module
+      const mc = color(nodeModule(lp.source));
+      ctx.strokeStyle = mc;
+      ctx.globalAlpha = 0.25;
+      ctx.lineWidth = 1;
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  });
+
+  // Second pass: highlighted edges on top
+  if (hlSet) {
+    for (const i of hlSet) {
+      const lp = linkPaths[i];
+      const mc = color(nodeModule(lp.source));
+      ctx.beginPath();
+      line(lp.path);
+      ctx.strokeStyle = mc;
+      ctx.globalAlpha = 0.85;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.restore();
+}
+
+drawEdges();
+
+// Info text
+d3.select("#info").text(`${leaves.length} modules, ${linkPaths.length} dependencies`);
+
+// ── Tension slider ──
+const slider = d3.select("#tension");
+const tensionVal = d3.select("#tension-val");
+
+slider.on("input", function() {
+  const tension = +this.value;
+  tensionVal.text(tension.toFixed(2));
+  currentBeta = 1 - tension;
+  drawEdges();
+});
+
+// ── Hover interaction ──
+leafGroup.on("pointerenter", (event, d) => {
+  hoveredNode = d;
+  const conn = connectionsByLeaf.get(d);
+  const connectedNodes = new Set();
+  connectedNodes.add(d);
+  if (conn) {
+    conn.incoming.forEach(i => connectedNodes.add(linkPaths[i].source));
+    conn.outgoing.forEach(i => connectedNodes.add(linkPaths[i].target));
+  }
+
+  // Update SVG dot + label styles
+  leafGroup.select("circle")
+    .attr("r", n => connectedNodes.has(n) ? 5 : 2.5)
+    .attr("fill", n => connectedNodes.has(n) ? color(nodeModule(n)) : "#ddd")
+    .attr("stroke-width", n => n === d ? 2 : 0.8)
+    .attr("stroke", n => n === d ? color(nodeModule(d)) : "#fff");
+
+  leafGroup.select("text")
+    .attr("fill", n => connectedNodes.has(n) ? "#222" : "#ddd")
+    .attr("font-weight", n => n === d ? 700 : 400);
+
+  drawEdges();
+});
+
+leafGroup.on("pointerleave", () => {
+  hoveredNode = null;
+  leafGroup.select("circle")
+    .attr("r", 3.5)
+    .attr("fill", d => color(nodeModule(d)))
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 0.8);
+  leafGroup.select("text")
+    .attr("fill", "#555")
+    .attr("font-weight", 400);
+  drawEdges();
+});
+
+// ── Legend ──
+const legend = d3.select("#legend");
+moduleNames.forEach(name => {
+  const item = legend.append("span").attr("class", "legend-item");
+  item.append("span").attr("class", "legend-swatch")
+    .style("background", color(name));
+  item.append("span").text(name);
+});
+
+})();
+</script>
+</body>
+</html>

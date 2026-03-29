@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sparkline Dashboard Table</title>
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa; color: #1a1a1a;
+    padding: 32px 40px;
+    min-height: 100vh;
+  }
+  h1 { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
+  .subtitle { font-size: 13px; color: #666; margin-bottom: 16px; }
+
+  .table-wrap {
+    max-height: calc(100vh - 120px);
+    overflow-y: auto;
+    border: 1px solid #d8d8d8;
+    border-radius: 6px;
+    background: #fff;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+
+  table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: 13px;
+  }
+
+  thead th {
+    position: sticky; top: 0; z-index: 2;
+    background: #f0f0f0;
+    border-bottom: 2px solid #c8c8c8;
+    padding: 10px 12px;
+    text-align: left;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #555;
+    transition: background 150ms;
+  }
+  thead th:hover { background: #e4e4e4; }
+  thead th.active { color: #1a1a1a; }
+  .sort-icon {
+    display: inline-block;
+    width: 14px;
+    text-align: center;
+    font-size: 9px;
+    margin-left: 3px;
+    opacity: 0.5;
+  }
+  thead th.active .sort-icon { opacity: 1; }
+
+  tbody tr {
+    will-change: transform;
+    transition: transform 400ms cubic-bezier(0.4, 0, 0.2, 1), background 150ms;
+  }
+  tbody tr:hover { background: #f0f4ff; }
+
+  td {
+    padding: 5px 12px;
+    vertical-align: middle;
+    white-space: nowrap;
+    line-height: 1;
+    border-bottom: 1px solid #f0f0f0;
+  }
+  td.ticker {
+    font-weight: 700;
+    font-size: 13px;
+    color: #1a1a1a;
+    width: 60px;
+  }
+  td.company {
+    color: #666;
+    font-size: 12px;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  td.num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    font-size: 12px;
+  }
+  th.num { text-align: right; }
+  td.change-pos { color: #228833; }
+  td.change-neg { color: #EE6677; }
+
+  td svg { display: block; }
+
+  .sector-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+    color: #fff;
+  }
+
+  .sr-only {
+    position: absolute; width: 1px; height: 1px;
+    overflow: hidden; clip: rect(0,0,0,0);
+  }
+</style>
+</head>
+<body>
+<h1>Stock Dashboard with Sparkline Charts</h1>
+<p class="subtitle">Click column headers to sort. 25 stocks with 30-day price, 7-day volume, win/loss streak, and performance vs target.</p>
+<div class="table-wrap">
+  <table id="dashboard" role="grid">
+    <thead><tr role="row"></tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+<div class="sr-only" aria-live="polite" id="live-region"></div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(() => {
+  // --- Tol palettes ---
+  const tolBright = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377","#BBBBBB"];
+  const sectors = ["Technology","Healthcare","Finance","Energy","Consumer"];
+  const sectorColor = d3.scaleOrdinal(sectors, tolBright.slice(0, 5));
+
+  // Boosted chroma versions for small marks
+  const sparkBlue = "#3366AA";
+  const winGreen = "#1A7A2A";
+  const lossRed = "#DD4455";
+
+  const liveRegion = d3.select("#live-region");
+
+  // --- Synthetic data ---
+  const randomWalk = (start, n, vol) => {
+    const v = [start];
+    for (let i = 1; i < n; i++) {
+      const drift = (Math.random() - 0.47) * vol;
+      v.push(Math.max(0.5, v[i - 1] * (1 + drift)));
+    }
+    return v;
+  };
+
+  const tickers = [
+    ["AAPL","Apple Inc","Technology"],["MSFT","Microsoft Corp","Technology"],
+    ["GOOG","Alphabet Inc","Technology"],["AMZN","Amazon.com","Technology"],
+    ["NVDA","NVIDIA Corp","Technology"],["META","Meta Platforms","Technology"],
+    ["TSLA","Tesla Inc","Consumer"],["JPM","JPMorgan Chase","Finance"],
+    ["JNJ","Johnson & Johnson","Healthcare"],["UNH","UnitedHealth","Healthcare"],
+    ["XOM","Exxon Mobil","Energy"],["PG","Procter & Gamble","Consumer"],
+    ["HD","Home Depot","Consumer"],["CVX","Chevron Corp","Energy"],
+    ["MRK","Merck & Co","Healthcare"],["ABBV","AbbVie Inc","Healthcare"],
+    ["PFE","Pfizer Inc","Healthcare"],["KO","Coca-Cola Co","Consumer"],
+    ["PEP","PepsiCo Inc","Consumer"],["COST","Costco Wholesale","Consumer"],
+    ["WMT","Walmart Inc","Consumer"],["TMO","Thermo Fisher","Healthcare"],
+    ["ABT","Abbott Labs","Healthcare"],["NKE","Nike Inc","Consumer"],
+    ["CRM","Salesforce Inc","Technology"]
+  ];
+
+  const data = tickers.map(([ticker, name, sector]) => {
+    const basePrice = 20 + Math.random() * 480;
+    const prices_30d = randomWalk(basePrice * (0.85 + Math.random() * 0.2), 30, 0.025);
+    const price = prices_30d.at(-1);
+    // Volume with some structure: weekday pattern + random
+    const volume_7d = Array.from({length: 7}, (_, i) => {
+      const base = 800000 + Math.random() * 4000000;
+      return base * (i < 5 ? 1 : 0.4); // lower weekend volume
+    });
+    // Daily returns with slight bias per stock
+    const bias = (Math.random() - 0.4) * 0.02;
+    const daily_returns_20d = Array.from({length: 20}, () => bias + (Math.random() - 0.5) * 0.04);
+    // Performance vs target
+    const performance_pct = -25 + Math.random() * 70;
+    const target_pct = 5 + Math.random() * 25;
+    const change_pct = (prices_30d.at(-1) - prices_30d[0]) / prices_30d[0] * 100;
+    const marketCap = price * (50 + Math.random() * 300); // in billions (fake)
+    return {
+      id: ticker, ticker, name, sector, price, prices_30d, volume_7d,
+      daily_returns_20d, performance_pct, target_pct, change_pct, marketCap
+    };
+  });
+
+  // --- Shared domains ---
+  const priceDomain = d3.extent(data.flatMap(d => d.prices_30d));
+  if (priceDomain[0] === priceDomain[1]) { priceDomain[0] -= 1; priceDomain[1] += 1; }
+  const volumeDomain = [0, d3.max(data, d => d3.max(d.volume_7d))];
+  const perfMax = Math.max(
+    Math.abs(d3.min(data, d => Math.min(d.performance_pct, 0))),
+    d3.max(data, d => Math.max(d.performance_pct, d.target_pct))
+  );
+  const perfDomain = [-perfMax * 0.3, perfMax * 1.1];
+
+  // --- Columns ---
+  const columns = [
+    { key: "ticker",    label: "Ticker",      type: "string", sortVal: d => d.ticker },
+    { key: "name",      label: "Company",     type: "string", sortVal: d => d.name },
+    { key: "sector",    label: "Sector",      type: "string", sortVal: d => d.sector },
+    { key: "price",     label: "Price",       type: "number", sortVal: d => d.price, format: d3.format("$,.2f") },
+    { key: "change_pct",label: "30d Chg",     type: "number", sortVal: d => d.change_pct, format: d3.format("+.1f") },
+    { key: "prices_30d",label: "30-Day Price",type: "spark-area", sortVal: d => d.prices_30d.at(-1) },
+    { key: "volume_7d", label: "7d Volume",   type: "spark-bar",  sortVal: d => d3.sum(d.volume_7d) },
+    { key: "daily_returns_20d", label: "Win/Loss", type: "winloss", sortVal: d => d3.sum(d.daily_returns_20d.map(r => r > 0 ? 1 : -1)) },
+    { key: "performance_pct", label: "Perf vs Target", type: "bullet", sortVal: d => d.performance_pct - d.target_pct },
+  ];
+
+  // --- Sort state ---
+  let sortKey = "ticker";
+  let sortDir = 1; // 1 = ascending, -1 = descending
+
+  const getSorted = () => {
+    const col = columns.find(c => c.key === sortKey);
+    const fn = col.sortVal;
+    return [...data].sort((a, b) => {
+      const va = fn(a), vb = fn(b);
+      return (typeof va === "string" ? d3.ascending(va, vb) : d3.ascending(va, vb)) * sortDir;
+    });
+  };
+
+  // --- Sparkline renderers ---
+  const drawSparkArea = (td, values) => {
+    const w = 80, h = 20, pad = 1;
+    const svg = d3.select(td).append("svg")
+      .attr("width", w).attr("height", h)
+      .attr("role", "img")
+      .attr("aria-label", `Price trend: ${values.length} days, latest ${values.at(-1).toFixed(1)}`);
+    const x = d3.scaleLinear([0, values.length - 1], [pad, w - pad]);
+    const y = d3.scaleLinear(priceDomain, [h - pad, pad]);
+    const area = d3.area().x((_, i) => x(i)).y0(h).y1(d => y(d)).curve(d3.curveMonotoneX);
+    const line = d3.line().x((_, i) => x(i)).y(d => y(d)).curve(d3.curveMonotoneX);
+    svg.append("path").datum(values).attr("d", area).attr("fill", sparkBlue).attr("opacity", 0.12);
+    svg.append("path").datum(values).attr("d", line)
+      .attr("fill", "none").attr("stroke", sparkBlue).attr("stroke-width", 1.5);
+    svg.append("circle")
+      .attr("cx", x(values.length - 1)).attr("cy", y(values.at(-1)))
+      .attr("r", 2).attr("fill", "#EE6677");
+  };
+
+  const drawSparkBars = (td, values) => {
+    const w = 50, h = 18, gap = 1;
+    const n = values.length;
+    const barW = Math.max(1, (w - gap * (n - 1)) / n);
+    const svg = d3.select(td).append("svg")
+      .attr("width", w).attr("height", h)
+      .attr("role", "img")
+      .attr("aria-label", `Volume: ${n} days`);
+    const y = d3.scaleLinear(volumeDomain, [h, 0]);
+    svg.selectAll("rect").data(values).join("rect")
+      .attr("x", (_, i) => i * (barW + gap))
+      .attr("y", d => y(d))
+      .attr("width", barW)
+      .attr("height", d => h - y(d))
+      .attr("fill", "#888")
+      .attr("rx", 0.5);
+  };
+
+  const drawWinLoss = (td, values) => {
+    const n = values.length;
+    const cellW = 4, gap = 1;
+    const w = n * (cellW + gap) - gap, h = 14;
+    const mid = h / 2, barH = mid - 2;
+    const svg = d3.select(td).append("svg")
+      .attr("width", w).attr("height", h)
+      .attr("role", "img")
+      .attr("aria-label", `Win/loss: ${values.filter(v => v > 0).length} wins, ${values.filter(v => v <= 0).length} losses`);
+    svg.selectAll("rect").data(values).join("rect")
+      .attr("x", (_, i) => i * (cellW + gap))
+      .attr("y", d => d > 0 ? mid - barH : mid + 1)
+      .attr("width", cellW)
+      .attr("height", barH)
+      .attr("rx", 0.5)
+      .attr("fill", d => d > 0 ? winGreen : lossRed);
+  };
+
+  const drawBullet = (td, row) => {
+    const w = 100, h = 16;
+    const svg = d3.select(td).append("svg")
+      .attr("width", w).attr("height", h)
+      .attr("role", "img")
+      .attr("aria-label", `Performance ${row.performance_pct.toFixed(1)}% vs target ${row.target_pct.toFixed(1)}%`);
+    const x = d3.scaleLinear(perfDomain, [0, w]);
+    const zero = x(0);
+
+    // Qualitative ranges (3 bands)
+    const maxVal = perfDomain[1];
+    svg.selectAll(".range").data([maxVal, maxVal * 0.67, maxVal * 0.33]).join("rect")
+      .attr("class", "range")
+      .attr("x", 0).attr("width", d => x(d))
+      .attr("height", h)
+      .attr("fill", (_, i) => ["#e8e8e8", "#dedede", "#d2d2d2"][i])
+      .attr("rx", 2);
+
+    // Zero line
+    svg.append("line")
+      .attr("x1", zero).attr("x2", zero)
+      .attr("y1", 0).attr("y2", h)
+      .attr("stroke", "#bbb").attr("stroke-width", 0.5);
+
+    // Performance bar
+    const perf = row.performance_pct;
+    const barX = perf >= 0 ? zero : x(perf);
+    const barW = Math.abs(x(perf) - zero);
+    const exceeds = perf >= row.target_pct;
+    svg.append("rect")
+      .attr("x", barX)
+      .attr("y", h * 0.25)
+      .attr("width", Math.max(0, barW))
+      .attr("height", h * 0.5)
+      .attr("fill", exceeds ? winGreen : "#4477AA")
+      .attr("rx", 1);
+
+    // Target marker
+    svg.append("line")
+      .attr("x1", x(row.target_pct)).attr("x2", x(row.target_pct))
+      .attr("y1", h * 0.1).attr("y2", h * 0.9)
+      .attr("stroke", "#333").attr("stroke-width", 2);
+  };
+
+  // --- Header ---
+  const thead = d3.select("#dashboard thead tr");
+
+  const renderHeader = () => {
+    thead.selectAll("th")
+      .data(columns, d => d.key)
+      .join("th")
+        .classed("num", d => d.type === "number")
+        .classed("active", d => d.key === sortKey)
+        .attr("tabindex", 0)
+        .attr("role", "columnheader")
+        .attr("aria-sort", d => d.key === sortKey ? (sortDir === 1 ? "ascending" : "descending") : "none")
+        .on("click", (_, col) => handleSort(col))
+        .on("keydown", (e, col) => {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleSort(col); }
+        })
+        .html(d => {
+          const icon = d.key === sortKey
+            ? (sortDir === 1 ? "&#9650;" : "&#9660;")
+            : "&#8597;";
+          return `${d.label}<span class="sort-icon">${icon}</span>`;
+        });
+  };
+
+  const handleSort = (col) => {
+    if (sortKey === col.key) {
+      sortDir *= -1;
+    } else {
+      sortKey = col.key;
+      sortDir = col.type === "number" ? -1 : 1; // numbers default descending
+    }
+    render();
+    liveRegion.text(`Sorted by ${col.label}, ${sortDir === 1 ? "ascending" : "descending"}`);
+  };
+
+  // --- Animated row positioning ---
+  const ROW_HEIGHT = 31; // approximate row height in px
+
+  const render = () => {
+    renderHeader();
+    const sorted = getSorted();
+
+    const tbody = d3.select("#dashboard tbody");
+    const rows = tbody.selectAll("tr")
+      .data(sorted, d => d.id);
+
+    // Calculate target positions
+    const posMap = new Map(sorted.map((d, i) => [d.id, i]));
+
+    // Handle enter
+    const enter = rows.enter().append("tr")
+      .attr("role", "row")
+      .style("position", "relative");
+
+    // Merge and animate
+    const all = enter.merge(rows);
+
+    // Animate via translateY: compute offset from DOM order
+    // Re-order DOM after transition
+    all.transition()
+      .duration(400)
+      .ease(d3.easeCubicInOut)
+      .on("end", function() {
+        // After animation, reorder DOM and reset transform
+        all.order();
+        all.style("transform", null);
+      })
+      .style("transform", function(d) {
+        const currentIdx = Array.from(tbody.node().children).indexOf(this);
+        const targetIdx = posMap.get(d.id);
+        const offset = (targetIdx - currentIdx) * ROW_HEIGHT;
+        return offset !== 0 ? `translateY(${offset}px)` : null;
+      });
+
+    // Rebuild cells on all rows
+    all.selectAll("td").remove();
+
+    all.each(function(d) {
+      const tr = d3.select(this);
+
+      // Ticker
+      tr.append("td").classed("ticker", true).text(d.ticker);
+
+      // Company
+      tr.append("td").classed("company", true).text(d.name);
+
+      // Sector badge
+      const sc = sectorColor(d.sector);
+      tr.append("td").append("span")
+        .attr("class", "sector-badge")
+        .style("background", sc)
+        .text(d.sector);
+
+      // Price
+      tr.append("td").classed("num", true).text(d3.format("$,.2f")(d.price));
+
+      // 30d Change
+      const chg = d.change_pct;
+      tr.append("td")
+        .classed("num", true)
+        .classed("change-pos", chg >= 0)
+        .classed("change-neg", chg < 0)
+        .text(d3.format("+.1f")(chg) + "%");
+
+      // 30-Day Price sparkline
+      drawSparkArea(tr.append("td").node(), d.prices_30d);
+
+      // Volume bars
+      drawSparkBars(tr.append("td").node(), d.volume_7d);
+
+      // Win/Loss
+      drawWinLoss(tr.append("td").node(), d.daily_returns_20d);
+
+      // Bullet chart
+      drawBullet(tr.append("td").node(), d);
+    });
+
+    // Stripe rows by data order
+    all.style("background", (_, i) => i % 2 === 0 ? null : "#f8f8fb");
+
+    rows.exit().remove();
+  };
+
+  render();
+})();
+</script>
+</body>
+</html>

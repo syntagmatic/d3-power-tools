@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hex-Binned US Population Density</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    display: flex; flex-direction: column; align-items: center;
+    min-height: 100vh; padding: 16px 0;
+  }
+  h1 {
+    font-size: 18px; font-weight: 600; color: #222;
+    margin-bottom: 4px;
+  }
+  .subtitle {
+    font-size: 13px; color: #777; margin-bottom: 10px;
+  }
+  .controls {
+    display: flex; align-items: center; gap: 16px;
+    padding: 8px 16px; margin-bottom: 8px;
+    font-size: 13px; color: #555;
+    background: #fff; border: 1px solid #e0e0e0; border-radius: 6px;
+  }
+  .controls label { display: flex; align-items: center; gap: 6px; }
+  .controls input[type="range"] { width: 140px; cursor: pointer; }
+  .controls .value {
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    font-size: 13px; min-width: 28px; text-align: right;
+  }
+  .controls .count {
+    font-size: 12px; color: #999;
+  }
+  #container { position: relative; width: 1200px; height: 800px; }
+  canvas, svg { position: absolute; top: 0; left: 0; }
+  svg { pointer-events: none; }
+  #tooltip {
+    position: absolute; pointer-events: none;
+    background: rgba(0,0,0,0.85); color: #fff;
+    padding: 7px 11px; border-radius: 4px;
+    font-size: 12px; line-height: 1.5;
+    white-space: nowrap; display: none;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+  }
+  #tooltip strong { font-family: "SF Mono", Monaco, "Cascadia Code", monospace; }
+</style>
+</head>
+<body>
+
+<h1>Hex-Binned US Population Density</h1>
+<p class="subtitle">20,000 synthetic GPS points concentrated around major population centers</p>
+
+<div class="controls">
+  <label>Hex radius:
+    <input type="range" id="radiusSlider" min="4" max="16" value="10" step="1">
+    <span class="value" id="radiusValue">10</span>px
+  </label>
+  <span class="count" id="binCount"></span>
+</div>
+
+<div id="container">
+  <canvas id="hexCanvas"></canvas>
+  <svg id="overlay"></svg>
+  <div id="tooltip"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3-hexbin@0.2/dist/d3-hexbin.min.js"></script>
+<script>
+(async function() {
+  const width = 1200, height = 800;
+  const dpr = devicePixelRatio || 1;
+
+  // --- Canvas setup (DPR-aware) ---
+  const canvas = document.getElementById("hexCanvas");
+  canvas.width = width * dpr;
+  canvas.height = height * dpr;
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  const svg = d3.select("#overlay")
+    .attr("width", width).attr("height", height)
+    .attr("viewBox", `0 0 ${width} ${height}`);
+
+  const tooltip = d3.select("#tooltip");
+
+  // --- Load real US geometry ---
+  const us = await d3.json("https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json");
+  const states = topojson.feature(us, us.objects.states);
+  const stateMesh = topojson.mesh(us, us.objects.states, (a, b) => a !== b);
+  const nation = topojson.merge(us, us.objects.states.geometries);
+
+  // --- Projection: AlbersUsa, fit to nation outline with padding ---
+  const padding = 40;
+  const projection = d3.geoAlbersUsa()
+    .fitExtent([[padding, padding], [width - padding, height - padding]], nation);
+  const geoPath = d3.geoPath(projection);
+
+  // --- Draw state outlines on SVG (overlaid on canvas) ---
+  svg.append("path")
+    .datum(stateMesh)
+    .attr("d", geoPath)
+    .attr("fill", "none")
+    .attr("stroke", "#999")
+    .attr("stroke-width", 0.6)
+    .attr("stroke-linejoin", "round");
+
+  svg.append("path")
+    .datum(nation)
+    .attr("d", geoPath)
+    .attr("fill", "none")
+    .attr("stroke", "#555")
+    .attr("stroke-width", 1.2)
+    .attr("stroke-linejoin", "round");
+
+  // --- Generate 20,000 synthetic GPS points around population centers ---
+  const cities = [
+    { name: "New York",       lon: -74.006, lat: 40.713, pop: 8300 },
+    { name: "Los Angeles",    lon: -118.244, lat: 34.052, pop: 3900 },
+    { name: "Chicago",        lon: -87.630, lat: 41.878, pop: 2700 },
+    { name: "Houston",        lon: -95.370, lat: 29.760, pop: 2300 },
+    { name: "Phoenix",        lon: -112.074, lat: 33.449, pop: 1600 },
+    { name: "Philadelphia",   lon: -75.165, lat: 39.953, pop: 1600 },
+    { name: "San Antonio",    lon: -98.494, lat: 29.425, pop: 1400 },
+    { name: "San Diego",      lon: -117.161, lat: 32.716, pop: 1400 },
+    { name: "Dallas",         lon: -96.797, lat: 32.777, pop: 1300 },
+    { name: "San Jose",       lon: -121.886, lat: 37.338, pop: 1000 },
+    { name: "Austin",         lon: -97.743, lat: 30.267, pop: 1000 },
+    { name: "Jacksonville",   lon: -81.656, lat: 30.332, pop: 950 },
+    { name: "San Francisco",  lon: -122.419, lat: 37.775, pop: 870 },
+    { name: "Columbus",       lon: -82.999, lat: 39.961, pop: 900 },
+    { name: "Indianapolis",   lon: -86.158, lat: 39.768, pop: 880 },
+    { name: "Seattle",        lon: -122.332, lat: 47.606, pop: 750 },
+    { name: "Denver",         lon: -104.990, lat: 39.739, pop: 720 },
+    { name: "Washington DC",  lon: -77.037, lat: 38.907, pop: 700 },
+    { name: "Nashville",      lon: -86.784, lat: 36.163, pop: 690 },
+    { name: "Boston",         lon: -71.059, lat: 42.360, pop: 680 },
+    { name: "Atlanta",        lon: -84.388, lat: 33.749, pop: 500 },
+    { name: "Minneapolis",    lon: -93.265, lat: 44.978, pop: 430 },
+    { name: "Miami",          lon: -80.192, lat: 25.762, pop: 450 },
+    { name: "Portland",       lon: -122.676, lat: 45.523, pop: 650 },
+    { name: "Detroit",        lon: -83.046, lat: 42.331, pop: 640 },
+    { name: "Kansas City",    lon: -94.579, lat: 39.100, pop: 500 },
+    { name: "St. Louis",      lon: -90.199, lat: 38.627, pop: 300 },
+    { name: "Salt Lake City", lon: -111.891, lat: 40.761, pop: 200 },
+    { name: "Tampa",          lon: -82.458, lat: 27.951, pop: 400 },
+    { name: "Charlotte",      lon: -80.843, lat: 35.227, pop: 880 },
+  ];
+
+  const totalPop = d3.sum(cities, d => d.pop);
+  const rng = d3.randomLcg(12345);
+  const boxMuller = (mu, sigma) => {
+    const u1 = rng(), u2 = rng();
+    return mu + sigma * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  };
+
+  const N = 20000;
+  const points = [];
+  for (const city of cities) {
+    const n = Math.round((city.pop / totalPop) * N);
+    // Spread proportional to city size (bigger cities have wider metro areas)
+    const sigma = 0.6 + Math.sqrt(city.pop / 8000) * 0.8;
+    for (let i = 0; i < n; i++) {
+      const lon = boxMuller(city.lon, sigma);
+      const lat = boxMuller(city.lat, sigma * 0.65);
+      const projected = projection([lon, lat]);
+      if (projected) {
+        points.push({ x: projected[0], y: projected[1] });
+      }
+    }
+  }
+
+  // --- Tol sequential palette (blue-cyan-yellow) for count encoding ---
+  // Using a perceptually uniform ramp derived from Tol's "sunset" scheme
+  const tolColors = ["#364B9A", "#4A7BB7", "#6EA6CD", "#98CAE1",
+    "#C2E4EF", "#EAECCC", "#FEDA8B", "#FDB366", "#F67E4B", "#DD3D2D", "#A50026"];
+  const colorInterpolator = d3.piecewise(d3.interpolateRgb.gamma(2.2), tolColors);
+
+  // --- Hex-bin state ---
+  let hexRadius = 10;
+  let currentBins = [];
+
+  // Pre-compute hex path function for canvas
+  const hexAngles = d3.range(6).map(i => {
+    const angle = (Math.PI / 3) * i - Math.PI / 6;
+    return [Math.cos(angle), Math.sin(angle)];
+  });
+
+  const drawHex = (ctx, cx, cy, r) => {
+    ctx.moveTo(cx + r * hexAngles[0][0], cy + r * hexAngles[0][1]);
+    for (let i = 1; i < 6; i++) {
+      ctx.lineTo(cx + r * hexAngles[i][0], cy + r * hexAngles[i][1]);
+    }
+    ctx.closePath();
+  };
+
+  function render() {
+    const hexbin = d3.hexbin()
+      .x(d => d.x).y(d => d.y)
+      .radius(hexRadius)
+      .extent([[0, 0], [width, height]]);
+
+    const bins = hexbin(points);
+    currentBins = bins;
+    const maxCount = d3.max(bins, d => d.length) || 1;
+
+    const color = d3.scaleSequential([0, maxCount], colorInterpolator);
+
+    // Update bin count display
+    document.getElementById("binCount").textContent =
+      `${bins.length} bins, max ${maxCount} pts`;
+
+    // Clear canvas
+    ctx.clearRect(0, 0, width, height);
+
+    // Batch hexagons by quantized color to reduce state changes
+    // Quantize to 32 color buckets
+    const buckets = 32;
+    const byBucket = new Map();
+    for (const bin of bins) {
+      if (bin.length === 0) continue;
+      const bucket = Math.min(buckets - 1, Math.floor((bin.length / maxCount) * buckets));
+      if (!byBucket.has(bucket)) byBucket.set(bucket, []);
+      byBucket.get(bucket).push(bin);
+    }
+
+    for (const [bucket, group] of byBucket) {
+      const representativeCount = ((bucket + 0.5) / buckets) * maxCount;
+      ctx.fillStyle = color(representativeCount);
+      ctx.beginPath();
+      for (const bin of group) {
+        drawHex(ctx, bin.x, bin.y, hexRadius - 0.3);
+      }
+      ctx.fill();
+    }
+
+    // Draw thin hex borders for definition
+    ctx.strokeStyle = "rgba(0,0,0,0.08)";
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    for (const bin of bins) {
+      if (bin.length === 0) continue;
+      drawHex(ctx, bin.x, bin.y, hexRadius - 0.3);
+    }
+    ctx.stroke();
+
+    // --- Legend ---
+    drawLegend(ctx, color, maxCount);
+  }
+
+  function drawLegend(ctx, color, maxCount) {
+    const lw = 220, lh = 12;
+    const lx = width - lw - 30, ly = height - 55;
+
+    ctx.save();
+    ctx.font = "12px system-ui, sans-serif";
+    ctx.fillStyle = "#444";
+    ctx.fillText("Points per hexagon", lx, ly - 8);
+
+    // Color ramp
+    for (let i = 0; i < lw; i++) {
+      ctx.fillStyle = color((i / lw) * maxCount);
+      ctx.fillRect(lx + i, ly, 1, lh);
+    }
+    ctx.strokeStyle = "#bbb";
+    ctx.lineWidth = 0.5;
+    ctx.strokeRect(lx, ly, lw, lh);
+
+    // Tick labels
+    ctx.fillStyle = "#555";
+    ctx.font = '11px "SF Mono", Monaco, "Cascadia Code", monospace';
+    ctx.textAlign = "start";
+    ctx.fillText("0", lx, ly + lh + 14);
+    ctx.textAlign = "center";
+    ctx.fillText(String(Math.round(maxCount / 2)), lx + lw / 2, ly + lh + 14);
+    ctx.textAlign = "end";
+    ctx.fillText(String(maxCount), lx + lw, ly + lh + 14);
+    ctx.restore();
+  }
+
+  // --- Initial render ---
+  render();
+
+  // --- Hover interaction ---
+  let hoveredBin = null;
+
+  canvas.addEventListener("pointermove", (event) => {
+    const [mx, my] = d3.pointer(event, canvas);
+
+    // Find closest hex bin center within one hex radius
+    let closest = null, closestDist = Infinity;
+    const maxDist2 = hexRadius * hexRadius * 3; // generous search radius
+    for (const bin of currentBins) {
+      if (bin.length === 0) continue;
+      const dx = bin.x - mx, dy = bin.y - my;
+      const dist2 = dx * dx + dy * dy;
+      if (dist2 < closestDist && dist2 < maxDist2) {
+        closest = bin;
+        closestDist = dist2;
+      }
+    }
+
+    if (closest !== hoveredBin) {
+      hoveredBin = closest;
+      render(); // redraw base
+
+      if (closest) {
+        // Highlight ring
+        ctx.save();
+        ctx.strokeStyle = "#222";
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        drawHex(ctx, closest.x, closest.y, hexRadius + 1);
+        ctx.stroke();
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        drawHex(ctx, closest.x, closest.y, hexRadius + 1);
+        ctx.stroke();
+        ctx.restore();
+
+        // Tooltip
+        const lonlat = projection.invert([closest.x, closest.y]);
+        const locStr = lonlat
+          ? `${Math.abs(lonlat[1]).toFixed(1)}\u00b0${lonlat[1] >= 0 ? "N" : "S"}, ${Math.abs(lonlat[0]).toFixed(1)}\u00b0${lonlat[0] >= 0 ? "E" : "W"}`
+          : "";
+        const pctStr = ((closest.length / points.length) * 100).toFixed(2);
+
+        // Position tooltip, flip if near right edge
+        const tx = closest.x + 14 > width - 160 ? closest.x - 140 : closest.x + 14;
+        tooltip
+          .style("display", "block")
+          .style("left", `${tx}px`)
+          .style("top", `${closest.y - 30}px`)
+          .html(`<strong>${closest.length}</strong> points (${pctStr}%)<br>${locStr}`);
+      } else {
+        tooltip.style("display", "none");
+      }
+    }
+  });
+
+  canvas.addEventListener("pointerleave", () => {
+    hoveredBin = null;
+    tooltip.style("display", "none");
+    render();
+  });
+
+  // --- Radius slider ---
+  const slider = document.getElementById("radiusSlider");
+  const radiusLabel = document.getElementById("radiusValue");
+
+  slider.addEventListener("input", () => {
+    hexRadius = +slider.value;
+    radiusLabel.textContent = hexRadius;
+    hoveredBin = null;
+    tooltip.style("display", "none");
+    render();
+  });
+})();
+</script>
+</body>
+</html>

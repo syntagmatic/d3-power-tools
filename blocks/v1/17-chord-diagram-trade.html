@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Global Trade Flows — Chord Diagram</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body {
+    background: #fafafa;
+    font-family: system-ui, -apple-system, sans-serif;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+  }
+  #chart { position: relative; }
+  h1 {
+    text-align: center;
+    font-size: 18px;
+    font-weight: 600;
+    color: #333;
+    margin-bottom: 4px;
+  }
+  .subtitle {
+    text-align: center;
+    font-size: 13px;
+    color: #777;
+    margin-bottom: 12px;
+  }
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: rgba(0,0,0,0.88);
+    color: #fff;
+    padding: 8px 14px;
+    border-radius: 5px;
+    font-size: 13px;
+    line-height: 1.6;
+    white-space: nowrap;
+    opacity: 0;
+    transition: opacity 0.15s;
+    z-index: 10;
+  }
+  .tooltip.visible { opacity: 1; }
+</style>
+</head>
+<body>
+<div id="chart">
+  <h1>Global Trade Flows</h1>
+  <p class="subtitle">Hover a country arc to isolate its trade partners. Tick marks show volume in $B.</p>
+  <div class="tooltip" id="tooltip"></div>
+</div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(() => {
+"use strict";
+
+// --- Synthetic asymmetric trade matrix (billions USD) ---
+const countries = [
+  "USA", "China", "Germany", "Japan", "UK",
+  "France", "S. Korea", "India", "Canada", "Mexico"
+];
+
+// Row = exporter, Col = importer. Deliberately asymmetric.
+const matrix = [
+  //  USA  CHN  DEU  JPN   UK  FRA  KOR  IND  CAN  MEX
+  [   0,  150,  65,  75,  70,  40,  55,  35, 310, 275], // USA
+  [ 540,    0, 110, 140,  70,  50, 160,  90,  45,  50], // China
+  [ 135,  105,   0,  25,  95, 110,  20,  15,  12,  18], // Germany
+  [ 140,  165,  22,   0,  15,  10,  50,  12,  12,  15], // Japan
+  [  60,   30,  50,  12,   0,  45,  10,  12,   8,   5], // UK
+  [  40,   25,  80,  10,  40,   0,  10,   8,   6,   5], // France
+  [  80,  160,  12,  30,  10,   8,   0,  15,   8,   7], // S. Korea
+  [  60,   20,  12,   6,  12,   6,   8,   0,   5,   4], // India
+  [ 380,   25,   8,  10,   8,   4,   5,   4,   0,   6], // Canada
+  [ 400,   10,  10,   5,   3,   3,   4,   3,  10,   0], // Mexico
+];
+
+const n = countries.length;
+
+// --- Layout dimensions ---
+const width = 800, height = 800;
+const margin = { top: 0, right: 0, bottom: 0, left: 0 };
+const outerRadius = Math.min(width, height) / 2 - 80;
+const innerRadius = outerRadius - 26;
+const tickRadius = outerRadius + 4;
+const labelRadius = outerRadius + 28;
+
+// Tol bright (7) + muted extras for 10 countries
+const palette = [
+  "#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE",
+  "#AA3377", "#CC6677", "#117733", "#88CCEE", "#999933"
+];
+
+// --- Chord layout ---
+const chordLayout = d3.chord()
+    .padAngle(12 / innerRadius) // ~12px gap
+    .sortSubgroups(d3.descending)
+    .sortChords(d3.descending);
+
+const arcGen = d3.arc()
+    .innerRadius(innerRadius)
+    .outerRadius(outerRadius);
+
+const ribbonGen = d3.ribbon()
+    .radius(innerRadius - 1);
+
+const chords = chordLayout(matrix);
+
+// --- Format helpers ---
+const fmt = v => `$${v.toFixed(0)}B`;
+const fmtDetail = v => `$${v.toFixed(1)}B`;
+
+// --- SVG ---
+const svg = d3.select("#chart").append("svg")
+    .attr("width", width)
+    .attr("height", height)
+    .attr("viewBox", `0 0 ${width} ${height}`)
+    .attr("role", "img")
+    .attr("aria-label", `Chord diagram showing trade flows between ${n} countries`)
+  .append("g")
+    .attr("transform", `translate(${width / 2},${height / 2})`);
+
+const tooltip = d3.select("#tooltip");
+
+// Reduced motion check
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+const dur = ms => reducedMotion.matches ? 0 : ms;
+
+// --- Tick generator ---
+function groupTicks(d, step) {
+  const k = (d.endAngle - d.startAngle) / d.value;
+  return d3.range(0, d.value, step).map(value => ({
+    value,
+    angle: value * k + d.startAngle
+  }));
+}
+
+// --- Draw country arcs ---
+const groupG = svg.append("g")
+    .attr("class", "groups")
+  .selectAll("g")
+  .data(chords.groups)
+  .join("g");
+
+const arcPaths = groupG.append("path")
+    .attr("d", d => {
+      // Start collapsed for entrance animation
+      return arcGen({ ...d, endAngle: d.startAngle });
+    })
+    .attr("fill", d => palette[d.index])
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 1)
+    .style("cursor", "pointer");
+
+// Animate arcs growing
+arcPaths.transition()
+    .duration(dur(600))
+    .ease(d3.easeCubicOut)
+    .attrTween("d", function(d) {
+      const interp = d3.interpolate(
+        { ...d, endAngle: d.startAngle },
+        d
+      );
+      return t => arcGen(interp(t));
+    });
+
+// --- Tick marks (appear after arcs) ---
+const tickG = groupG.append("g")
+    .attr("opacity", 0);
+
+const tickData = d => groupTicks(d, 50); // every $50B
+
+tickG.each(function(d) {
+  const g = d3.select(this);
+  const ticks = tickData(d);
+
+  const tickSel = g.selectAll("g")
+    .data(ticks)
+    .join("g")
+      .attr("transform", t => `rotate(${t.angle * 180 / Math.PI - 90}) translate(${outerRadius},0)`);
+
+  tickSel.append("line")
+      .attr("x2", 4)
+      .attr("stroke", "#666")
+      .attr("stroke-width", 0.8);
+
+  // Labels at every $200B
+  tickSel.filter(t => t.value % 200 === 0 && t.value > 0)
+    .append("text")
+      .attr("x", 7)
+      .attr("dy", "0.32em")
+      .attr("transform", t => t.angle > Math.PI ? "rotate(180) translate(-14)" : null)
+      .attr("text-anchor", t => t.angle > Math.PI ? "end" : null)
+      .attr("font-size", 9)
+      .attr("font-family", "'SF Mono', Monaco, 'Cascadia Code', monospace")
+      .attr("fill", "#666")
+      .text(t => `${t.value}`);
+});
+
+// Fade in ticks after arcs grow
+tickG.transition()
+    .delay(dur(500))
+    .duration(dur(300))
+    .attr("opacity", 1);
+
+// --- Country labels ---
+const labelG = groupG.append("text")
+    .each(function(d) { d.angle = (d.startAngle + d.endAngle) / 2; })
+    .attr("dy", "0.35em")
+    .attr("font-size", 12)
+    .attr("font-weight", 600)
+    .attr("fill", "#333")
+    .attr("opacity", 0)
+    .attr("transform", d => {
+      const rot = d.angle * 180 / Math.PI - 90;
+      const flip = d.angle > Math.PI;
+      return `rotate(${rot}) translate(${labelRadius}) ${flip ? "rotate(180)" : ""}`;
+    })
+    .attr("text-anchor", d => d.angle > Math.PI ? "end" : "start")
+    .text(d => countries[d.index]);
+
+labelG.transition()
+    .delay(dur(500))
+    .duration(dur(300))
+    .attr("opacity", 1);
+
+// --- Draw chords (ribbons) - appear after arcs ---
+const ribbonG = svg.append("g")
+    .attr("class", "ribbons")
+    .attr("fill-opacity", 0.65);
+
+const ribbonPaths = ribbonG.selectAll("path")
+  .data(chords)
+  .join("path")
+    .attr("d", ribbonGen)
+    .attr("fill", d => palette[d.source.index])
+    .attr("stroke", d => d3.rgb(palette[d.source.index]).darker(0.3))
+    .attr("stroke-width", 0.4)
+    .attr("opacity", 0);
+
+// Chords fade in after arcs finish growing
+ribbonPaths.transition()
+    .delay((d, i) => dur(650) + dur(i * 8))
+    .duration(dur(400))
+    .attr("opacity", 1);
+
+// --- Interaction: hover arc to isolate flows ---
+let activeGroup = null;
+
+function highlightGroup(index) {
+  activeGroup = index;
+
+  // Dim all arcs except the hovered one
+  arcPaths.transition().duration(150)
+      .attr("opacity", d => d.index === index ? 1 : 0.25);
+
+  // Show only chords connected to this group
+  ribbonPaths.transition().duration(150)
+      .attr("opacity", d =>
+        d.source.index === index || d.target.index === index ? 1 : 0.04
+      );
+
+  // Dim labels
+  labelG.transition().duration(150)
+      .attr("opacity", d => d.index === index ? 1 : 0.3);
+
+  // Dim ticks
+  tickG.transition().duration(150)
+      .attr("opacity", d => d.index === index ? 1 : 0.15);
+}
+
+function resetHighlight() {
+  activeGroup = null;
+
+  arcPaths.transition().duration(300)
+      .attr("opacity", 1);
+  ribbonPaths.transition().duration(300)
+      .attr("opacity", 1);
+  labelG.transition().duration(300)
+      .attr("opacity", 1);
+  tickG.transition().duration(300)
+      .attr("opacity", 1);
+}
+
+// Arc hover
+groupG.on("pointerenter", function(event, d) {
+  highlightGroup(d.index);
+
+  // Total trade for this country
+  const totalExport = d3.sum(matrix[d.index]);
+  const totalImport = d3.sum(matrix.map(row => row[d.index]));
+
+  tooltip.classed("visible", true)
+    .html(`<strong>${countries[d.index]}</strong><br>
+           Exports: ${fmtDetail(totalExport)}<br>
+           Imports: ${fmtDetail(totalImport)}<br>
+           Total: ${fmtDetail(totalExport + totalImport)}`);
+}).on("pointermove", function(event) {
+  const rect = d3.select("#chart").node().getBoundingClientRect();
+  tooltip
+    .style("left", (event.clientX - rect.left + 14) + "px")
+    .style("top", (event.clientY - rect.top - 10) + "px");
+}).on("pointerleave", function() {
+  resetHighlight();
+  tooltip.classed("visible", false);
+});
+
+// Chord hover
+ribbonPaths.on("pointerenter", function(event, d) {
+  // Highlight the two connected groups
+  const si = d.source.index, ti = d.target.index;
+
+  arcPaths.transition().duration(150)
+      .attr("opacity", g => g.index === si || g.index === ti ? 1 : 0.25);
+  ribbonPaths.transition().duration(150)
+      .attr("opacity", c => c === d ? 1 : 0.04);
+  labelG.transition().duration(150)
+      .attr("opacity", g => g.index === si || g.index === ti ? 1 : 0.3);
+  tickG.transition().duration(150)
+      .attr("opacity", g => g.index === si || g.index === ti ? 1 : 0.15);
+
+  const flow1 = matrix[si][ti];
+  const flow2 = matrix[ti][si];
+  tooltip.classed("visible", true)
+    .html(`<strong>${countries[si]} → ${countries[ti]}</strong>: ${fmtDetail(flow1)}<br>
+           <strong>${countries[ti]} → ${countries[si]}</strong>: ${fmtDetail(flow2)}`);
+}).on("pointermove", function(event) {
+  const rect = d3.select("#chart").node().getBoundingClientRect();
+  tooltip
+    .style("left", (event.clientX - rect.left + 14) + "px")
+    .style("top", (event.clientY - rect.top - 10) + "px");
+}).on("pointerleave", function() {
+  if (activeGroup !== null) {
+    highlightGroup(activeGroup);
+  } else {
+    resetHighlight();
+  }
+  tooltip.classed("visible", false);
+});
+
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Arc Diagram — Character Co-occurrences</title>
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    color: #333;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  header {
+    width: 100%;
+    max-width: 1200px;
+    padding: 18px 24px 0;
+  }
+  h1 {
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: #222;
+  }
+  .subtitle {
+    font-size: 0.82rem;
+    color: #777;
+    margin-top: 2px;
+  }
+  #status {
+    font-size: 0.82rem;
+    color: #555;
+    margin-top: 4px;
+    min-height: 1.3em;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+  }
+  #chart {
+    width: 1200px;
+    max-width: 100%;
+  }
+  .node-label {
+    font-size: 10px;
+    fill: #555;
+    pointer-events: none;
+    font-family: system-ui, -apple-system, sans-serif;
+  }
+  .axis text {
+    font-size: 10px;
+    fill: #888;
+  }
+  .axis .domain { stroke: #ccc; }
+  .axis .tick line { stroke: #ddd; }
+  .brush-info {
+    font-size: 11px;
+    fill: #444;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Character Co-occurrence Arc Diagram</h1>
+  <p class="subtitle">30 characters from a synthetic novel, ordered by first appearance. Arc height encodes co-occurrence weight.</p>
+  <div id="status">Hover a character to see connections. Brush the chapter axis to filter.</div>
+</header>
+<div id="chart"></div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(() => {
+  // --- Tol palettes ---
+  const tolBright = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377","#BBBBBB"];
+  const tolMuted  = ["#CC6677","#332288","#DDCC77","#117733","#88CCEE","#882255","#44AA99","#999933","#AA4499"];
+
+  // --- Synthetic data: 30 characters ---
+  const rng = d3.randomLcg(42);
+  const randInt = (lo, hi) => lo + Math.floor(rng() * (hi - lo + 1));
+  const randFloat = () => rng();
+
+  const namePool = [
+    "Elara","Kael","Miren","Thorne","Lyssa","Darius","Orin","Vesper","Calla","Rowan",
+    "Sable","Fenwick","Isolde","Jasper","Neve","Aldric","Bryn","Corin","Delphine","Egan",
+    "Fiora","Gareth","Hale","Ivor","Juno","Kira","Leander","Mara","Nyx","Oriel"
+  ];
+
+  // Characters with structured first appearances: protagonist early, supporting cast spread out
+  const characters = namePool.map((name, i) => ({
+    id: i,
+    name,
+    firstChapter: i === 0 ? 1 : i < 5 ? randInt(1, 5) : randInt(1 + Math.floor(i / 2), Math.min(30, 3 + i)),
+    importance: i < 3 ? randInt(7, 10) : i < 8 ? randInt(4, 8) : randInt(1, 6)
+  }));
+
+  // Sort by first appearance, then name
+  characters.sort((a, b) => a.firstChapter - b.firstChapter || a.name.localeCompare(b.name));
+  characters.forEach((c, i) => c.sortIndex = i);
+
+  // Generate ~90 co-occurrence edges with chapter ranges
+  // Characters co-occur in chapter ranges; close-appearing characters more likely to share scenes
+  const edges = [];
+  const edgeSet = new Set();
+  let attempts = 0;
+  while (edges.length < 90 && attempts < 800) {
+    attempts++;
+    const i = randInt(0, 29), j = randInt(0, 29);
+    if (i === j) continue;
+    const a = Math.min(i, j), b = Math.max(i, j);
+    const key = `${a}-${b}`;
+    if (edgeSet.has(key)) continue;
+
+    // Characters close in sort order are more likely connected
+    const dist = Math.abs(characters[a].sortIndex - characters[b].sortIndex);
+    if (randFloat() > 0.7 / (1 + dist * 0.08)) continue;
+
+    edgeSet.add(key);
+
+    // Weight: higher for important characters who appear close together
+    const chapterOverlap = 30 - Math.abs(characters[a].firstChapter - characters[b].firstChapter);
+    const importanceBoost = (characters[a].importance + characters[b].importance) / 20;
+    const weight = Math.max(1, Math.min(20, Math.round(
+      (chapterOverlap / 30) * 12 * importanceBoost + randFloat() * 5
+    )));
+
+    // Chapter range where co-occurrence happens
+    const startCh = Math.max(characters[a].firstChapter, characters[b].firstChapter);
+    const endCh = Math.min(30, startCh + randInt(1, Math.max(2, 30 - startCh)));
+
+    edges.push({ source: a, target: b, weight, startChapter: startCh, endChapter: endCh });
+  }
+
+  // Adjacency map
+  const adjacency = new Map(characters.map(c => [c.sortIndex, new Map()]));
+  edges.forEach(e => {
+    adjacency.get(e.source).set(e.target, e);
+    adjacency.get(e.target).set(e.source, e);
+  });
+
+  // --- Layout ---
+  const margin = { top: 40, right: 50, bottom: 100, left: 50 };
+  const W = 1200, H = 800;
+  const innerW = W - margin.left - margin.right;
+  const innerH = H - margin.top - margin.bottom;
+  const baselineY = margin.top + innerH * 0.72; // arcs go above, labels below
+
+  const svg = d3.select("#chart")
+    .append("svg")
+      .attr("viewBox", `0 0 ${W} ${H}`)
+      .attr("width", W)
+      .attr("height", H);
+
+  // Nodes on x-axis by sort order (first appearance)
+  const xScale = d3.scalePoint()
+    .domain(characters.map(c => c.sortIndex))
+    .range([margin.left + 10, W - margin.right - 10])
+    .padding(0.5);
+
+  // Chapter scale for brush axis
+  const chapterScale = d3.scaleLinear()
+    .domain([1, 30])
+    .range([margin.left + 10, W - margin.right - 10]);
+
+  // Arc height proportional to weight (scaleSqrt for area perception)
+  const arcHeight = d3.scaleSqrt()
+    .domain([1, 20])
+    .range([20, baselineY - margin.top - 10]);
+
+  // Stroke width from weight
+  const strokeWidth = d3.scaleSqrt()
+    .domain([1, 20])
+    .range([0.8, 4.5]);
+
+  // Node radius from importance
+  const nodeRadius = d3.scaleLinear()
+    .domain([1, 10])
+    .range([3.5, 11]);
+
+  // Color by first chapter (quantize into Tol muted)
+  const colorScale = d3.scaleQuantize()
+    .domain([1, 30])
+    .range(tolMuted);
+
+  // Small-area chroma boost: darken node fills slightly for visibility
+  const boostedColor = (hex) => {
+    const c = d3.hcl(hex);
+    c.c = Math.min(130, (c.c || 0) + 18);
+    c.l = Math.max(20, c.l - 4);
+    return c.toString();
+  };
+
+  // --- Draw arcs ---
+  const arcGroup = svg.append("g").attr("class", "arcs");
+
+  const arcPath = (d) => {
+    const x1 = xScale(d.source);
+    const x2 = xScale(d.target);
+    const h = arcHeight(d.weight);
+    // Quadratic bezier arc above baseline
+    const mx = (x1 + x2) / 2;
+    return `M${x1},${baselineY} Q${mx},${baselineY - h} ${x2},${baselineY}`;
+  };
+
+  const arcPaths = arcGroup.selectAll("path")
+    .data(edges)
+    .join("path")
+      .attr("fill", "none")
+      .attr("stroke", d => {
+        const ch = Math.min(characters[d.source].firstChapter, characters[d.target].firstChapter);
+        return colorScale(ch);
+      })
+      .attr("stroke-width", d => strokeWidth(d.weight))
+      .attr("stroke-opacity", 0.35)
+      .attr("d", arcPath)
+      .attr("stroke-linecap", "round");
+
+  // --- Draw nodes ---
+  const nodeGroup = svg.append("g").attr("class", "nodes");
+
+  const nodeSel = nodeGroup.selectAll("circle")
+    .data(characters)
+    .join("circle")
+      .attr("cx", d => xScale(d.sortIndex))
+      .attr("cy", baselineY)
+      .attr("r", d => nodeRadius(d.importance))
+      .attr("fill", d => boostedColor(colorScale(d.firstChapter)))
+      .attr("stroke", "#fff")
+      .attr("stroke-width", 1.5)
+      .style("cursor", "pointer");
+
+  // --- Labels (angled below baseline) ---
+  const labelGroup = svg.append("g").attr("class", "labels");
+
+  const labels = labelGroup.selectAll("text")
+    .data(characters)
+    .join("text")
+      .attr("class", "node-label")
+      .attr("transform", d => {
+        const cx = xScale(d.sortIndex);
+        const cy = baselineY + nodeRadius(d.importance) + 8;
+        return `translate(${cx},${cy}) rotate(45)`;
+      })
+      .attr("text-anchor", "start")
+      .attr("dy", "0.35em")
+      .text(d => d.name);
+
+  // --- Chapter axis below labels ---
+  const axisY = H - margin.bottom + 20;
+  const axisG = svg.append("g")
+    .attr("class", "axis")
+    .attr("transform", `translate(0,${axisY})`)
+    .call(d3.axisBottom(chapterScale)
+      .ticks(15)
+      .tickFormat(d => `Ch ${d}`)
+      .tickSizeOuter(0));
+
+  svg.append("text")
+    .attr("x", W / 2)
+    .attr("y", axisY + 36)
+    .attr("text-anchor", "middle")
+    .attr("fill", "#888")
+    .attr("font-size", 11)
+    .text("Chapter (brush to filter)");
+
+  // --- Brush on chapter axis ---
+  let brushRange = null;
+  const statusEl = document.getElementById("status");
+
+  const brush = d3.brushX()
+    .extent([[margin.left, axisY - 14], [W - margin.right, axisY + 14]])
+    .on("brush end", onBrush);
+
+  const brushG = svg.append("g")
+    .attr("class", "brush")
+    .call(brush);
+
+  // Style brush handles
+  brushG.selectAll(".selection")
+    .attr("fill", "#4477AA")
+    .attr("fill-opacity", 0.15)
+    .attr("stroke", "#4477AA");
+
+  function onBrush(event) {
+    const sel = event.selection;
+    if (!sel) {
+      brushRange = null;
+      resetView();
+      statusEl.textContent = "Hover a character to see connections. Brush the chapter axis to filter.";
+      return;
+    }
+    const ch0 = Math.max(1, Math.round(chapterScale.invert(sel[0])));
+    const ch1 = Math.min(30, Math.round(chapterScale.invert(sel[1])));
+    brushRange = [ch0, ch1];
+
+    // Filter: show only edges whose co-occurrence chapter range overlaps the brush
+    let visibleEdges = 0;
+    arcPaths
+      .attr("stroke-opacity", d => {
+        const overlaps = d.startChapter <= ch1 && d.endChapter >= ch0;
+        if (overlaps) visibleEdges++;
+        return overlaps ? 0.45 : 0.03;
+      })
+      .attr("stroke-width", d => {
+        const overlaps = d.startChapter <= ch1 && d.endChapter >= ch0;
+        return overlaps ? strokeWidth(d.weight) : 0.3;
+      });
+
+    // Dim nodes outside chapter range
+    nodeSel.attr("opacity", d =>
+      d.firstChapter >= ch0 && d.firstChapter <= ch1 ? 1 : 0.15
+    );
+    labels.attr("opacity", d =>
+      d.firstChapter >= ch0 && d.firstChapter <= ch1 ? 1 : 0.15
+    );
+
+    statusEl.textContent = `Chapters ${ch0}\u2013${ch1}: ${visibleEdges} co-occurrence${visibleEdges !== 1 ? "s" : ""} active`;
+  }
+
+  function resetView() {
+    arcPaths
+      .attr("stroke-opacity", 0.35)
+      .attr("stroke-width", d => strokeWidth(d.weight));
+    nodeSel.attr("opacity", 1);
+    labels.attr("opacity", 1);
+  }
+
+  // --- Hover interaction ---
+  const hoverArcGroup = svg.append("g").attr("class", "hover-arcs");
+  const tooltip = svg.append("g").style("pointer-events", "none");
+  const tooltipRect = tooltip.append("rect")
+    .attr("fill", "#fff")
+    .attr("stroke", "#ccc")
+    .attr("stroke-width", 0.5)
+    .attr("rx", 4)
+    .attr("opacity", 0);
+  const tooltipText = tooltip.append("text")
+    .attr("font-size", 12)
+    .attr("fill", "#333")
+    .attr("font-family", "system-ui, sans-serif");
+
+  let hovered = null;
+
+  nodeSel
+    .on("pointerenter", (event, d) => {
+      hovered = d;
+      const neighbors = adjacency.get(d.sortIndex);
+      const neighborIds = new Set(neighbors.keys());
+      const degree = neighbors.size;
+
+      // Dim all arcs, brighten connected
+      arcPaths.transition().duration(120)
+        .attr("stroke-opacity", e =>
+          (e.source === d.sortIndex || e.target === d.sortIndex) ? 0.8 : 0.04
+        )
+        .attr("stroke-width", e =>
+          (e.source === d.sortIndex || e.target === d.sortIndex)
+            ? strokeWidth(e.weight) + 1 : strokeWidth(e.weight) * 0.5
+        );
+
+      // Dim unconnected nodes
+      nodeSel.transition().duration(120)
+        .attr("opacity", n =>
+          n.sortIndex === d.sortIndex || neighborIds.has(n.sortIndex) ? 1 : 0.12
+        );
+      labels.transition().duration(120)
+        .attr("opacity", n =>
+          n.sortIndex === d.sortIndex || neighborIds.has(n.sortIndex) ? 1 : 0.12
+        );
+
+      // Tooltip
+      const totalWeight = d3.sum([...neighbors.values()], e => e.weight);
+      const line1 = `${d.name} — ${degree} connection${degree !== 1 ? "s" : ""}`;
+      const line2 = `First: Ch ${d.firstChapter}  Weight: ${totalWeight}`;
+      tooltipText.selectAll("tspan").remove();
+      tooltipText.append("tspan").attr("x", 8).attr("dy", 14).attr("font-weight", 600).text(line1);
+      tooltipText.append("tspan").attr("x", 8).attr("dy", 16).attr("fill", "#777").attr("font-size", 10.5).text(line2);
+
+      const bbox = tooltipText.node().getBBox();
+      const tx = Math.min(W - bbox.width - 30, Math.max(10, xScale(d.sortIndex) - bbox.width / 2));
+      const ty = baselineY - nodeRadius(d.importance) - bbox.height - 16;
+      tooltipRect
+        .attr("x", 0).attr("y", 0)
+        .attr("width", bbox.width + 16)
+        .attr("height", bbox.height + 10)
+        .attr("opacity", 1);
+      tooltip.attr("transform", `translate(${tx},${ty})`);
+
+      statusEl.textContent = `${d.name}: ${degree} connections, total weight ${totalWeight}, first appearance Ch ${d.firstChapter}`;
+    })
+    .on("pointerleave", () => {
+      hovered = null;
+      tooltipRect.attr("opacity", 0);
+      tooltipText.selectAll("tspan").remove();
+
+      if (brushRange) {
+        onBrush({ selection: [chapterScale(brushRange[0]), chapterScale(brushRange[1])] });
+      } else {
+        resetView();
+        statusEl.textContent = "Hover a character to see connections. Brush the chapter axis to filter.";
+      }
+    });
+
+  // --- Weight legend ---
+  const legendG = svg.append("g")
+    .attr("transform", `translate(${W - margin.right - 140},${margin.top})`);
+
+  legendG.append("text")
+    .attr("font-size", 11)
+    .attr("font-weight", 600)
+    .attr("fill", "#555")
+    .text("Co-occurrence weight");
+
+  const legendWeights = [2, 8, 15, 20];
+  legendWeights.forEach((w, i) => {
+    const y = 20 + i * 22;
+    const halfW = 40;
+    const h = arcHeight(w) * 0.18;
+    legendG.append("path")
+      .attr("d", `M0,${y} Q${halfW},${y - h} ${halfW * 2},${y}`)
+      .attr("fill", "none")
+      .attr("stroke", "#888")
+      .attr("stroke-width", strokeWidth(w))
+      .attr("stroke-opacity", 0.6)
+      .attr("stroke-linecap", "round");
+    legendG.append("text")
+      .attr("x", halfW * 2 + 8)
+      .attr("y", y)
+      .attr("dy", "0.35em")
+      .attr("font-size", 10)
+      .attr("fill", "#888")
+      .text(w);
+  });
+
+})();
+</script>
+</body>
+</html>

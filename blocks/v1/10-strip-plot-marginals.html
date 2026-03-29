@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Strip Plot with Marginals</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+  }
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    opacity: 0;
+    background: white;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    padding: 8px 10px;
+    font-size: 12px;
+    line-height: 1.5;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+    max-width: 200px;
+  }
+  .tooltip strong { font-family: "SF Mono", Monaco, "Cascadia Code", monospace; }
+  .mono { font-family: "SF Mono", Monaco, "Cascadia Code", monospace; }
+  .annotation-text {
+    font-size: 12px;
+    fill: #555;
+    font-style: italic;
+  }
+  .axis text { font-size: 11px; fill: #555; }
+  .axis path, .axis line { stroke: #ccc; }
+  .legend-label { font-size: 12px; fill: #444; }
+  .title { font-size: 16px; font-weight: 600; fill: #222; }
+  .subtitle { font-size: 12px; fill: #777; }
+  .brush-info { font-size: 11px; fill: #888; }
+</style>
+</head>
+<body>
+<script type="module">
+
+// --- Tol colorblind-safe palette ---
+const tolColors = ["#4477AA", "#EE6677", "#228833"];
+const riskLabels = ["Low", "Moderate", "High"];
+
+// --- Synthetic data: age vs cholesterol, 3 risk groups ---
+const rng = d3.randomLcg(42);
+const randNorm = (mu, sigma) => {
+  const u1 = rng(), u2 = rng();
+  return mu + sigma * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+};
+
+const data = [];
+for (let i = 0; i < 250; i++) {
+  const groupIdx = i < 90 ? 0 : i < 180 ? 1 : 2;
+  const group = riskLabels[groupIdx];
+  let age, cholesterol;
+  if (groupIdx === 0) {
+    age = Math.round(randNorm(35, 10));
+    cholesterol = randNorm(180, 25) + (age - 35) * 0.8;
+  } else if (groupIdx === 1) {
+    age = Math.round(randNorm(50, 12));
+    cholesterol = randNorm(220, 30) + (age - 50) * 1.1;
+  } else {
+    age = Math.round(randNorm(58, 9));
+    cholesterol = randNorm(265, 28) + (age - 58) * 1.4;
+  }
+  age = Math.max(20, Math.min(85, age));
+  cholesterol = Math.max(120, Math.min(380, cholesterol));
+  data.push({ age, cholesterol, group, groupIdx, idx: i });
+}
+
+// --- Layout ---
+const totalWidth = 1200, totalHeight = 800;
+const marginalTop = 100, marginalRight = 100;
+const margin = { top: 60 + marginalTop, right: 40 + marginalRight, bottom: 60, left: 70 };
+const width = totalWidth - margin.left - margin.right;
+const height = totalHeight - margin.top - margin.bottom;
+
+// --- Scales ---
+const xScale = d3.scaleLinear()
+  .domain(d3.extent(data, d => d.age)).nice()
+  .range([0, width]);
+
+const yScale = d3.scaleLinear()
+  .domain(d3.extent(data, d => d.cholesterol)).nice()
+  .range([height, 0]);
+
+const colorScale = d3.scaleOrdinal()
+  .domain(riskLabels)
+  .range(tolColors);
+
+// --- SVG ---
+const svg = d3.select("body").append("svg")
+  .attr("width", totalWidth)
+  .attr("height", totalHeight);
+
+const g = svg.append("g")
+  .attr("transform", `translate(${margin.left},${margin.top})`);
+
+// --- Title ---
+svg.append("text").attr("class", "title")
+  .attr("x", totalWidth / 2).attr("y", 24)
+  .attr("text-anchor", "middle")
+  .text("Age vs Cholesterol by Risk Group");
+
+svg.append("text").attr("class", "subtitle")
+  .attr("x", totalWidth / 2).attr("y", 42)
+  .attr("text-anchor", "middle")
+  .text("250 patients \u00B7 Brush scatterplot to update marginal summaries");
+
+// --- Axes ---
+const xAxis = g.append("g")
+  .attr("class", "axis")
+  .attr("transform", `translate(0,${height})`)
+  .call(d3.axisBottom(xScale).ticks(10));
+
+xAxis.append("text")
+  .attr("x", width / 2).attr("y", 42)
+  .attr("fill", "#444").attr("text-anchor", "middle")
+  .style("font-size", "13px")
+  .text("Age (years)");
+
+const yAxis = g.append("g")
+  .attr("class", "axis")
+  .call(d3.axisLeft(yScale).ticks(8));
+
+yAxis.append("text")
+  .attr("transform", "rotate(-90)")
+  .attr("x", -height / 2).attr("y", -50)
+  .attr("fill", "#444").attr("text-anchor", "middle")
+  .style("font-size", "13px")
+  .text("Total Cholesterol (mg/dL)");
+
+// --- Regression ---
+function linearRegression(pts) {
+  const n = pts.length;
+  if (n < 2) return null;
+  const mx = d3.mean(pts, d => d.age), my = d3.mean(pts, d => d.cholesterol);
+  let ssxy = 0, ssxx = 0, ssyy = 0;
+  for (const d of pts) {
+    ssxy += (d.age - mx) * (d.cholesterol - my);
+    ssxx += (d.age - mx) ** 2;
+    ssyy += (d.cholesterol - my) ** 2;
+  }
+  const slope = ssxy / ssxx;
+  const intercept = my - slope * mx;
+  const r2 = ssxx > 0 && ssyy > 0 ? (ssxy ** 2) / (ssxx * ssyy) : 0;
+  return { slope, intercept, r2 };
+}
+
+const regLine = g.append("line")
+  .attr("stroke", "#333").attr("stroke-width", 1.5)
+  .attr("stroke-dasharray", "6,4").attr("opacity", 0.7);
+
+const regLabel = g.append("text")
+  .attr("class", "annotation-text");
+
+function updateRegression(pts) {
+  const reg = linearRegression(pts);
+  if (!reg) { regLine.attr("opacity", 0); regLabel.attr("opacity", 0); return; }
+  const [xMin, xMax] = xScale.domain();
+  regLine
+    .attr("x1", xScale(xMin)).attr("y1", yScale(reg.intercept + reg.slope * xMin))
+    .attr("x2", xScale(xMax)).attr("y2", yScale(reg.intercept + reg.slope * xMax))
+    .attr("opacity", 0.7);
+  regLabel
+    .attr("x", xScale(xMax) - 4).attr("y", yScale(reg.intercept + reg.slope * xMax) - 8)
+    .attr("text-anchor", "end")
+    .attr("opacity", 1)
+    .text(`R\u00B2 = ${reg.r2.toFixed(3)}`);
+}
+
+updateRegression(data);
+
+// --- Scatter points ---
+const dots = g.append("g").attr("class", "dots");
+
+dots.selectAll("circle")
+  .data(data)
+  .join("circle")
+    .attr("cx", d => xScale(d.age))
+    .attr("cy", d => yScale(d.cholesterol))
+    .attr("r", 4)
+    .attr("fill", d => colorScale(d.group))
+    .attr("opacity", 0.75)
+    .attr("stroke", "white")
+    .attr("stroke-width", 0.5);
+
+// --- Marginal strip + box: Top (age distribution) ---
+const topMarginG = svg.append("g")
+  .attr("transform", `translate(${margin.left},${margin.top - marginalTop})`);
+
+const topStripHeight = 30;
+const topBoxY = topStripHeight + 8;
+const topBoxHeight = 20;
+
+// Strip area background
+topMarginG.append("rect")
+  .attr("width", width).attr("height", marginalTop - 10)
+  .attr("fill", "#f5f5f5").attr("rx", 3);
+
+// --- Marginal strip + box: Right (cholesterol distribution) ---
+const rightMarginG = svg.append("g")
+  .attr("transform", `translate(${margin.left + width + 10},${margin.top})`);
+
+const rightStripWidth = 30;
+const rightBoxX = rightStripWidth + 8;
+const rightBoxWidth = 20;
+
+rightMarginG.append("rect")
+  .attr("width", marginalRight - 10).attr("height", height)
+  .attr("fill", "#f5f5f5").attr("rx", 3);
+
+// --- Stats helper ---
+function computeStats(values) {
+  const sorted = Float64Array.from(values).sort();
+  const q1 = d3.quantile(sorted, 0.25), q3 = d3.quantile(sorted, 0.75), iqr = q3 - q1;
+  return {
+    min: sorted[0], max: sorted[sorted.length - 1],
+    q1, median: d3.quantile(sorted, 0.5), q3, iqr,
+    whiskerLow: d3.min(sorted.filter(v => v >= q1 - 1.5 * iqr)),
+    whiskerHigh: d3.max(sorted.filter(v => v <= q3 + 1.5 * iqr)),
+    n: sorted.length
+  };
+}
+
+// --- Draw marginals ---
+function drawTopMarginal(pts) {
+  topMarginG.selectAll(".strip-dot, .box-g").remove();
+
+  // Strip dots per group
+  for (const group of riskLabels) {
+    const groupPts = pts.filter(d => d.group === group);
+    const jitterRng = d3.randomLcg(99);
+    topMarginG.selectAll(null)
+      .data(groupPts)
+      .join("circle")
+        .attr("class", "strip-dot")
+        .attr("cx", d => xScale(d.age))
+        .attr("cy", () => 4 + jitterRng() * (topStripHeight - 8))
+        .attr("r", 2.5)
+        .attr("fill", colorScale(group))
+        .attr("opacity", 0.5);
+  }
+
+  // Box plot
+  const ages = pts.map(d => d.age);
+  if (ages.length < 2) return;
+  const stats = computeStats(ages);
+  const boxG = topMarginG.append("g").attr("class", "box-g")
+    .attr("transform", `translate(0,${topBoxY})`);
+
+  // Whiskers
+  boxG.append("line")
+    .attr("x1", xScale(stats.whiskerLow)).attr("x2", xScale(stats.q1))
+    .attr("y1", topBoxHeight / 2).attr("y2", topBoxHeight / 2)
+    .attr("stroke", "#555").attr("stroke-width", 1);
+  boxG.append("line")
+    .attr("x1", xScale(stats.q3)).attr("x2", xScale(stats.whiskerHigh))
+    .attr("y1", topBoxHeight / 2).attr("y2", topBoxHeight / 2)
+    .attr("stroke", "#555").attr("stroke-width", 1);
+
+  // Whisker caps
+  for (const v of [stats.whiskerLow, stats.whiskerHigh]) {
+    boxG.append("line")
+      .attr("x1", xScale(v)).attr("x2", xScale(v))
+      .attr("y1", topBoxHeight * 0.2).attr("y2", topBoxHeight * 0.8)
+      .attr("stroke", "#555").attr("stroke-width", 1);
+  }
+
+  // Box
+  boxG.append("rect")
+    .attr("x", xScale(stats.q1))
+    .attr("width", Math.max(0, xScale(stats.q3) - xScale(stats.q1)))
+    .attr("y", 0).attr("height", topBoxHeight)
+    .attr("fill", "#ddd").attr("fill-opacity", 0.7)
+    .attr("stroke", "#555").attr("stroke-width", 1);
+
+  // Median line
+  boxG.append("line")
+    .attr("x1", xScale(stats.median)).attr("x2", xScale(stats.median))
+    .attr("y1", 0).attr("y2", topBoxHeight)
+    .attr("stroke", "#333").attr("stroke-width", 2);
+}
+
+function drawRightMarginal(pts) {
+  rightMarginG.selectAll(".strip-dot, .box-g").remove();
+
+  for (const group of riskLabels) {
+    const groupPts = pts.filter(d => d.group === group);
+    const jitterRng = d3.randomLcg(77);
+    rightMarginG.selectAll(null)
+      .data(groupPts)
+      .join("circle")
+        .attr("class", "strip-dot")
+        .attr("cx", () => 4 + jitterRng() * (rightStripWidth - 8))
+        .attr("cy", d => yScale(d.cholesterol))
+        .attr("r", 2.5)
+        .attr("fill", colorScale(group))
+        .attr("opacity", 0.5);
+  }
+
+  const chols = pts.map(d => d.cholesterol);
+  if (chols.length < 2) return;
+  const stats = computeStats(chols);
+  const boxG = rightMarginG.append("g").attr("class", "box-g")
+    .attr("transform", `translate(${rightBoxX},0)`);
+
+  // Whiskers
+  boxG.append("line")
+    .attr("y1", yScale(stats.whiskerLow)).attr("y2", yScale(stats.q1))
+    .attr("x1", rightBoxWidth / 2).attr("x2", rightBoxWidth / 2)
+    .attr("stroke", "#555").attr("stroke-width", 1);
+  boxG.append("line")
+    .attr("y1", yScale(stats.q3)).attr("y2", yScale(stats.whiskerHigh))
+    .attr("x1", rightBoxWidth / 2).attr("x2", rightBoxWidth / 2)
+    .attr("stroke", "#555").attr("stroke-width", 1);
+
+  // Whisker caps
+  for (const v of [stats.whiskerLow, stats.whiskerHigh]) {
+    boxG.append("line")
+      .attr("y1", yScale(v)).attr("y2", yScale(v))
+      .attr("x1", rightBoxWidth * 0.2).attr("x2", rightBoxWidth * 0.8)
+      .attr("stroke", "#555").attr("stroke-width", 1);
+  }
+
+  // Box
+  boxG.append("rect")
+    .attr("y", yScale(stats.q3))
+    .attr("height", Math.max(0, yScale(stats.q1) - yScale(stats.q3)))
+    .attr("x", 0).attr("width", rightBoxWidth)
+    .attr("fill", "#ddd").attr("fill-opacity", 0.7)
+    .attr("stroke", "#555").attr("stroke-width", 1);
+
+  // Median line
+  boxG.append("line")
+    .attr("y1", yScale(stats.median)).attr("y2", yScale(stats.median))
+    .attr("x1", 0).attr("x2", rightBoxWidth)
+    .attr("stroke", "#333").attr("stroke-width", 2);
+}
+
+drawTopMarginal(data);
+drawRightMarginal(data);
+
+// --- Brush ---
+const brushInfo = g.append("text").attr("class", "brush-info")
+  .attr("x", width).attr("y", height + 34)
+  .attr("text-anchor", "end");
+
+const brush = d3.brush()
+  .extent([[0, 0], [width, height]])
+  .on("start brush end", brushed);
+
+g.append("g").attr("class", "brush-layer").call(brush);
+
+// Style brush overlay
+g.select(".brush-layer .overlay").attr("cursor", "crosshair");
+
+function brushed({ selection }) {
+  let selected;
+  if (!selection) {
+    // No brush: show all
+    selected = data;
+    dots.selectAll("circle")
+      .attr("opacity", 0.75)
+      .attr("r", 4);
+    brushInfo.text("");
+  } else {
+    const [[x0, y0], [x1, y1]] = selection;
+    selected = data.filter(d => {
+      const px = xScale(d.age), py = yScale(d.cholesterol);
+      return px >= x0 && px <= x1 && py >= y0 && py <= y1;
+    });
+    const selectedSet = new Set(selected.map(d => d.idx));
+    dots.selectAll("circle")
+      .attr("opacity", d => selectedSet.has(d.idx) ? 0.9 : 0.1)
+      .attr("r", d => selectedSet.has(d.idx) ? 5 : 3);
+    brushInfo.text(`${selected.length} of ${data.length} selected`);
+  }
+
+  updateRegression(selected);
+  drawTopMarginal(selected);
+  drawRightMarginal(selected);
+}
+
+// --- Tooltip ---
+const tooltip = d3.select("body").append("div").attr("class", "tooltip");
+
+dots.selectAll("circle")
+  .on("pointerenter", (event, d) => {
+    tooltip
+      .html(`<strong>${d.group}</strong> risk<br>Age: <strong>${d.age}</strong><br>Cholesterol: <strong>${d.cholesterol.toFixed(0)}</strong> mg/dL`)
+      .style("opacity", 1);
+    d3.select(event.target).attr("stroke", "#333").attr("stroke-width", 1.5);
+  })
+  .on("pointermove", (event) => {
+    const tw = tooltip.node().offsetWidth;
+    const x = Math.min(event.pageX + 14, window.innerWidth - tw - 12);
+    const y = Math.max(event.pageY - 50, 8);
+    tooltip.style("left", `${x}px`).style("top", `${y}px`);
+  })
+  .on("pointerleave", (event) => {
+    tooltip.style("opacity", 0);
+    d3.select(event.target).attr("stroke", "white").attr("stroke-width", 0.5);
+  });
+
+// --- Legend ---
+const legend = svg.append("g")
+  .attr("transform", `translate(${margin.left + 12},${margin.top + 12})`);
+
+legend.append("rect")
+  .attr("x", -8).attr("y", -14)
+  .attr("width", 120).attr("height", riskLabels.length * 22 + 12)
+  .attr("fill", "white").attr("fill-opacity", 0.9)
+  .attr("stroke", "#ddd").attr("rx", 3);
+
+riskLabels.forEach((label, i) => {
+  const row = legend.append("g").attr("transform", `translate(0,${i * 22})`);
+  row.append("circle").attr("r", 5).attr("cx", 6).attr("cy", 0)
+    .attr("fill", tolColors[i]).attr("opacity", 0.85);
+  row.append("text").attr("class", "legend-label")
+    .attr("x", 18).attr("y", 4).text(`${label} risk`);
+});
+
+</script>
+</body>
+</html>

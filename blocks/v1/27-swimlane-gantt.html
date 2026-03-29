@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Swimlane Gantt Chart</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa; padding: 20px 24px;
+  }
+  h1 { font-size: 18px; font-weight: 600; color: #222; margin-bottom: 2px; }
+  .subtitle { font-size: 13px; color: #666; margin-bottom: 14px; }
+  .legend {
+    display: flex; gap: 18px; margin-bottom: 10px;
+    font-size: 11.5px; color: #444; align-items: center; flex-wrap: wrap;
+  }
+  .legend-item { display: flex; align-items: center; gap: 5px; }
+  .legend-swatch { width: 14px; height: 10px; border-radius: 2px; }
+  .legend-diamond {
+    width: 9px; height: 9px; transform: rotate(45deg);
+    background: #AA3377; border-radius: 1px;
+  }
+  .legend-today {
+    width: 18px; height: 0; border-top: 2px dashed #CC3333;
+  }
+  #chart { position: relative; }
+  .tooltip {
+    position: fixed; pointer-events: none; background: #fff;
+    border: 1px solid #ddd; border-radius: 6px; padding: 10px 14px;
+    font-size: 12px; line-height: 1.6; max-width: 280px;
+    box-shadow: 0 3px 12px rgba(0,0,0,.12); opacity: 0;
+    transition: opacity .12s ease-out; z-index: 10;
+  }
+  .tooltip strong { font-size: 13px; }
+  .tooltip .dot {
+    display: inline-block; width: 8px; height: 8px;
+    border-radius: 50%; margin-right: 4px; vertical-align: middle;
+  }
+  .task-bar { cursor: pointer; }
+  .task-bar:hover { filter: brightness(1.12); }
+</style>
+</head>
+<body>
+<h1>Product Launch Timeline — Q1-Q2 2025</h1>
+<p class="subtitle">35 tasks across 5 teams. Brush the overview bar below to zoom into a time range.</p>
+<div class="legend">
+  <div class="legend-item"><div class="legend-swatch" style="background:#228833"></div>Complete</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#4477AA"></div>In Progress</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#EE6677"></div>Blocked</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#BBBBBB"></div>Not Started</div>
+  <div class="legend-item"><div class="legend-diamond"></div>Milestone</div>
+  <div class="legend-item"><div class="legend-today"></div>Today</div>
+</div>
+<div id="chart"></div>
+<div class="tooltip" id="tooltip"></div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(() => {
+  // ---------- Seeded RNG ----------
+  const rng = (() => { let s = 137; return () => { s = (s * 16807) % 2147483647; return (s - 1) / 2147483646; }; })();
+  const randInt = (a, b) => a + Math.floor(rng() * (b - a + 1));
+  const pick = arr => arr[randInt(0, arr.length - 1)];
+
+  // ---------- Config ----------
+  const teams = ["Platform", "Frontend", "Design", "QA", "Infrastructure"];
+  const statusColor = {
+    complete: "#228833", "in-progress": "#4477AA",
+    blocked: "#EE6677", "not-started": "#BBBBBB"
+  };
+  const statusLabel = {
+    complete: "Complete", "in-progress": "In Progress",
+    blocked: "Blocked", "not-started": "Not Started"
+  };
+  const laneShade = {
+    Platform: "#f0f4f8", Frontend: "#f0f7f0",
+    Design: "#f7f3ee", QA: "#f4f0f7", Infrastructure: "#eef5f7"
+  };
+
+  const projectStart = new Date(2025, 0, 6);   // Mon Jan 6
+  const projectEnd   = new Date(2025, 5, 30);   // Jun 30
+  const today        = new Date(2025, 2, 29);   // Mar 29
+
+  // ---------- Synthetic tasks ----------
+  const taskDefs = [
+    // Platform (7)
+    { name: "API Gateway v2",       team: 0, off: 0,  dur: 18, status: "complete" },
+    { name: "Auth Service Rewrite", team: 0, off: 5,  dur: 25, status: "complete" },
+    { name: "Database Migration",   team: 0, off: 20, dur: 14, status: "complete" },
+    { name: "Cache Layer (Redis)",  team: 0, off: 30, dur: 12, status: "in-progress" },
+    { name: "Rate Limiter",         team: 0, off: 42, dur: 10, status: "in-progress" },
+    { name: "Event Bus Setup",      team: 0, off: 55, dur: 15, status: "not-started" },
+    { name: "GraphQL Federation",   team: 0, off: 70, dur: 20, status: "not-started" },
+    // Frontend (7)
+    { name: "Design System v3",     team: 1, off: 3,  dur: 22, status: "complete" },
+    { name: "Dashboard Rebuild",    team: 1, off: 18, dur: 20, status: "complete" },
+    { name: "Form Engine",          team: 1, off: 28, dur: 18, status: "in-progress" },
+    { name: "PWA Offline Mode",     team: 1, off: 45, dur: 14, status: "blocked", blockReason: "Waiting on Cache Layer" },
+    { name: "i18n Integration",     team: 1, off: 50, dur: 16, status: "not-started" },
+    { name: "Performance Audit",    team: 1, off: 68, dur: 10, status: "not-started" },
+    { name: "A11y Compliance",      team: 1, off: 75, dur: 15, status: "not-started" },
+    // Design (7)
+    { name: "Brand Refresh",        team: 2, off: 0,  dur: 20, status: "complete" },
+    { name: "Icon System",          team: 2, off: 8,  dur: 15, status: "complete" },
+    { name: "Wireframes v2",        team: 2, off: 22, dur: 12, status: "complete" },
+    { name: "User Research",        team: 2, off: 34, dur: 18, status: "in-progress" },
+    { name: "Prototype Testing",    team: 2, off: 50, dur: 10, status: "not-started" },
+    { name: "Style Guide Update",   team: 2, off: 60, dur: 12, status: "not-started" },
+    { name: "Motion Design Spec",   team: 2, off: 72, dur: 14, status: "not-started" },
+    // QA (7)
+    { name: "Test Framework Setup", team: 3, off: 5,  dur: 10, status: "complete" },
+    { name: "Unit Test Coverage",   team: 3, off: 15, dur: 20, status: "complete" },
+    { name: "Integration Tests",    team: 3, off: 32, dur: 15, status: "in-progress" },
+    { name: "E2E Test Suite",       team: 3, off: 45, dur: 18, status: "blocked", blockReason: "Waiting on Form Engine" },
+    { name: "Load Testing",         team: 3, off: 58, dur: 12, status: "not-started" },
+    { name: "Security Pen Test",    team: 3, off: 70, dur: 14, status: "not-started" },
+    { name: "Regression Automation",team: 3, off: 82, dur: 16, status: "not-started" },
+    // Infrastructure (7)
+    { name: "CI/CD Pipeline v2",    team: 4, off: 0,  dur: 14, status: "complete" },
+    { name: "Docker Optimization",  team: 4, off: 10, dur: 12, status: "complete" },
+    { name: "K8s Cluster Upgrade",  team: 4, off: 22, dur: 16, status: "in-progress" },
+    { name: "Monitoring Stack",     team: 4, off: 38, dur: 14, status: "in-progress" },
+    { name: "Log Aggregation",      team: 4, off: 50, dur: 10, status: "not-started" },
+    { name: "Disaster Recovery",    team: 4, off: 62, dur: 18, status: "not-started" },
+    { name: "Cost Optimization",    team: 4, off: 80, dur: 12, status: "not-started" },
+  ];
+
+  const tasks = taskDefs.map((def, i) => {
+    const start = new Date(+projectStart + def.off * 864e5);
+    const end   = new Date(+start + def.dur * 864e5);
+    return {
+      id: i, name: def.name, team: teams[def.team],
+      start, end, duration: def.dur,
+      status: def.status, blockReason: def.blockReason || null,
+      deps: []
+    };
+  });
+
+  // ---------- Dependencies (structured, realistic) ----------
+  const depPairs = [
+    [0, 3],   // API Gateway -> Cache Layer
+    [1, 4],   // Auth Service -> Rate Limiter
+    [2, 5],   // DB Migration -> Event Bus
+    [3, 10],  // Cache Layer -> PWA Offline (cross-team, this causes block)
+    [5, 6],   // Event Bus -> GraphQL
+    [7, 9],   // Design System -> Form Engine
+    [8, 9],   // Dashboard -> Form Engine
+    [9, 24],  // Form Engine -> E2E Tests (cross-team, causes block)
+    [14, 15], // Brand Refresh -> Icon System
+    [16, 17], // Wireframes -> User Research
+    [17, 18], // User Research -> Prototype Testing
+    [21, 22], // Test Framework -> Unit Tests
+    [22, 23], // Unit Tests -> Integration Tests
+    [28, 29], // CI/CD -> Docker
+    [29, 30], // Docker -> K8s
+    [30, 31], // K8s -> Monitoring
+    [31, 32], // Monitoring -> Log Aggregation
+  ];
+  depPairs.forEach(([from, to]) => tasks[to].deps.push(from));
+
+  // ---------- Milestones ----------
+  const milestones = [
+    { date: new Date(2025, 0, 31), label: "Sprint 1 Done" },
+    { date: new Date(2025, 2, 1),  label: "Alpha Release" },
+    { date: new Date(2025, 3, 15), label: "Beta Release" },
+    { date: new Date(2025, 5, 1),  label: "Launch" },
+  ];
+
+  // ---------- Layout math ----------
+  const W = 1200, overviewH = 44;
+  const margin = { top: 10, right: 24, bottom: 80, left: 130 };
+  const barH = 15, barGap = 3, lanePadTop = 22, lanePadBot = 8;
+  const innerW = W - margin.left - margin.right;
+
+  // Build y positions per task
+  const grouped = d3.group(tasks, d => d.team);
+  const laneInfo = [];
+  let yAccum = 0;
+  teams.forEach(team => {
+    const list = [...(grouped.get(team) || [])].sort((a, b) => a.start - b.start);
+    const laneY = yAccum;
+    const laneH = lanePadTop + list.length * (barH + barGap) + lanePadBot;
+    list.forEach((t, i) => {
+      t._y = laneY + lanePadTop + i * (barH + barGap);
+    });
+    laneInfo.push({ team, y: laneY, h: laneH, count: list.length });
+    yAccum += laneH;
+  });
+  const innerH = yAccum;
+  const totalH = margin.top + innerH + margin.bottom;
+
+  // ---------- Scales ----------
+  const xFull = d3.scaleUtc().domain([projectStart, projectEnd]).range([0, innerW]);
+  const xMain = xFull.copy();
+
+  // ---------- SVG ----------
+  const svg = d3.select("#chart").append("svg")
+      .attr("width", W).attr("height", totalH)
+      .attr("viewBox", `0 0 ${W} ${totalH}`)
+      .style("font-family", "system-ui, -apple-system, sans-serif");
+
+  // Defs: clip + arrow marker
+  const defs = svg.append("defs");
+  defs.append("clipPath").attr("id", "clip-main")
+    .append("rect").attr("width", innerW).attr("height", innerH);
+
+  defs.append("marker").attr("id", "dep-arrow")
+    .attr("viewBox", "0 0 8 6").attr("refX", 8).attr("refY", 3)
+    .attr("markerWidth", 7).attr("markerHeight", 5).attr("orient", "auto")
+    .append("path").attr("d", "M0,0.5 L7,3 L0,5.5Z").attr("fill", "#999");
+
+  // Main chart group with offset
+  const mainG = svg.append("g")
+      .attr("transform", `translate(${margin.left},${margin.top})`);
+  const clipG = mainG.append("g").attr("clip-path", "url(#clip-main)");
+
+  // Layer order: lanes -> grid -> deps -> bars -> milestones -> today
+  const laneLayer  = clipG.append("g");
+  const gridLayer  = clipG.append("g");
+  const depLayer   = clipG.append("g");
+  const barLayer   = clipG.append("g");
+  const msLayer    = clipG.append("g");
+  const todayLayer = clipG.append("g");
+  const labelLayer = svg.append("g")
+      .attr("transform", `translate(0,${margin.top})`);
+  const axisLayer  = mainG.append("g")
+      .attr("transform", `translate(0,${innerH})`);
+
+  // ---------- Overview bar (below main chart) ----------
+  const overviewY = margin.top + innerH + 30;
+  const ovG = svg.append("g").attr("transform", `translate(${margin.left},${overviewY})`);
+
+  ovG.append("rect")
+    .attr("width", innerW).attr("height", overviewH)
+    .attr("fill", "#f0f0f0").attr("rx", 3).attr("stroke", "#ddd");
+
+  // Mini-bars in overview
+  const ovYScale = d3.scaleBand()
+    .domain(d3.range(tasks.length)).range([3, overviewH - 3]).padding(0.15);
+
+  const sortedOv = [...tasks].sort((a, b) => {
+    const ti = teams.indexOf(a.team), bi = teams.indexOf(b.team);
+    return ti !== bi ? ti - bi : a.start - b.start;
+  });
+
+  ovG.selectAll(".ov-bar")
+    .data(sortedOv)
+    .join("rect")
+      .attr("x", d => xFull(d.start))
+      .attr("width", d => Math.max(1, xFull(d.end) - xFull(d.start)))
+      .attr("y", (_, i) => ovYScale(i))
+      .attr("height", Math.max(1, ovYScale.bandwidth()))
+      .attr("fill", d => statusColor[d.status])
+      .attr("opacity", 0.65)
+      .attr("rx", 1);
+
+  // Today line in overview
+  ovG.append("line")
+    .attr("x1", xFull(today)).attr("x2", xFull(today))
+    .attr("y1", 0).attr("y2", overviewH)
+    .attr("stroke", "#CC3333").attr("stroke-width", 1).attr("stroke-dasharray", "3,2");
+
+  // Overview label
+  ovG.append("text")
+    .attr("x", innerW / 2).attr("y", overviewH + 14)
+    .attr("text-anchor", "middle").attr("font-size", 10).attr("fill", "#888")
+    .text("Drag to select a time range");
+
+  // Brush on overview
+  const brush = d3.brushX()
+    .extent([[0, 0], [innerW, overviewH]])
+    .on("brush end", onBrush);
+
+  const brushG = ovG.append("g").call(brush);
+
+  // Style brush overlay
+  brushG.select(".overlay").attr("rx", 3);
+  brushG.selectAll(".selection")
+    .attr("fill", "#4477AA").attr("fill-opacity", 0.15)
+    .attr("stroke", "#4477AA").attr("stroke-width", 1);
+
+  // ---------- Render function ----------
+  const fmt = d3.utcFormat("%b %d");
+  const fmtFull = d3.utcFormat("%b %d, %Y");
+
+  function render() {
+    const xs = xMain;
+
+    // Swimlane backgrounds
+    laneLayer.selectAll(".lane")
+      .data(laneInfo, d => d.team)
+      .join("rect")
+        .attr("class", "lane")
+        .attr("x", 0).attr("width", innerW)
+        .attr("y", d => d.y).attr("height", d => d.h)
+        .attr("fill", d => laneShade[d.team]);
+
+    // Lane separator lines
+    laneLayer.selectAll(".lane-sep")
+      .data(laneInfo.slice(1), d => d.team)
+      .join("line")
+        .attr("class", "lane-sep")
+        .attr("x1", 0).attr("x2", innerW)
+        .attr("y1", d => d.y).attr("y2", d => d.y)
+        .attr("stroke", "#e0e0e0").attr("stroke-width", 0.5);
+
+    // Team labels (outside clip, in label layer)
+    labelLayer.selectAll(".team-lbl")
+      .data(laneInfo, d => d.team)
+      .join("text")
+        .attr("class", "team-lbl")
+        .attr("x", margin.left - 8)
+        .attr("y", d => d.y + d.h / 2)
+        .attr("text-anchor", "end")
+        .attr("dominant-baseline", "middle")
+        .attr("font-size", 12).attr("font-weight", 600).attr("fill", "#444")
+        .text(d => d.team);
+
+    // Week grid lines
+    const ticks = xs.ticks(d3.utcWeek.every(1));
+    gridLayer.selectAll(".grid-line")
+      .data(ticks, d => +d)
+      .join("line")
+        .attr("class", "grid-line")
+        .attr("x1", d => xs(d)).attr("x2", d => xs(d))
+        .attr("y1", 0).attr("y2", innerH)
+        .attr("stroke", "#eee").attr("stroke-width", 0.5);
+
+    // Dependency arrows
+    const depData = [];
+    tasks.forEach(t => {
+      t.deps.forEach(depId => depData.push({ src: tasks[depId], tgt: t }));
+    });
+
+    depLayer.selectAll(".dep")
+      .data(depData, d => `${d.src.id}-${d.tgt.id}`)
+      .join("path")
+        .attr("class", "dep")
+        .attr("d", d => {
+          const x1 = xs(d.src.end), y1 = d.src._y + barH / 2;
+          const x2 = xs(d.tgt.start), y2 = d.tgt._y + barH / 2;
+          // S-curve dependency arrow
+          const mx = (x1 + x2) / 2;
+          return `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`;
+        })
+        .attr("fill", "none")
+        .attr("stroke", d => d.tgt.status === "blocked" ? "#EE6677" : "#bbb")
+        .attr("stroke-width", d => d.tgt.status === "blocked" ? 1.2 : 0.8)
+        .attr("stroke-dasharray", d => d.tgt.status === "blocked" ? "4,3" : null)
+        .attr("marker-end", "url(#dep-arrow)")
+        .attr("opacity", 0.6);
+
+    // Task bars
+    barLayer.selectAll(".task-bar")
+      .data(tasks, d => d.id)
+      .join("rect")
+        .attr("class", "task-bar")
+        .attr("x", d => xs(d.start))
+        .attr("width", d => Math.max(3, xs(d.end) - xs(d.start)))
+        .attr("y", d => d._y)
+        .attr("height", barH)
+        .attr("rx", 3)
+        .attr("fill", d => statusColor[d.status])
+        .attr("stroke", d => d.status === "blocked" ? "#CC4455" : "none")
+        .attr("stroke-width", d => d.status === "blocked" ? 1 : 0)
+        .on("pointerenter", showTip)
+        .on("pointermove", moveTip)
+        .on("pointerleave", hideTip);
+
+    // Progress indicator for in-progress tasks (inner lighter bar for remaining)
+    barLayer.selectAll(".progress-bg")
+      .data(tasks.filter(d => d.status === "in-progress"), d => d.id)
+      .join("rect")
+        .attr("class", "progress-bg")
+        .attr("pointer-events", "none")
+        .attr("x", d => {
+          const elapsed = (today - d.start) / (d.end - d.start);
+          const pct = Math.max(0, Math.min(1, elapsed));
+          return xs(d.start) + (xs(d.end) - xs(d.start)) * pct;
+        })
+        .attr("width", d => {
+          const elapsed = (today - d.start) / (d.end - d.start);
+          const pct = Math.max(0, Math.min(1, elapsed));
+          const full = Math.max(3, xs(d.end) - xs(d.start));
+          return Math.max(0, full * (1 - pct));
+        })
+        .attr("y", d => d._y)
+        .attr("height", barH)
+        .attr("rx", 3)
+        .attr("fill", "#fff").attr("opacity", 0.3);
+
+    // Task labels inside bars
+    barLayer.selectAll(".task-lbl")
+      .data(tasks, d => d.id)
+      .join("text")
+        .attr("class", "task-lbl")
+        .attr("pointer-events", "none")
+        .attr("x", d => xs(d.start) + 5)
+        .attr("y", d => d._y + barH / 2 + 0.5)
+        .attr("dominant-baseline", "middle")
+        .attr("font-size", 10)
+        .attr("fill", d => d.status === "not-started" ? "#666" : "#fff")
+        .text(d => {
+          const barW = xs(d.end) - xs(d.start);
+          if (barW < 40) return "";
+          const maxCh = Math.floor((barW - 10) / 5.8);
+          return d.name.length > maxCh ? d.name.slice(0, maxCh - 1) + "\u2026" : d.name;
+        });
+
+    // Milestones
+    msLayer.selectAll(".ms-g")
+      .data(milestones, d => +d.date)
+      .join(
+        enter => {
+          const g = enter.append("g").attr("class", "ms-g");
+          g.append("line").attr("class", "ms-line");
+          g.append("path").attr("class", "ms-diamond");
+          g.append("text").attr("class", "ms-label");
+          return g;
+        }
+      )
+      .each(function(d) {
+        const g = d3.select(this);
+        const mx = xs(d.date);
+        g.select(".ms-line")
+          .attr("x1", mx).attr("x2", mx)
+          .attr("y1", 0).attr("y2", innerH)
+          .attr("stroke", "#AA3377").attr("stroke-width", 0.8)
+          .attr("stroke-dasharray", "4,3").attr("opacity", 0.35);
+        // Diamond as rotated path
+        g.select(".ms-diamond")
+          .attr("d", `M${mx},${-8} l5,5 l-5,5 l-5,-5 Z`)
+          .attr("fill", "#AA3377");
+        g.select(".ms-label")
+          .attr("x", mx).attr("y", -16)
+          .attr("text-anchor", "middle").attr("font-size", 9.5)
+          .attr("fill", "#AA3377").attr("font-weight", 500)
+          .text(d.label);
+      });
+
+    // Today line
+    todayLayer.selectAll(".today-line")
+      .data([today])
+      .join("line")
+        .attr("class", "today-line")
+        .attr("x1", xs(today)).attr("x2", xs(today))
+        .attr("y1", -2).attr("y2", innerH)
+        .attr("stroke", "#CC3333").attr("stroke-width", 1.5)
+        .attr("stroke-dasharray", "6,4");
+
+    todayLayer.selectAll(".today-lbl")
+      .data([today])
+      .join("text")
+        .attr("class", "today-lbl")
+        .attr("x", xs(today)).attr("y", -6)
+        .attr("text-anchor", "middle").attr("font-size", 10)
+        .attr("fill", "#CC3333").attr("font-weight", 600)
+        .text("Today");
+
+    // X axis
+    const domain = xs.domain();
+    const spanDays = (domain[1] - domain[0]) / 864e5;
+    const tickInterval = spanDays > 120 ? d3.utcMonth.every(1)
+      : spanDays > 40 ? d3.utcWeek.every(2)
+      : d3.utcWeek.every(1);
+    const tickFmt = spanDays > 120 ? d3.utcFormat("%b '%y") : d3.utcFormat("%b %d");
+
+    axisLayer.call(
+      d3.axisBottom(xs).ticks(tickInterval).tickFormat(tickFmt).tickSizeOuter(0)
+    ).call(g => {
+      g.select(".domain").attr("stroke", "#ccc");
+      g.selectAll(".tick line").attr("stroke", "#ddd");
+      g.selectAll(".tick text").attr("font-size", 10).attr("fill", "#666");
+    });
+  }
+
+  render();
+
+  // ---------- Brush handler ----------
+  function onBrush(event) {
+    if (!event.selection) {
+      xMain.domain([projectStart, projectEnd]);
+    } else {
+      const [x0, x1] = event.selection.map(xFull.invert, xFull);
+      xMain.domain([x0, x1]);
+    }
+    render();
+  }
+
+  // ---------- Tooltip ----------
+  const tooltip = d3.select("#tooltip");
+
+  function showTip(event, d) {
+    const depNames = d.deps.map(id => tasks[id].name);
+    tooltip.style("opacity", 1).html(`
+      <strong>${d.name}</strong><br>
+      <span style="color:#888">${d.team}</span><br>
+      ${fmtFull(d.start)} &ndash; ${fmtFull(d.end)} (${d.duration}d)<br>
+      <span class="dot" style="background:${statusColor[d.status]}"></span>${statusLabel[d.status]}
+      ${d.blockReason ? `<br><span style="color:#CC4455">${d.blockReason}</span>` : ""}
+      ${depNames.length ? `<br><span style="color:#888">Depends on: ${depNames.join(", ")}</span>` : ""}
+    `);
+  }
+
+  function moveTip(event) {
+    const tw = tooltip.node().offsetWidth, th = tooltip.node().offsetHeight;
+    const x = Math.min(event.clientX + 14, window.innerWidth - tw - 12);
+    const y = Math.max(event.clientY - th - 10, 8);
+    tooltip.style("left", x + "px").style("top", y + "px");
+  }
+
+  function hideTip() { tooltip.style("opacity", 0); }
+})();
+</script>
+</body>
+</html>

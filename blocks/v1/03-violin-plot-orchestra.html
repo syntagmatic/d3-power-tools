@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Split Violin Orchestra: Temperature Distributions</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #fafafa;
+    font-family: system-ui, -apple-system, sans-serif;
+    display: flex;
+    justify-content: center;
+    padding: 20px;
+  }
+  #chart { max-width: 1200px; width: 100%; }
+  svg { display: block; width: 100%; height: auto; }
+  .title { font-size: 17px; font-weight: 700; fill: #222; }
+  .subtitle { font-size: 12px; fill: #666; }
+  .city-label { font-size: 12px; font-weight: 600; fill: #333; }
+  .month-label { font-size: 10px; fill: #555; text-anchor: middle; font-weight: 500; }
+  .axis-label { font-size: 9px; fill: #777; }
+  .legend-text { font-size: 11px; fill: #444; }
+  .grid-line { stroke: #eaeaea; stroke-width: 0.5; }
+  .cell-border { stroke: #e4e4e4; stroke-width: 0.5; fill: none; }
+  .violin-left { fill-opacity: 0.72; stroke-width: 0.6; }
+  .violin-right { fill-opacity: 0.72; stroke-width: 0.6; }
+  .median-line { stroke: #fff; stroke-width: 1.2; stroke-opacity: 0.85; stroke-linecap: round; }
+  .cell-hover { fill: transparent; pointer-events: all; cursor: crosshair; }
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: rgba(255,255,255,0.96);
+    border: 1px solid #ccc;
+    border-radius: 5px;
+    padding: 8px 10px;
+    font-size: 12px;
+    font-family: system-ui, -apple-system, sans-serif;
+    line-height: 1.5;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .tooltip .city-name { font-weight: 700; color: #222; }
+  .tooltip .decade-row { display: flex; align-items: center; gap: 6px; }
+  .tooltip .swatch {
+    display: inline-block;
+    width: 10px; height: 10px;
+    border-radius: 2px;
+  }
+  .tooltip .val { font-family: "SF Mono", Monaco, "Cascadia Code", monospace; font-size: 11px; }
+  .highlight-row rect.cell-border { stroke: #bbb; stroke-width: 1; }
+  .highlight-col .month-label { font-weight: 700; fill: #222; }
+</style>
+</head>
+<body>
+<div id="chart"></div>
+<div class="tooltip" id="tooltip"></div>
+<script type="module">
+
+// --- Cities ordered equator-ward (cold to hot) ---
+const cities = [
+  { name: "Oslo",      lat: 59.9, baseMean: 2,  seasonalAmp: 14, spread: 4.5 },
+  { name: "London",    lat: 51.5, baseMean: 11, seasonalAmp: 8,  spread: 3.2 },
+  { name: "Rome",      lat: 41.9, baseMean: 16, seasonalAmp: 10, spread: 3.0 },
+  { name: "Cairo",     lat: 30.0, baseMean: 23, seasonalAmp: 9,  spread: 2.8 },
+  { name: "Mumbai",    lat: 19.1, baseMean: 28, seasonalAmp: 4,  spread: 2.0 },
+  { name: "Singapore", lat: 1.3,  baseMean: 27, seasonalAmp: 1.5, spread: 1.2 },
+];
+
+const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const coolColor = "#4477AA";  // Tol Bright blue
+const warmColor = "#EE6677";  // Tol Bright rose
+
+// --- Seeded PRNG ---
+const lcg = d3.randomLcg(42);
+const normalRng = d3.randomNormal.source(lcg);
+
+// Seasonal curve: peaks in July (index 6) for Northern Hemisphere
+const seasonalOffset = (monthIdx, amp) => amp * Math.cos((monthIdx - 6) * Math.PI / 6);
+
+// --- Generate synthetic daily temperature data (Celsius) ---
+const records = [];
+for (const city of cities) {
+  for (let m = 0; m < 12; m++) {
+    const offset = seasonalOffset(m, city.seasonalAmp);
+    for (const decade of ["2010s", "2020s"]) {
+      // Warming shift: +0.8 to +1.4C in 2020s, larger at higher latitudes
+      const warming = decade === "2020s" ? 0.8 + 0.6 * (city.lat / 60) : 0;
+      const mean = city.baseMean + offset + warming;
+      const std = city.spread + city.seasonalAmp * 0.08;
+      const rng = normalRng(mean, std);
+      // ~30 readings per month-decade (daily averages for a representative year)
+      const values = Float64Array.from({ length: 35 }, rng);
+      records.push({ city: city.name, month: m, decade, values: Array.from(values), mean, std });
+    }
+  }
+}
+
+// --- KDE (Gaussian kernel, Silverman bandwidth) ---
+const gaussian = x => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+
+function kde(values, bw, nPts = 100) {
+  const ext = d3.extent(values);
+  const lo = ext[0] - 3 * bw;
+  const hi = ext[1] + 3 * bw;
+  const step = (hi - lo) / (nPts - 1);
+  return Array.from({ length: nPts }, (_, i) => {
+    const x = lo + i * step;
+    return [x, d3.mean(values, v => gaussian((x - v) / bw)) / bw];
+  });
+}
+
+function silverman(values) {
+  const sorted = Float64Array.from(values).sort();
+  const std = d3.deviation(values);
+  const iqr = d3.quantile(sorted, 0.75) - d3.quantile(sorted, 0.25);
+  return 0.9 * Math.min(std, iqr / 1.34) * Math.pow(values.length, -0.2);
+}
+
+// --- Compute all densities ---
+const densityMap = new Map();
+let maxDensity = 0;
+
+for (const r of records) {
+  const bw = Math.max(silverman(r.values), 0.5); // floor bandwidth
+  const density = kde(r.values, bw);
+  const key = `${r.city}-${r.month}-${r.decade}`;
+  densityMap.set(key, density);
+  const localMax = d3.max(density, d => d[1]);
+  if (localMax > maxDensity) maxDensity = localMax;
+}
+
+// --- Layout ---
+const margin = { top: 78, right: 24, bottom: 20, left: 80 };
+const totalWidth = 1080;
+const cellW = (totalWidth - margin.left - margin.right) / 12;
+const cellH = 88;
+const totalHeight = margin.top + cities.length * cellH + margin.bottom;
+
+// Shared y-scale across all cells (temperature in Celsius)
+const allValues = records.flatMap(r => r.values);
+const tempExtent = d3.extent(allValues);
+const yScale = d3.scaleLinear()
+  .domain([Math.floor(tempExtent[0] / 5) * 5 - 5, Math.ceil(tempExtent[1] / 5) * 5 + 5])
+  .range([cellH - 4, 4]);
+
+// Violin width: max density -> half cell width
+const violinScale = d3.scaleLinear()
+  .domain([0, maxDensity])
+  .range([0, cellW / 2 - 2]);
+
+// --- Area generators ---
+const areaLeft = d3.area()
+  .x0(0)
+  .x1(d => -violinScale(d[1]))
+  .y(d => yScale(d[0]))
+  .curve(d3.curveBasis);
+
+const areaRight = d3.area()
+  .x0(0)
+  .x1(d => violinScale(d[1]))
+  .y(d => yScale(d[0]))
+  .curve(d3.curveBasis);
+
+// --- SVG ---
+const svg = d3.select("#chart").append("svg")
+  .attr("viewBox", `0 0 ${totalWidth} ${totalHeight}`)
+  .attr("preserveAspectRatio", "xMidYMid meet");
+
+// Title
+svg.append("text").attr("class", "title")
+  .attr("x", totalWidth / 2).attr("y", 22)
+  .attr("text-anchor", "middle")
+  .text("Daily Temperature Distributions by City and Month");
+
+svg.append("text").attr("class", "subtitle")
+  .attr("x", totalWidth / 2).attr("y", 38)
+  .attr("text-anchor", "middle")
+  .text("Split violins: 2010s (left) vs 2020s (right) — shared y-scale reveals seasonal pattern and decadal warming");
+
+// Legend
+const lg = svg.append("g").attr("transform", `translate(${totalWidth / 2 - 90}, 50)`);
+lg.append("rect").attr("width", 12).attr("height", 12).attr("rx", 2).attr("fill", coolColor).attr("fill-opacity", 0.8);
+lg.append("text").attr("class", "legend-text").attr("x", 16).attr("y", 10).text("2010s");
+lg.append("rect").attr("x", 75).attr("width", 12).attr("height", 12).attr("rx", 2).attr("fill", warmColor).attr("fill-opacity", 0.8);
+lg.append("text").attr("class", "legend-text").attr("x", 91).attr("y", 10).text("2020s");
+lg.append("line").attr("x1", 150).attr("x2", 168).attr("y1", 6).attr("y2", 6)
+  .attr("stroke", "#fff").attr("stroke-width", 1.5).attr("stroke-linecap", "round")
+  .attr("filter", "drop-shadow(0 0 1px rgba(0,0,0,0.5))");
+lg.append("text").attr("class", "legend-text").attr("x", 172).attr("y", 10).text("median");
+
+// Main group
+const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+// Month labels
+months.forEach((m, i) => {
+  g.append("text").attr("class", "month-label")
+    .attr("x", i * cellW + cellW / 2).attr("y", -8)
+    .text(m);
+});
+
+// City labels
+cities.forEach((c, i) => {
+  g.append("text").attr("class", "city-label")
+    .attr("x", -10).attr("y", i * cellH + cellH / 2)
+    .attr("text-anchor", "end").attr("dominant-baseline", "middle")
+    .text(c.name);
+});
+
+// Temperature axis (left side, first row only, shared)
+const tempTicks = d3.ticks(yScale.domain()[0], yScale.domain()[1], 6);
+const axG = g.append("g").attr("transform", "translate(-45, 0)");
+tempTicks.forEach(t => {
+  const y = yScale(t);
+  axG.append("text").attr("class", "axis-label")
+    .attr("x", -3).attr("y", y)
+    .attr("text-anchor", "end").attr("dominant-baseline", "middle")
+    .text(`${t}°C`);
+  axG.append("line")
+    .attr("x1", 0).attr("x2", 3)
+    .attr("y1", y).attr("y2", y)
+    .attr("stroke", "#aaa").attr("stroke-width", 0.5);
+});
+axG.append("line")
+  .attr("x1", 3).attr("x2", 3)
+  .attr("y1", yScale(yScale.domain()[1])).attr("y2", yScale(yScale.domain()[0]))
+  .attr("stroke", "#aaa").attr("stroke-width", 0.5);
+
+// --- Draw cells ---
+const tooltip = d3.select("#tooltip");
+
+cities.forEach((city, row) => {
+  const rowG = g.append("g").attr("class", "row").attr("data-city", city.name);
+
+  months.forEach((month, col) => {
+    const cx = col * cellW + cellW / 2;
+    const cy = row * cellH;
+    const cellG = rowG.append("g").attr("transform", `translate(0,${cy})`);
+
+    // Cell border
+    cellG.append("rect").attr("class", "cell-border")
+      .attr("x", col * cellW).attr("y", 0)
+      .attr("width", cellW).attr("height", cellH);
+
+    // Grid lines at key temperatures
+    for (const t of tempTicks) {
+      if (t === yScale.domain()[0] || t === yScale.domain()[1]) continue;
+      cellG.append("line").attr("class", "grid-line")
+        .attr("x1", col * cellW).attr("x2", col * cellW + cellW)
+        .attr("y1", yScale(t)).attr("y2", yScale(t));
+    }
+
+    const violinG = cellG.append("g").attr("transform", `translate(${cx},0)`);
+
+    // Left half: 2010s
+    const dL = densityMap.get(`${city.name}-${col}-2010s`);
+    violinG.append("path").attr("class", "violin-left")
+      .attr("d", areaLeft(dL))
+      .attr("fill", coolColor).attr("stroke", coolColor);
+
+    // Right half: 2020s
+    const dR = densityMap.get(`${city.name}-${col}-2020s`);
+    violinG.append("path").attr("class", "violin-right")
+      .attr("d", areaRight(dR))
+      .attr("fill", warmColor).attr("stroke", warmColor);
+
+    // Medians
+    const rec2010 = records.find(r => r.city === city.name && r.month === col && r.decade === "2010s");
+    const rec2020 = records.find(r => r.city === city.name && r.month === col && r.decade === "2020s");
+    const med2010 = d3.median(rec2010.values);
+    const med2020 = d3.median(rec2020.values);
+
+    violinG.append("line").attr("class", "median-line")
+      .attr("x1", -cellW * 0.22).attr("x2", 0)
+      .attr("y1", yScale(med2010)).attr("y2", yScale(med2010));
+    violinG.append("line").attr("class", "median-line")
+      .attr("x1", 0).attr("x2", cellW * 0.22)
+      .attr("y1", yScale(med2020)).attr("y2", yScale(med2020));
+
+    // Invisible hover target
+    cellG.append("rect").attr("class", "cell-hover")
+      .attr("x", col * cellW).attr("y", 0)
+      .attr("width", cellW).attr("height", cellH)
+      .on("pointerenter", (event) => {
+        // Highlight row and column
+        g.selectAll(".row").attr("opacity", 0.3);
+        rowG.attr("opacity", 1);
+        g.selectAll(".month-label").attr("font-weight", (_, i) => i === col ? 700 : 500)
+          .attr("fill", (_, i) => i === col ? "#222" : "#555");
+
+        const sorted2010 = Float64Array.from(rec2010.values).sort();
+        const sorted2020 = Float64Array.from(rec2020.values).sort();
+        const q1_10 = d3.quantile(sorted2010, 0.25).toFixed(1);
+        const q3_10 = d3.quantile(sorted2010, 0.75).toFixed(1);
+        const q1_20 = d3.quantile(sorted2020, 0.25).toFixed(1);
+        const q3_20 = d3.quantile(sorted2020, 0.75).toFixed(1);
+        const delta = (med2020 - med2010).toFixed(1);
+        const sign = delta >= 0 ? "+" : "";
+
+        tooltip.html(`
+          <div class="city-name">${city.name} — ${month}</div>
+          <div class="decade-row">
+            <span class="swatch" style="background:${coolColor}"></span>
+            <span>2010s: median <span class="val">${med2010.toFixed(1)}°C</span> (IQR ${q1_10}–${q3_10})</span>
+          </div>
+          <div class="decade-row">
+            <span class="swatch" style="background:${warmColor}"></span>
+            <span>2020s: median <span class="val">${med2020.toFixed(1)}°C</span> (IQR ${q1_20}–${q3_20})</span>
+          </div>
+          <div style="margin-top:3px;color:#666">Shift: <span class="val" style="color:${delta >= 0 ? '#c33' : '#4477AA'}">${sign}${delta}°C</span></div>
+        `).style("opacity", 1);
+      })
+      .on("pointermove", (event) => {
+        const [px, py] = [event.pageX, event.pageY];
+        tooltip.style("left", `${px + 14}px`).style("top", `${py - 10}px`);
+      })
+      .on("pointerleave", () => {
+        g.selectAll(".row").attr("opacity", 1);
+        g.selectAll(".month-label").attr("font-weight", 500).attr("fill", "#555");
+        tooltip.style("opacity", 0);
+      });
+  });
+});
+
+</script>
+</body>
+</html>

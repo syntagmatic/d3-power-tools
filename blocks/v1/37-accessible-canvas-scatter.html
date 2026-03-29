@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Accessible Canvas Scatterplot</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    color: #222;
+    margin: 0;
+    padding: 20px 28px;
+  }
+  h1 { font-size: 1.25rem; margin: 0 0 2px; font-weight: 600; }
+  .subtitle { font-size: 0.82rem; color: #666; margin: 0 0 10px; }
+  .toolbar {
+    display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+  button {
+    font-family: inherit; font-size: 0.82rem; padding: 5px 14px;
+    border: 1px solid #aaa; border-radius: 4px; background: #fff; cursor: pointer;
+    transition: background 0.15s;
+  }
+  button:hover { background: #eee; }
+  button:focus-visible { outline: 2px solid #1a73e8; outline-offset: 2px; }
+  button[aria-pressed="true"] { background: #dce8f5; border-color: #4477AA; }
+  .legend { display: flex; gap: 14px; font-size: 0.78rem; align-items: center; margin-left: auto; }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .legend-swatch { width: 10px; height: 10px; border-radius: 50%; }
+  .kbd-hint { font-size: 0.72rem; color: #888; margin-bottom: 6px; }
+  .kbd-hint kbd {
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    font-size: 0.68rem; background: #e8e8e8; border: 1px solid #ccc;
+    border-radius: 3px; padding: 0 4px;
+  }
+  .chart-wrap { position: relative; display: inline-block; }
+  canvas { display: block; border-radius: 2px; }
+  canvas:focus { outline: 2px solid #1a73e8; outline-offset: 1px; }
+  svg.axis-layer {
+    position: absolute; top: 0; left: 0; pointer-events: none;
+  }
+  .info-bar {
+    font-size: 0.8rem; color: #444; min-height: 1.3em; margin: 5px 0 0;
+    font-variant-numeric: tabular-nums;
+  }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+  }
+
+  /* Data table */
+  .table-wrap { max-height: 520px; overflow: auto; border: 1px solid #ccc; border-radius: 4px; }
+  table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 0.78rem; }
+  thead { position: sticky; top: 0; z-index: 1; }
+  th {
+    background: #eaeaea; padding: 6px 10px; text-align: left;
+    border-bottom: 2px solid #bbb; cursor: pointer; user-select: none;
+    white-space: nowrap; font-weight: 600;
+  }
+  th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  th:hover { background: #ddd; }
+  th[aria-sort] .arrow { font-size: 0.65rem; margin-left: 3px; }
+  td { padding: 4px 10px; border-bottom: 1px solid #e4e4e4; }
+  tr.focused-row { background: #e3f0fd; }
+  tr:hover:not(.focused-row) { background: #f3f3f3; }
+  .status-bar { font-size: 0.75rem; color: #666; margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<h1>Research Output vs. Experience</h1>
+<p class="subtitle">1,500 synthetic researchers across 5 fields &mdash; clusters, outliers, and correlations</p>
+
+<div class="toolbar">
+  <button id="btnToggle" aria-pressed="false">Show Data Table</button>
+  <div class="legend" id="legend" role="img" aria-label="Color legend"></div>
+</div>
+
+<div class="kbd-hint">
+  <kbd>&larr;</kbd><kbd>&rarr;</kbd> prev/next by experience &nbsp;
+  <kbd>&uarr;</kbd><kbd>&darr;</kbd> nearest spatially &nbsp;
+  <kbd>Home</kbd><kbd>End</kbd> first/last &nbsp;
+  <kbd>Enter</kbd> select &nbsp;
+  <kbd>Esc</kbd> clear
+</div>
+
+<div id="chartView">
+  <div class="chart-wrap" id="wrap"></div>
+  <div class="info-bar" id="infoBar"></div>
+  <div aria-live="polite" aria-atomic="true" class="sr-only" id="liveRegion"></div>
+</div>
+
+<div id="tableView" style="display:none" aria-hidden="true"></div>
+<div class="status-bar" id="statusBar"></div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script type="module">
+// ── Dimensions ──
+const W = 1200, H = 800;
+const margin = { top: 28, right: 24, bottom: 56, left: 72 };
+const pw = W - margin.left - margin.right;
+const ph = H - margin.top - margin.bottom;
+
+// ── Tol bright palette ──
+const fields = ["Biology", "Physics", "Computer Science", "Economics", "Chemistry"];
+const palette = ["#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE"];
+const colorOf = new Map(fields.map((f, i) => [f, palette[i]]));
+
+// ── Generate structurally interesting data ──
+// Each field has a different experience-output relationship with clusters
+const rng = d3.randomLcg(2024);
+const rnorm = d3.randomNormal.source(rng);
+const runif = d3.randomUniform.source(rng);
+
+const data = [];
+const perField = 300;
+const profiles = [
+  { field: "Biology",          xMu: 12, xSig: 6, slope: 2.8, noise: 18, outlierRate: 0.03 },
+  { field: "Physics",          xMu: 15, xSig: 7, slope: 3.5, noise: 22, outlierRate: 0.02 },
+  { field: "Computer Science", xMu: 8,  xSig: 5, slope: 4.2, noise: 25, outlierRate: 0.05 },
+  { field: "Economics",        xMu: 14, xSig: 6, slope: 2.0, noise: 15, outlierRate: 0.04 },
+  { field: "Chemistry",        xMu: 13, xSig: 5, slope: 3.0, noise: 20, outlierRate: 0.02 },
+];
+
+let id = 0;
+for (const p of profiles) {
+  const genX = rnorm(p.xMu, p.xSig);
+  const genNoise = rnorm(0, p.noise);
+  for (let i = 0; i < perField; i++) {
+    const exp = Math.max(1, Math.min(35, Math.round(genX())));
+    let output;
+    if (runif()() < p.outlierRate) {
+      // Outlier: unusually high or low
+      output = Math.round(rnorm(p.slope * exp + 40, 50)());
+    } else {
+      output = Math.round(p.slope * exp + 10 + genNoise());
+    }
+    output = Math.max(1, Math.min(200, output));
+    data.push({
+      id: id++,
+      name: `R-${String(id).padStart(4, "0")}`,
+      field: p.field,
+      experience: exp,
+      output,
+    });
+  }
+}
+
+// Sort by x (experience) for left/right arrow navigation
+data.sort((a, b) => a.experience - b.experience || a.output - b.output);
+
+// ── Scales ──
+const xScale = d3.scaleLinear().domain([0, 36]).range([0, pw]).nice();
+const yScale = d3.scaleLinear().domain([0, 210]).range([ph, 0]).nice();
+const fmtOut = d3.format(",");
+
+// ── Build legend ──
+const legendEl = document.getElementById("legend");
+for (const f of fields) {
+  const s = document.createElement("span");
+  s.className = "legend-item";
+  s.innerHTML = `<span class="legend-swatch" style="background:${colorOf.get(f)}"></span>${f}`;
+  legendEl.appendChild(s);
+}
+
+// ── Canvas ──
+const wrap = d3.select("#wrap");
+const dpr = devicePixelRatio || 1;
+
+const canvas = wrap.append("canvas")
+  .attr("width", W * dpr).attr("height", H * dpr)
+  .style("width", `${W}px`).style("height", `${H}px`)
+  .attr("tabindex", "0")
+  .attr("role", "application")
+  .attr("aria-label",
+    `Scatterplot of research output versus years of experience for ${data.length} researchers across 5 fields. Arrow keys navigate points.`)
+  .node();
+
+canvas.textContent =
+  `Scatterplot with ${data.length} data points. Use arrow keys to navigate, Enter to select, Escape to clear.`;
+
+const ctx = canvas.getContext("2d");
+ctx.scale(dpr, dpr);
+
+// ── SVG overlay for axes only ──
+const svg = wrap.append("svg")
+  .attr("class", "axis-layer")
+  .attr("width", W).attr("height", H)
+  .attr("aria-hidden", "true");
+
+const gAxis = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+// X axis
+gAxis.append("g")
+  .attr("transform", `translate(0,${ph})`)
+  .call(d3.axisBottom(xScale).ticks(12).tickSizeOuter(0))
+  .call(g => g.select(".domain").attr("stroke", "#bbb"))
+  .call(g => g.selectAll(".tick line").attr("stroke", "#ccc"))
+  .append("text")
+    .attr("x", pw / 2).attr("y", 42)
+    .attr("fill", "#333").attr("text-anchor", "middle")
+    .attr("font-size", "0.88rem")
+    .text("Years of Experience");
+
+// Y axis
+gAxis.append("g")
+  .call(d3.axisLeft(yScale).ticks(8).tickSizeOuter(0))
+  .call(g => g.select(".domain").attr("stroke", "#bbb"))
+  .call(g => g.selectAll(".tick line").attr("stroke", "#ccc"))
+  .append("text")
+    .attr("transform", "rotate(-90)")
+    .attr("x", -ph / 2).attr("y", -54)
+    .attr("fill", "#333").attr("text-anchor", "middle")
+    .attr("font-size", "0.88rem")
+    .text("Research Output (publications)");
+
+// ── Quadtree for hit detection ──
+const qt = d3.quadtree()
+  .x(d => xScale(d.experience))
+  .y(d => yScale(d.output))
+  .addAll(data);
+
+// ── Spatial navigation (90-degree cone, from canvas-accessibility skill) ──
+function inDirection(ox, oy, tx, ty, dir) {
+  const dx = tx - ox, dy = ty - oy;
+  if (!dx && !dy) return false;
+  switch (dir) {
+    case "right": return dx > 0 && Math.abs(dy) <= dx;
+    case "left":  return dx < 0 && Math.abs(dy) <= -dx;
+    case "down":  return dy > 0 && Math.abs(dx) <= dy;
+    case "up":    return dy < 0 && Math.abs(dx) <= -dy;
+  }
+}
+
+function findSpatialNearest(current, direction) {
+  const cx = xScale(current.experience), cy = yScale(current.output);
+  let best = null, bestDist = Infinity;
+  qt.visit((quad, x0, y0, x1, y1) => {
+    if (best) {
+      const cornerDist = Math.hypot(
+        Math.max(x0 - cx, 0, cx - x1),
+        Math.max(y0 - cy, 0, cy - y1)
+      );
+      if (cornerDist > bestDist) return true;
+    }
+    if (!quad.length) {
+      let p = quad;
+      do {
+        if (p.data === current) continue;
+        const px = xScale(p.data.experience), py = yScale(p.data.output);
+        if (!inDirection(cx, cy, px, py, direction)) continue;
+        const dist = Math.hypot(px - cx, py - cy);
+        if (dist < bestDist) { bestDist = dist; best = p.data; }
+      } while ((p = p.next));
+    }
+  });
+  return best;
+}
+
+// ── State ──
+let focusIdx = -1;
+let hasFocus = false;
+const selected = new Set();
+
+const liveRegion = document.getElementById("liveRegion");
+const infoBar = document.getElementById("infoBar");
+const statusBar = document.getElementById("statusBar");
+
+// ── Announce with debounce ──
+let annTimer;
+function announce(d, extra) {
+  clearTimeout(annTimer);
+  annTimer = setTimeout(() => {
+    const parts = [
+      d.name,
+      `${d.field}`,
+      `${d.experience} years`,
+      `${fmtOut(d.output)} publications`,
+    ];
+    if (extra) parts.push(extra);
+    liveRegion.textContent = parts.join(", ");
+  }, 150);
+}
+
+// ── Render ──
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+
+function render() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.save();
+  ctx.translate(margin.left, margin.top);
+
+  // Batch draw by field for minimal state changes
+  const groups = d3.group(data, d => d.field);
+  for (const [field, pts] of groups) {
+    ctx.fillStyle = colorOf.get(field);
+    ctx.globalAlpha = 0.45;
+    ctx.beginPath();
+    for (const d of pts) {
+      if (selected.has(d.id)) continue; // draw selected on top
+      const px = xScale(d.experience), py = yScale(d.output);
+      ctx.moveTo(px + 3.5, py);
+      ctx.arc(px, py, 3.5, 0, Math.PI * 2);
+    }
+    ctx.fill();
+  }
+
+  // Selected points: full opacity + stroke
+  if (selected.size > 0) {
+    ctx.globalAlpha = 1;
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = "#333";
+    for (const d of data) {
+      if (!selected.has(d.id)) continue;
+      const px = xScale(d.experience), py = yScale(d.output);
+      ctx.fillStyle = colorOf.get(d.field);
+      ctx.beginPath();
+      ctx.arc(px, py, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+
+  // Focus ring on canvas (drawn last, on top)
+  if (hasFocus && focusIdx >= 0) {
+    const d = data[focusIdx];
+    const fx = xScale(d.experience), fy = yScale(d.output);
+    ctx.save();
+    ctx.strokeStyle = "#1a73e8";
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([5, 3]);
+    ctx.shadowColor = "rgba(255,255,255,0.9)";
+    ctx.shadowBlur = 3;
+    if (!reducedMotion.matches) {
+      ctx.lineDashOffset = -performance.now() / 50;
+    }
+    ctx.beginPath();
+    ctx.arc(fx, fy, 9, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+
+    // Inner filled highlight
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = colorOf.get(d.field);
+    ctx.beginPath();
+    ctx.arc(fx, fy, 4.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#1a73e8";
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([]);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+
+  // Info bar
+  if (hasFocus && focusIdx >= 0) {
+    const d = data[focusIdx];
+    infoBar.textContent =
+      `${d.name}  |  ${d.field}  |  ${d.experience} yrs experience  |  ${fmtOut(d.output)} publications`;
+  } else {
+    infoBar.textContent = "";
+  }
+
+  // Animate focus ring
+  if (hasFocus && focusIdx >= 0 && !reducedMotion.matches) {
+    requestAnimationFrame(render);
+  }
+}
+
+// ── Keyboard navigation ──
+canvas.addEventListener("keydown", e => {
+  const n = data.length;
+  let handled = true;
+
+  switch (e.key) {
+    case "ArrowRight":
+      focusIdx = focusIdx < 0 ? 0 : Math.min(focusIdx + 1, n - 1);
+      break;
+    case "ArrowLeft":
+      focusIdx = focusIdx < 0 ? 0 : Math.max(focusIdx - 1, 0);
+      break;
+    case "ArrowUp":
+    case "ArrowDown": {
+      if (focusIdx < 0) { focusIdx = 0; break; }
+      const dir = e.key === "ArrowUp" ? "up" : "down";
+      const next = findSpatialNearest(data[focusIdx], dir);
+      if (next) focusIdx = data.indexOf(next);
+      break;
+    }
+    case "Home":
+      focusIdx = 0; break;
+    case "End":
+      focusIdx = n - 1; break;
+    case "Enter":
+    case " ":
+      if (focusIdx >= 0) {
+        const d = data[focusIdx];
+        if (selected.has(d.id)) {
+          selected.delete(d.id);
+          announce(d, "deselected");
+        } else {
+          selected.add(d.id);
+          announce(d, "selected");
+        }
+        updateStatus();
+      }
+      break;
+    case "Escape":
+      selected.clear();
+      liveRegion.textContent = "Selection cleared";
+      updateStatus();
+      break;
+    default:
+      handled = false;
+  }
+
+  if (handled) {
+    e.preventDefault();
+    if (["ArrowRight","ArrowLeft","ArrowUp","ArrowDown","Home","End"].includes(e.key)) {
+      announce(data[focusIdx]);
+    }
+    render();
+  }
+});
+
+canvas.addEventListener("focus", () => {
+  hasFocus = true;
+  if (focusIdx < 0) focusIdx = 0;
+  announce(data[focusIdx]);
+  render();
+});
+
+canvas.addEventListener("blur", () => {
+  hasFocus = false;
+  render();
+});
+
+// ── Pointer hit detection ──
+canvas.addEventListener("pointerdown", e => {
+  canvas.focus();
+  const rect = canvas.getBoundingClientRect();
+  const mx = (e.clientX - rect.left) * (W / rect.width) - margin.left;
+  const my = (e.clientY - rect.top) * (H / rect.height) - margin.top;
+  const hit = qt.find(mx, my, 18);
+  if (hit) {
+    focusIdx = data.indexOf(hit);
+    announce(hit);
+    render();
+  }
+});
+
+// Hover tooltip
+canvas.addEventListener("pointermove", e => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = (e.clientX - rect.left) * (W / rect.width) - margin.left;
+  const my = (e.clientY - rect.top) * (H / rect.height) - margin.top;
+  const hit = qt.find(mx, my, 12);
+  canvas.style.cursor = hit ? "pointer" : "default";
+});
+
+function updateStatus() {
+  statusBar.textContent = selected.size > 0
+    ? `${selected.size} point${selected.size > 1 ? "s" : ""} selected`
+    : "";
+}
+
+// ── Data Table ──
+const btnToggle = document.getElementById("btnToggle");
+const chartView = document.getElementById("chartView");
+const tableView = document.getElementById("tableView");
+let tableMode = false;
+let tableBuilt = false;
+let sortKey = "experience";
+let sortDir = 1; // 1 = ascending, -1 = descending
+
+const columns = [
+  { key: "name",       label: "Name",         type: "string" },
+  { key: "field",      label: "Field",        type: "string" },
+  { key: "experience", label: "Experience (yrs)", type: "number", format: d => d },
+  { key: "output",     label: "Publications",  type: "number", format: d3.format(",") },
+];
+
+function buildTable() {
+  if (tableBuilt) return;
+  tableBuilt = true;
+
+  const tw = document.createElement("div");
+  tw.className = "table-wrap";
+
+  const tbl = document.createElement("table");
+  tbl.setAttribute("role", "table");
+  tbl.setAttribute("aria-label", `Data table: ${data.length} researchers with field, experience, and output`);
+  tbl.setAttribute("aria-rowcount", String(data.length + 1));
+
+  const thead = document.createElement("thead");
+  const hrow = document.createElement("tr");
+  hrow.setAttribute("role", "row");
+
+  for (const col of columns) {
+    const th = document.createElement("th");
+    th.setAttribute("scope", "col");
+    th.setAttribute("role", "columnheader");
+    th.setAttribute("tabindex", "0");
+    if (col.type === "number") th.className = "num";
+    th.dataset.key = col.key;
+    th.textContent = col.label;
+    th.addEventListener("click", () => sortTable(col.key));
+    th.addEventListener("keydown", e => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); sortTable(col.key); }
+    });
+    hrow.appendChild(th);
+  }
+  thead.appendChild(hrow);
+  tbl.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  tbody.id = "tbody";
+  tbl.appendChild(tbody);
+  tw.appendChild(tbl);
+  tableView.appendChild(tw);
+}
+
+function renderTableRows() {
+  const tbody = document.getElementById("tbody");
+  if (!tbody) return;
+
+  const sorted = [...data].sort((a, b) => {
+    const va = a[sortKey], vb = b[sortKey];
+    const cmp = typeof va === "string" ? va.localeCompare(vb) : va - vb;
+    return cmp * sortDir;
+  });
+
+  // Use D3 join for stable updates
+  const rows = d3.select(tbody).selectAll("tr")
+    .data(sorted, d => d.id)
+    .join("tr")
+    .classed("focused-row", d => d.id === (focusIdx >= 0 ? data[focusIdx].id : -1))
+    .attr("role", "row");
+
+  rows.selectAll("td")
+    .data(d => columns.map(col => ({
+      value: col.format ? col.format(d[col.key]) : d[col.key],
+      type: col.type
+    })))
+    .join("td")
+    .attr("class", d => d.type === "number" ? "num" : null)
+    .text(d => d.value);
+
+  // Update header sort indicators
+  document.querySelectorAll("#tableView th").forEach(th => {
+    const k = th.dataset.key;
+    const isSorted = k === sortKey;
+    th.setAttribute("aria-sort", isSorted ? (sortDir === 1 ? "ascending" : "descending") : "none");
+    // Remove old arrow
+    const old = th.querySelector(".arrow");
+    if (old) old.remove();
+    if (isSorted) {
+      const sp = document.createElement("span");
+      sp.className = "arrow";
+      sp.textContent = sortDir === 1 ? " \u25B2" : " \u25BC";
+      th.appendChild(sp);
+    }
+  });
+}
+
+function sortTable(key) {
+  if (sortKey === key) sortDir *= -1;
+  else { sortKey = key; sortDir = 1; }
+  renderTableRows();
+  liveRegion.textContent = `Sorted by ${columns.find(c => c.key === key).label}, ${sortDir === 1 ? "ascending" : "descending"}`;
+}
+
+btnToggle.addEventListener("click", () => {
+  tableMode = !tableMode;
+  btnToggle.setAttribute("aria-pressed", String(tableMode));
+
+  if (tableMode) {
+    buildTable();
+    renderTableRows();
+    chartView.style.display = "none";
+    chartView.setAttribute("aria-hidden", "true");
+    tableView.style.display = "block";
+    tableView.setAttribute("aria-hidden", "false");
+    btnToggle.textContent = "Show Chart";
+  } else {
+    chartView.style.display = "block";
+    chartView.setAttribute("aria-hidden", "false");
+    tableView.style.display = "none";
+    tableView.setAttribute("aria-hidden", "true");
+    btnToggle.textContent = "Show Data Table";
+    render();
+  }
+});
+
+// ── Initial render ──
+render();
+</script>
+</body>
+</html>

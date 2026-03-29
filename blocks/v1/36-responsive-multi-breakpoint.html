@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Responsive Multi-Breakpoint Chart</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    color: #333;
+  }
+  #chart-wrapper {
+    width: 100%;
+    height: 100vh;
+    overflow: hidden;
+    position: relative;
+    container-type: inline-size;
+  }
+  .header {
+    position: absolute;
+    top: 12px;
+    left: 16px;
+    z-index: 10;
+    pointer-events: none;
+  }
+  .header h1 {
+    font-size: 16px;
+    font-weight: 700;
+    color: #333;
+    margin-bottom: 2px;
+  }
+  .header .subtitle {
+    font-size: 12px;
+    color: #888;
+    letter-spacing: 0.3px;
+  }
+  .breakpoint-badge {
+    position: absolute;
+    top: 12px;
+    right: 16px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #fff;
+    background: #4477AA;
+    padding: 3px 10px;
+    border-radius: 10px;
+    z-index: 10;
+    pointer-events: none;
+    transition: background 0.3s;
+  }
+  .breakpoint-badge.medium { background: #228833; }
+  .breakpoint-badge.narrow { background: #EE6677; }
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    opacity: 0;
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 12px;
+    line-height: 1.5;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    z-index: 20;
+    white-space: nowrap;
+  }
+  .tooltip strong { font-weight: 600; }
+  .tooltip .val { font-family: "SF Mono", Monaco, "Cascadia Code", monospace; font-size: 11px; }
+  .axis path, .axis line { stroke: #ccc; }
+  .axis text { fill: #666; font-size: 11px; }
+</style>
+</head>
+<body>
+<div id="chart-wrapper">
+  <div class="header">
+    <h1>Iris Morphometrics</h1>
+    <div class="subtitle">Resize window to see layout adapt at 3 breakpoints</div>
+  </div>
+  <div class="breakpoint-badge" id="bp-badge">WIDE</div>
+</div>
+<div class="tooltip" id="tooltip"></div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script type="module">
+
+// --- Synthetic iris-like data with realistic correlations ---
+const rng = d3.randomLcg(42);
+const randNorm = d3.randomNormal.source(rng);
+const randU = d3.randomUniform.source(rng);
+
+const species = ["Setosa", "Versicolor", "Virginica", "Hybrid"];
+const tolBright = ["#4477AA", "#EE6677", "#228833", "#CCBB44"];
+const colorScale = d3.scaleOrdinal().domain(species).range(tolBright);
+
+const clusterParams = [
+  { cx: 1.5, cy: 0.3, sx: 0.3, sy: 0.1, corr: 0.6, n: 40 },  // setosa: small, tight
+  { cx: 4.3, cy: 1.3, sx: 0.5, sy: 0.2, corr: 0.75, n: 40 },  // versicolor
+  { cx: 5.8, cy: 2.0, sx: 0.6, sy: 0.3, corr: 0.8, n: 40 },   // virginica: large, spread
+  { cx: 4.8, cy: 1.6, sx: 0.7, sy: 0.35, corr: 0.5, n: 30 },  // hybrid: overlaps versicolor+virginica
+];
+
+const data = [];
+clusterParams.forEach((p, si) => {
+  for (let i = 0; i < p.n; i++) {
+    const z1 = randNorm(0, 1)(), z2 = randNorm(0, 1)();
+    const petalLength = p.cx + p.sx * z1;
+    const petalWidth = p.cy + p.sy * (p.corr * z1 + Math.sqrt(1 - p.corr * p.corr) * z2);
+    data.push({
+      petalLength: Math.max(0.5, petalLength),
+      petalWidth: Math.max(0.1, petalWidth),
+      species: species[si],
+      id: data.length
+    });
+  }
+});
+
+const xExtent = d3.extent(data, d => d.petalLength);
+const yExtent = d3.extent(data, d => d.petalWidth);
+const xDomain = [Math.floor(xExtent[0] * 2) / 2, Math.ceil(xExtent[1] * 2) / 2];
+const yDomain = [Math.floor(yExtent[0] * 2) / 2, Math.ceil(yExtent[1] * 2) / 2];
+
+// --- DOM Setup ---
+const wrapper = document.getElementById("chart-wrapper");
+const badge = document.getElementById("bp-badge");
+const tooltipEl = document.getElementById("tooltip");
+
+const svg = d3.select(wrapper).append("svg")
+  .style("width", "100%")
+  .style("height", "100%");
+
+// Group ordering: back to front
+const layerNames = [
+  "top-hist", "right-hist", "boxes", "dots",
+  "x-axis", "y-axis", "strip-axis", "legend", "hover-layer"
+];
+const layers = {};
+layerNames.forEach(name => {
+  layers[name] = svg.append("g").attr("class", `layer-${name}`);
+});
+
+let currentLayout = null;
+let hoveredId = null;
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+function dur(ms) { return reduceMotion ? 0 : ms; }
+
+function getBreakpoint(w) {
+  if (w >= 1000) return "wide";
+  if (w >= 600) return "medium";
+  return "narrow";
+}
+
+// --- Tooltip ---
+function showTooltip(event, d) {
+  hoveredId = d.id;
+  tooltipEl.innerHTML = `<strong>${d.species}</strong><br>
+    <span class="val">Petal length: ${d.petalLength.toFixed(2)} cm</span><br>
+    <span class="val">Petal width: ${d.petalWidth.toFixed(2)} cm</span>`;
+  tooltipEl.style.opacity = 1;
+  positionTooltip(event);
+  highlightPoint(d.id);
+}
+
+function moveTooltip(event) {
+  positionTooltip(event);
+}
+
+function hideTooltip() {
+  hoveredId = null;
+  tooltipEl.style.opacity = 0;
+  highlightPoint(null);
+}
+
+function positionTooltip(event) {
+  const tw = tooltipEl.offsetWidth, th = tooltipEl.offsetHeight;
+  const x = Math.min(event.pageX + 14, window.innerWidth + window.scrollX - tw - 8);
+  const y = Math.max(event.pageY - th - 10, window.scrollY + 8);
+  tooltipEl.style.left = `${x}px`;
+  tooltipEl.style.top = `${y}px`;
+}
+
+function highlightPoint(id) {
+  layers.dots.selectAll("circle")
+    .attr("opacity", d => id === null ? 0.7 : d.id === id ? 1 : 0.15)
+    .attr("stroke", d => d.id === id ? "#333" : "none")
+    .attr("stroke-width", d => d.id === id ? 1.5 : 0);
+}
+
+// --- Render orchestrator ---
+function render(width, height) {
+  const bp = getBreakpoint(width);
+  const layoutChanged = currentLayout !== bp;
+  const morphDur = layoutChanged ? dur(600) : dur(250);
+  const t = svg.transition("main").duration(morphDur).ease(d3.easeCubicInOut);
+
+  badge.textContent = `${bp.toUpperCase()} ${Math.round(width)}px`;
+  badge.className = `breakpoint-badge ${bp}`;
+
+  currentLayout = bp;
+
+  // Clear layers not used by current layout
+  if (bp === "wide") {
+    renderWide(width, height, t);
+    fadeOut(layers["boxes"], t);
+    fadeOut(layers["strip-axis"], t);
+  } else if (bp === "medium") {
+    renderMedium(width, height, t);
+    fadeOut(layers["top-hist"], t);
+    fadeOut(layers["right-hist"], t);
+    fadeOut(layers["boxes"], t);
+    fadeOut(layers["strip-axis"], t);
+  } else {
+    renderNarrow(width, height, t);
+    fadeOut(layers["top-hist"], t);
+    fadeOut(layers["right-hist"], t);
+  }
+}
+
+function fadeOut(layer, t) {
+  layer.selectAll("*").transition(t).attr("opacity", 0).end()
+    .then(() => layer.selectAll("*").remove()).catch(() => {});
+}
+
+// --- Wide: Scatter + marginal histograms ---
+function renderWide(W, H, t) {
+  const margin = { top: 52, right: 140, bottom: 56, left: 56 };
+  const histH = 56;
+  const gap = 6;
+  const plotL = margin.left;
+  const plotT = margin.top + histH + gap;
+  const plotW = W - margin.left - margin.right - histH - gap;
+  const plotH = H - margin.top - margin.bottom - histH - gap;
+
+  if (plotW < 50 || plotH < 50) return;
+
+  const x = d3.scaleLinear().domain(xDomain).range([0, plotW]).nice();
+  const y = d3.scaleLinear().domain(yDomain).range([plotH, 0]).nice();
+  const r = d3.scaleSqrt().domain(d3.extent(data, d => d.petalLength)).range([3, 8]);
+
+  // Axes
+  layers["x-axis"]
+    .transition(t).attr("transform", `translate(${plotL},${plotT + plotH})`)
+    .call(d3.axisBottom(x).ticks(Math.max(3, Math.floor(plotW / 80))).tickSizeOuter(0))
+    .call(g => g.selectAll(".tick line").attr("stroke", "#ddd"))
+    .call(g => {
+      g.selectAll(".axis-label").remove();
+      g.append("text").attr("class", "axis-label")
+        .attr("x", plotW / 2).attr("y", 40)
+        .attr("fill", "#555").attr("text-anchor", "middle")
+        .attr("font-size", "12px").text("Petal Length (cm)");
+    });
+
+  layers["y-axis"]
+    .transition(t).attr("transform", `translate(${plotL},${plotT})`)
+    .call(d3.axisLeft(y).ticks(Math.max(3, Math.floor(plotH / 60))).tickSizeOuter(0))
+    .call(g => g.selectAll(".tick line").attr("stroke", "#ddd"))
+    .call(g => {
+      g.selectAll(".axis-label").remove();
+      g.append("text").attr("class", "axis-label")
+        .attr("transform", "rotate(-90)")
+        .attr("x", -plotH / 2).attr("y", -40)
+        .attr("fill", "#555").attr("text-anchor", "middle")
+        .attr("font-size", "12px").text("Petal Width (cm)");
+    });
+
+  // Scatter points
+  layers.dots.transition(t).attr("transform", `translate(${plotL},${plotT})`);
+  layers.dots.selectAll("circle")
+    .data(data, d => d.id)
+    .join(
+      enter => enter.append("circle")
+        .attr("cx", d => x(d.petalLength))
+        .attr("cy", d => y(d.petalWidth))
+        .attr("r", 0)
+        .attr("fill", d => colorScale(d.species))
+        .attr("opacity", 0)
+        .style("cursor", "pointer")
+        .on("pointerenter", showTooltip)
+        .on("pointermove", moveTooltip)
+        .on("pointerleave", hideTooltip)
+        .call(e => e.transition(t)
+          .attr("r", d => r(d.petalLength))
+          .attr("opacity", 0.7)),
+      update => update.call(u => u.transition(t)
+        .attr("cx", d => x(d.petalLength))
+        .attr("cy", d => y(d.petalWidth))
+        .attr("r", d => r(d.petalLength))
+        .attr("opacity", d => hoveredId !== null ? (d.id === hoveredId ? 1 : 0.15) : 0.7)
+        .attr("fill", d => colorScale(d.species)))
+    );
+
+  // Top marginal histogram
+  const xBins = d3.bin().domain(x.domain()).thresholds(24)(data.map(d => d.petalLength));
+  const xHistY = d3.scaleLinear()
+    .domain([0, d3.max(xBins, b => b.length)])
+    .range([histH, 0]);
+
+  layers["top-hist"].transition(t).attr("transform", `translate(${plotL},${margin.top})`);
+  layers["top-hist"].selectAll("rect")
+    .data(xBins, (d, i) => i)
+    .join(
+      enter => enter.append("rect")
+        .attr("x", d => x(d.x0) + 0.5)
+        .attr("width", d => Math.max(0, x(d.x1) - x(d.x0) - 1))
+        .attr("y", histH).attr("height", 0)
+        .attr("fill", "#aaa").attr("opacity", 0)
+        .call(e => e.transition(t)
+          .attr("y", d => xHistY(d.length))
+          .attr("height", d => histH - xHistY(d.length))
+          .attr("opacity", 0.35)),
+      update => update.call(u => u.transition(t)
+        .attr("x", d => x(d.x0) + 0.5)
+        .attr("width", d => Math.max(0, x(d.x1) - x(d.x0) - 1))
+        .attr("y", d => xHistY(d.length))
+        .attr("height", d => histH - xHistY(d.length))
+        .attr("opacity", 0.35))
+    );
+
+  // Right marginal histogram
+  const yBins = d3.bin().domain(y.domain()).thresholds(20)(data.map(d => d.petalWidth));
+  const yHistX = d3.scaleLinear()
+    .domain([0, d3.max(yBins, b => b.length)])
+    .range([0, histH]);
+
+  layers["right-hist"].transition(t).attr("transform", `translate(${plotL + plotW + gap},${plotT})`);
+  layers["right-hist"].selectAll("rect")
+    .data(yBins, (d, i) => i)
+    .join(
+      enter => enter.append("rect")
+        .attr("x", 0).attr("width", 0)
+        .attr("y", d => y(d.x1) + 0.5)
+        .attr("height", d => Math.max(0, y(d.x0) - y(d.x1) - 1))
+        .attr("fill", "#aaa").attr("opacity", 0)
+        .call(e => e.transition(t)
+          .attr("width", d => yHistX(d.length))
+          .attr("opacity", 0.35)),
+      update => update.call(u => u.transition(t)
+        .attr("y", d => y(d.x1) + 0.5)
+        .attr("height", d => Math.max(0, y(d.x0) - y(d.x1) - 1))
+        .attr("width", d => yHistX(d.length))
+        .attr("opacity", 0.35))
+    );
+
+  // Legend — right side
+  const legX = plotL + plotW + gap + histH + 20;
+  const legY = plotT + 4;
+  renderLegend(legX, legY, "vertical", t);
+}
+
+// --- Medium: Simplified scatter, legend below ---
+function renderMedium(W, H, t) {
+  const margin = { top: 52, right: 24, bottom: 90, left: 52 };
+  const plotW = W - margin.left - margin.right;
+  const plotH = H - margin.top - margin.bottom;
+
+  if (plotW < 50 || plotH < 50) return;
+
+  const x = d3.scaleLinear().domain(xDomain).range([0, plotW]).nice();
+  const y = d3.scaleLinear().domain(yDomain).range([plotH, 0]).nice();
+
+  layers["x-axis"]
+    .transition(t).attr("transform", `translate(${margin.left},${margin.top + plotH})`)
+    .call(d3.axisBottom(x).ticks(Math.max(3, Math.floor(plotW / 90))).tickSizeOuter(0))
+    .call(g => {
+      g.selectAll(".axis-label").remove();
+      g.append("text").attr("class", "axis-label")
+        .attr("x", plotW / 2).attr("y", 36)
+        .attr("fill", "#555").attr("text-anchor", "middle")
+        .attr("font-size", "12px").text("Petal Length (cm)");
+    });
+
+  layers["y-axis"]
+    .transition(t).attr("transform", `translate(${margin.left},${margin.top})`)
+    .call(d3.axisLeft(y).ticks(Math.max(3, Math.floor(plotH / 60))).tickSizeOuter(0))
+    .call(g => {
+      g.selectAll(".axis-label").remove();
+      g.append("text").attr("class", "axis-label")
+        .attr("transform", "rotate(-90)")
+        .attr("x", -plotH / 2).attr("y", -36)
+        .attr("fill", "#555").attr("text-anchor", "middle")
+        .attr("font-size", "12px").text("Petal Width (cm)");
+    });
+
+  layers.dots.transition(t).attr("transform", `translate(${margin.left},${margin.top})`);
+  layers.dots.selectAll("circle")
+    .data(data, d => d.id)
+    .join(
+      enter => enter.append("circle")
+        .attr("cx", d => x(d.petalLength))
+        .attr("cy", d => y(d.petalWidth))
+        .attr("r", 0)
+        .attr("fill", d => colorScale(d.species))
+        .attr("opacity", 0)
+        .style("cursor", "pointer")
+        .on("pointerenter", showTooltip)
+        .on("pointermove", moveTooltip)
+        .on("pointerleave", hideTooltip)
+        .call(e => e.transition(t).attr("r", 5).attr("opacity", 0.7)),
+      update => update.call(u => u.transition(t)
+        .attr("cx", d => x(d.petalLength))
+        .attr("cy", d => y(d.petalWidth))
+        .attr("r", 5)
+        .attr("opacity", d => hoveredId !== null ? (d.id === hoveredId ? 1 : 0.15) : 0.7)
+        .attr("fill", d => colorScale(d.species)))
+    );
+
+  // Legend below
+  const legX = margin.left + plotW / 2 - (species.length * 100) / 2;
+  const legY = margin.top + plotH + 54;
+  renderLegend(legX, legY, "horizontal", t);
+}
+
+// --- Narrow: Strip plot + box overlays ---
+function renderNarrow(W, H, t) {
+  const margin = { top: 52, right: 16, bottom: 48, left: 44 };
+  const plotW = W - margin.left - margin.right;
+  const plotH = H - margin.top - margin.bottom;
+
+  if (plotW < 30 || plotH < 50) return;
+
+  const x = d3.scaleBand().domain(species).range([0, plotW]).padding(0.25);
+  const y = d3.scaleLinear().domain(yDomain).range([plotH, 0]).nice();
+
+  // Strip x-axis
+  layers["strip-axis"]
+    .transition(t).attr("transform", `translate(${margin.left},${margin.top + plotH})`)
+    .call(d3.axisBottom(x).tickSizeOuter(0));
+  layers["strip-axis"].selectAll("text")
+    .attr("font-size", W < 420 ? "9px" : "11px");
+
+  // Hide continuous x-axis
+  layers["x-axis"].selectAll("*").transition(t).attr("opacity", 0).end()
+    .then(() => layers["x-axis"].selectAll("*").remove()).catch(() => {});
+
+  layers["y-axis"]
+    .transition(t).attr("transform", `translate(${margin.left},${margin.top})`)
+    .call(d3.axisLeft(y).ticks(Math.max(3, Math.floor(plotH / 60))).tickSizeOuter(0))
+    .call(g => {
+      g.selectAll(".axis-label").remove();
+      g.append("text").attr("class", "axis-label")
+        .attr("transform", "rotate(-90)")
+        .attr("x", -plotH / 2).attr("y", -32)
+        .attr("fill", "#555").attr("text-anchor", "middle")
+        .attr("font-size", "11px").text("Petal Width (cm)");
+    });
+
+  // Deterministic jitter
+  const jitterRng = d3.randomLcg(99);
+  const jitters = data.map(() => (jitterRng() - 0.5) * 0.65);
+
+  layers.dots.transition(t).attr("transform", `translate(${margin.left},${margin.top})`);
+  layers.dots.selectAll("circle")
+    .data(data, d => d.id)
+    .join(
+      enter => enter.append("circle")
+        .attr("cx", (d, i) => x(d.species) + x.bandwidth() / 2 + jitters[i] * x.bandwidth())
+        .attr("cy", d => y(d.petalWidth))
+        .attr("r", 0)
+        .attr("fill", d => colorScale(d.species))
+        .attr("opacity", 0)
+        .style("cursor", "pointer")
+        .on("pointerenter", showTooltip)
+        .on("pointermove", moveTooltip)
+        .on("pointerleave", hideTooltip)
+        .call(e => e.transition(t).attr("r", 3.5).attr("opacity", 0.55)),
+      update => update.call(u => u.transition(t)
+        .attr("cx", (d, i) => x(d.species) + x.bandwidth() / 2 + jitters[i] * x.bandwidth())
+        .attr("cy", d => y(d.petalWidth))
+        .attr("r", 3.5)
+        .attr("opacity", d => hoveredId !== null ? (d.id === hoveredId ? 1 : 0.15) : 0.55)
+        .attr("fill", d => colorScale(d.species)))
+    );
+
+  // Box plot overlays
+  const grouped = d3.groups(data, d => d.species);
+  layers.boxes.transition(t).attr("transform", `translate(${margin.left},${margin.top})`);
+
+  const boxW = Math.min(x.bandwidth() * 0.35, 28);
+
+  layers.boxes.selectAll(".box-group")
+    .data(grouped, d => d[0])
+    .join(
+      enter => enter.append("g").attr("class", "box-group").each(function([cat, vals]) {
+        drawBox(d3.select(this), cat, vals, x, y, boxW, t, true);
+      }),
+      update => update.each(function([cat, vals]) {
+        drawBox(d3.select(this), cat, vals, x, y, boxW, t, false);
+      })
+    );
+
+  // Hide legend in narrow
+  layers.legend.selectAll("*").transition(t).attr("opacity", 0).end()
+    .then(() => layers.legend.selectAll("*").remove()).catch(() => {});
+}
+
+function drawBox(g, cat, vals, x, y, boxW, t, isNew) {
+  const sorted = vals.map(d => d.petalWidth).sort(d3.ascending);
+  const q1 = d3.quantile(sorted, 0.25);
+  const med = d3.quantile(sorted, 0.5);
+  const q3 = d3.quantile(sorted, 0.75);
+  const iqr = q3 - q1;
+  const lo = Math.max(d3.min(sorted), q1 - 1.5 * iqr);
+  const hi = Math.min(d3.max(sorted), q3 + 1.5 * iqr);
+  const cx = x(cat) + x.bandwidth() / 2;
+
+  // Whisker
+  const wh = g.selectAll(".whisker").data([0]);
+  wh.join("line").attr("class", "whisker")
+    .attr("stroke", "#444").attr("stroke-width", 1)
+    .transition(t)
+    .attr("x1", cx).attr("x2", cx)
+    .attr("y1", y(lo)).attr("y2", y(hi))
+    .attr("opacity", 1);
+
+  // Whisker caps
+  const capW = boxW * 0.5;
+  const caps = g.selectAll(".cap").data([lo, hi]);
+  caps.join("line").attr("class", "cap")
+    .attr("stroke", "#444").attr("stroke-width", 1)
+    .transition(t)
+    .attr("x1", cx - capW / 2).attr("x2", cx + capW / 2)
+    .attr("y1", (d) => y(d)).attr("y2", (d) => y(d))
+    .attr("opacity", 1);
+
+  // IQR box
+  const rect = g.selectAll(".iqr-rect").data([0]);
+  rect.join("rect").attr("class", "iqr-rect")
+    .attr("fill", colorScale(cat)).attr("fill-opacity", 0.12)
+    .attr("stroke", colorScale(cat)).attr("stroke-width", 1.5)
+    .attr("rx", 2)
+    .transition(t)
+    .attr("x", cx - boxW / 2).attr("width", boxW)
+    .attr("y", y(q3)).attr("height", y(q1) - y(q3))
+    .attr("opacity", 1);
+
+  // Median
+  const medLine = g.selectAll(".med").data([0]);
+  medLine.join("line").attr("class", "med")
+    .attr("stroke", colorScale(cat)).attr("stroke-width", 2.5)
+    .transition(t)
+    .attr("x1", cx - boxW / 2).attr("x2", cx + boxW / 2)
+    .attr("y1", y(med)).attr("y2", y(med))
+    .attr("opacity", 1);
+}
+
+// --- Legend renderer ---
+function renderLegend(x, y, orientation, t) {
+  layers.legend.transition(t).attr("transform", `translate(${x},${y})`);
+
+  const items = layers.legend.selectAll(".leg-item")
+    .data(species, d => d)
+    .join(enter => {
+      const g = enter.append("g").attr("class", "leg-item").attr("opacity", 0);
+      g.append("circle").attr("r", 5).attr("cx", 0);
+      g.append("text").attr("x", 12).attr("dy", "0.35em")
+        .style("font-size", "12px").style("fill", "#555");
+      return g;
+    });
+
+  const isVert = orientation === "vertical";
+  items.transition(t)
+    .attr("transform", (d, i) => isVert
+      ? `translate(0,${i * 24})`
+      : `translate(${i * 100},0)`)
+    .attr("opacity", 1);
+  items.select("circle").attr("fill", d => colorScale(d));
+  items.select("text").text(d => d);
+}
+
+// --- ResizeObserver with width-only guard ---
+let lastWidth = 0;
+const ro = new ResizeObserver(([entry]) => {
+  const { width, height } = entry.contentRect;
+  if (width < 10 || Math.abs(width - lastWidth) < 1) return;
+  lastWidth = width;
+  render(width, height);
+});
+ro.observe(wrapper);
+
+</script>
+</body>
+</html>

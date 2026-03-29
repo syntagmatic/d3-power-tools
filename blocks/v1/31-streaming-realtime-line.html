@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Real-Time Streaming Line Chart</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa; color: #333; padding: 24px;
+  }
+  h1 { font-size: 1.15rem; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { font-size: 0.82rem; color: #777; margin-bottom: 14px; }
+  .container { max-width: 1200px; margin: 0 auto; }
+  .controls {
+    display: flex; gap: 10px; align-items: center;
+    margin-bottom: 10px; flex-wrap: wrap;
+  }
+  .controls button {
+    padding: 5px 14px; border: 1px solid #bbb; border-radius: 4px;
+    background: #fff; cursor: pointer; font: inherit; font-size: 0.82rem;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .controls button:hover { border-color: #888; }
+  .controls button.active {
+    background: #4477AA; color: #fff; border-color: #4477AA;
+  }
+  .controls .sep {
+    width: 1px; height: 20px; background: #ddd; margin: 0 4px;
+  }
+  .stats {
+    display: flex; gap: 20px; font-size: 0.82rem; color: #666;
+    margin-bottom: 10px; flex-wrap: wrap;
+  }
+  .stats .val {
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    font-weight: 600; color: #333;
+  }
+  .chart-area { position: relative; }
+  .chart-area canvas, .chart-area svg {
+    position: absolute; top: 0; left: 0;
+  }
+  .overview-area { position: relative; margin-top: 6px; }
+  .overview-area canvas, .overview-area svg {
+    position: absolute; top: 0; left: 0;
+  }
+  .overview-label {
+    position: absolute; right: 4px; top: 2px;
+    font-size: 0.7rem; color: #aaa; pointer-events: none; z-index: 5;
+  }
+  .crosshair-label {
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    font-size: 0.75rem;
+  }
+  .selection { fill: rgba(68, 119, 170, 0.15); stroke: #4477AA; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Real-Time Streaming Line Chart</h1>
+  <p class="subtitle">Ornstein-Uhlenbeck process &middot; 10 values/sec &middot; Canvas rendering</p>
+  <div class="controls" id="controls">
+    <button id="btn-pause">&#9646;&#9646; Pause</button>
+    <div class="sep"></div>
+    <span style="font-size:0.82rem;color:#666;">Speed:</span>
+    <button class="speed-btn active" data-speed="1">1&times;</button>
+    <button class="speed-btn" data-speed="3">3&times;</button>
+    <button class="speed-btn" data-speed="10">10&times;</button>
+  </div>
+  <div class="stats" id="stats">
+    <span>Current: <span class="val" id="s-cur">--</span></span>
+    <span>Min: <span class="val" id="s-min">--</span></span>
+    <span>Max: <span class="val" id="s-max">--</span></span>
+    <span>&mu;: <span class="val" id="s-mean">--</span></span>
+    <span>&sigma;: <span class="val" id="s-std">--</span></span>
+    <span>Points: <span class="val" id="s-pts">--</span></span>
+  </div>
+  <div class="chart-area" id="main-area"></div>
+  <div class="overview-area" id="overview-area">
+    <span class="overview-label">5-minute overview (LTTB downsampled)</span>
+  </div>
+</div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(function() {
+  "use strict";
+
+  // ── Configuration ──
+  const MAIN_H = 480, OVERVIEW_H = 100;
+  const M = { top: 24, right: 56, bottom: 32, left: 56 };
+  const MO = { top: 8, right: 56, bottom: 20, left: 56 }; // overview margins
+  const MAIN_WINDOW_MS = 60_000;
+  const OVERVIEW_WINDOW_MS = 300_000;
+  const EMIT_INTERVAL_MS = 100;
+  const CAPACITY = Math.ceil(OVERVIEW_WINDOW_MS / EMIT_INTERVAL_MS); // 3000
+  const LTTB_OVERVIEW = 400;
+  const TOL_BLUE = "#4477AA";
+  const TOL_PINK = "#EE6677";
+  const GRID_COLOR = "#e8e8e8";
+
+  // ── Layout ──
+  const container = document.querySelector(".container");
+  const fullW = Math.min(1200, container.clientWidth);
+  const w = fullW - M.left - M.right;
+  const h = MAIN_H - M.top - M.bottom;
+  const ow = fullW - MO.left - MO.right;
+  const oh = OVERVIEW_H - MO.top - MO.bottom;
+
+  // ── Canvas helper (DPR-aware) ──
+  const dpr = devicePixelRatio || 1;
+  function makeCanvas(parent, cw, ch, left, top) {
+    const cvs = document.createElement("canvas");
+    cvs.width = cw * dpr; cvs.height = ch * dpr;
+    Object.assign(cvs.style, {
+      width: cw + "px", height: ch + "px",
+      position: "absolute", left: left + "px", top: top + "px"
+    });
+    parent.appendChild(cvs);
+    const ctx = cvs.getContext("2d");
+    ctx.scale(dpr, dpr);
+    return ctx;
+  }
+
+  // ── Main chart ──
+  const mainEl = document.getElementById("main-area");
+  mainEl.style.width = fullW + "px";
+  mainEl.style.height = MAIN_H + "px";
+
+  const mainCtx = makeCanvas(mainEl, w, h, M.left, M.top);
+  // Gradient for area fill
+  const mainGrad = mainCtx.createLinearGradient(0, 0, 0, h);
+  mainGrad.addColorStop(0, "rgba(68,119,170,0.18)");
+  mainGrad.addColorStop(1, "rgba(68,119,170,0.02)");
+
+  const mainSvg = d3.select(mainEl).append("svg")
+    .attr("width", fullW).attr("height", MAIN_H)
+    .style("pointer-events", "none");
+
+  const xMain = d3.scaleUtc().range([0, w]);
+  const yMain = d3.scaleLinear().range([h, 0]);
+
+  const xAxisG = mainSvg.append("g")
+    .attr("transform", `translate(${M.left},${M.top + h})`);
+  const yAxisG = mainSvg.append("g")
+    .attr("transform", `translate(${M.left},${M.top})`);
+
+  // Crosshair group
+  const crossG = mainSvg.append("g")
+    .attr("transform", `translate(${M.left},${M.top})`)
+    .style("display", "none");
+  crossG.append("line").attr("class", "cross-v")
+    .attr("y1", 0).attr("y2", h)
+    .attr("stroke", "#999").attr("stroke-dasharray", "3,3").attr("stroke-width", 0.5);
+  crossG.append("line").attr("class", "cross-h")
+    .attr("x1", 0).attr("x2", w)
+    .attr("stroke", "#999").attr("stroke-dasharray", "3,3").attr("stroke-width", 0.5);
+  const crossLabel = crossG.append("text").attr("class", "crosshair-label")
+    .attr("fill", "#555").attr("text-anchor", "start");
+  const crossDot = crossG.append("circle")
+    .attr("r", 3.5).attr("fill", TOL_BLUE).attr("stroke", "#fff").attr("stroke-width", 1.5);
+
+  // Pointer overlay for crosshair
+  const overlay = mainSvg.append("rect")
+    .attr("x", M.left).attr("y", M.top).attr("width", w).attr("height", h)
+    .attr("fill", "none").style("pointer-events", "all").style("cursor", "crosshair");
+
+  // ── Overview chart ──
+  const overEl = document.getElementById("overview-area");
+  overEl.style.width = fullW + "px";
+  overEl.style.height = OVERVIEW_H + "px";
+
+  const overCtx = makeCanvas(overEl, ow, oh, MO.left, MO.top);
+
+  const overSvg = d3.select(overEl).append("svg")
+    .attr("width", fullW).attr("height", OVERVIEW_H)
+    .style("position", "absolute").style("top", "0").style("left", "0");
+
+  const xOver = d3.scaleUtc().range([0, ow]);
+  const yOver = d3.scaleLinear().range([oh, 0]);
+
+  const overAxisG = overSvg.append("g")
+    .attr("transform", `translate(${MO.left},${MO.top + oh})`);
+
+  // Brush
+  const brushG = overSvg.append("g")
+    .attr("transform", `translate(${MO.left},${MO.top})`);
+
+  let brushLock = null; // user-selected time range
+
+  const brush = d3.brushX()
+    .extent([[0, 0], [ow, oh]])
+    .on("brush", onBrush)
+    .on("end", onBrushEnd);
+
+  brushG.call(brush);
+
+  function onBrush(event) {
+    if (!event.sourceEvent || !event.selection) return;
+    brushLock = event.selection.map(xOver.invert, xOver);
+  }
+  function onBrushEnd(event) {
+    if (!event.selection) brushLock = null; // cleared → resume live
+  }
+
+  // ── Ornstein-Uhlenbeck process ──
+  // dx = theta*(mu - x)*dt + sigma*sqrt(dt)*dW
+  const OU = { mu: 0, theta: 0.15, sigma: 1.2 };
+  let x = 0; // current process value
+  let simTime = Date.now();
+
+  function boxMuller() {
+    const u = Math.random(), v = Math.random();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  }
+
+  const dtSec = EMIT_INTERVAL_MS / 1000;
+  const sqrtDt = Math.sqrt(dtSec);
+
+  // Circular buffer
+  const buf = new Array(CAPACITY);
+  let head = 0, count = 0;
+
+  function pushPoint(time, value) {
+    buf[head % CAPACITY] = { time, value };
+    head++;
+    if (count < CAPACITY) count++;
+  }
+
+  function getOrdered() {
+    // Return points in chronological order
+    if (count < CAPACITY) return buf.slice(0, count);
+    const start = head % CAPACITY;
+    return buf.slice(start).concat(buf.slice(0, start));
+  }
+
+  function emitStep() {
+    x += OU.theta * (OU.mu - x) * dtSec + OU.sigma * sqrtDt * boxMuller();
+    simTime += EMIT_INTERVAL_MS;
+    pushPoint(new Date(simTime), x);
+  }
+
+  // Seed 3 seconds
+  for (let i = 0; i < 30; i++) emitStep();
+
+  // ── LTTB downsampling ──
+  function lttb(data, threshold) {
+    const n = data.length;
+    if (threshold >= n || threshold < 3) return data;
+    const out = [data[0]];
+    const bSize = (n - 2) / (threshold - 2);
+    let prevIdx = 0;
+    for (let i = 0; i < threshold - 2; i++) {
+      const bStart = Math.floor(i * bSize) + 1;
+      const bEnd = Math.floor((i + 1) * bSize) + 1;
+      const nEnd = Math.min(Math.floor((i + 2) * bSize) + 1, n);
+      let avgX = 0, avgY = 0;
+      for (let j = bEnd; j < nEnd; j++) { avgX += +data[j].time; avgY += data[j].value; }
+      avgX /= (nEnd - bEnd); avgY /= (nEnd - bEnd);
+      let maxArea = -1, maxIdx = bStart;
+      const prev = data[prevIdx];
+      for (let j = bStart; j < bEnd; j++) {
+        const area = Math.abs(
+          (+prev.time - avgX) * (data[j].value - prev.value) -
+          (+prev.time - +data[j].time) * (avgY - prev.value)
+        );
+        if (area > maxArea) { maxArea = area; maxIdx = j; }
+      }
+      out.push(data[maxIdx]); prevIdx = maxIdx;
+    }
+    out.push(data[n - 1]);
+    return out;
+  }
+
+  // ── Drawing helpers ──
+  function drawMainChart(pts) {
+    mainCtx.clearRect(0, 0, w, h);
+    if (pts.length < 2) return;
+
+    // Horizontal grid lines
+    const ticks = yMain.ticks(6);
+    mainCtx.strokeStyle = GRID_COLOR;
+    mainCtx.lineWidth = 1;
+    for (const t of ticks) {
+      const yy = Math.round(yMain(t)) + 0.5;
+      mainCtx.beginPath();
+      mainCtx.moveTo(0, yy); mainCtx.lineTo(w, yy);
+      mainCtx.stroke();
+    }
+
+    // Area fill
+    mainCtx.beginPath();
+    mainCtx.moveTo(xMain(pts[0].time), h);
+    for (const d of pts) mainCtx.lineTo(xMain(d.time), yMain(d.value));
+    mainCtx.lineTo(xMain(pts[pts.length - 1].time), h);
+    mainCtx.closePath();
+    mainCtx.fillStyle = mainGrad;
+    mainCtx.fill();
+
+    // Line
+    mainCtx.beginPath();
+    mainCtx.moveTo(xMain(pts[0].time), yMain(pts[0].value));
+    for (let i = 1; i < pts.length; i++) {
+      mainCtx.lineTo(xMain(pts[i].time), yMain(pts[i].value));
+    }
+    mainCtx.strokeStyle = TOL_BLUE;
+    mainCtx.lineWidth = 1.8;
+    mainCtx.lineJoin = "round";
+    mainCtx.stroke();
+
+    // Current value dot
+    const last = pts[pts.length - 1];
+    mainCtx.beginPath();
+    mainCtx.arc(xMain(last.time), yMain(last.value), 3.5, 0, Math.PI * 2);
+    mainCtx.fillStyle = TOL_BLUE;
+    mainCtx.fill();
+    mainCtx.strokeStyle = "#fff";
+    mainCtx.lineWidth = 1.5;
+    mainCtx.stroke();
+
+    // Current value label on right
+    mainCtx.fillStyle = TOL_BLUE;
+    mainCtx.font = "bold 11px 'SF Mono', Monaco, monospace";
+    mainCtx.textAlign = "left";
+    mainCtx.textBaseline = "middle";
+    mainCtx.fillText(last.value.toFixed(2), xMain(last.time) + 8, yMain(last.value));
+  }
+
+  function drawOverview(pts) {
+    overCtx.clearRect(0, 0, ow, oh);
+    if (pts.length < 2) return;
+
+    // Area
+    overCtx.beginPath();
+    overCtx.moveTo(xOver(pts[0].time), oh);
+    for (const d of pts) overCtx.lineTo(xOver(d.time), yOver(d.value));
+    overCtx.lineTo(xOver(pts[pts.length - 1].time), oh);
+    overCtx.closePath();
+    overCtx.fillStyle = "rgba(68,119,170,0.08)";
+    overCtx.fill();
+
+    // Line
+    overCtx.beginPath();
+    overCtx.moveTo(xOver(pts[0].time), yOver(pts[0].value));
+    for (let i = 1; i < pts.length; i++) {
+      overCtx.lineTo(xOver(pts[i].time), yOver(pts[i].value));
+    }
+    overCtx.strokeStyle = "#999";
+    overCtx.lineWidth = 1;
+    overCtx.stroke();
+  }
+
+  // ── Crosshair interaction ──
+  let hoverX = null;
+  overlay.on("pointermove", (event) => {
+    const [mx] = d3.pointer(event);
+    hoverX = mx - M.left;
+  }).on("pointerleave", () => { hoverX = null; });
+
+  function updateCrosshair(pts) {
+    if (hoverX == null || pts.length < 2) {
+      crossG.style("display", "none");
+      return;
+    }
+    crossG.style("display", null);
+    const t = xMain.invert(hoverX);
+    const bisect = d3.bisector(d => d.time).left;
+    let idx = bisect(pts, t, 1);
+    if (idx >= pts.length) idx = pts.length - 1;
+    if (idx > 0 && (t - pts[idx - 1].time) < (pts[idx].time - t)) idx--;
+    const d = pts[idx];
+    const px = xMain(d.time), py = yMain(d.value);
+    crossG.select(".cross-v").attr("x1", px).attr("x2", px);
+    crossG.select(".cross-h").attr("y1", py).attr("y2", py);
+    crossDot.attr("cx", px).attr("cy", py);
+    const labelX = px + 8, labelY = py - 10;
+    crossLabel
+      .attr("x", labelX > w - 80 ? px - 8 : labelX)
+      .attr("y", labelY < 10 ? py + 16 : labelY)
+      .attr("text-anchor", labelX > w - 80 ? "end" : "start")
+      .text(`${d.value.toFixed(3)} @ ${d3.utcFormat("%H:%M:%S")(d.time)}`);
+  }
+
+  // ── Stats ──
+  const sCur = document.getElementById("s-cur");
+  const sMin = document.getElementById("s-min");
+  const sMax = document.getElementById("s-max");
+  const sMean = document.getElementById("s-mean");
+  const sStd = document.getElementById("s-std");
+  const sPts = document.getElementById("s-pts");
+
+  function updateStats(pts) {
+    if (!pts.length) return;
+    const last = pts[pts.length - 1].value;
+    let sum = 0, min = Infinity, max = -Infinity;
+    for (const d of pts) {
+      sum += d.value;
+      if (d.value < min) min = d.value;
+      if (d.value > max) max = d.value;
+    }
+    const mean = sum / pts.length;
+    let sq = 0;
+    for (const d of pts) sq += (d.value - mean) ** 2;
+    const std = Math.sqrt(sq / pts.length);
+    sCur.textContent = last.toFixed(3);
+    sMin.textContent = min.toFixed(3);
+    sMax.textContent = max.toFixed(3);
+    sMean.textContent = mean.toFixed(3);
+    sStd.textContent = std.toFixed(3);
+    sPts.textContent = pts.length.toLocaleString();
+  }
+
+  // ── Main render ──
+  function render() {
+    const all = getOrdered();
+    if (all.length < 2) return;
+
+    // Visible window for main chart
+    let visible;
+    if (brushLock) {
+      const [t0, t1] = brushLock;
+      visible = all.filter(d => d.time >= t0 && d.time <= t1);
+    } else {
+      const latest = all[all.length - 1].time;
+      const earliest = new Date(+latest - MAIN_WINDOW_MS);
+      // bisect for efficiency
+      const bi = d3.bisector(d => d.time).left;
+      const si = bi(all, earliest);
+      visible = all.slice(si);
+    }
+    if (visible.length < 2) return;
+
+    // Main scales
+    const tExt = [visible[0].time, visible[visible.length - 1].time];
+    let vMin = Infinity, vMax = -Infinity;
+    for (const d of visible) {
+      if (d.value < vMin) vMin = d.value;
+      if (d.value > vMax) vMax = d.value;
+    }
+    const pad = Math.max((vMax - vMin) * 0.12, 0.2);
+    xMain.domain(tExt);
+    yMain.domain([vMin - pad, vMax + pad]);
+
+    drawMainChart(visible);
+
+    // Axes
+    xAxisG.call(d3.axisBottom(xMain).ticks(8).tickFormat(d3.utcFormat("%H:%M:%S"))
+      .tickSizeOuter(0));
+    yAxisG.call(d3.axisLeft(yMain).ticks(7).tickSizeOuter(0));
+    // Style axes
+    mainSvg.selectAll(".domain").attr("stroke", "#ccc");
+    mainSvg.selectAll(".tick line").attr("stroke", "#ddd");
+    mainSvg.selectAll(".tick text").attr("fill", "#777").attr("font-size", "0.75rem");
+
+    updateCrosshair(visible);
+    updateStats(visible);
+
+    // Overview scales
+    const oExt = [all[0].time, all[all.length - 1].time];
+    let oMin = Infinity, oMax = -Infinity;
+    for (const d of all) {
+      if (d.value < oMin) oMin = d.value;
+      if (d.value > oMax) oMax = d.value;
+    }
+    const oPad = Math.max((oMax - oMin) * 0.05, 0.1);
+    xOver.domain(oExt);
+    yOver.domain([oMin - oPad, oMax + oPad]);
+
+    const downsampled = lttb(all, Math.min(all.length, LTTB_OVERVIEW));
+    drawOverview(downsampled);
+
+    // Overview axis
+    overAxisG.call(d3.axisBottom(xOver).ticks(6).tickFormat(d3.utcFormat("%H:%M:%S"))
+      .tickSizeOuter(0));
+    overSvg.selectAll(".domain").attr("stroke", "#ccc");
+    overSvg.selectAll(".tick line").attr("stroke", "#ddd");
+    overSvg.selectAll(".tick text").attr("fill", "#999").attr("font-size", "0.68rem");
+
+    // Sync brush position when live (no user override)
+    if (!brushLock) {
+      const bx0 = xOver(tExt[0]);
+      const bx1 = xOver(tExt[1]);
+      brushG.call(brush.move, [bx0, bx1]);
+    }
+  }
+
+  // ── Data generation ──
+  let paused = false, speed = 1, genTimer = null;
+
+  function startGen() {
+    if (genTimer) clearInterval(genTimer);
+    const ms = Math.max(1, Math.round(EMIT_INTERVAL_MS / speed));
+    genTimer = setInterval(() => { if (!paused) emitStep(); }, ms);
+  }
+  startGen();
+
+  // ── Animation loop (rAF-gated) ──
+  let rafId = null;
+  function tick() {
+    render();
+    rafId = requestAnimationFrame(tick);
+  }
+  rafId = requestAnimationFrame(tick);
+
+  // ── Controls ──
+  const pauseBtn = document.getElementById("btn-pause");
+  pauseBtn.addEventListener("click", () => {
+    paused = !paused;
+    pauseBtn.innerHTML = paused ? "&#9654; Resume" : "&#9646;&#9646; Pause";
+    pauseBtn.classList.toggle("active", paused);
+  });
+
+  document.querySelectorAll(".speed-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".speed-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      speed = +btn.dataset.speed;
+      startGen();
+    });
+  });
+
+  // ── Cleanup on page unload ──
+  window.addEventListener("beforeunload", () => {
+    cancelAnimationFrame(rafId);
+    clearInterval(genTimer);
+  });
+})();
+</script>
+</body>
+</html>

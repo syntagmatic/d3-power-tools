@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Projection Morphing</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body {
+    background: #fafafa;
+    font-family: system-ui, -apple-system, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px;
+  }
+  h1 {
+    font-size: 22px;
+    font-weight: 600;
+    color: #222;
+    margin-bottom: 4px;
+  }
+  #subtitle {
+    font-size: 14px;
+    color: #666;
+    margin-bottom: 16px;
+    min-height: 20px;
+  }
+  svg { display: block; }
+  .controls {
+    display: flex;
+    gap: 8px;
+    margin-top: 16px;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+  }
+  .controls button {
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 13px;
+    padding: 6px 16px;
+    border: 1.5px solid #bbb;
+    border-radius: 5px;
+    background: #fff;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+  }
+  .controls button:hover { background: #f0f0f0; }
+  .controls button.active {
+    background: #4477AA;
+    color: #fff;
+    border-color: #4477AA;
+  }
+  .controls .play-btn {
+    font-weight: 700;
+    min-width: 36px;
+  }
+  .legend {
+    display: flex;
+    gap: 14px;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-top: 12px;
+    font-size: 12px;
+    color: #555;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .legend-swatch {
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+  }
+  .country {
+    stroke: #fff;
+    stroke-width: 0.4;
+    stroke-linejoin: round;
+    cursor: pointer;
+    transition: opacity 0.12s;
+  }
+  .country:hover {
+    stroke: #333;
+    stroke-width: 1.2;
+    opacity: 0.85;
+  }
+  .graticule {
+    fill: none;
+    stroke: #ddd;
+    stroke-width: 0.4;
+  }
+  .sphere {
+    fill: #f0f4f8;
+    stroke: #bbb;
+    stroke-width: 0.8;
+  }
+  .border-mesh {
+    fill: none;
+    stroke: #fff;
+    stroke-width: 0.5;
+    stroke-linejoin: round;
+    pointer-events: none;
+  }
+  #tooltip {
+    position: fixed;
+    pointer-events: none;
+    background: rgba(255,255,255,0.95);
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 12px;
+    color: #333;
+    display: none;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+    z-index: 10;
+  }
+</style>
+</head>
+<body>
+<h1>World Projection Morphing</h1>
+<div id="subtitle">Transitioning between 5 map projections</div>
+<svg id="map"></svg>
+<div class="controls" id="controls"></div>
+<div class="legend" id="legend"></div>
+<div id="tooltip"></div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
+<script>
+(async function() {
+  const width = 1200, height = 800;
+  const mapW = 1000, mapH = 620;
+  const mapX = (width - mapW) / 2, mapY = 20;
+
+  // Tol muted palette for continents
+  const continentPalette = {
+    "Africa":        "#CC6677",
+    "Asia":          "#DDCC77",
+    "Europe":        "#88CCEE",
+    "North America": "#44AA99",
+    "South America": "#AA4499",
+    "Oceania":       "#882255",
+    "Antarctica":    "#BBBBBB"
+  };
+
+  // Map country numeric IDs to continents (ISO 3166-1 numeric)
+  const continentMap = new Map();
+  const africaIds = [12,24,72,108,120,132,140,148,174,178,180,204,226,231,232,262,266,270,288,324,328,384,404,426,430,434,450,454,466,478,480,504,508,516,562,566,624,638,646,678,686,694,706,710,716,728,729,732,748,768,788,800,834,854,894];
+  const asiaIds = [4,31,48,50,51,64,96,104,116,144,156,158,162,166,170,196,268,275,356,360,364,368,376,392,398,400,410,414,417,418,422,446,458,462,496,512,524,586,608,626,634,643,682,702,704,760,762,764,784,792,795,860,887];
+  const europeIds = [8,20,40,56,70,100,112,191,203,208,233,234,246,250,276,292,300,336,348,352,372,380,428,438,440,442,470,492,498,499,528,578,616,620,630,642,674,688,703,705,724,744,752,756,804,807,826,831,832,833];
+  const naIds = [28,44,52,60,76,84,124,136,170,188,192,212,214,222,304,308,312,320,332,340,388,474,484,500,531,533,558,591,630,636,652,659,660,662,663,670,780,796,840,850,854];
+  const saIds = [32,68,76,152,170,218,238,254,328,600,604,740,858,862];
+  const oceaniaIds = [16,36,90,162,166,184,242,258,296,520,540,548,554,570,574,580,583,584,585,598,612,772,776,798,876,882];
+
+  africaIds.forEach(id => continentMap.set(String(id), "Africa"));
+  asiaIds.forEach(id => continentMap.set(String(id), "Asia"));
+  europeIds.forEach(id => continentMap.set(String(id), "Europe"));
+  naIds.forEach(id => continentMap.set(String(id), "North America"));
+  saIds.forEach(id => continentMap.set(String(id), "South America"));
+  oceaniaIds.forEach(id => continentMap.set(String(id), "Oceania"));
+
+  function getContinent(id) {
+    return continentMap.get(String(id)) || "Africa";
+  }
+
+  function getColor(id) {
+    return continentPalette[getContinent(id)] || "#BBBBBB";
+  }
+
+  // Country names lookup (common ones)
+  const countryNames = new Map([
+    ["840","United States"],["124","Canada"],["484","Mexico"],["76","Brazil"],
+    ["32","Argentina"],["152","Chile"],["170","Colombia"],["604","Peru"],
+    ["862","Venezuela"],["218","Ecuador"],["156","China"],["356","India"],
+    ["392","Japan"],["410","South Korea"],["360","Indonesia"],["764","Thailand"],
+    ["704","Vietnam"],["608","Philippines"],["458","Malaysia"],["50","Bangladesh"],
+    ["586","Pakistan"],["364","Iran"],["368","Iraq"],["792","Turkey"],
+    ["682","Saudi Arabia"],["784","UAE"],["643","Russia"],["276","Germany"],
+    ["250","France"],["826","United Kingdom"],["380","Italy"],["724","Spain"],
+    ["616","Poland"],["752","Sweden"],["578","Norway"],["246","Finland"],
+    ["804","Ukraine"],["56","Belgium"],["528","Netherlands"],["40","Austria"],
+    ["756","Switzerland"],["300","Greece"],["620","Portugal"],["208","Denmark"],
+    ["372","Ireland"],["203","Czech Republic"],["642","Romania"],["348","Hungary"],
+    ["566","Nigeria"],["710","South Africa"],["818","Egypt"],["404","Kenya"],
+    ["231","Ethiopia"],["834","Tanzania"],["180","DR Congo"],["504","Morocco"],
+    ["12","Algeria"],["434","Libya"],["788","Tunisia"],["288","Ghana"],
+    ["36","Australia"],["554","New Zealand"],["598","Papua New Guinea"],
+    ["242","Fiji"],["376","Israel"],["400","Jordan"],["422","Lebanon"],
+    ["496","Mongolia"],["104","Myanmar"],["418","Laos"],["116","Cambodia"],
+    ["144","Sri Lanka"],["524","Nepal"],["4","Afghanistan"],["860","Uzbekistan"],
+    ["398","Kazakhstan"],["762","Tajikistan"],["417","Kyrgyzstan"],
+    ["795","Turkmenistan"],["268","Georgia"],["31","Azerbaijan"],["51","Armenia"],
+    ["858","Uruguay"],["600","Paraguay"],["68","Bolivia"],["328","Guyana"],
+    ["740","Suriname"],["332","Haiti"],["214","Dominican Republic"],
+    ["192","Cuba"],["388","Jamaica"],["320","Guatemala"],["340","Honduras"],
+    ["222","El Salvador"],["558","Nicaragua"],["188","Costa Rica"],["591","Panama"],
+    ["84","Belize"],["508","Mozambique"],["894","Zambia"],["716","Zimbabwe"],
+    ["72","Botswana"],["516","Namibia"],["24","Angola"],["800","Uganda"],
+    ["646","Rwanda"],["108","Burundi"],["454","Malawi"],["450","Madagascar"],
+    ["694","Sierra Leone"],["430","Liberia"],["384","Ivory Coast"],
+    ["854","Burkina Faso"],["466","Mali"],["562","Niger"],["148","Chad"],
+    ["140","Central African Rep."],["120","Cameroon"],["178","Congo"],
+    ["266","Gabon"],["226","Equatorial Guinea"],["624","Guinea-Bissau"],
+    ["324","Guinea"],["686","Senegal"],["270","Gambia"],["478","Mauritania"],
+    ["232","Eritrea"],["262","Djibouti"],["706","Somalia"],["728","South Sudan"],
+    ["729","Sudan"],["748","Eswatini"],["426","Lesotho"],
+  ]);
+
+  function getCountryName(id) {
+    return countryNames.get(String(id)) || `Country ${id}`;
+  }
+
+  // Projections
+  const projections = [
+    { name: "Natural Earth",  make: () => d3.geoNaturalEarth1() },
+    { name: "Mercator",       make: () => d3.geoMercator() },
+    { name: "Orthographic",   make: () => d3.geoOrthographic().clipAngle(90) },
+    { name: "Equal Earth",    make: () => d3.geoEqualEarth() },
+    { name: "Azimuthal Equal Area", make: () => d3.geoAzimuthalEqualArea() },
+  ];
+
+  let currentIdx = 0;
+  let playing = true;
+  let transitioning = false;
+  let autoTimer = null;
+
+  // Load world data
+  const world = await d3.json("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json");
+  const countries = topojson.feature(world, world.objects.countries).features;
+  const borders = topojson.mesh(world, world.objects.countries, (a, b) => a !== b);
+  const graticule = d3.geoGraticule10();
+  const sphere = { type: "Sphere" };
+
+  // Create fitted projections
+  function fitProjection(proj) {
+    return proj.fitSize([mapW, mapH], sphere);
+  }
+
+  // SVG setup
+  const svg = d3.select("#map")
+    .attr("width", width)
+    .attr("height", height)
+    .attr("viewBox", `0 0 ${width} ${height}`);
+
+  const g = svg.append("g").attr("transform", `translate(${mapX},${mapY})`);
+
+  // Layers: sphere, graticule, countries, borders
+  const spherePath = g.append("path").attr("class", "sphere");
+  const graticulePath = g.append("path").attr("class", "graticule");
+  const countryPaths = g.selectAll(".country")
+    .data(countries, d => d.id)
+    .join("path")
+      .attr("class", "country")
+      .attr("fill", d => getColor(d.id));
+  const borderPath = g.append("path").attr("class", "border-mesh");
+
+  // Tooltip
+  const tooltip = d3.select("#tooltip");
+
+  countryPaths
+    .on("pointerenter", (event, d) => {
+      tooltip.style("display", "block")
+        .html(`<strong>${getCountryName(d.id)}</strong><br>${getContinent(d.id)}`);
+    })
+    .on("pointermove", (event) => {
+      tooltip
+        .style("left", (event.clientX + 14) + "px")
+        .style("top", (event.clientY - 10) + "px");
+    })
+    .on("pointerleave", () => {
+      tooltip.style("display", "none");
+    });
+
+  // Render with a given projection
+  function render(proj) {
+    const path = d3.geoPath(proj);
+    spherePath.attr("d", path(sphere));
+    graticulePath.attr("d", path(graticule));
+    countryPaths.attr("d", d => path(d));
+    borderPath.attr("d", path(borders));
+  }
+
+  // Initial render
+  const initProj = fitProjection(projections[0].make());
+  render(initProj);
+
+  // Transition between projections using screen-space interpolation
+  function transitionTo(targetIdx, duration = 2000) {
+    if (transitioning || targetIdx === currentIdx) return;
+    transitioning = true;
+
+    const sourceProj = fitProjection(projections[currentIdx].make());
+    const targetProj = fitProjection(projections[targetIdx].make());
+
+    // Update UI
+    currentIdx = targetIdx;
+    updateButtons();
+    d3.select("#subtitle").text(`Transitioning to ${projections[targetIdx].name}...`);
+
+    const ease = d3.easeCubicInOut;
+    const path = d3.geoPath();
+
+    const timer = d3.timer((elapsed) => {
+      const t = Math.min(1, ease(elapsed / duration));
+
+      // Interpolate projection output point by point
+      const interpolated = d3.geoProjection((lon, lat) => {
+        const a = sourceProj([lon * 180 / Math.PI, lat * 180 / Math.PI]);
+        const b = targetProj([lon * 180 / Math.PI, lat * 180 / Math.PI]);
+        if (!a || !b) return [0, 0];
+        return [
+          a[0] * (1 - t) + b[0] * t,
+          a[1] * (1 - t) + b[1] * t
+        ];
+      }).scale(1).translate([0, 0]);
+
+      path.projection(interpolated);
+      spherePath.attr("d", path(sphere));
+      graticulePath.attr("d", path(graticule));
+      countryPaths.attr("d", d => path(d));
+      borderPath.attr("d", path(borders));
+
+      if (t >= 1) {
+        timer.stop();
+        // Final render with clean projection for crispness
+        render(targetProj);
+        d3.select("#subtitle").text(projections[targetIdx].name);
+        transitioning = false;
+      }
+    });
+  }
+
+  // Controls
+  const controlsDiv = d3.select("#controls");
+
+  // Play/pause button
+  const playBtn = controlsDiv.append("button")
+    .attr("class", "play-btn")
+    .text("⏸")
+    .on("click", () => {
+      playing = !playing;
+      playBtn.text(playing ? "⏸" : "▶");
+      if (playing) scheduleNext();
+      else clearTimeout(autoTimer);
+    });
+
+  // Projection buttons
+  projections.forEach((p, i) => {
+    controlsDiv.append("button")
+      .attr("class", i === 0 ? "active" : "")
+      .attr("data-idx", i)
+      .text(p.name)
+      .on("click", () => {
+        if (transitioning) return;
+        clearTimeout(autoTimer);
+        transitionTo(i);
+        if (playing) scheduleNext();
+      });
+  });
+
+  function updateButtons() {
+    controlsDiv.selectAll("button[data-idx]")
+      .classed("active", function() { return +this.dataset.idx === currentIdx; });
+  }
+
+  // Auto-advance
+  function scheduleNext() {
+    clearTimeout(autoTimer);
+    autoTimer = setTimeout(() => {
+      if (!playing) return;
+      const next = (currentIdx + 1) % projections.length;
+      transitionTo(next);
+      scheduleNext();
+    }, 4000);
+  }
+
+  // Legend
+  const legendDiv = d3.select("#legend");
+  Object.entries(continentPalette).forEach(([name, color]) => {
+    if (name === "Antarctica") return;
+    const item = legendDiv.append("div").attr("class", "legend-item");
+    item.append("div").attr("class", "legend-swatch").style("background", color);
+    item.append("span").text(name);
+  });
+
+  // Set initial subtitle
+  d3.select("#subtitle").text(projections[0].name);
+
+  // Start auto-advance
+  scheduleNext();
+})();
+</script>
+</body>
+</html>
