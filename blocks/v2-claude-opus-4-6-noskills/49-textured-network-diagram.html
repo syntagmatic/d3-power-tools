@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Textured Network Diagram</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #fafafa; font-family: system-ui, -apple-system, sans-serif; }
+  #container { width: 100vw; height: 100vh; position: relative; }
+  svg { display: block; }
+  #controls {
+    position: absolute; top: 16px; left: 16px; z-index: 10;
+    display: flex; gap: 12px; align-items: center;
+  }
+  button {
+    padding: 8px 16px; border: 1px solid #999; border-radius: 4px;
+    background: #fff; cursor: pointer; font-size: 14px;
+    transition: background 0.2s;
+  }
+  button:hover { background: #eee; }
+  button.active { background: #333; color: #fff; border-color: #333; }
+  #legend {
+    position: absolute; bottom: 16px; left: 16px; z-index: 10;
+    background: rgba(255,255,255,0.95); border: 1px solid #ddd;
+    border-radius: 6px; padding: 12px 16px;
+  }
+  #legend h3 { font-size: 13px; margin-bottom: 8px; color: #555; text-transform: uppercase; letter-spacing: 0.5px; }
+  .legend-item { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; font-size: 13px; }
+  .legend-swatch { width: 24px; height: 24px; border-radius: 3px; border: 1px solid #aaa; }
+  .tooltip {
+    position: absolute; pointer-events: none; background: rgba(0,0,0,0.8);
+    color: #fff; padding: 6px 10px; border-radius: 4px; font-size: 12px;
+    opacity: 0; transition: opacity 0.15s;
+  }
+</style>
+</head>
+<body>
+<div id="container">
+  <div id="controls">
+    <button id="grayscale-btn">Grayscale</button>
+  </div>
+  <div id="legend"></div>
+  <div class="tooltip" id="tooltip"></div>
+</div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+const container = document.getElementById("container");
+const width = container.clientWidth;
+const height = container.clientHeight;
+
+// --- Community definitions ---
+const communities = [
+  { id: 0, name: "Infrastructure", color: "#e41a1c", gray: "#666" },
+  { id: 1, name: "Analytics",      color: "#377eb8", gray: "#888" },
+  { id: 2, name: "Frontend",       color: "#4daf4a", gray: "#aaa" },
+  { id: 3, name: "Security",       color: "#984ea3", gray: "#555" },
+  { id: 4, name: "Data Pipeline",  color: "#ff7f00", gray: "#777" },
+  { id: 5, name: "ML Platform",    color: "#a65628", gray: "#999" },
+];
+
+// --- Texton patterns (hatching, dots, crosshatch, stripes, waves, diamonds) ---
+function createPatterns(defs) {
+  // 0: Horizontal hatching
+  const p0 = defs.append("pattern").attr("id","tex-0").attr("width",8).attr("height",8)
+    .attr("patternUnits","userSpaceOnUse");
+  p0.append("rect").attr("width",8).attr("height",8).attr("class","pat-bg");
+  p0.append("line").attr("x1",0).attr("y1",4).attr("x2",8).attr("y2",4)
+    .attr("class","pat-fg").attr("stroke-width",1.5);
+
+  // 1: Dots
+  const p1 = defs.append("pattern").attr("id","tex-1").attr("width",8).attr("height",8)
+    .attr("patternUnits","userSpaceOnUse");
+  p1.append("rect").attr("width",8).attr("height",8).attr("class","pat-bg");
+  p1.append("circle").attr("cx",4).attr("cy",4).attr("r",1.8).attr("class","pat-fg-fill");
+
+  // 2: Crosshatch
+  const p2 = defs.append("pattern").attr("id","tex-2").attr("width",8).attr("height",8)
+    .attr("patternUnits","userSpaceOnUse");
+  p2.append("rect").attr("width",8).attr("height",8).attr("class","pat-bg");
+  p2.append("line").attr("x1",0).attr("y1",0).attr("x2",8).attr("y2",8)
+    .attr("class","pat-fg").attr("stroke-width",1);
+  p2.append("line").attr("x1",8).attr("y1",0).attr("x2",0).attr("y2",8)
+    .attr("class","pat-fg").attr("stroke-width",1);
+
+  // 3: Vertical stripes
+  const p3 = defs.append("pattern").attr("id","tex-3").attr("width",6).attr("height",6)
+    .attr("patternUnits","userSpaceOnUse");
+  p3.append("rect").attr("width",6).attr("height",6).attr("class","pat-bg");
+  p3.append("line").attr("x1",3).attr("y1",0).attr("x2",3).attr("y2",6)
+    .attr("class","pat-fg").attr("stroke-width",1.5);
+
+  // 4: Waves
+  const p4 = defs.append("pattern").attr("id","tex-4").attr("width",12).attr("height",8)
+    .attr("patternUnits","userSpaceOnUse");
+  p4.append("rect").attr("width",12).attr("height",8).attr("class","pat-bg");
+  p4.append("path").attr("d","M0,4 Q3,0 6,4 Q9,8 12,4")
+    .attr("class","pat-fg").attr("stroke-width",1.2).attr("fill","none");
+
+  // 5: Diamonds
+  const p5 = defs.append("pattern").attr("id","tex-5").attr("width",10).attr("height",10)
+    .attr("patternUnits","userSpaceOnUse");
+  p5.append("rect").attr("width",10).attr("height",10).attr("class","pat-bg");
+  p5.append("path").attr("d","M5,1 L9,5 L5,9 L1,5 Z")
+    .attr("class","pat-fg").attr("stroke-width",1).attr("fill","none");
+}
+
+// --- Generate synthetic data ---
+const rng = d3.randomLcg(42);
+const randInt = (min, max) => Math.floor(rng() * (max - min)) + min;
+
+const nodes = d3.range(50).map(i => ({
+  id: i,
+  label: `Node ${i}`,
+  community: i < 10 ? 0 : i < 18 ? 1 : i < 26 ? 2 : i < 34 ? 3 : i < 42 ? 4 : 5,
+  degree: 0,
+}));
+
+const links = [];
+const linkSet = new Set();
+function addLink(s, t) {
+  const key = s < t ? `${s}-${t}` : `${t}-${s}`;
+  if (s !== t && !linkSet.has(key)) {
+    linkSet.add(key);
+    links.push({ source: s, target: t });
+    nodes[s].degree++;
+    nodes[t].degree++;
+  }
+}
+
+// Intra-community edges (dense)
+for (const c of communities) {
+  const members = nodes.filter(n => n.community === c.id).map(n => n.id);
+  for (let i = 0; i < members.length; i++) {
+    for (let j = i + 1; j < members.length; j++) {
+      if (rng() < 0.35) addLink(members[i], members[j]);
+    }
+  }
+  // Ensure connectivity within community
+  for (let i = 1; i < members.length; i++) {
+    addLink(members[i - 1], members[i]);
+  }
+}
+
+// Inter-community edges (sparse)
+for (let i = 0; i < 20; i++) {
+  const a = randInt(0, 50), b = randInt(0, 50);
+  if (nodes[a].community !== nodes[b].community) addLink(a, b);
+}
+
+// --- SVG setup ---
+const svg = d3.select("#container").append("svg")
+  .attr("width", width).attr("height", height);
+
+const defs = svg.append("defs");
+createPatterns(defs);
+
+const g = svg.append("g");
+
+// Zoom
+const zoom = d3.zoom()
+  .scaleExtent([0.3, 5])
+  .on("zoom", (e) => g.attr("transform", e.transform));
+svg.call(zoom);
+
+// --- Simulation ---
+const simulation = d3.forceSimulation(nodes)
+  .force("link", d3.forceLink(links).id(d => d.id).distance(50))
+  .force("charge", d3.forceManyBody().strength(-120))
+  .force("center", d3.forceCenter(width / 2, height / 2))
+  .force("collision", d3.forceCollide(18))
+  .force("x", d3.forceX(width / 2).strength(0.05))
+  .force("y", d3.forceY(height / 2).strength(0.05));
+
+// --- Draw ---
+const link = g.append("g")
+  .attr("stroke", "#bbb").attr("stroke-opacity", 0.5)
+  .selectAll("line")
+  .data(links).join("line").attr("stroke-width", 1);
+
+const rScale = d3.scaleSqrt().domain(d3.extent(nodes, d => d.degree)).range([8, 20]);
+
+const node = g.append("g")
+  .selectAll("g")
+  .data(nodes).join("g")
+  .call(d3.drag()
+    .on("start", (e, d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+    .on("drag", (e, d) => { d.fx = e.x; d.fy = e.y; })
+    .on("end", (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; })
+  );
+
+// Circle with pattern fill
+node.append("circle")
+  .attr("r", d => rScale(d.degree))
+  .attr("fill", d => `url(#tex-${d.community})`)
+  .attr("stroke", d => communities[d.community].color)
+  .attr("stroke-width", 2)
+  .attr("class", "node-circle");
+
+// Label for larger nodes
+node.filter(d => d.degree >= 4).append("text")
+  .text(d => d.id)
+  .attr("text-anchor", "middle").attr("dy", "0.35em")
+  .attr("font-size", 9).attr("fill", "#333").attr("pointer-events", "none");
+
+// Tooltip
+const tooltip = d3.select("#tooltip");
+node.on("pointerenter", (e, d) => {
+  tooltip.style("opacity", 1)
+    .html(`<strong>${d.label}</strong><br>Community: ${communities[d.community].name}<br>Connections: ${d.degree}`)
+    .style("left", (e.pageX + 12) + "px").style("top", (e.pageY - 10) + "px");
+}).on("pointermove", (e) => {
+  tooltip.style("left", (e.pageX + 12) + "px").style("top", (e.pageY - 10) + "px");
+}).on("pointerleave", () => tooltip.style("opacity", 0));
+
+simulation.on("tick", () => {
+  link.attr("x1", d => d.source.x).attr("y1", d => d.source.y)
+      .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
+  node.attr("transform", d => `translate(${d.x},${d.y})`);
+});
+
+// --- Pattern coloring ---
+let grayscale = false;
+
+function updateColors() {
+  // Pattern backgrounds and foregrounds
+  defs.selectAll(".pat-bg").attr("fill", d => grayscale ? "#e0e0e0" : "#fff");
+  defs.selectAll(".pat-fg").attr("stroke", d => grayscale ? "#333" : "#333");
+  defs.selectAll(".pat-fg-fill").attr("fill", d => grayscale ? "#333" : "#333");
+
+  // Update node stroke per community
+  svg.selectAll(".node-circle")
+    .attr("stroke", d => grayscale ? communities[d.community].gray : communities[d.community].color)
+    .attr("stroke-width", 2);
+
+  // Per-community pattern background tint
+  communities.forEach((c, i) => {
+    const pat = defs.select(`#tex-${i}`);
+    const bg = grayscale ? c.gray : c.color;
+    pat.select(".pat-bg").attr("fill", d3.color(bg).copy({opacity: 0.15}));
+    pat.selectAll(".pat-fg").attr("stroke", grayscale ? "#222" : d3.color(bg).darker(1));
+    pat.selectAll(".pat-fg-fill").attr("fill", grayscale ? "#222" : d3.color(bg).darker(1));
+  });
+
+  link.attr("stroke", grayscale ? "#999" : "#bbb");
+}
+
+updateColors();
+
+// Grayscale toggle
+const btn = document.getElementById("grayscale-btn");
+btn.addEventListener("click", () => {
+  grayscale = !grayscale;
+  btn.classList.toggle("active", grayscale);
+  btn.textContent = grayscale ? "Color" : "Grayscale";
+  updateColors();
+});
+
+// --- Legend ---
+const legendDiv = d3.select("#legend");
+legendDiv.append("h3").text("Communities");
+const texNames = ["Hatching", "Dots", "Crosshatch", "Stripes", "Waves", "Diamonds"];
+
+const legendSvg = legendDiv.append("svg").attr("width", 180).attr("height", communities.length * 30);
+
+communities.forEach((c, i) => {
+  const gy = legendSvg.append("g").attr("transform", `translate(0, ${i * 28})`);
+  gy.append("rect").attr("width", 24).attr("height", 24).attr("rx", 3)
+    .attr("fill", `url(#tex-${i})`).attr("stroke", c.color).attr("stroke-width", 1.5)
+    .attr("class", "legend-swatch-rect");
+  gy.append("text").attr("x", 32).attr("y", 16).attr("font-size", 12)
+    .text(`${c.name} — ${texNames[i]}`);
+});
+
+// Update legend on grayscale toggle
+const origUpdateColors = updateColors;
+// We already handle this in updateColors — also update legend swatches
+const updateAll = () => {
+  legendSvg.selectAll(".legend-swatch-rect")
+    .attr("stroke", (_, i) => grayscale ? communities[i].gray : communities[i].color);
+};
+
+btn.addEventListener("click", updateAll);
+updateAll();
+
+</script>
+</body>
+</html>

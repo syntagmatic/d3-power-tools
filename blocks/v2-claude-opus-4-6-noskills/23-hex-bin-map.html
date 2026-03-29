@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hex-Binned US Map</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; color: #eee; font-family: system-ui, sans-serif; display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
+  h1 { margin: 16px 0 4px; font-size: 1.3rem; font-weight: 600; }
+  .controls { display: flex; align-items: center; gap: 12px; margin: 8px 0 12px; font-size: 0.85rem; }
+  .controls label { opacity: 0.8; }
+  #radius-val { min-width: 2.5em; text-align: right; font-variant-numeric: tabular-nums; }
+  #container { position: relative; }
+  canvas, svg { position: absolute; top: 0; left: 0; }
+  svg { pointer-events: none; }
+  .legend { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 0.75rem; opacity: 0.8; }
+  .legend canvas { border-radius: 2px; }
+</style>
+</head>
+<body>
+<h1>Hex-Binned US Population Density</h1>
+<div class="controls">
+  <label for="radius-slider">Hex radius:</label>
+  <input id="radius-slider" type="range" min="4" max="16" value="8" step="1">
+  <span id="radius-val">8px</span>
+  <span style="opacity:0.5; margin-left:8px;">20,000 synthetic GPS points</span>
+</div>
+<div id="container"></div>
+<div class="legend" id="legend"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+import * as topojson from "https://cdn.jsdelivr.net/npm/topojson-client@3/+esm";
+
+const width = 960, height = 600;
+
+// --- Synthetic data: 20,000 GPS points around US population centers ---
+const centers = [
+  // [lon, lat, weight] — approximate metro centers
+  [-74.006, 40.713, 0.12],   // NYC
+  [-118.244, 34.052, 0.10],  // LA
+  [-87.630, 41.878, 0.07],   // Chicago
+  [-95.370, 29.760, 0.06],   // Houston
+  [-112.074, 33.449, 0.04],  // Phoenix
+  [-75.165, 39.953, 0.04],   // Philadelphia
+  [-98.494, 29.425, 0.03],   // San Antonio
+  [-117.161, 32.716, 0.03],  // San Diego
+  [-96.797, 32.777, 0.03],   // Dallas
+  [-121.886, 37.339, 0.03],  // San Jose
+  [-97.744, 30.267, 0.02],   // Austin
+  [-122.419, 37.775, 0.04],  // SF
+  [-80.191, 25.762, 0.04],   // Miami
+  [-84.388, 33.749, 0.04],   // Atlanta
+  [-122.332, 47.606, 0.03],  // Seattle
+  [-77.037, 38.907, 0.04],   // DC
+  [-71.059, 42.360, 0.03],   // Boston
+  [-104.990, 39.739, 0.03],  // Denver
+  [-83.046, 42.331, 0.02],   // Detroit
+  [-90.199, 38.627, 0.02],   // St. Louis
+  [-93.265, 44.978, 0.02],   // Minneapolis
+  [-82.999, 39.961, 0.015],  // Columbus
+  [-86.158, 39.769, 0.015],  // Indianapolis
+  [-81.655, 30.332, 0.015],  // Jacksonville
+  [-149.900, 61.218, 0.005], // Anchorage
+  [-157.858, 21.307, 0.005], // Honolulu
+  [-106.651, 35.084, 0.01],  // Albuquerque
+  [-115.139, 36.175, 0.02],  // Las Vegas
+  [-90.075, 29.951, 0.02],   // New Orleans
+  [-85.764, 38.253, 0.015],  // Louisville
+  [-86.802, 36.163, 0.015],  // Nashville
+  [-79.931, 32.777, 0.01],   // Charleston
+  [-78.639, 35.779, 0.015],  // Raleigh
+  [-80.843, 35.227, 0.015],  // Charlotte
+  [-111.891, 40.761, 0.015], // Salt Lake City
+  [-122.676, 45.523, 0.02],  // Portland
+  [-94.580, 39.100, 0.015],  // Kansas City
+];
+
+// Normalize weights
+const totalW = d3.sum(centers, d => d[2]);
+centers.forEach(d => d[2] /= totalW);
+
+// Mulberry32 seeded PRNG for reproducibility
+function mulberry32(a) {
+  return function() {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const rng = mulberry32(42);
+
+// Box-Muller transform using our seeded rng
+function gaussianRng() {
+  let u, v, s;
+  do { u = 2 * rng() - 1; v = 2 * rng() - 1; s = u * u + v * v; } while (s >= 1 || s === 0);
+  const m = Math.sqrt(-2 * Math.log(s) / s);
+  return u * m;
+}
+
+const N = 20000;
+const points = [];
+for (let i = 0; i < N; i++) {
+  // Pick a center based on weights
+  let r = rng(), cum = 0, ci = 0;
+  for (; ci < centers.length - 1; ci++) { cum += centers[ci][2]; if (r < cum) break; }
+  const [lon, lat] = centers[ci];
+  // Gaussian spread: ~1.5° std for major metros
+  const spread = 1.2 + rng() * 0.8;
+  points.push([lon + gaussianRng() * spread, lat + gaussianRng() * spread * 0.7]);
+}
+
+// --- Projection ---
+const projection = d3.geoAlbersUsa().fitSize([width, height], { type: "Sphere" });
+
+// Project points, filter those inside the projection domain
+const projected = [];
+for (const [lon, lat] of points) {
+  const p = projection([lon, lat]);
+  if (p) projected.push(p);
+}
+
+// --- Load US states for overlay ---
+const us = await d3.json("https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json");
+const states = topojson.feature(us, us.objects.states);
+const stateMesh = topojson.mesh(us, us.objects.states, (a, b) => a !== b);
+const nation = topojson.merge(us, us.objects.states.geometries);
+
+const path = d3.geoPath(projection);
+
+// --- Setup DOM ---
+const container = d3.select("#container")
+  .style("width", width + "px")
+  .style("height", height + "px")
+  .style("position", "relative");
+
+const canvas = container.append("canvas")
+  .attr("width", width * devicePixelRatio)
+  .attr("height", height * devicePixelRatio)
+  .style("width", width + "px")
+  .style("height", height + "px");
+
+const ctx = canvas.node().getContext("2d");
+ctx.scale(devicePixelRatio, devicePixelRatio);
+
+const svg = container.append("svg")
+  .attr("width", width)
+  .attr("height", height)
+  .attr("viewBox", `0 0 ${width} ${height}`);
+
+// State outlines in SVG
+svg.append("path")
+  .datum(nation)
+  .attr("d", path)
+  .attr("fill", "none")
+  .attr("stroke", "rgba(255,255,255,0.25)")
+  .attr("stroke-width", 1.5);
+
+svg.append("path")
+  .datum(stateMesh)
+  .attr("d", path)
+  .attr("fill", "none")
+  .attr("stroke", "rgba(255,255,255,0.12)")
+  .attr("stroke-width", 0.5);
+
+// --- Color scale ---
+const colorScheme = d3.interpolateYlOrRd;
+
+function drawHexbins(radius) {
+  const hexbin = d3.hexbin()
+    .x(d => d[0])
+    .y(d => d[1])
+    .radius(radius)
+    .extent([[0, 0], [width, height]]);
+
+  const bins = hexbin(projected);
+  const maxCount = d3.max(bins, d => d.length) || 1;
+
+  const color = d3.scaleSequentialLog()
+    .domain([1, maxCount])
+    .interpolator(colorScheme);
+
+  // Clear and draw
+  ctx.save();
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  // Dark background for nation
+  ctx.beginPath();
+  path.context(ctx);
+  path(nation);
+  ctx.fillStyle = "rgba(255,255,255,0.03)";
+  ctx.fill();
+  path.context(null);
+
+  // Draw hexagons
+  const hexPath = hexbin.hexagon();
+  for (const bin of bins) {
+    ctx.beginPath();
+    ctx.translate(bin.x, bin.y);
+    const p = new Path2D(hexPath);
+    ctx.fillStyle = color(bin.length);
+    ctx.fill(p);
+    ctx.translate(-bin.x, -bin.y);
+  }
+  ctx.restore();
+
+  // Update legend
+  drawLegend(color, maxCount);
+}
+
+function drawLegend(color, maxCount) {
+  const legendDiv = d3.select("#legend");
+  legendDiv.selectAll("*").remove();
+
+  const lw = 200, lh = 12;
+  const lCanvas = legendDiv.append("canvas")
+    .attr("width", lw * devicePixelRatio)
+    .attr("height", lh * devicePixelRatio)
+    .style("width", lw + "px")
+    .style("height", lh + "px");
+
+  const lCtx = lCanvas.node().getContext("2d");
+  lCtx.scale(devicePixelRatio, devicePixelRatio);
+  for (let i = 0; i < lw; i++) {
+    const t = i / (lw - 1);
+    const v = Math.pow(maxCount, t); // log scale mapping
+    lCtx.fillStyle = color(Math.max(1, v));
+    lCtx.fillRect(i, 0, 1, lh);
+  }
+
+  legendDiv.append("span").text("1");
+  legendDiv.append("span").style("flex", "1");
+  legendDiv.append("span").text(maxCount + " points/hex");
+}
+
+// --- Hexbin dependency (inline minimal hexbin) ---
+// d3-hexbin is not in the d3 bundle, so we load it separately
+// We'll use a CDN for d3-hexbin
+const hexbinModule = await import("https://cdn.jsdelivr.net/npm/d3-hexbin@0.2/+esm");
+d3.hexbin = hexbinModule.hexbin;
+
+// Initial draw
+const slider = document.getElementById("radius-slider");
+const valSpan = document.getElementById("radius-val");
+
+function update() {
+  const r = +slider.value;
+  valSpan.textContent = r + "px";
+  drawHexbins(r);
+}
+
+slider.addEventListener("input", update);
+update();
+</script>
+</body>
+</html>

@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Global Trade Flows — Chord Diagram</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: #0d1117;
+  color: #c9d1d9;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 36px 16px 52px;
+  min-height: 100vh;
+}
+h1 {
+  font-size: 22px;
+  font-weight: 700;
+  color: #f0f6fc;
+  margin-bottom: 8px;
+  letter-spacing: -0.01em;
+}
+.subtitle {
+  font-size: 13px;
+  color: #7d8590;
+  margin-bottom: 32px;
+  text-align: center;
+  max-width: 520px;
+  line-height: 1.6;
+}
+svg { overflow: visible; }
+#tooltip {
+  position: fixed;
+  background: rgba(13, 17, 23, 0.97);
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 11px 14px;
+  font-size: 12px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+  z-index: 1000;
+  color: #e6edf3;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+  min-width: 190px;
+}
+#tooltip.show { opacity: 1; }
+.tt-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f0f6fc;
+  margin-bottom: 7px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid #30363d;
+}
+.tt-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 2px 0;
+  font-size: 11px;
+}
+.tt-label { color: #8b949e; }
+.tt-value { font-weight: 500; color: #e6edf3; }
+.tt-net { color: #58a6ff; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>Global Trade Flows</h1>
+<div class="subtitle">
+  Bilateral export flows between 10 major economies · Values in billions USD (synthetic) ·
+  Hover an arc to isolate flows · Tick marks show export volume
+</div>
+<svg id="chart"></svg>
+<div id="tooltip"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<script>
+// ── Data ──────────────────────────────────────────────────────────────────
+const names = [
+  'USA', 'China', 'Germany', 'Japan', 'UK',
+  'France', 'India', 'S. Korea', 'Canada', 'Netherlands'
+];
+
+// matrix[i][j] = exports from country i to country j (billions USD)
+const matrix = [
+//   USA  CHN  DEU  JPN   UK  FRA  IND  KOR  CAN  NLD
+  [    0, 180,  80,  75, 120,  50,  45,  65, 280,  30], // USA
+  [  520,   0, 110, 180,  75,  65,  80, 260,  50,  70], // China
+  [  120,  80,   0,  40,  85, 120,  30,  25,  15,  95], // Germany
+  [   75, 150,  35,   0,  35,  20,  20, 100,  12,  18], // Japan
+  [  110,  50,  65,  25,   0,  75,  20,  12,  25,  45], // UK
+  [   45,  60,  80,  20,  70,   0,  15,  10,  10,  60], // France
+  [   70, 100,  25,  15,  25,  12,   0,  15,   8,  12], // India
+  [   80, 150,  20,  70,  15,  10,  10,   0,  10,  12], // S. Korea
+  [  340,  25,  15,  10,  20,   8,   8,   8,   0,   8], // Canada
+  [   40,  50,  75,  15,  60,  55,  10,  10,   8,   0], // Netherlands
+];
+
+// ── Dimensions ────────────────────────────────────────────────────────────
+const W = 820, H = 820;
+const cx = W / 2, cy = H / 2;
+const innerR = 238, outerR = 275;
+const labelR  = outerR + 26;
+const TICK_STEP = 100; // tick every 100B
+
+// ── SVG ───────────────────────────────────────────────────────────────────
+const svg = d3.select('#chart')
+  .attr('width', W)
+  .attr('height', H)
+  .attr('viewBox', `0 0 ${W} ${H}`);
+
+const root = svg.append('g').attr('transform', `translate(${cx},${cy})`);
+
+// ── Color ─────────────────────────────────────────────────────────────────
+const color = d3.scaleOrdinal(d3.schemeTableau10).domain(d3.range(10));
+
+// ── Chord layout ──────────────────────────────────────────────────────────
+const chordLayout = d3.chord()
+  .padAngle(0.048)
+  .sortSubgroups(d3.descending)
+  .sortChords(d3.descending);
+
+const chords = chordLayout(matrix);
+
+// ── Generators ────────────────────────────────────────────────────────────
+const arcGen = d3.arc()
+  .innerRadius(innerR)
+  .outerRadius(outerR);
+
+const ribbonGen = d3.ribbon().radius(innerR - 1);
+
+// ── Tick helper ───────────────────────────────────────────────────────────
+function groupTicks(d, step) {
+  const k = (d.endAngle - d.startAngle) / d.value;
+  return d3.range(0, d.value, step).map(v => ({
+    value: v,
+    angle: v * k + d.startAngle
+  }));
+}
+
+// ── Draw ribbons (below arcs) ─────────────────────────────────────────────
+const ribbonLayer = root.append('g');
+
+const ribbonPaths = ribbonLayer.selectAll('path')
+  .data(chords)
+  .join('path')
+  .attr('d', ribbonGen)
+  .attr('fill', d => color(d.source.index))
+  .attr('fill-opacity', 0)
+  .attr('stroke', d => d3.color(color(d.source.index)).darker(1.4))
+  .attr('stroke-opacity', 0)
+  .attr('stroke-width', 0.4)
+  .style('cursor', 'pointer');
+
+// ── Draw group arcs ───────────────────────────────────────────────────────
+const groupLayer = root.append('g');
+
+const groups = groupLayer.selectAll('g')
+  .data(chords.groups)
+  .join('g');
+
+const arcPaths = groups.append('path')
+  .attr('fill', d => color(d.index))
+  .attr('stroke', d => d3.color(color(d.index)).darker(0.7))
+  .attr('stroke-width', 0.5)
+  .style('cursor', 'pointer');
+
+// ── Tick marks ────────────────────────────────────────────────────────────
+const tickLayers = groups.append('g')
+  .attr('class', 'tick-layer')
+  .attr('opacity', 0); // animate in later
+
+tickLayers.each(function(gd) {
+  const tg = d3.select(this);
+  const ticks = groupTicks(gd, TICK_STEP);
+
+  const tickEls = tg.selectAll('g.tk')
+    .data(ticks)
+    .join('g')
+    .attr('class', 'tk')
+    .attr('transform', d =>
+      `rotate(${d.angle * 180 / Math.PI - 90}) translate(${outerR},0)`
+    );
+
+  // Tick line
+  tickEls.append('line')
+    .attr('x1', 2)
+    .attr('x2', d => d.value % 400 === 0 ? 12 : (d.value % 200 === 0 ? 8 : 5))
+    .attr('stroke', d => d.value % 200 === 0 ? '#6b7280' : '#3d444d')
+    .attr('stroke-width', d => d.value % 200 === 0 ? 1 : 0.7);
+
+  // Tick label (every 200B, skip 0)
+  tickEls.filter(d => d.value % 200 === 0 && d.value > 0)
+    .append('text')
+    .attr('x', d => d.angle > Math.PI ? -14 : 14)
+    .attr('dy', '0.35em')
+    .attr('transform', d => d.angle > Math.PI ? 'rotate(180)' : null)
+    .attr('text-anchor', d => d.angle > Math.PI ? 'end' : 'start')
+    .attr('fill', '#6b7280')
+    .attr('font-size', '9px')
+    .attr('font-family', 'sans-serif')
+    .text(d => `${d.value}B`);
+});
+
+// ── Country labels ────────────────────────────────────────────────────────
+const labels = groups.append('text')
+  .attr('dy', '0.35em')
+  .attr('font-size', '12px')
+  .attr('font-family', "-apple-system, 'Segoe UI', sans-serif")
+  .attr('font-weight', '600')
+  .attr('opacity', 0)
+  .attr('transform', d => {
+    const mid = (d.startAngle + d.endAngle) / 2;
+    const rotate = mid * 180 / Math.PI - 90;
+    const flip = mid > Math.PI;
+    return `rotate(${rotate}) translate(${labelR},0)${flip ? ' rotate(180)' : ''}`;
+  })
+  .attr('text-anchor', d => (d.startAngle + d.endAngle) / 2 > Math.PI ? 'end' : 'start')
+  .attr('fill', d => color(d.index))
+  .text(d => names[d.index]);
+
+// ── Tooltip ───────────────────────────────────────────────────────────────
+const tooltip = d3.select('#tooltip');
+
+function showTT(html, event) {
+  tooltip.html(html).classed('show', true);
+  moveTT(event);
+}
+function moveTT(event) {
+  const x = Math.min(event.clientX + 18, window.innerWidth - 220);
+  const y = event.clientY - 10;
+  tooltip.style('left', `${x}px`).style('top', `${y}px`);
+}
+function hideTT() { tooltip.classed('show', false); }
+
+// ── Highlight ─────────────────────────────────────────────────────────────
+function highlight(idx) {
+  arcPaths.transition().duration(120)
+    .attr('opacity', d => d.index === idx ? 1 : 0.12);
+  ribbonPaths.transition().duration(120)
+    .attr('fill-opacity', d =>
+      d.source.index === idx || d.target.index === idx ? 0.82 : 0.04)
+    .attr('stroke-opacity', d =>
+      d.source.index === idx || d.target.index === idx ? 0.5 : 0.01);
+  labels.transition().duration(120)
+    .attr('opacity', d => d.index === idx ? 1 : 0.2);
+}
+
+function reset() {
+  arcPaths.transition().duration(200).attr('opacity', 1);
+  ribbonPaths.transition().duration(200)
+    .attr('fill-opacity', 0.62)
+    .attr('stroke-opacity', 0.25);
+  labels.transition().duration(200).attr('opacity', 1);
+}
+
+// ── Group arc events ──────────────────────────────────────────────────────
+groups
+  .on('mouseover', function(event, d) {
+    highlight(d.index);
+    const exports = d3.sum(matrix[d.index]);
+    const imports = d3.sum(matrix.map(row => row[d.index]));
+    const balance = exports - imports;
+    const topExpI = d3.maxIndex(matrix[d.index].map((v, i) => i === d.index ? -Infinity : v));
+    const topImpI = d3.maxIndex(matrix.map(row => row[d.index]).map((v, i) => i === d.index ? -Infinity : v));
+    showTT(`
+      <div class="tt-title">${names[d.index]}</div>
+      <div class="tt-row"><span class="tt-label">Total exports</span><span class="tt-value">$${exports}B</span></div>
+      <div class="tt-row"><span class="tt-label">Total imports</span><span class="tt-value">$${imports}B</span></div>
+      <div class="tt-row"><span class="tt-label">Trade balance</span><span class="tt-net">${balance >= 0 ? '+' : ''}$${balance}B</span></div>
+      <div class="tt-row"><span class="tt-label">Top export dest.</span><span class="tt-value">${names[topExpI]}</span></div>
+      <div class="tt-row"><span class="tt-label">Top import src.</span><span class="tt-value">${names[topImpI]}</span></div>
+    `, event);
+  })
+  .on('mousemove', moveTT)
+  .on('mouseout', () => { reset(); hideTT(); });
+
+// ── Ribbon events ─────────────────────────────────────────────────────────
+ribbonPaths
+  .on('mouseover', function(event, d) {
+    highlight(d.source.index);
+    const si = d.source.index, ti = d.target.index;
+    const fwd = matrix[si][ti], rev = matrix[ti][si];
+    const netWinner = fwd >= rev ? names[si] : names[ti];
+    showTT(`
+      <div class="tt-title">${names[si]} ↔ ${names[ti]}</div>
+      <div class="tt-row"><span class="tt-label">${names[si]} → ${names[ti]}</span><span class="tt-value">$${fwd}B</span></div>
+      <div class="tt-row"><span class="tt-label">${names[ti]} → ${names[si]}</span><span class="tt-value">$${rev}B</span></div>
+      <div class="tt-row"><span class="tt-label">Net surplus</span><span class="tt-net">${netWinner} +$${Math.abs(fwd - rev)}B</span></div>
+    `, event);
+  })
+  .on('mousemove', moveTT)
+  .on('mouseout', () => { reset(); hideTT(); });
+
+// ── Entrance animation ────────────────────────────────────────────────────
+
+// Phase 1: Group arcs grow from zero width, staggered
+arcPaths
+  .attr('d', d => arcGen({ ...d, endAngle: d.startAngle }))
+  .transition('arcs')
+  .duration(850)
+  .delay((_, i) => i * 60)
+  .ease(d3.easeCubicOut)
+  .attrTween('d', function(d) {
+    const interp = d3.interpolate(d.startAngle, d.endAngle);
+    return t => arcGen({ ...d, endAngle: interp(t) });
+  });
+
+// Phase 2: Labels appear as arcs finish
+labels.transition()
+  .delay((_, i) => 650 + i * 60)
+  .duration(280)
+  .attr('opacity', 1);
+
+// Phase 3: Tick marks fade in after all arcs are done
+tickLayers.transition()
+  .delay(1100)
+  .duration(350)
+  .attr('opacity', 1);
+
+// Phase 4: Ribbons fade in with stagger
+ribbonPaths.transition('ribbons')
+  .delay((_, i) => 1250 + i * 12)
+  .duration(380)
+  .ease(d3.easeQuadOut)
+  .attr('fill-opacity', 0.62)
+  .attr('stroke-opacity', 0.25);
+</script>
+</body>
+</html>

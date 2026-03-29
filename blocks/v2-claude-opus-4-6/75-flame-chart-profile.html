@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CPU Flame Chart Profile</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; font-family: system-ui, -apple-system, sans-serif; color: #e0e0e0; overflow: hidden; }
+  #container { position: relative; width: 100vw; height: 100vh; }
+  canvas { position: absolute; top: 0; left: 0; }
+  svg { position: absolute; top: 0; left: 0; }
+  #tooltip {
+    position: absolute; pointer-events: none; opacity: 0;
+    background: rgba(10,10,30,0.95); border: 1px solid #555; border-radius: 4px;
+    padding: 8px 12px; font-size: 13px; line-height: 1.5; max-width: 360px;
+    transition: opacity 0.15s;
+  }
+  #tooltip .fn-name { color: #fff; font-weight: 600; }
+  #tooltip .module { color: #888; }
+  #tooltip .pct { color: #ffd700; font-weight: 600; }
+  #breadcrumb {
+    position: absolute; top: 8px; left: 12px; font-size: 12px; color: #aaa;
+    z-index: 10; cursor: pointer;
+  }
+  #breadcrumb:hover { color: #fff; }
+  #legend {
+    position: absolute; bottom: 12px; left: 12px; display: flex; gap: 12px;
+    font-size: 11px; color: #999; z-index: 10; flex-wrap: wrap;
+  }
+  #legend .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 2px; margin-right: 4px; vertical-align: -2px; }
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="canvas"></canvas>
+  <svg id="overlay"></svg>
+  <div id="tooltip"></div>
+  <div id="breadcrumb"></div>
+  <div id="legend"></div>
+</div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data: ~800 stack frames across 8 modules ---
+const modules = [
+  { name: "runtime",    fns: ["gc_collect", "gc_sweep", "gc_mark", "alloc_page", "free_page", "compact_heap", "finalize"] },
+  { name: "net",        fns: ["tcp_read", "tcp_write", "tls_handshake", "dns_resolve", "socket_poll", "http_parse", "conn_pool"] },
+  { name: "parser",     fns: ["tokenize", "parse_expr", "parse_stmt", "build_ast", "validate", "resolve_refs", "optimize_ast"] },
+  { name: "compiler",   fns: ["emit_bytecode", "reg_alloc", "dead_code_elim", "inline_expand", "loop_unroll", "const_fold", "type_check"] },
+  { name: "io",         fns: ["read_file", "write_file", "mmap_region", "flush_buffer", "sync_pages", "seek", "stat"] },
+  { name: "render",     fns: ["layout", "paint", "composite", "rasterize", "clip", "blend", "present"] },
+  { name: "db",         fns: ["query_exec", "index_scan", "sort_merge", "hash_join", "buffer_read", "wal_write", "checkpoint"] },
+  { name: "crypto",     fns: ["sha256", "aes_encrypt", "aes_decrypt", "hmac", "pbkdf2", "rng_fill", "verify_sig"] }
+];
+
+const moduleColors = {
+  runtime:  "#e45649",
+  net:      "#61afef",
+  parser:   "#98c379",
+  compiler: "#c678dd",
+  io:       "#e5c07b",
+  render:   "#56b6c2",
+  db:       "#d19a66",
+  crypto:   "#be5046"
+};
+
+// Seeded PRNG for reproducibility
+function mulberry32(a) {
+  return function() {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const rng = mulberry32(42);
+const randInt = (min, max) => min + Math.floor(rng() * (max - min + 1));
+const pick = arr => arr[randInt(0, arr.length - 1)];
+
+function buildTree(maxDepth, totalTarget) {
+  let count = 0;
+  const root = { name: "main", module: "runtime", children: [] };
+
+  function addChildren(node, depth) {
+    if (count >= totalTarget || depth >= maxDepth) return;
+    const nKids = depth < 3 ? randInt(3, 7) : randInt(1, 4);
+    for (let i = 0; i < nKids && count < totalTarget; i++) {
+      const mod = depth < 2 ? modules[randInt(0, modules.length - 1)] : (rng() < 0.7 ? modules.find(m => m.name === node.module) || pick(modules) : pick(modules));
+      const child = { name: `${mod.name}::${pick(mod.fns)}`, module: mod.name, children: [] };
+      node.children.push(child);
+      count++;
+      if (depth < maxDepth - 1 && rng() < 0.7) addChildren(child, depth + 1);
+    }
+  }
+
+  addChildren(root, 0);
+  return root;
+}
+
+const treeData = buildTree(12, 800);
+
+// --- Layout ---
+const margin = { top: 40, right: 20, bottom: 40, left: 20 };
+let W = window.innerWidth;
+let H = window.innerHeight;
+const width = W - margin.left - margin.right;
+const height = H - margin.top - margin.bottom;
+const rowHeight = 18;
+
+const root = d3.hierarchy(treeData)
+  .sum(() => 1)
+  .sort((a, b) => b.value - a.value);
+
+const partition = d3.partition()
+  .size([width, height])
+  .padding(0.5);
+
+partition(root);
+
+// Flip vertically (flame chart: root at bottom, callees grow upward)
+const maxY1 = d3.max(root.descendants(), d => d.y1);
+root.each(d => {
+  const tmpY0 = d.y0;
+  d.y0 = maxY1 - d.y1;
+  d.y1 = maxY1 - tmpY0;
+});
+
+const nodes = root.descendants();
+
+// x-scale for horizontal zoom
+const xScale = d3.scaleLinear().domain([0, width]).range([0, width]);
+
+// --- Canvas setup ---
+const dpr = devicePixelRatio;
+const canvas = document.getElementById("canvas");
+canvas.width = W * dpr;
+canvas.height = H * dpr;
+canvas.style.width = `${W}px`;
+canvas.style.height = `${H}px`;
+const ctx = canvas.getContext("2d");
+ctx.scale(dpr, dpr);
+
+// --- SVG overlay for zoom interaction ---
+const svg = d3.select("#overlay")
+  .attr("width", W).attr("height", H)
+  .style("pointer-events", "all");
+
+const tooltip = document.getElementById("tooltip");
+const breadcrumb = document.getElementById("breadcrumb");
+
+// --- Legend ---
+const legend = document.getElementById("legend");
+for (const mod of modules) {
+  const span = document.createElement("span");
+  span.innerHTML = `<span class="swatch" style="background:${moduleColors[mod.name]}"></span>${mod.name}`;
+  legend.appendChild(span);
+}
+
+// --- rAF-throttled rendering ---
+let dirty = false;
+let currentTransform = d3.zoomIdentity;
+let focusNode = null;
+
+function markDirty() {
+  if (!dirty) { dirty = true; requestAnimationFrame(draw); }
+}
+
+function draw() {
+  dirty = false;
+  const t = currentTransform;
+  const k = t.k;
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.save();
+  ctx.translate(margin.left, margin.top);
+
+  // Visible x range in data coords
+  const visXMin = -t.x / k;
+  const visXMax = (width - t.x) / k;
+
+  // Draw cells
+  for (const d of nodes) {
+    const x0 = d.x0, x1 = d.x1;
+    // Cull horizontally
+    if (x1 < visXMin || x0 > visXMax) continue;
+
+    const sx = t.x + x0 * k;
+    const sw = (x1 - x0) * k;
+    const sy = d.y0;
+    const sh = d.y1 - d.y0;
+
+    if (sw < 0.5) continue;
+
+    // Module color with slight depth variation
+    const base = d3.color(moduleColors[d.data.module]);
+    const depthFade = Math.min(d.depth * 4, 30);
+    base.r = Math.min(255, base.r + depthFade);
+    base.g = Math.min(255, base.g + depthFade);
+    base.b = Math.min(255, base.b + depthFade);
+
+    ctx.fillStyle = base.formatRgb();
+    ctx.fillRect(sx, sy, sw - 0.5, sh - 0.5);
+
+    // LOD labels
+    if (sw > 40 && sh > 10) {
+      const label = d.data.name;
+      ctx.fillStyle = "#000";
+      ctx.font = `${Math.min(11, sh - 4)}px system-ui, sans-serif`;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(sx + 2, sy, sw - 4, sh);
+      ctx.clip();
+      ctx.fillText(label, sx + 3, sy + sh - 4);
+      ctx.restore();
+    } else if (sw > 20 && sh > 10) {
+      // Abbreviated label at medium zoom
+      const abbr = d.data.name.split("::").pop().slice(0, 3);
+      ctx.fillStyle = "rgba(0,0,0,0.6)";
+      ctx.font = `9px system-ui, sans-serif`;
+      ctx.fillText(abbr, sx + 2, sy + sh - 4);
+    }
+  }
+
+  ctx.restore();
+}
+
+// --- Hit detection ---
+function findNode(mx, my) {
+  const t = currentTransform;
+  const px = mx - margin.left;
+  const py = my - margin.top;
+  if (px < 0 || py < 0 || px > width || py > height) return null;
+
+  let hit = null;
+  for (const d of nodes) {
+    const sx = t.x + d.x0 * t.k;
+    const sw = (d.x1 - d.x0) * t.k;
+    const sy = d.y0;
+    const sh = d.y1 - d.y0;
+    if (px >= sx && px <= sx + sw && py >= sy && py <= sy + sh) {
+      if (!hit || d.depth > hit.depth) hit = d;
+    }
+  }
+  return hit;
+}
+
+// --- Tooltip ---
+svg.on("pointermove", (event) => {
+  const [mx, my] = d3.pointer(event);
+  const node = findNode(mx, my);
+  if (node) {
+    const pct = ((node.value / root.value) * 100).toFixed(1);
+    tooltip.innerHTML = `<span class="fn-name">${node.data.name}</span><br>
+      <span class="module">${node.data.module}</span> &middot;
+      depth ${node.depth}<br>
+      <span class="pct">${pct}%</span> of total samples (${node.value} frames)`;
+    tooltip.style.opacity = 1;
+    const tx = Math.min(mx + 12, W - 370);
+    const ty = my < H / 2 ? my + 20 : my - 80;
+    tooltip.style.left = `${tx}px`;
+    tooltip.style.top = `${ty}px`;
+  } else {
+    tooltip.style.opacity = 0;
+  }
+});
+
+svg.on("pointerleave", () => { tooltip.style.opacity = 0; });
+
+// --- Click-to-zoom: fit subtree horizontally ---
+svg.on("click", (event) => {
+  const [mx, my] = d3.pointer(event);
+  const node = findNode(mx, my);
+  if (!node) return;
+
+  if (focusNode === node) {
+    // Click same node again → zoom out to root
+    focusNode = null;
+    breadcrumb.textContent = "";
+    svg.transition().duration(750).call(zoom.transform, d3.zoomIdentity);
+    return;
+  }
+
+  focusNode = node;
+
+  // Build breadcrumb trail
+  const trail = node.ancestors().reverse().map(d => d.data.name.split("::").pop());
+  breadcrumb.textContent = "⬅ " + trail.join(" → ");
+
+  // Compute transform to fit this subtree horizontally
+  const k = width / (node.x1 - node.x0);
+  const tx = -node.x0 * k;
+  svg.transition().duration(750).call(zoom.transform,
+    d3.zoomIdentity.translate(tx, 0).scale(k)
+  );
+});
+
+breadcrumb.addEventListener("click", () => {
+  focusNode = null;
+  breadcrumb.textContent = "";
+  svg.transition().duration(750).call(zoom.transform, d3.zoomIdentity);
+});
+
+// --- Horizontal zoom ---
+const zoom = d3.zoom()
+  .scaleExtent([1, 200])
+  .translateExtent([[0, 0], [width, height]])
+  .extent([[0, 0], [width, height]])
+  .filter(event => {
+    // Allow wheel and drag, block vertical-only pan
+    if (event.type === "wheel") return true;
+    if (event.type === "mousedown" || event.type === "touchstart") return true;
+    return true;
+  })
+  .on("zoom", ({ transform }) => {
+    // Constrain to horizontal only
+    currentTransform = d3.zoomIdentity.translate(transform.x, 0).scale(transform.k);
+    markDirty();
+  });
+
+svg.call(zoom);
+
+// Initial draw
+draw();
+
+// --- Resize ---
+window.addEventListener("resize", () => {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = `${W}px`;
+  canvas.style.height = `${H}px`;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.scale(dpr, dpr);
+  svg.attr("width", W).attr("height", H);
+  markDirty();
+});
+</script>
+</body>
+</html>

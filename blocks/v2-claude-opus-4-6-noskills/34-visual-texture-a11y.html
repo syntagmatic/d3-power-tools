@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Visual Texture + Color Dual Encoding</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #fafafa; font-family: 'Helvetica Neue', sans-serif; color: #222; }
+  h1 { text-align: center; font-size: 1.4rem; font-weight: 600; margin: 24px 0 4px; }
+  .subtitle { text-align: center; font-size: 0.85rem; color: #666; margin-bottom: 16px; }
+  .container { display: flex; justify-content: center; gap: 32px; flex-wrap: wrap; padding: 0 16px 32px; }
+  .panel-title { text-align: center; font-size: 0.9rem; font-weight: 600; margin-bottom: 6px; }
+  .legend { display: flex; justify-content: center; gap: 20px; margin-bottom: 20px; flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; }
+  .legend-swatch { width: 24px; height: 16px; stroke: #333; stroke-width: 1; }
+</style>
+</head>
+<body>
+<h1>Quarterly Revenue by Product Line</h1>
+<p class="subtitle">Color + pattern dual encoding — patterns remain distinguishable under color vision deficiency</p>
+<div class="legend" id="legend"></div>
+<div class="container">
+  <div>
+    <p class="panel-title">Normal Vision</p>
+    <div id="chart-normal"></div>
+  </div>
+  <div>
+    <p class="panel-title">Deuteranopia Simulation</p>
+    <div id="chart-deutan"></div>
+  </div>
+</div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data ---
+const categories = ["Q1", "Q2", "Q3", "Q4"];
+const series = ["Hardware", "Software", "Services", "Support"];
+const data = categories.map(q => {
+  const row = { category: q };
+  series.forEach(s => {
+    row[s] = Math.round(40 + Math.random() * 60);
+  });
+  return row;
+});
+
+// --- Colors (normal vision) ---
+const colorsNormal = ["#2166ac", "#d6604d", "#4daf4a", "#ff7f00"];
+
+// --- Deuteranopia simulation (Brettel 1997 approximation) ---
+function simulateDeutan([r, g, b]) {
+  const rr = 0.625 * r + 0.375 * g;
+  const gg = 0.700 * g + 0.300 * r;
+  const bb = 0.300 * g + 0.700 * b;
+  return [Math.round(rr), Math.round(gg), Math.round(bb)];
+}
+
+function hexToRgb(hex) {
+  const v = parseInt(hex.slice(1), 16);
+  return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+}
+function rgbToHex([r, g, b]) {
+  return "#" + [r, g, b].map(c => c.toString(16).padStart(2, "0")).join("");
+}
+
+const colorsDeutan = colorsNormal.map(c => rgbToHex(simulateDeutan(hexToRgb(c))));
+
+// --- Pattern definitions ---
+function addPatterns(svg, colors, suffix) {
+  const defs = svg.append("defs");
+
+  // 0: horizontal hatching
+  const p0 = defs.append("pattern").attr("id", `pat-hatch-${suffix}`)
+    .attr("width", 6).attr("height", 6).attr("patternUnits", "userSpaceOnUse");
+  p0.append("rect").attr("width", 6).attr("height", 6).attr("fill", colors[0]);
+  p0.append("line").attr("x1", 0).attr("y1", 3).attr("x2", 6).attr("y2", 3)
+    .attr("stroke", "#fff").attr("stroke-width", 1.5);
+
+  // 1: vertical stripes
+  const p1 = defs.append("pattern").attr("id", `pat-stripe-${suffix}`)
+    .attr("width", 6).attr("height", 6).attr("patternUnits", "userSpaceOnUse");
+  p1.append("rect").attr("width", 6).attr("height", 6).attr("fill", colors[1]);
+  p1.append("line").attr("x1", 3).attr("y1", 0).attr("x2", 3).attr("y2", 6)
+    .attr("stroke", "#fff").attr("stroke-width", 1.5);
+
+  // 2: stipple (dots)
+  const p2 = defs.append("pattern").attr("id", `pat-stipple-${suffix}`)
+    .attr("width", 6).attr("height", 6).attr("patternUnits", "userSpaceOnUse");
+  p2.append("rect").attr("width", 6).attr("height", 6).attr("fill", colors[2]);
+  p2.append("circle").attr("cx", 1.5).attr("cy", 1.5).attr("r", 1.2).attr("fill", "#fff");
+  p2.append("circle").attr("cx", 4.5).attr("cy", 4.5).attr("r", 1.2).attr("fill", "#fff");
+
+  // 3: crosshatch
+  const p3 = defs.append("pattern").attr("id", `pat-cross-${suffix}`)
+    .attr("width", 6).attr("height", 6).attr("patternUnits", "userSpaceOnUse");
+  p3.append("rect").attr("width", 6).attr("height", 6).attr("fill", colors[3]);
+  p3.append("line").attr("x1", 0).attr("y1", 0).attr("x2", 6).attr("y2", 6)
+    .attr("stroke", "#fff").attr("stroke-width", 1);
+  p3.append("line").attr("x1", 6).attr("y1", 0).attr("x2", 0).attr("y2", 6)
+    .attr("stroke", "#fff").attr("stroke-width", 1);
+
+  return [
+    `url(#pat-hatch-${suffix})`,
+    `url(#pat-stripe-${suffix})`,
+    `url(#pat-stipple-${suffix})`,
+    `url(#pat-cross-${suffix})`
+  ];
+}
+
+// --- Chart builder ---
+function buildChart(container, colors, suffix) {
+  const margin = { top: 16, right: 16, bottom: 40, left: 44 };
+  const width = 420, height = 300;
+  const innerW = width - margin.left - margin.right;
+  const innerH = height - margin.top - margin.bottom;
+
+  const svg = d3.select(container).append("svg")
+    .attr("width", width).attr("height", height)
+    .attr("viewBox", `0 0 ${width} ${height}`);
+
+  const fills = addPatterns(svg, colors, suffix);
+
+  const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+  const x0 = d3.scaleBand().domain(categories).range([0, innerW]).paddingInner(0.2).paddingOuter(0.1);
+  const x1 = d3.scaleBand().domain(series).range([0, x0.bandwidth()]).padding(0.08);
+  const y = d3.scaleLinear().domain([0, 110]).range([innerH, 0]);
+
+  // Axes
+  g.append("g").attr("transform", `translate(0,${innerH})`)
+    .call(d3.axisBottom(x0).tickSize(0))
+    .call(g => g.select(".domain").attr("stroke", "#999"));
+
+  g.append("g")
+    .call(d3.axisLeft(y).ticks(5).tickFormat(d => `$${d}M`))
+    .call(g => g.select(".domain").remove())
+    .call(g => g.selectAll(".tick line").attr("stroke", "#ddd").attr("x2", innerW).attr("stroke-dasharray", "2,2"));
+
+  // Bars
+  const groups = g.selectAll(".group")
+    .data(data).join("g")
+    .attr("class", "group")
+    .attr("transform", d => `translate(${x0(d.category)},0)`);
+
+  groups.selectAll("rect")
+    .data(d => series.map((s, i) => ({ key: s, value: d[s], index: i })))
+    .join("rect")
+    .attr("x", d => x1(d.key))
+    .attr("y", d => y(d.value))
+    .attr("width", x1.bandwidth())
+    .attr("height", d => innerH - y(d.value))
+    .attr("fill", d => fills[d.index])
+    .attr("stroke", "#333")
+    .attr("stroke-width", 0.5);
+
+  // Value labels
+  groups.selectAll("text")
+    .data(d => series.map((s, i) => ({ key: s, value: d[s], index: i })))
+    .join("text")
+    .attr("x", d => x1(d.key) + x1.bandwidth() / 2)
+    .attr("y", d => y(d.value) - 4)
+    .attr("text-anchor", "middle")
+    .attr("font-size", 9)
+    .attr("fill", "#444")
+    .text(d => d.value);
+}
+
+// --- Legend ---
+const legendSvg = d3.select("#legend").append("svg").attr("width", 500).attr("height", 24);
+const patternIds = ["pat-hatch-legend", "pat-stripe-legend", "pat-stipple-legend", "pat-cross-legend"];
+addPatterns(legendSvg, colorsNormal, "legend");
+
+series.forEach((s, i) => {
+  const g = legendSvg.append("g").attr("transform", `translate(${i * 120 + 10}, 3)`);
+  g.append("rect").attr("width", 24).attr("height", 16).attr("fill", `url(#${patternIds[i]})`)
+    .attr("stroke", "#333").attr("stroke-width", 0.5).attr("rx", 2);
+  g.append("text").attr("x", 30).attr("y", 12).attr("font-size", 12).attr("fill", "#333").text(s);
+});
+
+// --- Build both charts ---
+buildChart("#chart-normal", colorsNormal, "normal");
+buildChart("#chart-deutan", colorsDeutan, "deutan");
+</script>
+</body>
+</html>

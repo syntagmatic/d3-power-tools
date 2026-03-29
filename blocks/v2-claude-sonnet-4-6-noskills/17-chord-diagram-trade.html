@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Global Trade Flows — Chord Diagram</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: #10121a;
+  color: #ccc;
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-height: 100vh;
+  padding: 28px 16px 40px;
+}
+h1 {
+  font-size: 20px;
+  font-weight: 600;
+  color: #f0f0f0;
+  margin-bottom: 5px;
+  letter-spacing: -.02em;
+}
+.subtitle {
+  font-size: 12px;
+  color: #556;
+  margin-bottom: 28px;
+  text-align: center;
+  max-width: 500px;
+  line-height: 1.5;
+}
+#chart { cursor: default; }
+
+#tooltip {
+  position: fixed;
+  background: rgba(14,16,22,.97);
+  border: 1px solid #252830;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 12px;
+  line-height: 1.75;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .12s;
+  box-shadow: 0 6px 24px rgba(0,0,0,.5);
+  min-width: 170px;
+}
+#tooltip.show { opacity: 1; }
+.tt-title { font-weight: 600; font-size: 13px; color: #f2f2f2; margin-bottom: 3px; }
+.tt-row { color: #778; }
+.tt-val { color: #ddd; font-weight: 500; }
+.tt-pos { color: #5db87e; font-weight: 500; }
+.tt-neg { color: #e06060; font-weight: 500; }
+</style>
+</head>
+<body>
+<h1>Global Trade Flows</h1>
+<p class="subtitle">
+  Directed exports between 10 major economies · Arc width = total exports · Arrow points to importer<br>
+  Hover a country arc to isolate its flows · Tick marks every $200B
+</p>
+<svg id="chart"></svg>
+<div id="tooltip"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// ── Synthetic trade data ─────────────────────────────────────────────────────
+const names = ["USA","China","Germany","Japan","UK","France","Canada","S.Korea","India","Netherlands"];
+
+// matrix[i][j] = exports from country i to country j, in $B
+const matrix = [
+  //  USA   CHN   DEU   JPN   GBR   FRA   CAN   KOR   IND   NLD
+  [    0,  452,   65,   75,   58,   35,  282,   56,   50,   38],  // USA
+  [  395,    0,  107,  177,   73,   46,   22,  162,  118,   82],  // China
+  [  118,  103,    0,   20,   89,   62,   12,   17,   22,  155],  // Germany
+  [   70,  152,   18,    0,   17,    8,   10,   35,   15,   10],  // Japan
+  [   58,   25,   42,   12,    0,   30,   19,    6,   18,   52],  // UK
+  [   32,   18,   48,    8,   40,    0,    8,    5,   10,   35],  // France
+  [  295,   21,   10,    9,   18,    9,    0,    4,    7,   10],  // Canada
+  [   83,  145,   20,   28,   12,    5,    6,    0,   20,   15],  // S.Korea
+  [   68,   75,   18,   14,   22,    8,    4,   15,    0,   18],  // India
+  [   42,   28,   62,    8,   25,   28,    8,    5,    8,    0],  // Netherlands
+];
+
+const n = names.length;
+
+// ── Dimensions ───────────────────────────────────────────────────────────────
+const W = 720, H = 720;
+const outerR = 252;
+const innerR = outerR - 28;
+const tickStep = 200; // $B per tick mark
+const labelR  = outerR + 22;
+
+// ── Color palette ────────────────────────────────────────────────────────────
+const palette = [
+  "#4e84d4", "#f5a623", "#e05252", "#45b8a8", "#52b26a",
+  "#e882c8", "#9b6dda", "#f0904a", "#8a7560", "#7ec8e3"
+];
+const clr = i => palette[i % palette.length];
+
+// ── Chord layout ─────────────────────────────────────────────────────────────
+const chordLayout = d3.chordDirected()
+  .padAngle(12 / innerR)
+  .sortSubgroups(d3.descending)
+  .sortChords(d3.descending);
+
+const chords = chordLayout(matrix);
+
+const arcGen = d3.arc()
+  .innerRadius(innerR)
+  .outerRadius(outerR);
+
+const ribbonGen = d3.ribbonArrow()
+  .radius(innerR - 1)
+  .padAngle(1 / innerR);
+
+// ── SVG setup ─────────────────────────────────────────────────────────────────
+const svg = d3.select("#chart")
+  .attr("width", W)
+  .attr("height", H)
+  .attr("viewBox", `${-W/2} ${-H/2} ${W} ${H}`);
+
+// ── Draw chords (behind arcs) ─────────────────────────────────────────────────
+const chordG = svg.append("g").attr("class", "chords");
+
+const chordPaths = chordG.selectAll("path")
+  .data(chords)
+  .join("path")
+    .attr("d", ribbonGen)
+    .attr("fill", d => clr(d.target.index))
+    .attr("fill-opacity", 0)           // start invisible for animation
+    .attr("stroke", d => d3.color(clr(d.target.index)).darker(.7))
+    .attr("stroke-width", .6)
+    .attr("stroke-opacity", 0);
+
+// ── Draw groups ───────────────────────────────────────────────────────────────
+const groups = svg.append("g").attr("class", "groups")
+  .selectAll("g")
+  .data(chords.groups)
+  .join("g");
+
+// Arc path — start closed (endAngle = startAngle) for sweep animation
+const arcPaths = groups.append("path")
+  .attr("fill", d => clr(d.index))
+  .attr("stroke", d => d3.color(clr(d.index)).darker(.6))
+  .attr("stroke-width", .8)
+  .attr("d", d => arcGen({ ...d, endAngle: d.startAngle }))
+  .style("cursor", "pointer");
+
+// ── Tick marks ────────────────────────────────────────────────────────────────
+function buildTicks(d, step) {
+  const k = (d.endAngle - d.startAngle) / d.value;
+  return d3.range(step, d.value, step).map(v => ({
+    value: v,
+    angle: v * k + d.startAngle
+  }));
+}
+
+const tickGroups = groups.append("g")
+  .attr("class", "ticks")
+  .attr("opacity", 0);  // hidden until after arc animation
+
+tickGroups.selectAll("g")
+  .data(d => buildTicks(d, tickStep))
+  .join("g")
+    .attr("transform", d =>
+      `rotate(${d.angle * 180 / Math.PI - 90}) translate(${outerR + 2},0)`
+    )
+    .call(g => {
+      g.append("line")
+        .attr("x2", 6)
+        .attr("stroke", "#4a4d5a")
+        .attr("stroke-width", 1.2);
+      g.append("text")
+        .attr("x", 9)
+        .attr("dy", "0.35em")
+        .attr("transform", d => d.angle > Math.PI ? "rotate(180) translate(-18)" : null)
+        .attr("text-anchor", d => d.angle > Math.PI ? "end" : "start")
+        .attr("fill", "#666")
+        .attr("font-size", "9px")
+        .attr("font-family", "system-ui, sans-serif")
+        .text(d => `$${d.value}B`);
+    });
+
+// ── Country labels ────────────────────────────────────────────────────────────
+const labels = groups.append("text")
+  .attr("opacity", 0)
+  .attr("dy", "0.35em")
+  .attr("font-size", "11.5px")
+  .attr("font-weight", "500")
+  .attr("font-family", "system-ui, sans-serif")
+  .attr("fill", "#c8cad4")
+  .attr("transform", d => {
+    const mid = (d.startAngle + d.endAngle) / 2;
+    const flip = mid > Math.PI;
+    return `rotate(${mid * 180 / Math.PI - 90}) translate(${labelR}) ${flip ? "rotate(180)" : ""}`;
+  })
+  .attr("text-anchor", d => {
+    const mid = (d.startAngle + d.endAngle) / 2;
+    return mid > Math.PI ? "end" : "start";
+  })
+  .text(d => names[d.index]);
+
+// ── Tooltip ───────────────────────────────────────────────────────────────────
+const tip = d3.select("#tooltip");
+const fmt = v => `$${d3.format(",.0f")(v)}B`;
+
+function showTip(html, ev) {
+  tip.html(html).classed("show", true)
+    .style("left", `${ev.clientX + 16}px`)
+    .style("top",  `${ev.clientY - 12}px`);
+}
+function moveTip(ev) {
+  tip.style("left", `${ev.clientX + 16}px`)
+    .style("top",  `${ev.clientY - 12}px`);
+}
+function hideTip() { tip.classed("show", false); }
+
+// ── Interaction: isolate / reset ──────────────────────────────────────────────
+let animDone = false;
+
+function isolate(idx) {
+  arcPaths.attr("opacity", d => d.index === idx ? 1 : 0.15);
+  chordPaths
+    .attr("fill-opacity", d =>
+      d.source.index === idx || d.target.index === idx ? 0.78 : 0.04
+    )
+    .attr("stroke-opacity", d =>
+      d.source.index === idx || d.target.index === idx ? 0.9 : 0.04
+    );
+}
+
+function resetAll() {
+  arcPaths.attr("opacity", 1);
+  chordPaths.attr("fill-opacity", 0.68).attr("stroke-opacity", 0.75);
+}
+
+// Hover on country arc
+groups
+  .on("mouseenter", function(ev, d) {
+    if (!animDone) return;
+    isolate(d.index);
+    const exp = d3.sum(matrix[d.index]);
+    const imp = d3.sum(matrix, row => row[d.index]);
+    const bal = exp - imp;
+    showTip(`
+      <div class="tt-title">${names[d.index]}</div>
+      <div class="tt-row">Exports: <span class="tt-val">${fmt(exp)}</span></div>
+      <div class="tt-row">Imports: <span class="tt-val">${fmt(imp)}</span></div>
+      <div class="tt-row">Balance: <span class="${bal >= 0 ? 'tt-pos' : 'tt-neg'}">${bal >= 0 ? '+' : ''}${fmt(bal)}</span></div>
+    `, ev);
+  })
+  .on("mousemove", moveTip)
+  .on("mouseleave", () => { if (animDone) { resetAll(); hideTip(); } });
+
+// Hover on chord
+chordPaths
+  .on("mouseenter", function(ev, d) {
+    if (!animDone) return;
+    const si = d.source.index, ti = d.target.index;
+    showTip(`
+      <div class="tt-title">${names[si]} ↔ ${names[ti]}</div>
+      <div class="tt-row">${names[si]} → ${names[ti]}: <span class="tt-val">${fmt(matrix[si][ti])}</span></div>
+      <div class="tt-row">${names[ti]} → ${names[si]}: <span class="tt-val">${fmt(matrix[ti][si])}</span></div>
+    `, ev);
+  })
+  .on("mousemove", moveTip)
+  .on("mouseleave", hideTip);
+
+// ── Entrance animation ────────────────────────────────────────────────────────
+const arcDur   = 850;
+const arcDelay = 90;
+const totalArcMs = arcDur + arcDelay * (n - 1);
+
+// Phase 1: arcs sweep in one by one
+arcPaths
+  .transition()
+    .duration(arcDur)
+    .delay((d, i) => i * arcDelay)
+    .ease(d3.easeCubicOut)
+    .attrTween("d", function(d) {
+      const interp = d3.interpolate(d.startAngle, d.endAngle);
+      return t => arcGen({ ...d, endAngle: interp(t) });
+    });
+
+// Phase 2: ticks and labels fade in after arcs
+tickGroups
+  .transition()
+    .delay(totalArcMs + 80)
+    .duration(350)
+    .attr("opacity", 1);
+
+labels
+  .transition()
+    .delay(totalArcMs + 80)
+    .duration(350)
+    .attr("opacity", 1);
+
+// Phase 3: chords fade + scale in after arcs
+chordPaths
+  .transition()
+    .delay((d, i) => totalArcMs + 220 + i * 18)
+    .duration(480)
+    .ease(d3.easeSinOut)
+    .attr("fill-opacity", 0.68)
+    .attr("stroke-opacity", 0.75)
+    .on("end", (d, i, nodes) => {
+      if (i === nodes.length - 1) animDone = true;
+    });
+
+</script>
+</body>
+</html>

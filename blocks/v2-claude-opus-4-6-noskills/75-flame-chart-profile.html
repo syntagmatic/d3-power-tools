@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CPU Flame Chart Profile</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; color: #e0e0e0; font-family: 'Menlo', 'Consolas', monospace; overflow: hidden; }
+  #container { width: 100vw; height: 100vh; position: relative; }
+  canvas { display: block; }
+  #tooltip {
+    position: absolute; pointer-events: none; display: none;
+    background: rgba(10, 10, 30, 0.95); border: 1px solid #555;
+    padding: 8px 12px; font-size: 12px; line-height: 1.5;
+    border-radius: 4px; white-space: nowrap; z-index: 10;
+  }
+  #tooltip .name { color: #fff; font-weight: bold; }
+  #tooltip .detail { color: #aaa; }
+  #breadcrumb {
+    position: absolute; top: 8px; left: 12px; font-size: 12px;
+    color: #888; z-index: 10; user-select: none;
+  }
+  #breadcrumb span { cursor: pointer; color: #6ca0dc; }
+  #breadcrumb span:hover { text-decoration: underline; }
+  #info {
+    position: absolute; bottom: 8px; right: 12px; font-size: 11px;
+    color: #555; z-index: 10;
+  }
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="chart"></canvas>
+  <div id="tooltip"></div>
+  <div id="breadcrumb"></div>
+  <div id="info">scroll to zoom · click to focus · esc to reset</div>
+</div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data generation ---
+const modules = [
+  { name: "app",       color: "#e45649", fns: ["main", "init", "run", "setup", "configure", "bootstrap", "shutdown", "handleSignal"] },
+  { name: "http",      color: "#e5c07b", fns: ["serve", "handleRequest", "parseHeaders", "writeResponse", "routeMatch", "middleware", "compress", "negotiate"] },
+  { name: "db",        color: "#61afef", fns: ["query", "connect", "prepare", "execute", "fetchRows", "beginTx", "commitTx", "rollbackTx", "poolGet", "poolRelease"] },
+  { name: "cache",     color: "#56b6c2", fns: ["get", "set", "invalidate", "lru_evict", "serialize", "hash", "warmup"] },
+  { name: "auth",      color: "#c678dd", fns: ["verify", "hashPassword", "checkToken", "refreshSession", "rateLimit", "decrypt", "loadKeys"] },
+  { name: "render",    color: "#98c379", fns: ["template", "compile", "escape", "partial", "layout", "stringify", "minify"] },
+  { name: "io",        color: "#d19a66", fns: ["readFile", "writeFile", "stat", "watch", "pipe", "bufferAlloc", "streamFlush", "poll"] },
+  { name: "runtime",   color: "#abb2bf", fns: ["gc", "alloc", "jit_compile", "deopt", "inlineCacheHit", "stackWalk", "trampoline", "safepoint"] }
+];
+
+const rng = d3.randomLcg(42);
+const rand = d3.randomUniform.source(rng)(0, 1);
+const randInt = (lo, hi) => Math.floor(rand() * (hi - lo)) + lo;
+const pick = arr => arr[randInt(0, arr.length)];
+
+function generateTree(depth, widthBudget, totalSamples) {
+  if (depth <= 0 || widthBudget < 1) return [];
+  const nChildren = Math.min(randInt(1, 5), widthBudget);
+  const children = [];
+  let remaining = totalSamples;
+  for (let i = 0; i < nChildren && remaining > 0; i++) {
+    const mod = pick(modules);
+    const fn = pick(mod.fns);
+    const selfTime = randInt(1, Math.max(2, Math.floor(remaining * 0.4)));
+    const childBudget = Math.floor(widthBudget / nChildren);
+    const sub = depth > 1 && rand() > 0.15
+      ? generateTree(depth - 1, childBudget, Math.max(0, selfTime - randInt(1, Math.max(2, selfTime))))
+      : [];
+    const value = selfTime;
+    const node = { name: `${mod.name}::${fn}`, module: mod.name, value, children: sub };
+    children.push(node);
+    remaining -= selfTime;
+  }
+  return children;
+}
+
+const rootChildren = generateTree(12, 200, 5000);
+const root = { name: "root", module: "runtime", value: 0, children: rootChildren };
+
+// Count frames
+let frameCount = 0;
+(function count(n) { frameCount++; (n.children || []).forEach(count); })(root);
+console.log(`Generated ${frameCount} stack frames`);
+
+// --- d3.hierarchy + partition ---
+const hierarchy = d3.hierarchy(root)
+  .sum(d => d.children && d.children.length ? 0 : d.value)
+  .sort((a, b) => b.value - a.value);
+
+const partitionLayout = d3.partition();
+partitionLayout(hierarchy);
+
+// Flip vertically: root at bottom, leaves at top
+const maxDepth = hierarchy.height;
+hierarchy.each(node => {
+  const origY0 = node.y0, origY1 = node.y1;
+  node.y0 = 1 - origY1;
+  node.y1 = 1 - origY0;
+});
+
+// --- Color map ---
+const moduleColorMap = new Map(modules.map(m => [m.name, m.color]));
+function nodeColor(d) {
+  return moduleColorMap.get(d.data.module) || "#666";
+}
+
+// --- Canvas setup ---
+const container = document.getElementById("container");
+const canvas = document.getElementById("chart");
+const ctx = canvas.getContext("2d");
+const tooltip = document.getElementById("tooltip");
+const breadcrumb = document.getElementById("breadcrumb");
+
+let width, height, dpr;
+const ROW_HEIGHT = 20;
+
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  width = container.clientWidth;
+  height = container.clientHeight;
+  canvas.width = width * dpr;
+  canvas.height = height * dpr;
+  canvas.style.width = width + "px";
+  canvas.style.height = height + "px";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+resize();
+window.addEventListener("resize", () => { resize(); scheduleRender(); });
+
+// --- Zoom state ---
+let zoomTransform = d3.zoomIdentity;
+let focusNode = hierarchy; // for click-to-zoom
+
+// d3.zoom — horizontal only
+const zoomBehavior = d3.zoom()
+  .scaleExtent([1, 2000])
+  .on("zoom", (event) => {
+    zoomTransform = event.transform;
+    scheduleRender();
+  });
+
+d3.select(canvas).call(zoomBehavior)
+  .on("dblclick.zoom", null); // disable double-click zoom
+
+// Constrain zoom to horizontal
+zoomBehavior.filter(event => {
+  return !event.button;
+});
+
+// --- Flatten nodes for rendering ---
+const allNodes = hierarchy.descendants();
+
+// --- Render ---
+let renderScheduled = false;
+function scheduleRender() {
+  if (!renderScheduled) {
+    renderScheduled = true;
+    requestAnimationFrame(render);
+  }
+}
+
+function render() {
+  renderScheduled = false;
+  ctx.clearRect(0, 0, width, height);
+
+  const t = zoomTransform;
+  // Map partition x coords [0,1] to screen pixels, applying zoom
+  // Map partition y coords to rows from bottom of screen
+
+  const totalRows = maxDepth + 1;
+  const chartHeight = totalRows * ROW_HEIGHT;
+  const yOffset = height - chartHeight;
+
+  ctx.save();
+
+  const minPx = 0.5; // minimum pixel width to render
+
+  for (const node of allNodes) {
+    const x0 = t.applyX(node.x0 * width);
+    const x1 = t.applyX(node.x1 * width);
+    const pxWidth = x1 - x0;
+
+    if (pxWidth < minPx) continue; // LOD: skip tiny frames
+    if (x1 < 0 || x0 > width) continue; // off-screen
+
+    const y0 = yOffset + node.y0 * chartHeight;
+    const y1 = yOffset + node.y1 * chartHeight;
+    const pxHeight = y1 - y0;
+
+    // Draw rect
+    const color = nodeColor(node);
+    ctx.fillStyle = node === hoveredNode ? lighten(color, 0.3) : color;
+    ctx.fillRect(x0, y0, Math.max(pxWidth - 0.5, 0.5), pxHeight - 1);
+
+    // LOD labels: only when frame is wide enough
+    if (pxWidth > 40 && pxHeight > 10) {
+      const fontSize = Math.min(11, pxHeight - 4);
+      ctx.font = `${fontSize}px Menlo, Consolas, monospace`;
+      ctx.fillStyle = "#fff";
+      ctx.textBaseline = "middle";
+
+      const label = node.data.name;
+      const textWidth = ctx.measureText(label).width;
+      const padX = 4;
+
+      if (textWidth + padX * 2 < pxWidth) {
+        ctx.fillText(label, x0 + padX, y0 + pxHeight / 2);
+      } else if (pxWidth > 60) {
+        // Truncate
+        const available = pxWidth - padX * 2 - ctx.measureText("…").width;
+        let truncated = label;
+        while (ctx.measureText(truncated).width > available && truncated.length > 1) {
+          truncated = truncated.slice(0, -1);
+        }
+        ctx.fillText(truncated + "…", x0 + padX, y0 + pxHeight / 2);
+      }
+    }
+  }
+
+  ctx.restore();
+}
+
+function lighten(hex, amount) {
+  const c = d3.color(hex);
+  if (c) { c.opacity = 1; return d3.interpolateRgb(c, "#fff")(amount); }
+  return hex;
+}
+
+// --- Hover / tooltip ---
+let hoveredNode = null;
+
+canvas.addEventListener("mousemove", (event) => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = event.clientX - rect.left;
+  const my = event.clientY - rect.top;
+
+  const hit = hitTest(mx, my);
+  if (hit !== hoveredNode) {
+    hoveredNode = hit;
+    scheduleRender();
+  }
+
+  if (hit && hit !== hierarchy) {
+    const totalValue = hierarchy.value;
+    const pct = ((hit.value / totalValue) * 100).toFixed(2);
+    tooltip.innerHTML = `<div class="name">${hit.data.name}</div>`
+      + `<div class="detail">${hit.value} samples (${pct}%) · depth ${hit.depth}</div>`;
+    tooltip.style.display = "block";
+    let tx = event.clientX + 12;
+    let ty = event.clientY - 30;
+    if (tx + tooltip.offsetWidth > width) tx = event.clientX - tooltip.offsetWidth - 12;
+    if (ty < 0) ty = event.clientY + 16;
+    tooltip.style.left = tx + "px";
+    tooltip.style.top = ty + "px";
+  } else {
+    tooltip.style.display = "none";
+  }
+});
+
+canvas.addEventListener("mouseleave", () => {
+  hoveredNode = null;
+  tooltip.style.display = "none";
+  scheduleRender();
+});
+
+function hitTest(mx, my) {
+  const t = zoomTransform;
+  const totalRows = maxDepth + 1;
+  const chartHeight = totalRows * ROW_HEIGHT;
+  const yOffset = height - chartHeight;
+
+  for (let i = allNodes.length - 1; i >= 0; i--) {
+    const node = allNodes[i];
+    const x0 = t.applyX(node.x0 * width);
+    const x1 = t.applyX(node.x1 * width);
+    if (x1 - x0 < 0.5) continue;
+
+    const y0 = yOffset + node.y0 * chartHeight;
+    const y1 = yOffset + node.y1 * chartHeight;
+
+    if (mx >= x0 && mx <= x1 && my >= y0 && my < y1) {
+      return node;
+    }
+  }
+  return null;
+}
+
+// --- Click to zoom: fits subtree horizontally ---
+canvas.addEventListener("click", (event) => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = event.clientX - rect.left;
+  const my = event.clientY - rect.top;
+  const hit = hitTest(mx, my);
+  if (hit && hit !== hierarchy) {
+    zoomToNode(hit);
+  }
+});
+
+function zoomToNode(node) {
+  focusNode = node;
+  const x0 = node.x0 * width;
+  const x1 = node.x1 * width;
+  const nodeWidth = x1 - x0;
+  const scale = width / nodeWidth;
+  const tx = -x0 * scale;
+
+  const newTransform = d3.zoomIdentity.translate(tx, 0).scale(scale);
+  d3.select(canvas)
+    .transition()
+    .duration(500)
+    .call(zoomBehavior.transform, newTransform);
+
+  updateBreadcrumb(node);
+}
+
+function resetZoom() {
+  focusNode = hierarchy;
+  d3.select(canvas)
+    .transition()
+    .duration(400)
+    .call(zoomBehavior.transform, d3.zoomIdentity);
+  breadcrumb.innerHTML = "";
+}
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") resetZoom();
+});
+
+// --- Breadcrumb ---
+function updateBreadcrumb(node) {
+  const ancestors = node.ancestors().reverse();
+  breadcrumb.innerHTML = "";
+  ancestors.forEach((anc, i) => {
+    if (i > 0) {
+      const sep = document.createTextNode(" › ");
+      breadcrumb.appendChild(sep);
+    }
+    const span = document.createElement("span");
+    span.textContent = anc.data.name === "root" ? "all" : anc.data.name;
+    span.addEventListener("click", () => {
+      if (anc === hierarchy) resetZoom();
+      else zoomToNode(anc);
+    });
+    breadcrumb.appendChild(span);
+  });
+}
+
+// --- Initial render ---
+scheduleRender();
+</script>
+</body>
+</html>

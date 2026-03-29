@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Textured Network Diagram</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #fafafa; font-family: system-ui, -apple-system, sans-serif; }
+  #container { width: 100%; max-width: 960px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 1.25rem; font-weight: 600; color: #222; margin-bottom: 2px; }
+  .subtitle { font-size: 0.85rem; color: #666; margin-bottom: 12px; }
+  .controls { display: flex; align-items: center; gap: 16px; margin-bottom: 8px; }
+  .toggle-btn {
+    padding: 6px 14px; border: 1px solid #999; border-radius: 4px;
+    background: #fff; cursor: pointer; font-size: 0.8rem; transition: all 0.2s;
+  }
+  .toggle-btn.active { background: #333; color: #fff; border-color: #333; }
+  svg { display: block; }
+  .link { stroke-opacity: 0.4; }
+  .node-circle { cursor: grab; }
+  .node-circle:active { cursor: grabbing; }
+  .legend-item text { font-size: 11px; }
+  .tooltip {
+    position: absolute; pointer-events: none; background: rgba(0,0,0,0.8);
+    color: #fff; padding: 5px 9px; border-radius: 4px; font-size: 12px;
+    opacity: 0; transition: opacity 0.15s;
+  }
+</style>
+</head>
+<body>
+<div id="container">
+  <h1>Force-Directed Network with Texture Encoding</h1>
+  <p class="subtitle">6 communities distinguished by color + SVG pattern fills (texton theory). Toggle grayscale to verify texture alone is sufficient.</p>
+  <div class="controls">
+    <button class="toggle-btn" id="grayscaleBtn">Grayscale Mode</button>
+  </div>
+  <svg id="chart"></svg>
+</div>
+<div class="tooltip" id="tooltip"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Dimensions ---
+const width = 960, height = 620;
+const margin = { top: 10, right: 180, bottom: 10, left: 10 };
+
+// --- Generate synthetic data ---
+const rng = d3.randomLcg(42);
+const rand = d3.randomUniform.source(rng)(0, 1);
+
+const communityNames = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta"];
+const nNodes = 50;
+const nodes = d3.range(nNodes).map(i => ({
+  id: i,
+  label: `Node ${i}`,
+  community: Math.floor(i / (nNodes / 6)),
+  value: 4 + rand() * 12
+}));
+
+// Generate intra-community and inter-community links
+const links = [];
+const communityNodes = d3.group(nodes, d => d.community);
+
+// Dense intra-community links
+for (const [, members] of communityNodes) {
+  for (let i = 0; i < members.length; i++) {
+    for (let j = i + 1; j < members.length; j++) {
+      if (rand() < 0.55) {
+        links.push({ source: members[i].id, target: members[j].id, weight: 0.5 + rand() * 2 });
+      }
+    }
+  }
+}
+
+// Sparse inter-community links
+for (let i = 0; i < nodes.length; i++) {
+  for (let j = i + 1; j < nodes.length; j++) {
+    if (nodes[i].community !== nodes[j].community && rand() < 0.02) {
+      links.push({ source: nodes[i].id, target: nodes[j].id, weight: 0.3 + rand() });
+    }
+  }
+}
+
+// Compute degree
+const degreeMap = new Map(nodes.map(d => [d.id, 0]));
+links.forEach(l => { degreeMap.set(l.source, degreeMap.get(l.source) + 1); degreeMap.set(l.target, degreeMap.get(l.target) + 1); });
+nodes.forEach(d => { d.degree = degreeMap.get(d.id); });
+
+const radiusScale = d3.scaleSqrt().domain(d3.extent(nodes, d => d.degree)).range([5, 16]);
+
+// --- Color palettes ---
+const colorPalette = ["#4e79a7", "#f28e2b", "#59a14f", "#e15759", "#b07aa1", "#76b7b2"];
+const grayPalette = ["#888", "#888", "#888", "#888", "#888", "#888"];
+
+let isGrayscale = false;
+const colorScale = (community) => isGrayscale ? grayPalette[community] : colorPalette[community];
+
+// --- SVG setup ---
+const svg = d3.select("#chart")
+  .attr("width", width)
+  .attr("height", height)
+  .attr("viewBox", [0, 0, width, height]);
+
+const defs = svg.append("defs");
+
+// --- Pattern definitions (texton-diverse set) ---
+function createPatterns(defs) {
+  const size = 8;
+  const sw = 1.5;
+  const stroke = "rgba(0,0,0,0.25)";
+
+  // 0: Diagonal hatch (45°) — orientation texton
+  defs.append("pattern").attr("id", "pat-hatch").attr("width", size).attr("height", size)
+    .attr("patternUnits", "userSpaceOnUse").attr("patternTransform", "rotate(45)")
+    .append("line").attr("x1", 0).attr("y1", 0).attr("x2", 0).attr("y2", size)
+    .attr("stroke", stroke).attr("stroke-width", sw);
+
+  // 1: Dots (grid) — shape texton (blob vs line)
+  const dotPat = defs.append("pattern").attr("id", "pat-dots").attr("width", size).attr("height", size)
+    .attr("patternUnits", "userSpaceOnUse");
+  dotPat.append("circle").attr("cx", size / 2).attr("cy", size / 2).attr("r", 1.6)
+    .attr("fill", stroke);
+
+  // 2: Cross-hatch — density/terminator texton
+  const crossPat = defs.append("pattern").attr("id", "pat-cross").attr("width", size).attr("height", size)
+    .attr("patternUnits", "userSpaceOnUse").attr("patternTransform", "rotate(45)");
+  crossPat.append("line").attr("x1", 0).attr("y1", 0).attr("x2", 0).attr("y2", size)
+    .attr("stroke", stroke).attr("stroke-width", sw);
+  crossPat.append("line").attr("x1", 0).attr("y1", 0).attr("x2", size).attr("y2", 0)
+    .attr("stroke", stroke).attr("stroke-width", sw);
+
+  // 3: Horizontal lines — orientation texton (0°, 45° separation from diagonal)
+  defs.append("pattern").attr("id", "pat-horiz").attr("width", size).attr("height", size)
+    .attr("patternUnits", "userSpaceOnUse")
+    .append("line").attr("x1", 0).attr("y1", size / 2).attr("x2", size).attr("y2", size / 2)
+    .attr("stroke", stroke).attr("stroke-width", sw);
+
+  // 4: Waves — curvature texton
+  defs.append("pattern").attr("id", "pat-waves").attr("width", size * 2).attr("height", size)
+    .attr("patternUnits", "userSpaceOnUse")
+    .append("path")
+    .attr("d", `M0,${size / 2} Q${size / 2},0 ${size},${size / 2} Q${size * 1.5},${size} ${size * 2},${size / 2}`)
+    .attr("fill", "none").attr("stroke", stroke).attr("stroke-width", sw);
+
+  // 5: Vertical lines — orientation texton (90°)
+  defs.append("pattern").attr("id", "pat-vert").attr("width", size).attr("height", size)
+    .attr("patternUnits", "userSpaceOnUse")
+    .append("line").attr("x1", size / 2).attr("y1", 0).attr("x2", size / 2).attr("y2", size)
+    .attr("stroke", stroke).attr("stroke-width", sw);
+}
+
+createPatterns(defs);
+
+const patternIds = ["pat-hatch", "pat-dots", "pat-cross", "pat-horiz", "pat-waves", "pat-vert"];
+const patternLabels = ["Diagonal hatch", "Dots", "Cross-hatch", "Horizontal", "Waves", "Vertical"];
+
+// --- Force simulation ---
+const simulation = d3.forceSimulation(nodes)
+  .force("link", d3.forceLink(links).id(d => d.id).distance(30).strength(l =>
+    nodes[l.source.index || l.source].community === nodes[l.target.index || l.target].community ? 0.3 : 0.01
+  ))
+  .force("charge", d3.forceManyBody().strength(-80).distanceMax(250))
+  .force("center", d3.forceCenter((width - margin.right) / 2, height / 2))
+  .force("collide", d3.forceCollide(d => radiusScale(d.degree) + 2))
+  .force("x", d3.forceX((width - margin.right) / 2).strength(0.03))
+  .force("y", d3.forceY(height / 2).strength(0.03));
+
+// --- Draw ---
+const linkSel = svg.append("g")
+  .selectAll("line")
+  .data(links)
+  .join("line")
+  .attr("class", "link")
+  .attr("stroke", "#999")
+  .attr("stroke-width", d => d.weight);
+
+const nodeGroup = svg.append("g")
+  .selectAll("g")
+  .data(nodes)
+  .join("g")
+  .attr("class", "node");
+
+// Background circle (color fill)
+nodeGroup.append("circle")
+  .attr("class", "node-bg")
+  .attr("r", d => radiusScale(d.degree))
+  .attr("fill", d => colorScale(d.community))
+  .attr("stroke", "#fff")
+  .attr("stroke-width", 1.5);
+
+// Pattern overlay circle
+nodeGroup.append("circle")
+  .attr("class", "node-pattern")
+  .attr("r", d => radiusScale(d.degree))
+  .attr("fill", d => `url(#${patternIds[d.community]})`)
+  .attr("stroke", d => d3.color(colorScale(d.community)).darker(0.5))
+  .attr("stroke-width", 1.5);
+
+// Invisible interaction target
+nodeGroup.append("circle")
+  .attr("class", "node-circle")
+  .attr("r", d => radiusScale(d.degree) + 2)
+  .attr("fill", "transparent")
+  .attr("stroke", "none");
+
+// --- Tooltip ---
+const tooltip = d3.select("#tooltip");
+
+nodeGroup
+  .on("pointerenter", (event, d) => {
+    tooltip.style("opacity", 1)
+      .html(`<strong>${d.label}</strong><br>Community: ${communityNames[d.community]}<br>Connections: ${d.degree}`);
+  })
+  .on("pointermove", (event) => {
+    tooltip.style("left", (event.pageX + 12) + "px").style("top", (event.pageY - 10) + "px");
+  })
+  .on("pointerleave", () => {
+    tooltip.style("opacity", 0);
+  });
+
+// --- Drag ---
+const drag = d3.drag()
+  .on("start", (event, d) => {
+    if (!event.active) simulation.alphaTarget(0.3).restart();
+    d.fx = d.x; d.fy = d.y;
+  })
+  .on("drag", (event, d) => {
+    d.fx = event.x; d.fy = event.y;
+  })
+  .on("end", (event, d) => {
+    if (!event.active) simulation.alphaTarget(0);
+    d.fx = null; d.fy = null;
+  });
+
+nodeGroup.call(drag);
+
+// --- Tick ---
+simulation.on("tick", () => {
+  linkSel
+    .attr("x1", d => d.source.x).attr("y1", d => d.source.y)
+    .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
+  nodeGroup.attr("transform", d => `translate(${d.x},${d.y})`);
+});
+
+// --- Legend ---
+const legend = svg.append("g")
+  .attr("transform", `translate(${width - margin.right + 20}, 30)`);
+
+legend.append("text")
+  .attr("font-size", 13).attr("font-weight", 600).attr("fill", "#333")
+  .text("Communities");
+
+communityNames.forEach((name, i) => {
+  const g = legend.append("g").attr("transform", `translate(0, ${24 + i * 44})`);
+
+  // Color + pattern swatch
+  g.append("rect")
+    .attr("class", "legend-bg")
+    .attr("width", 24).attr("height", 24).attr("rx", 4)
+    .attr("fill", colorPalette[i]);
+
+  g.append("rect")
+    .attr("class", "legend-pat")
+    .attr("width", 24).attr("height", 24).attr("rx", 4)
+    .attr("fill", `url(#${patternIds[i]})`)
+    .attr("stroke", d3.color(colorPalette[i]).darker(0.5))
+    .attr("stroke-width", 1);
+
+  g.append("text")
+    .attr("x", 32).attr("y", 13)
+    .attr("font-size", 12).attr("fill", "#333")
+    .attr("dominant-baseline", "middle")
+    .text(name);
+
+  g.append("text")
+    .attr("x", 32).attr("y", 24)
+    .attr("font-size", 9.5).attr("fill", "#888")
+    .text(patternLabels[i]);
+});
+
+// --- Grayscale toggle ---
+const btn = document.getElementById("grayscaleBtn");
+
+btn.addEventListener("click", () => {
+  isGrayscale = !isGrayscale;
+  btn.classList.toggle("active", isGrayscale);
+  btn.textContent = isGrayscale ? "Color Mode" : "Grayscale Mode";
+
+  const t = d3.transition().duration(400);
+
+  nodeGroup.selectAll(".node-bg")
+    .transition(t)
+    .attr("fill", d => colorScale(d.community));
+
+  nodeGroup.selectAll(".node-pattern")
+    .transition(t)
+    .attr("stroke", d => isGrayscale ? "#555" : d3.color(colorScale(d.community)).darker(0.5));
+
+  linkSel.transition(t)
+    .attr("stroke", isGrayscale ? "#bbb" : "#999");
+
+  // Update legend swatches
+  legend.selectAll(".legend-bg")
+    .transition(t)
+    .attr("fill", (_, i) => isGrayscale ? grayPalette[i] : colorPalette[i]);
+
+  legend.selectAll(".legend-pat")
+    .transition(t)
+    .attr("stroke", (_, i) => isGrayscale ? "#555" : d3.color(colorPalette[i]).darker(0.5));
+});
+
+</script>
+</body>
+</html>

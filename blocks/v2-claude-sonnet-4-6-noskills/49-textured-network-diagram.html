@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Textured Network — Texton Communities</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #111827;
+    color: #e5e7eb;
+    font-family: system-ui, -apple-system, sans-serif;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  #header {
+    padding: 10px 20px;
+    background: #1f2937;
+    border-bottom: 1px solid #374151;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-shrink: 0;
+  }
+  #header h1 {
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+  }
+  #toggle-btn {
+    padding: 5px 14px;
+    background: #374151;
+    border: 1px solid #4b5563;
+    border-radius: 5px;
+    color: #e5e7eb;
+    cursor: pointer;
+    font-size: 12px;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  #toggle-btn:hover { background: #4b5563; }
+  #toggle-btn.active {
+    background: #6b7280;
+    border-color: #9ca3af;
+    color: #f9fafb;
+  }
+  #mode-label {
+    font-size: 11px;
+    color: #9ca3af;
+    font-style: italic;
+  }
+  #legend {
+    padding: 7px 20px;
+    background: #1f2937;
+    border-bottom: 1px solid #374151;
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    align-items: center;
+    flex-shrink: 0;
+  }
+  .legend-label {
+    font-size: 10px;
+    color: #6b7280;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    margin-right: 4px;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    color: #d1d5db;
+  }
+  #viz {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+  }
+  svg { width: 100%; height: 100%; }
+  .link {
+    fill: none;
+    stroke-linecap: round;
+  }
+  .node circle {
+    stroke-width: 1.5;
+  }
+  .node:hover circle {
+    stroke-width: 3;
+  }
+  .node { cursor: pointer; }
+  #tooltip {
+    position: absolute;
+    background: rgba(17, 24, 39, 0.92);
+    border: 1px solid #374151;
+    color: #e5e7eb;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s;
+    line-height: 1.6;
+    max-width: 200px;
+  }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <h1>Textured Network Diagram</h1>
+  <button id="toggle-btn">Grayscale Mode</button>
+  <span id="mode-label">Color + Texture</span>
+</div>
+<div id="legend">
+  <span class="legend-label">Communities</span>
+</div>
+<div id="viz"></div>
+<div id="tooltip"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// ── Reproducible RNG ──────────────────────────────────────────────────────────
+const rng = (() => {
+  let s = 1337;
+  return () => { s = (s * 16807 + 0) % 2147483647; return s / 2147483647; };
+})();
+const pick = arr => arr[Math.floor(rng() * arr.length)];
+
+// ── Synthetic Data ────────────────────────────────────────────────────────────
+const NUM_NODES = 50, NUM_COMM = 6;
+
+const nodes = Array.from({ length: NUM_NODES }, (_, i) => ({
+  id: i,
+  community: Math.floor(i * NUM_COMM / NUM_NODES),
+  label: `N${i}`,
+}));
+
+// Community sizes will be: floor(50*k/6) boundaries → ~8-9 per community
+const commNodes = Array.from({ length: NUM_COMM }, (_, c) =>
+  nodes.filter(n => n.community === c)
+);
+
+const edgeSet = new Set();
+const links = [];
+
+const tryAdd = (a, b, intra) => {
+  const key = `${Math.min(a,b)}-${Math.max(a,b)}`;
+  if (!edgeSet.has(key)) {
+    edgeSet.add(key);
+    links.push({ source: a, target: b, intra });
+  }
+};
+
+// Intra-community: 3–5 edges per node (modular ring + random)
+commNodes.forEach(group => {
+  // Ring backbone ensures connectivity
+  for (let i = 0; i < group.length; i++) {
+    tryAdd(group[i].id, group[(i + 1) % group.length].id, true);
+  }
+  // Random extras
+  group.forEach(n => {
+    const extras = 1 + Math.floor(rng() * 2);
+    const cands = group.filter(m => m.id !== n.id);
+    cands.sort(() => rng() - 0.5).slice(0, extras).forEach(m => tryAdd(n.id, m.id, true));
+  });
+});
+
+// Inter-community: 1–3 bridges per pair
+for (let a = 0; a < NUM_COMM; a++) {
+  for (let b = a + 1; b < NUM_COMM; b++) {
+    const bridges = 1 + Math.floor(rng() * 2.5);
+    for (let k = 0; k < bridges; k++) {
+      tryAdd(pick(commNodes[a]).id, pick(commNodes[b]).id, false);
+    }
+  }
+}
+
+// ── Community Config ──────────────────────────────────────────────────────────
+const communities = [
+  { id: 0, name: 'Alpha',   color: '#4e79a7', textureDesc: 'Horizontal Lines' },
+  { id: 1, name: 'Beta',    color: '#f28e2b', textureDesc: 'Dots / Stipple'   },
+  { id: 2, name: 'Gamma',   color: '#59a14f', textureDesc: 'Diagonal 45°'     },
+  { id: 3, name: 'Delta',   color: '#e15759', textureDesc: 'Crosshatch'        },
+  { id: 4, name: 'Epsilon', color: '#b07aa1', textureDesc: 'Waves'             },
+  { id: 5, name: 'Zeta',    color: '#76b7b2', textureDesc: 'Vertical Lines'   },
+];
+
+// Gray tone ladder — different lightness levels for subtle differentiation in GS mode
+const grayFills = ['#d4d4d4', '#b8b8b8', '#c8c8c8', '#a8a8a8', '#d8d8d8', '#bcbcbc'];
+
+// ── SVG & Defs ────────────────────────────────────────────────────────────────
+const container = document.getElementById('viz');
+const svg = d3.select('#viz').append('svg');
+const defs = svg.append('defs');
+
+// Arrowhead marker for inter-community edges (subtle)
+defs.append('marker')
+  .attr('id', 'arrow')
+  .attr('viewBox', '0 -3 6 6')
+  .attr('refX', 16).attr('refY', 0)
+  .attr('markerWidth', 4).attr('markerHeight', 4)
+  .attr('orient', 'auto')
+  .append('path')
+    .attr('d', 'M0,-3L6,0L0,3')
+    .attr('fill', '#6b7280');
+
+// ── Pattern Factory ───────────────────────────────────────────────────────────
+let grayscale = false;
+
+function buildPatterns() {
+  defs.selectAll('pattern').remove();
+  defs.selectAll('filter').remove();
+
+  // Slight drop shadow filter for nodes
+  const filt = defs.append('filter').attr('id', 'shadow')
+    .attr('x', '-20%').attr('y', '-20%').attr('width', '140%').attr('height', '140%');
+  filt.append('feDropShadow')
+    .attr('dx', 1).attr('dy', 2).attr('stdDeviation', 2)
+    .attr('flood-color', '#000').attr('flood-opacity', 0.4);
+
+  communities.forEach((cfg, ci) => {
+    const bg = grayscale ? grayFills[ci] : cfg.color;
+    const ink = '#111';    // texture line color (always dark)
+    const T = 12;          // tile size px
+    const sw = 1.2;        // stroke-width for lines
+
+    const pat = defs.append('pattern')
+      .attr('id', `pat-${ci}`)
+      .attr('patternUnits', 'userSpaceOnUse')
+      .attr('width', T).attr('height', T);
+
+    // Tile background
+    pat.append('rect').attr('width', T).attr('height', T).attr('fill', bg);
+
+    const add = tag => pat.append(tag);
+
+    switch (ci) {
+      case 0: // Horizontal lines — primary orientation cue: 0°
+        [3, 7, 11].forEach(y =>
+          add('line').attr('x1', 0).attr('y1', y).attr('x2', T).attr('y2', y)
+            .attr('stroke', ink).attr('stroke-width', sw)
+        );
+        break;
+
+      case 1: // Dots — element shape cue (circular blobs)
+        [[3,3],[9,3],[3,9],[9,9],[6,6]].forEach(([cx,cy]) =>
+          add('circle').attr('cx', cx).attr('cy', cy).attr('r', 1.7)
+            .attr('fill', ink)
+        );
+        break;
+
+      case 2: // Diagonal 45° lines — orientation cue: 45°
+        for (let d = -T; d <= T * 2; d += 4) {
+          add('line')
+            .attr('x1', d).attr('y1', 0)
+            .attr('x2', d + T).attr('y2', T)
+            .attr('stroke', ink).attr('stroke-width', sw);
+        }
+        break;
+
+      case 3: // Crosshatch — dual orientation, higher density cue
+        for (let d = -T; d <= T * 2; d += 5) {
+          // 45°
+          add('line')
+            .attr('x1', d).attr('y1', 0)
+            .attr('x2', d + T).attr('y2', T)
+            .attr('stroke', ink).attr('stroke-width', sw * 0.85);
+          // 135°
+          add('line')
+            .attr('x1', d + T).attr('y1', 0)
+            .attr('x2', d).attr('y2', T)
+            .attr('stroke', ink).attr('stroke-width', sw * 0.85);
+        }
+        break;
+
+      case 4: { // Waves — curved element shape cue
+        const waveY = y =>
+          `M 0,${y} C 2,${y-2.5} 4,${y+2.5} 6,${y} S 10,${y-2.5} 12,${y}`;
+        [3, 8].forEach(y =>
+          add('path').attr('d', waveY(y))
+            .attr('stroke', ink).attr('stroke-width', sw).attr('fill', 'none')
+        );
+        break;
+      }
+
+      case 5: // Vertical lines — orientation cue: 90°
+        [3, 7, 11].forEach(x =>
+          add('line').attr('x1', x).attr('y1', 0).attr('x2', x).attr('y2', T)
+            .attr('stroke', ink).attr('stroke-width', sw)
+        );
+        break;
+    }
+  });
+}
+
+buildPatterns();
+
+// ── Legend ────────────────────────────────────────────────────────────────────
+const legendEl = document.getElementById('legend');
+
+// Build legend with inline SVG swatches
+communities.forEach(cfg => {
+  const item = document.createElement('div');
+  item.className = 'legend-item';
+  item.dataset.community = cfg.id;
+
+  const swatchSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  swatchSvg.setAttribute('width', '22');
+  swatchSvg.setAttribute('height', '22');
+  swatchSvg.style.borderRadius = '50%';
+  swatchSvg.style.overflow = 'hidden';
+  swatchSvg.style.flexShrink = '0';
+
+  // Clone pattern into swatch — use separate <defs> per swatch
+  const bg = grayscale ? grayFills[cfg.id] : cfg.color;
+  const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  circle.setAttribute('cx', '11');
+  circle.setAttribute('cy', '11');
+  circle.setAttribute('r', '10');
+  circle.setAttribute('fill', `url(#pat-${cfg.id})`);
+  circle.setAttribute('stroke', '#374151');
+  circle.setAttribute('stroke-width', '1');
+  swatchSvg.appendChild(circle);
+  // Swatches reference the main SVG defs (shared document)
+  item.appendChild(swatchSvg);
+
+  const label = document.createElement('span');
+  label.textContent = `${cfg.name} — ${cfg.textureDesc}`;
+  item.appendChild(label);
+
+  legendEl.appendChild(item);
+});
+
+// ── Force Layout ──────────────────────────────────────────────────────────────
+const NODE_R = 14;
+
+const getW = () => container.clientWidth;
+const getH = () => container.clientHeight;
+
+const sim = d3.forceSimulation(nodes)
+  .force('link', d3.forceLink(links).id(d => d.id)
+    .distance(d => d.intra ? 55 : 130)
+    .strength(d => d.intra ? 0.5 : 0.08))
+  .force('charge', d3.forceManyBody().strength(-220).distanceMax(300))
+  .force('center', d3.forceCenter(getW() / 2, getH() / 2))
+  .force('collide', d3.forceCollide(NODE_R + 3))
+  .alphaDecay(0.025);
+
+// ── Render ────────────────────────────────────────────────────────────────────
+const g = svg.append('g');
+
+// Links
+const linkSel = g.append('g').attr('class', 'links')
+  .selectAll('line')
+  .data(links)
+  .join('line')
+    .attr('class', 'link')
+    .attr('stroke', d => d.intra ? '#4b5563' : '#374151')
+    .attr('stroke-width', d => d.intra ? 1.2 : 0.7)
+    .attr('stroke-opacity', d => d.intra ? 0.55 : 0.35)
+    .attr('stroke-dasharray', d => d.intra ? null : '4,3');
+
+// Nodes
+const nodeSel = g.append('g').attr('class', 'nodes')
+  .selectAll('g')
+  .data(nodes)
+  .join('g')
+    .attr('class', 'node')
+    .call(d3.drag()
+      .on('start', dragStart)
+      .on('drag',  dragging)
+      .on('end',   dragEnd));
+
+nodeSel.append('circle')
+  .attr('r', NODE_R)
+  .attr('fill', d => `url(#pat-${d.community})`)
+  .attr('stroke', d => grayscale ? '#555' : d3.color(communities[d.community].color).darker(0.8).formatHex())
+  .attr('filter', 'url(#shadow)');
+
+// Simulation tick
+sim.on('tick', () => {
+  const W = getW(), H = getH();
+  const pad = NODE_R + 2;
+  nodes.forEach(n => {
+    n.x = Math.max(pad, Math.min(W - pad, n.x));
+    n.y = Math.max(pad, Math.min(H - pad, n.y));
+  });
+
+  linkSel
+    .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+    .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+
+  nodeSel.attr('transform', d => `translate(${d.x},${d.y})`);
+});
+
+// ── Drag ──────────────────────────────────────────────────────────────────────
+function dragStart(event, d) {
+  if (!event.active) sim.alphaTarget(0.3).restart();
+  d.fx = d.x; d.fy = d.y;
+}
+function dragging(event, d) { d.fx = event.x; d.fy = event.y; }
+function dragEnd(event, d) {
+  if (!event.active) sim.alphaTarget(0);
+  d.fx = null; d.fy = null;
+}
+
+// ── Tooltip ───────────────────────────────────────────────────────────────────
+const tooltip = document.getElementById('tooltip');
+
+nodeSel
+  .on('mouseover', (event, d) => {
+    const cfg = communities[d.community];
+    const degree = links.filter(l =>
+      (l.source.id ?? l.source) === d.id || (l.target.id ?? l.target) === d.id
+    ).length;
+    tooltip.innerHTML = `
+      <strong>${d.label}</strong><br>
+      Community: <em>${cfg.name}</em><br>
+      Texture: ${cfg.textureDesc}<br>
+      Degree: ${degree}
+    `;
+    tooltip.style.opacity = '1';
+  })
+  .on('mousemove', event => {
+    tooltip.style.left = (event.pageX + 12) + 'px';
+    tooltip.style.top  = (event.pageY - 10) + 'px';
+  })
+  .on('mouseleave', () => { tooltip.style.opacity = '0'; });
+
+// ── Grayscale Toggle ──────────────────────────────────────────────────────────
+document.getElementById('toggle-btn').addEventListener('click', function () {
+  grayscale = !grayscale;
+  this.classList.toggle('active', grayscale);
+  document.getElementById('mode-label').textContent =
+    grayscale ? 'Grayscale — texture alone distinguishes communities' : 'Color + Texture';
+
+  buildPatterns();  // Rebuild patterns with new colors
+
+  // Update node stroke
+  nodeSel.select('circle')
+    .attr('stroke', d => {
+      if (grayscale) return '#555';
+      return d3.color(communities[d.community].color).darker(0.8).formatHex();
+    });
+});
+
+// ── Zoom ──────────────────────────────────────────────────────────────────────
+svg.call(d3.zoom()
+  .scaleExtent([0.3, 4])
+  .on('zoom', ({ transform }) => g.attr('transform', transform)));
+
+// ── Resize ────────────────────────────────────────────────────────────────────
+new ResizeObserver(() => {
+  sim.force('center', d3.forceCenter(getW() / 2, getH() / 2));
+  sim.alpha(0.1).restart();
+}).observe(container);
+
+</script>
+</body>
+</html>

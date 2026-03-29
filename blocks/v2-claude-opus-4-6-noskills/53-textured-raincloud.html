@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Textured Raincloud Plots</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #fafafa; font-family: system-ui, -apple-system, sans-serif; color: #222; }
+  .container { max-width: 960px; margin: 0 auto; padding: 24px; }
+  h1 { font-size: 1.4rem; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { font-size: 0.85rem; color: #666; margin-bottom: 16px; }
+  .toggle-wrap { margin-bottom: 12px; }
+  .toggle-wrap label { font-size: 0.82rem; cursor: pointer; user-select: none; }
+  .toggle-wrap input { margin-right: 6px; vertical-align: middle; }
+  svg { display: block; }
+  .legend-item text { font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Raincloud Plots with Texture Encoding</h1>
+  <p class="subtitle">Half-violin KDE + box plot + jittered strip. Each group has a Tol color and SVG pattern — toggle deuteranopia simulation to verify patterns carry the encoding alone.</p>
+  <div class="toggle-wrap">
+    <label><input type="checkbox" id="deuter-toggle"> Simulate deuteranopia</label>
+  </div>
+  <div id="chart"></div>
+</div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data ---
+const groups = ["Control", "Treatment A", "Treatment B", "Treatment C", "Treatment D", "Treatment E"];
+const rng = d3.randomLcg(42);
+
+function generateGroup(name, mean, std, n = 80, skew = 0) {
+  const normal = d3.randomNormal.source(rng)(mean, std);
+  const vals = [];
+  for (let i = 0; i < n; i++) {
+    let v = normal();
+    if (skew > 0) v += Math.abs(d3.randomExponential.source(rng)(1 / skew)());
+    if (skew < 0) v -= Math.abs(d3.randomExponential.source(rng)(1 / -skew)());
+    vals.push({ group: name, value: v });
+  }
+  return vals;
+}
+
+const data = [
+  ...generateGroup("Control", 50, 8, 90),
+  ...generateGroup("Treatment A", 58, 10, 85, 2),
+  ...generateGroup("Treatment B", 45, 12, 80, -3),
+  ...generateGroup("Treatment C", 65, 7, 75),
+  ...generateGroup("Treatment D", 52, 15, 95, 4),
+  ...generateGroup("Treatment E", 70, 9, 70, -2),
+];
+
+// --- Tol muted palette (colorblind-safe) ---
+const tolColors = ["#332288", "#88CCEE", "#44AA99", "#117733", "#DDCC77", "#CC6677"];
+
+// --- Deuteranopia simulation matrix (Brettel 1997 approximation) ---
+const deuterMatrix = [
+  [0.625, 0.375, 0],
+  [0.7,   0.3,   0],
+  [0,     0.3,   0.7],
+];
+
+function simulateDeuter(hex) {
+  const c = d3.rgb(hex);
+  const [r, g, b] = [c.r / 255, c.g / 255, c.b / 255];
+  const lr = Math.pow(r, 2.2), lg = Math.pow(g, 2.2), lb = Math.pow(b, 2.2);
+  const dr = deuterMatrix[0][0] * lr + deuterMatrix[0][1] * lg + deuterMatrix[0][2] * lb;
+  const dg = deuterMatrix[1][0] * lr + deuterMatrix[1][1] * lg + deuterMatrix[1][2] * lb;
+  const db = deuterMatrix[2][0] * lr + deuterMatrix[2][1] * lg + deuterMatrix[2][2] * lb;
+  return d3.rgb(
+    Math.pow(Math.max(0, Math.min(1, dr)), 1/2.2) * 255,
+    Math.pow(Math.max(0, Math.min(1, dg)), 1/2.2) * 255,
+    Math.pow(Math.max(0, Math.min(1, db)), 1/2.2) * 255
+  ).formatHex();
+}
+
+// --- Layout ---
+const margin = { top: 40, right: 30, bottom: 50, left: 100 };
+const width = 900;
+const rowHeight = 100;
+const height = margin.top + margin.bottom + groups.length * rowHeight;
+
+const svg = d3.select("#chart")
+  .append("svg")
+  .attr("width", width)
+  .attr("height", height)
+  .attr("viewBox", `0 0 ${width} ${height}`);
+
+const defs = svg.append("defs");
+
+// --- SVG patterns ---
+const patternDefs = [
+  { id: "pat-hatch",    draw: (g, s) => { g.append("line").attr("x1",0).attr("y1",0).attr("x2",s).attr("y2",s).attr("stroke","currentColor").attr("stroke-width",1.5); }},
+  { id: "pat-dots",     draw: (g, s) => { g.append("circle").attr("cx",s/2).attr("cy",s/2).attr("r",2).attr("fill","currentColor"); }},
+  { id: "pat-cross",    draw: (g, s) => { g.append("line").attr("x1",0).attr("y1",s/2).attr("x2",s).attr("y2",s/2).attr("stroke","currentColor").attr("stroke-width",1.5); g.append("line").attr("x1",s/2).attr("y1",0).attr("x2",s/2).attr("y2",s).attr("stroke","currentColor").attr("stroke-width",1.5); }},
+  { id: "pat-diamond",  draw: (g, s) => { const h = s/2; g.append("polygon").attr("points",`${h},0 ${s},${h} ${h},${s} 0,${h}`).attr("fill","none").attr("stroke","currentColor").attr("stroke-width",1.2); }},
+  { id: "pat-zigzag",   draw: (g, s) => { g.append("polyline").attr("points",`0,${s*0.75} ${s*0.25},${s*0.25} ${s*0.5},${s*0.75} ${s*0.75},${s*0.25} ${s},${s*0.75}`).attr("fill","none").attr("stroke","currentColor").attr("stroke-width",1.5); }},
+  { id: "pat-horiz",    draw: (g, s) => { g.append("line").attr("x1",0).attr("y1",s*0.33).attr("x2",s).attr("y2",s*0.33).attr("stroke","currentColor").attr("stroke-width",1.2); g.append("line").attr("x1",0).attr("y1",s*0.67).attr("x2",s).attr("y2",s*0.67).attr("stroke","currentColor").attr("stroke-width",1.2); }},
+];
+
+const patternSize = 8;
+patternDefs.forEach(({ id, draw }) => {
+  const p = defs.append("pattern")
+    .attr("id", id)
+    .attr("patternUnits", "userSpaceOnUse")
+    .attr("width", patternSize)
+    .attr("height", patternSize);
+  draw(p, patternSize);
+});
+
+// --- Scales ---
+const allValues = data.map(d => d.value);
+const x = d3.scaleLinear()
+  .domain([d3.min(allValues) - 5, d3.max(allValues) + 5])
+  .range([margin.left, width - margin.right]);
+
+const y = d3.scaleBand()
+  .domain(groups)
+  .range([margin.top, height - margin.bottom])
+  .padding(0.05);
+
+const colorScale = d3.scaleOrdinal().domain(groups).range(tolColors);
+const patternScale = d3.scaleOrdinal().domain(groups).range(patternDefs.map(p => p.id));
+
+// --- KDE ---
+function kde(kernel, thresholds, values) {
+  return thresholds.map(t => [t, d3.mean(values, v => kernel(t - v))]);
+}
+function epanechnikov(bandwidth) {
+  return x => Math.abs(x /= bandwidth) <= 1 ? 0.75 * (1 - x * x) / bandwidth : 0;
+}
+
+const g = svg.append("g");
+
+// --- Draw each group ---
+const grouped = d3.group(data, d => d.group);
+const jitterRng = d3.randomLcg(123);
+const jitterNormal = d3.randomNormal.source(jitterRng)(0, 1);
+
+groups.forEach((group, i) => {
+  const values = grouped.get(group).map(d => d.value).sort(d3.ascending);
+  const bandwidth = 4;
+  const thresholds = d3.range(x.domain()[0], x.domain()[1], 0.5);
+  const density = kde(epanechnikov(bandwidth), thresholds, values);
+
+  const yCenter = y(group) + y.bandwidth() / 2;
+  const violinHeight = y.bandwidth() * 0.35;
+  const maxDensity = d3.max(density, d => d[1]);
+
+  const violinY = d3.scaleLinear()
+    .domain([0, maxDensity])
+    .range([0, violinHeight]);
+
+  const color = colorScale(group);
+  const patId = patternScale(group);
+
+  // Set pattern color
+  defs.select(`#${patId}`).attr("color", color);
+
+  // Half-violin (upper half only — cloud)
+  const area = d3.area()
+    .x(d => x(d[0]))
+    .y0(yCenter)
+    .y1(d => yCenter - violinY(d[1]))
+    .curve(d3.curveBasis);
+
+  g.append("path")
+    .datum(density)
+    .attr("d", area)
+    .attr("fill", color)
+    .attr("opacity", 0.35)
+    .attr("class", "violin-fill");
+
+  g.append("path")
+    .datum(density)
+    .attr("d", area)
+    .attr("fill", `url(#${patId})`)
+    .attr("opacity", 0.7)
+    .attr("class", "violin-pattern");
+
+  g.append("path")
+    .datum(density)
+    .attr("d", area)
+    .attr("fill", "none")
+    .attr("stroke", color)
+    .attr("stroke-width", 1.5)
+    .attr("class", "violin-stroke");
+
+  // Box plot
+  const q1 = d3.quantile(values, 0.25);
+  const median = d3.quantile(values, 0.5);
+  const q3 = d3.quantile(values, 0.75);
+  const iqr = q3 - q1;
+  const whiskerLow = d3.max([d3.min(values), q1 - 1.5 * iqr]);
+  const whiskerHigh = d3.min([d3.max(values), q3 + 1.5 * iqr]);
+
+  const boxY = yCenter + 2;
+  const boxH = 10;
+
+  // Whisker line
+  g.append("line")
+    .attr("x1", x(whiskerLow)).attr("x2", x(whiskerHigh))
+    .attr("y1", boxY + boxH / 2).attr("y2", boxY + boxH / 2)
+    .attr("stroke", "#333").attr("stroke-width", 1);
+
+  // Whisker caps
+  [whiskerLow, whiskerHigh].forEach(w => {
+    g.append("line")
+      .attr("x1", x(w)).attr("x2", x(w))
+      .attr("y1", boxY + 1).attr("y2", boxY + boxH - 1)
+      .attr("stroke", "#333").attr("stroke-width", 1);
+  });
+
+  // Box
+  g.append("rect")
+    .attr("x", x(q1)).attr("width", x(q3) - x(q1))
+    .attr("y", boxY).attr("height", boxH)
+    .attr("fill", color).attr("opacity", 0.5)
+    .attr("stroke", "#333").attr("stroke-width", 1)
+    .attr("class", "box-fill");
+
+  g.append("rect")
+    .attr("x", x(q1)).attr("width", x(q3) - x(q1))
+    .attr("y", boxY).attr("height", boxH)
+    .attr("fill", `url(#${patId})`)
+    .attr("opacity", 0.6)
+    .attr("class", "box-pattern");
+
+  // Median line
+  g.append("line")
+    .attr("x1", x(median)).attr("x2", x(median))
+    .attr("y1", boxY).attr("y2", boxY + boxH)
+    .attr("stroke", "#111").attr("stroke-width", 2);
+
+  // Jittered strip (rain)
+  const stripY = boxY + boxH + 4;
+  const stripHeight = y.bandwidth() * 0.22;
+
+  g.selectAll(null)
+    .data(values)
+    .join("circle")
+    .attr("cx", d => x(d))
+    .attr("cy", () => stripY + Math.abs(jitterNormal()) * stripHeight * 0.7)
+    .attr("r", 2)
+    .attr("fill", color)
+    .attr("opacity", 0.6)
+    .attr("class", "strip-dot");
+});
+
+// --- Axes ---
+svg.append("g")
+  .attr("transform", `translate(0,${height - margin.bottom})`)
+  .call(d3.axisBottom(x).ticks(10))
+  .call(g => g.select(".domain").remove());
+
+svg.append("g")
+  .attr("transform", `translate(${margin.left},0)`)
+  .call(d3.axisLeft(y).tickSize(0).tickPadding(8))
+  .call(g => g.select(".domain").remove())
+  .selectAll("text")
+  .style("font-size", "13px");
+
+// Axis label
+svg.append("text")
+  .attr("x", (margin.left + width - margin.right) / 2)
+  .attr("y", height - 8)
+  .attr("text-anchor", "middle")
+  .attr("font-size", "13px")
+  .attr("fill", "#555")
+  .text("Measurement value");
+
+// --- Legend ---
+const legend = svg.append("g")
+  .attr("transform", `translate(${width - margin.right - 280}, ${margin.top - 30})`);
+
+groups.forEach((group, i) => {
+  const lx = (i % 3) * 95;
+  const ly = Math.floor(i / 3) * 18;
+  const lg = legend.append("g").attr("transform", `translate(${lx},${ly})`);
+
+  lg.append("rect")
+    .attr("width", 14).attr("height", 14).attr("rx", 2)
+    .attr("fill", colorScale(group)).attr("opacity", 0.5);
+  lg.append("rect")
+    .attr("width", 14).attr("height", 14).attr("rx", 2)
+    .attr("fill", `url(#${patternScale(group)})`).attr("opacity", 0.7);
+  lg.append("rect")
+    .attr("width", 14).attr("height", 14).attr("rx", 2)
+    .attr("fill", "none").attr("stroke", colorScale(group)).attr("stroke-width", 1);
+  lg.append("text")
+    .attr("x", 18).attr("y", 11)
+    .attr("font-size", "11px").attr("fill", "#333")
+    .text(group.length > 12 ? group.slice(0, 11) + "…" : group);
+});
+
+// --- Deuteranopia toggle ---
+const toggle = document.getElementById("deuter-toggle");
+
+function applyDeuter(on) {
+  groups.forEach((group) => {
+    const orig = colorScale(group);
+    const c = on ? simulateDeuter(orig) : orig;
+    const patId = patternScale(group);
+
+    // Update pattern stroke color
+    defs.select(`#${patId}`).attr("color", c);
+  });
+
+  // Update violin fills
+  svg.selectAll(".violin-fill").attr("fill", function() {
+    const groupIndex = groups.indexOf(getGroupFromY(this));
+    const orig = tolColors[groupIndex];
+    return on ? simulateDeuter(orig) : orig;
+  });
+  svg.selectAll(".violin-stroke").attr("stroke", function() {
+    const groupIndex = groups.indexOf(getGroupFromY(this));
+    const orig = tolColors[groupIndex];
+    return on ? simulateDeuter(orig) : orig;
+  });
+  svg.selectAll(".box-fill").attr("fill", function() {
+    const groupIndex = groups.indexOf(getGroupFromY(this));
+    const orig = tolColors[groupIndex];
+    return on ? simulateDeuter(orig) : orig;
+  });
+  svg.selectAll(".strip-dot").attr("fill", function() {
+    const groupIndex = groups.indexOf(getGroupFromY(this));
+    const orig = tolColors[groupIndex];
+    return on ? simulateDeuter(orig) : orig;
+  });
+
+  // Force pattern repaint by toggling a tiny attribute
+  svg.selectAll(".violin-pattern, .box-pattern")
+    .attr("opacity", function() { return +d3.select(this).attr("opacity") === 0.7 ? 0.700001 : 0.7; });
+}
+
+// Map element y position back to group index
+function getGroupFromY(el) {
+  // Walk up to find the bounding box center and map to group
+  const bbox = el.getBBox ? el.getBBox() : { y: 0, height: 0 };
+  const cy = bbox.y + bbox.height / 2;
+  let best = 0, bestDist = Infinity;
+  groups.forEach((gr, i) => {
+    const gc = y(gr) + y.bandwidth() / 2;
+    const dist = Math.abs(cy - gc);
+    if (dist < bestDist) { bestDist = dist; best = i; }
+  });
+  return groups[best];
+}
+
+// Simpler approach: re-render colors by group using data binding
+// We'll tag elements with group index during creation instead
+// Patch: add data-group to all colored elements
+let elIndex = 0;
+g.selectAll(".violin-fill").each(function(d, i) { d3.select(this).attr("data-gi", i); });
+g.selectAll(".violin-stroke").each(function(d, i) { d3.select(this).attr("data-gi", i); });
+g.selectAll(".violin-pattern").each(function(d, i) { d3.select(this).attr("data-gi", i); });
+g.selectAll(".box-fill").each(function(d, i) { d3.select(this).attr("data-gi", i); });
+g.selectAll(".box-pattern").each(function(d, i) { d3.select(this).attr("data-gi", i); });
+
+// Tag strip dots by group
+let dotGroupIndex = 0, dotCount = 0;
+const groupSizes = groups.map(gr => grouped.get(gr).length);
+g.selectAll(".strip-dot").each(function() {
+  d3.select(this).attr("data-gi", dotGroupIndex);
+  dotCount++;
+  if (dotCount >= groupSizes[dotGroupIndex]) {
+    dotGroupIndex++;
+    dotCount = 0;
+  }
+});
+
+function applyDeuterSimple(on) {
+  const getColor = (i) => on ? simulateDeuter(tolColors[i]) : tolColors[i];
+
+  g.selectAll(".violin-fill").attr("fill", function() { return getColor(+d3.select(this).attr("data-gi")); });
+  g.selectAll(".violin-stroke").attr("stroke", function() { return getColor(+d3.select(this).attr("data-gi")); });
+  g.selectAll(".box-fill").attr("fill", function() { return getColor(+d3.select(this).attr("data-gi")); });
+  g.selectAll(".strip-dot").attr("fill", function() { return getColor(+d3.select(this).attr("data-gi")); });
+
+  // Update pattern colors
+  groups.forEach((group, i) => {
+    defs.select(`#${patternDefs[i].id}`).attr("color", getColor(i));
+  });
+
+  // Nudge patterns to force repaint
+  g.selectAll(".violin-pattern, .box-pattern").each(function() {
+    const el = d3.select(this);
+    const op = parseFloat(el.attr("opacity"));
+    el.attr("opacity", op > 0.7 ? 0.7 : 0.700001);
+  });
+}
+
+toggle.addEventListener("change", () => applyDeuterSimple(toggle.checked));
+
+</script>
+</body>
+</html>

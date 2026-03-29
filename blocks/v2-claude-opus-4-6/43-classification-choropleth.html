@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Classification Choropleth — Four Methods Compared</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #f8f8f8;
+    color: #222;
+    padding: 20px;
+  }
+  h1 { font-size: 1.4rem; margin-bottom: 4px; }
+  .subtitle { font-size: 0.85rem; color: #666; margin-bottom: 16px; }
+  .controls {
+    display: flex; align-items: center; gap: 16px;
+    margin-bottom: 16px; font-size: 0.85rem;
+  }
+  .controls label { font-weight: 600; }
+  .controls input[type="range"] { width: 160px; }
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .map-panel {
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    padding: 10px;
+    position: relative;
+  }
+  .map-panel h2 {
+    font-size: 0.82rem;
+    font-weight: 600;
+    margin-bottom: 6px;
+    color: #444;
+  }
+  .map-panel canvas { display: block; width: 100%; height: auto; }
+  .histogram-panel {
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    padding: 16px;
+  }
+  .histogram-panel h2 {
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: #444;
+  }
+  .legend {
+    display: flex; gap: 2px; margin-top: 6px; font-size: 0.7rem;
+  }
+  .legend-item {
+    display: flex; flex-direction: column; align-items: center;
+  }
+  .legend-swatch {
+    width: 28px; height: 10px; border: 0.5px solid #999;
+  }
+  .tooltip {
+    position: fixed;
+    pointer-events: none;
+    background: rgba(0,0,0,0.82);
+    color: #fff;
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 0.78rem;
+    line-height: 1.4;
+    display: none;
+    z-index: 100;
+    white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+
+<h1>Classification Methods Shape the Story</h1>
+<p class="subtitle">Same median household income data, four different classification schemes. Notice how each emphasizes different patterns.</p>
+
+<div class="controls">
+  <label for="classSlider">Classes: <span id="classCount">5</span></label>
+  <input type="range" id="classSlider" min="3" max="9" value="5" step="1">
+</div>
+
+<div class="grid">
+  <div class="map-panel" id="panel-quantile">
+    <h2>Quantile (Equal Count)</h2>
+    <canvas></canvas>
+    <div class="legend"></div>
+  </div>
+  <div class="map-panel" id="panel-equal">
+    <h2>Equal Interval</h2>
+    <canvas></canvas>
+    <div class="legend"></div>
+  </div>
+  <div class="map-panel" id="panel-jenks">
+    <h2>Natural Breaks (Jenks)</h2>
+    <canvas></canvas>
+    <div class="legend"></div>
+  </div>
+  <div class="map-panel" id="panel-manual">
+    <h2>Manual Threshold</h2>
+    <canvas></canvas>
+    <div class="legend"></div>
+  </div>
+</div>
+
+<div class="histogram-panel">
+  <h2>Distribution with Breakpoints</h2>
+  <svg id="histogram"></svg>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+import * as topojson from "https://cdn.jsdelivr.net/npm/topojson-client@3/+esm";
+
+// ── Synthetic income data by state FIPS ──
+const stateIncomes = new Map([
+  ["01",52000],["02",77640],["04",62055],["05",48952],["06",80440],
+  ["08",77127],["09",79855],["10",69110],["12",57703],["13",58700],
+  ["15",83102],["16",55785],["17",69187],["18",57617],["19",61691],
+  ["20",59597],["21",52295],["22",51073],["23",57918],["24",86738],
+  ["25",85843],["26",59234],["27",74593],["28",45081],["29",57290],
+  ["30",56539],["31",63229],["32",62043],["33",77933],["34",85751],
+  ["35",51945],["36",72108],["37",57341],["38",64577],["39",58642],
+  ["40",53840],["41",67058],["42",63627],["44",71169],["45",54864],
+  ["46",59533],["47",54833],["48",63826],["49",74865],["50",63001],
+  ["51",76398],["53",78687],["54",48037],["55",63293],["56",65003]
+]);
+
+const stateNames = new Map([
+  ["01","Alabama"],["02","Alaska"],["04","Arizona"],["05","Arkansas"],
+  ["06","California"],["08","Colorado"],["09","Connecticut"],["10","Delaware"],
+  ["12","Florida"],["13","Georgia"],["15","Hawaii"],["16","Idaho"],
+  ["17","Illinois"],["18","Indiana"],["19","Iowa"],["20","Kansas"],
+  ["21","Kentucky"],["22","Louisiana"],["23","Maine"],["24","Maryland"],
+  ["25","Massachusetts"],["26","Michigan"],["27","Minnesota"],["28","Mississippi"],
+  ["29","Missouri"],["30","Montana"],["31","Nebraska"],["32","Nevada"],
+  ["33","New Hampshire"],["34","New Jersey"],["35","New Mexico"],["36","New York"],
+  ["37","North Carolina"],["38","North Dakota"],["39","Ohio"],["40","Oklahoma"],
+  ["41","Oregon"],["42","Pennsylvania"],["44","Rhode Island"],["45","South Carolina"],
+  ["46","South Dakota"],["47","Tennessee"],["48","Texas"],["49","Utah"],
+  ["50","Vermont"],["51","Virginia"],["53","Washington"],["54","West Virginia"],
+  ["55","Wisconsin"],["56","Wyoming"]
+]);
+
+const values = [...stateIncomes.values()].sort(d3.ascending);
+
+// ── Load US topology ──
+const us = await d3.json("https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json");
+const states = topojson.feature(us, us.objects.states).features;
+const stateMesh = topojson.mesh(us, us.objects.states, (a, b) => a !== b);
+const nation = topojson.merge(us, us.objects.states.geometries);
+
+// Pad FIPS for join
+states.forEach(s => { s.id = String(s.id).padStart(2, "0"); });
+
+// ── Jenks natural breaks ──
+function jenks(data, nClasses) {
+  const sorted = [...data].sort(d3.ascending);
+  const n = sorted.length;
+  if (nClasses >= n) return sorted;
+
+  const lower = Array.from({length: nClasses + 1}, () => new Float64Array(n + 1));
+  const variance = Array.from({length: nClasses + 1}, () => new Float64Array(n + 1).fill(Infinity));
+
+  for (let i = 1; i <= n; i++) {
+    let sum = 0, sumSq = 0;
+    for (let m = 1; m <= i; m++) {
+      const val = sorted[i - m];
+      sum += val;
+      sumSq += val * val;
+      const v = sumSq - (sum * sum) / m;
+      if (m === i) {
+        lower[1][i] = 1;
+        variance[1][i] = v;
+      } else {
+        for (let j = 2; j <= nClasses; j++) {
+          if (variance[j][i] > v + variance[j - 1][i - m]) {
+            lower[j][i] = i - m + 1;
+            variance[j][i] = v + variance[j - 1][i - m];
+          }
+        }
+      }
+    }
+  }
+
+  const breaks = [sorted[0]];
+  let k = n;
+  for (let j = nClasses; j >= 2; j--) {
+    breaks.unshift(sorted[lower[j][k] - 1]);
+    k = lower[j][k] - 1;
+  }
+  breaks.push(sorted[n - 1]);
+  return breaks.slice(1, -1);
+}
+
+// ── Manual breaks (sensible income thresholds) ──
+function manualBreaks(nClasses) {
+  const allBreaks = [45000, 50000, 55000, 60000, 65000, 70000, 75000, 80000];
+  const step = Math.max(1, Math.floor(allBreaks.length / (nClasses - 1)));
+  const picks = [];
+  for (let i = 0; i < nClasses - 1; i++) {
+    const idx = Math.min(i * step, allBreaks.length - 1);
+    picks.push(allBreaks[idx]);
+  }
+  return picks.slice(0, nClasses - 1);
+}
+
+// ── Build classification scales ──
+let currentNClasses = 5;
+
+function buildScales(nClasses) {
+  currentNClasses = nClasses;
+  const scheme = d3.schemeYlGnBu[Math.max(3, Math.min(9, nClasses))];
+
+  const quantile = d3.scaleQuantile(values, scheme);
+  const quantileBreaks = quantile.quantiles();
+
+  const [vMin, vMax] = d3.extent(values);
+  const equalInterval = d3.scaleQuantize([vMin, vMax], scheme);
+  const eqStep = (vMax - vMin) / nClasses;
+  const equalBreaks = d3.range(1, nClasses).map(i => vMin + i * eqStep);
+
+  const jenksBreaks = jenks(values, nClasses);
+  const jenksScale = d3.scaleThreshold(jenksBreaks, scheme);
+
+  const mBreaks = manualBreaks(nClasses);
+  const manualScale = d3.scaleThreshold(mBreaks, scheme);
+
+  return [
+    { key: "quantile", scale: quantile, breaks: quantileBreaks, label: "Quantile" },
+    { key: "equal", scale: equalInterval, breaks: equalBreaks, label: "Equal Interval" },
+    { key: "jenks", scale: jenksScale, breaks: jenksBreaks, label: "Natural Breaks" },
+    { key: "manual", scale: manualScale, breaks: mBreaks, label: "Manual" },
+  ];
+}
+
+// ── Map rendering ──
+const dpr = window.devicePixelRatio || 1;
+const mapW = 420, mapH = 280;
+const projection = d3.geoAlbersUsa().fitSize([mapW, mapH], nation);
+
+const panels = [
+  { key: "quantile", el: document.getElementById("panel-quantile") },
+  { key: "equal", el: document.getElementById("panel-equal") },
+  { key: "jenks", el: document.getElementById("panel-jenks") },
+  { key: "manual", el: document.getElementById("panel-manual") },
+];
+
+// Setup canvases
+panels.forEach(p => {
+  const canvas = p.el.querySelector("canvas");
+  canvas.width = mapW * dpr;
+  canvas.height = mapH * dpr;
+  canvas.style.width = mapW + "px";
+  canvas.style.height = mapH + "px";
+  p.canvas = canvas;
+  p.ctx = canvas.getContext("2d");
+  p.ctx.scale(dpr, dpr);
+});
+
+const tooltip = document.getElementById("tooltip");
+let hoveredStateId = null;
+
+function drawMap(panel, colorScale) {
+  const ctx = panel.ctx;
+  const path = d3.geoPath(projection, ctx);
+
+  ctx.clearRect(0, 0, mapW, mapH);
+
+  // Fill states
+  for (const f of states) {
+    const val = stateIncomes.get(f.id);
+    ctx.beginPath();
+    path(f);
+    ctx.fillStyle = val != null ? colorScale(val) : "#eee";
+    ctx.fill();
+  }
+
+  // Internal borders
+  ctx.beginPath();
+  path(stateMesh);
+  ctx.strokeStyle = "#fff";
+  ctx.lineWidth = 0.5;
+  ctx.stroke();
+
+  // Nation outline
+  ctx.beginPath();
+  path(nation);
+  ctx.strokeStyle = "#333";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Highlight hovered state (on top of borders)
+  if (hoveredStateId) {
+    const hf = states.find(s => s.id === hoveredStateId);
+    if (hf) {
+      ctx.beginPath();
+      path(hf);
+      ctx.strokeStyle = "#ff3333";
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+    }
+  }
+}
+
+function buildLegend(panel, breaks, nClasses) {
+  const container = panel.el.querySelector(".legend");
+  container.innerHTML = "";
+  const scheme = d3.schemeYlGnBu[Math.max(3, Math.min(9, nClasses))];
+  const vMin = d3.min(values), vMax = d3.max(values);
+
+  scheme.forEach((color, i) => {
+    const item = document.createElement("div");
+    item.className = "legend-item";
+    const swatch = document.createElement("div");
+    swatch.className = "legend-swatch";
+    swatch.style.background = color;
+    item.appendChild(swatch);
+
+    const label = document.createElement("span");
+    const lo = i === 0 ? vMin : breaks[i - 1];
+    label.textContent = `${(lo / 1000).toFixed(0)}k`;
+    item.appendChild(label);
+    container.appendChild(item);
+  });
+}
+
+// ── Histogram ──
+const histMargin = { top: 20, right: 20, bottom: 30, left: 50 };
+const histW = 880, histH = 180;
+const histSvg = d3.select("#histogram")
+  .attr("viewBox", `0 0 ${histW} ${histH}`)
+  .attr("width", "100%");
+
+const histX = d3.scaleLinear(d3.extent(values), [histMargin.left, histW - histMargin.right]).nice();
+const bins = d3.bin().domain(histX.domain()).thresholds(30)(values);
+const histY = d3.scaleLinear([0, d3.max(bins, d => d.length)], [histH - histMargin.bottom, histMargin.top]);
+
+// Axes
+histSvg.append("g")
+  .attr("transform", `translate(0,${histH - histMargin.bottom})`)
+  .call(d3.axisBottom(histX).ticks(8).tickFormat(d3.format("$,.0f")))
+  .call(g => g.select(".domain").attr("stroke", "#999"));
+
+histSvg.append("g")
+  .attr("transform", `translate(${histMargin.left},0)`)
+  .call(d3.axisLeft(histY).ticks(4))
+  .call(g => g.select(".domain").remove());
+
+// Bars
+histSvg.append("g").attr("class", "hist-bars")
+  .selectAll("rect")
+  .data(bins)
+  .join("rect")
+    .attr("x", d => histX(d.x0) + 0.5)
+    .attr("y", d => histY(d.length))
+    .attr("width", d => Math.max(0, histX(d.x1) - histX(d.x0) - 1))
+    .attr("height", d => histY(0) - histY(d.length))
+    .attr("fill", "#b0c4de");
+
+// Breakpoint lines group
+const breakLinesGroup = histSvg.append("g").attr("class", "break-lines");
+
+const breakColors = {
+  quantile: "#e41a1c",
+  equal: "#377eb8",
+  jenks: "#4daf4a",
+  manual: "#984ea3",
+};
+
+function drawBreakLines(allScales) {
+  breakLinesGroup.selectAll("*").remove();
+
+  const offsets = { quantile: -3, equal: -1, jenks: 1, manual: 3 };
+
+  allScales.forEach(({ key, breaks }) => {
+    breaks.forEach(b => {
+      const x = histX(b) + offsets[key];
+      breakLinesGroup.append("line")
+        .attr("x1", x).attr("x2", x)
+        .attr("y1", histMargin.top - 5)
+        .attr("y2", histH - histMargin.bottom)
+        .attr("stroke", breakColors[key])
+        .attr("stroke-width", 1.5)
+        .attr("stroke-dasharray", key === "manual" ? "4,3" : key === "equal" ? "2,2" : "none")
+        .attr("opacity", 0.8);
+    });
+  });
+
+  // Legend at top-right
+  const legendX = histW - histMargin.right - 180;
+  allScales.forEach((s, i) => {
+    breakLinesGroup.append("line")
+      .attr("x1", legendX).attr("x2", legendX + 16)
+      .attr("y1", histMargin.top + i * 14).attr("y2", histMargin.top + i * 14)
+      .attr("stroke", breakColors[s.key])
+      .attr("stroke-width", 1.5)
+      .attr("stroke-dasharray", s.key === "manual" ? "4,3" : s.key === "equal" ? "2,2" : "none");
+    breakLinesGroup.append("text")
+      .attr("x", legendX + 20)
+      .attr("y", histMargin.top + i * 14 + 3.5)
+      .attr("font-size", "10px")
+      .attr("fill", "#333")
+      .text(s.label);
+  });
+}
+
+// ── Hover via geoContains (<=50 states, fine for O(n)) ──
+function findState(mx, my) {
+  const coords = projection.invert([mx, my]);
+  if (!coords) return null;
+  return states.find(f => d3.geoContains(f, coords));
+}
+
+panels.forEach(p => {
+  p.canvas.addEventListener("mousemove", (e) => {
+    const rect = p.canvas.getBoundingClientRect();
+    const scaleX = mapW / rect.width;
+    const mx = (e.clientX - rect.left) * scaleX;
+    const my = (e.clientY - rect.top) * scaleX;
+    const found = findState(mx, my);
+    const newId = found ? found.id : null;
+
+    if (newId !== hoveredStateId) {
+      hoveredStateId = newId;
+      renderAll();
+    }
+
+    if (found) {
+      const val = stateIncomes.get(found.id);
+      const name = stateNames.get(found.id) || found.id;
+      tooltip.style.display = "block";
+      tooltip.style.left = (e.clientX + 14) + "px";
+      tooltip.style.top = (e.clientY - 10) + "px";
+      tooltip.innerHTML = `<strong>${name}</strong><br>${d3.format("$,.0f")(val)}`;
+    } else {
+      tooltip.style.display = "none";
+    }
+  });
+
+  p.canvas.addEventListener("mouseleave", () => {
+    hoveredStateId = null;
+    tooltip.style.display = "none";
+    renderAll();
+  });
+});
+
+// ── Render everything ──
+let currentScales = buildScales(5);
+
+function renderAll() {
+  currentScales.forEach((s, i) => {
+    drawMap(panels[i], s.scale);
+  });
+  drawBreakLines(currentScales);
+}
+
+function updateClasses(n) {
+  currentScales = buildScales(n);
+  currentScales.forEach((s, i) => {
+    buildLegend(panels[i], s.breaks, n);
+  });
+  renderAll();
+}
+
+// Slider
+const slider = document.getElementById("classSlider");
+const countLabel = document.getElementById("classCount");
+slider.addEventListener("input", () => {
+  countLabel.textContent = slider.value;
+  updateClasses(+slider.value);
+});
+
+// Initial render
+updateClasses(5);
+</script>
+</body>
+</html>

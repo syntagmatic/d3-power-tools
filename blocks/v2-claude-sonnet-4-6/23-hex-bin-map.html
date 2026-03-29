@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Hex-Bin US Population Map</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0f1117;
+      color: #e0e0e0;
+      font-family: system-ui, -apple-system, sans-serif;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    #header {
+      padding: 10px 18px;
+      display: flex;
+      align-items: center;
+      gap: 24px;
+      border-bottom: 1px solid #1e2230;
+      flex-shrink: 0;
+    }
+    h1 { font-size: 14px; font-weight: 600; color: #f0f0f0; letter-spacing: 0.02em; }
+    .control {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: #7a8099;
+    }
+    #radius-val {
+      color: #f97316;
+      font-weight: 700;
+      font-size: 13px;
+      min-width: 28px;
+      font-variant-numeric: tabular-nums;
+    }
+    input[type=range] {
+      -webkit-appearance: none;
+      width: 130px;
+      height: 4px;
+      background: #2a2d3e;
+      border-radius: 2px;
+      outline: none;
+      cursor: pointer;
+    }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      background: #f97316;
+      border-radius: 50%;
+      cursor: pointer;
+    }
+    input[type=range]::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      background: #f97316;
+      border-radius: 50%;
+      cursor: pointer;
+      border: none;
+    }
+    .note {
+      margin-left: auto;
+      font-size: 11px;
+      color: #3d4155;
+    }
+    #map-container {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+    }
+    canvas, svg {
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+    svg { pointer-events: none; }
+    #legend {
+      position: absolute;
+      bottom: 18px;
+      right: 18px;
+      background: rgba(10, 11, 18, 0.88);
+      border: 1px solid #1e2230;
+      border-radius: 6px;
+      padding: 10px 13px;
+      font-size: 11px;
+      backdrop-filter: blur(4px);
+    }
+    #legend-title { color: #7a8099; margin-bottom: 6px; }
+    #legend-bar { display: block; height: 8px; width: 140px; border-radius: 2px; margin-bottom: 5px; }
+    #legend-labels {
+      display: flex;
+      justify-content: space-between;
+      color: #5a617a;
+      font-variant-numeric: tabular-nums;
+    }
+    #loading {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      color: #4a5168;
+      background: #0f1117;
+      z-index: 10;
+    }
+  </style>
+</head>
+<body>
+  <div id="header">
+    <h1>Hex-Bin US Population Density</h1>
+    <div class="control">
+      <span>Hex radius</span>
+      <input type="range" id="radius-slider" min="4" max="16" value="10" step="1">
+      <span id="radius-val">10px</span>
+    </div>
+    <div class="note">20,000 synthetic GPS points</div>
+  </div>
+
+  <div id="map-container">
+    <div id="loading">Loading map data...</div>
+    <canvas id="hex-canvas"></canvas>
+    <svg id="map-svg"></svg>
+    <div id="legend">
+      <div id="legend-title">Points per bin</div>
+      <canvas id="legend-bar" width="140" height="8"></canvas>
+      <div id="legend-labels">
+        <span>0</span>
+        <span id="leg-max">—</span>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+    import * as topojson from "https://cdn.jsdelivr.net/npm/topojson-client@3/+esm";
+    import { hexbin as d3Hexbin } from "https://cdn.jsdelivr.net/npm/d3-hexbin@0.2/+esm";
+
+    // ── Seeded random (LCG) for reproducible synthetic data ──────────────────────
+    let seed = 0xdeadbeef;
+    function rand() {
+      seed = Math.imul(seed ^ (seed >>> 15), seed | 1);
+      seed ^= seed + Math.imul(seed ^ (seed >>> 7), seed | 61);
+      return ((seed ^ (seed >>> 14)) >>> 0) / 0xffffffff;
+    }
+    function randn() {
+      // Box-Muller transform
+      return Math.sqrt(-2 * Math.log(rand() + 1e-12)) * Math.cos(2 * Math.PI * rand());
+    }
+
+    // ── Major US metro centers [lat, lon, relative weight] ───────────────────────
+    const centers = [
+      [40.71, -74.00, 8.5],   // New York
+      [34.05, -118.25, 7.8],  // Los Angeles
+      [41.88, -87.63, 6.2],   // Chicago
+      [29.76, -95.37, 5.0],   // Houston
+      [38.91, -77.04, 4.6],   // Washington DC
+      [42.36, -71.06, 4.4],   // Boston
+      [39.95, -75.17, 4.2],   // Philadelphia
+      [37.78, -122.42, 4.0],  // San Francisco
+      [33.75, -84.39, 3.9],   // Atlanta
+      [33.45, -112.07, 3.8],  // Phoenix
+      [32.78, -96.80, 3.8],   // Dallas
+      [47.60, -122.33, 3.6],  // Seattle
+      [29.42, -98.49, 3.5],   // San Antonio
+      [32.72, -117.15, 3.4],  // San Diego
+      [39.74, -104.98, 3.4],  // Denver
+      [30.27, -97.74, 3.3],   // Austin
+      [37.34, -121.89, 3.2],  // San Jose
+      [25.78, -80.21, 3.1],   // Miami
+      [42.33, -83.05, 2.9],   // Detroit
+      [39.96, -82.99, 2.8],   // Columbus
+      [44.98, -93.27, 2.8],   // Minneapolis
+      [39.29, -76.61, 2.8],   // Baltimore
+      [35.23, -80.84, 2.7],   // Charlotte
+      [36.17, -86.78, 2.7],   // Nashville
+      [39.79, -86.15, 2.6],   // Indianapolis
+      [45.52, -122.68, 2.6],  // Portland OR
+      [35.15, -90.05, 2.4],   // Memphis
+      [36.17, -115.14, 2.4],  // Las Vegas
+      [43.04, -87.91, 2.3],   // Milwaukee
+      [38.25, -85.76, 2.2],   // Louisville
+      [35.47, -97.52, 2.2],   // Oklahoma City
+      [30.33, -81.66, 2.1],   // Jacksonville
+      [35.08, -106.65, 2.0],  // Albuquerque
+      [31.76, -106.49, 1.9],  // El Paso
+      [41.26, -95.94, 1.8],   // Omaha
+      [35.78, -78.64, 1.8],   // Raleigh
+      [27.95, -82.46, 1.7],   // Tampa
+      [38.63, -90.20, 1.7],   // St. Louis
+      [36.07, -79.79, 1.6],   // Greensboro
+      [33.08, -97.01, 1.5],   // Fort Worth (spillover)
+    ];
+
+    // ── Generate 20K synthetic GPS points ───────────────────────────────────────
+    const totalWeight = centers.reduce((s, c) => s + c[2], 0);
+    const N = 20000;
+    const rawPoints = new Array(N);
+
+    // Precompute cumulative weights
+    const cumWeights = [];
+    let cum = 0;
+    for (const c of centers) { cum += c[2]; cumWeights.push(cum); }
+
+    for (let i = 0; i < N; i++) {
+      const r = rand() * totalWeight;
+      let idx = 0;
+      while (idx < cumWeights.length - 1 && r > cumWeights[idx]) idx++;
+      const [lat, lon, w] = centers[idx];
+      const spread = 0.4 + w * 0.07;
+      rawPoints[i] = [lon + randn() * spread * 1.15, lat + randn() * spread];
+    }
+
+    // ── Canvas & SVG setup ───────────────────────────────────────────────────────
+    const container = document.getElementById("map-container");
+    const hexCanvas = document.getElementById("hex-canvas");
+    const hexCtx = hexCanvas.getContext("2d");
+    const svg = d3.select("#map-svg");
+    const slider = document.getElementById("radius-slider");
+    const radiusLabel = document.getElementById("radius-val");
+    const legMax = document.getElementById("leg-max");
+    const legBarCanvas = document.getElementById("legend-bar");
+    const legBarCtx = legBarCanvas.getContext("2d");
+
+    let width = 0, height = 0;
+
+    function resize() {
+      width = container.clientWidth;
+      height = container.clientHeight;
+      const dpr = devicePixelRatio;
+      hexCanvas.width = width * dpr;
+      hexCanvas.height = height * dpr;
+      hexCanvas.style.width = width + "px";
+      hexCanvas.style.height = height + "px";
+      svg.attr("width", width).attr("height", height);
+    }
+
+    // ── Load US Atlas ────────────────────────────────────────────────────────────
+    const us = await d3.json("https://cdn.jsdelivr.net/npm/us-atlas@3/counties-10m.json");
+    const nation = topojson.merge(us, us.objects.states.geometries);
+    const stateMesh = topojson.mesh(us, us.objects.states, (a, b) => a !== b);
+    document.getElementById("loading").style.display = "none";
+
+    // ── Projection ───────────────────────────────────────────────────────────────
+    let projection, geoPath;
+
+    function updateProjection() {
+      const pad = Math.min(width, height) * 0.04;
+      projection = d3.geoAlbersUsa()
+        .fitExtent([[pad, pad], [width - pad, height - pad]], nation);
+      geoPath = d3.geoPath(projection);
+    }
+
+    // ── SVG state borders ────────────────────────────────────────────────────────
+    function drawBorders() {
+      svg.selectAll("*").remove();
+      // Outer nation boundary
+      svg.append("path")
+        .datum(nation)
+        .attr("d", geoPath)
+        .attr("fill", "none")
+        .attr("stroke", "#2a3050")
+        .attr("stroke-width", 1.2);
+      // Internal state mesh
+      svg.append("path")
+        .datum(stateMesh)
+        .attr("d", geoPath)
+        .attr("fill", "none")
+        .attr("stroke", "#1e2438")
+        .attr("stroke-width", 0.6);
+    }
+
+    // ── Color scale (sequential, sqrt-compressed for skewed density) ─────────────
+    // Domain set per render. Use sqrt-compressed interpolator so sparse bins
+    // get visible color, not just the dense cities.
+    function makeColorInterpolator() {
+      // Plasma palette: works well on dark backgrounds
+      return t => d3.interpolatePlasma(0.1 + Math.pow(t, 0.45) * 0.88);
+    }
+
+    // ── Hex bin render ───────────────────────────────────────────────────────────
+    function drawHexes(radius) {
+      // Project raw lon/lat -> [x, y] in screen space
+      const projected = [];
+      for (const pt of rawPoints) {
+        const xy = projection(pt);
+        if (xy) projected.push(xy);
+      }
+
+      const hb = d3Hexbin()
+        .x(d => d[0])
+        .y(d => d[1])
+        .radius(radius)
+        .extent([[0, 0], [width, height]]);
+
+      const bins = hb(projected);
+      const maxCount = d3.max(bins, b => b.length) || 1;
+
+      const interpolator = makeColorInterpolator();
+      const dpr = devicePixelRatio;
+
+      hexCtx.save();
+      hexCtx.scale(dpr, dpr);
+      hexCtx.clearRect(0, 0, width, height);
+
+      // Pre-build Path2D for one hexagon centered at origin
+      const hexPathStr = hb.hexagon(radius - 0.5);
+      const hexShape = new Path2D(hexPathStr);
+
+      // Group bins into color buckets (16 levels) for batched rendering
+      const NUM_BUCKETS = 20;
+      const buckets = new Array(NUM_BUCKETS).fill(null).map(() => []);
+      for (const bin of bins) {
+        const t = bin.length / maxCount;
+        const bIdx = Math.min(NUM_BUCKETS - 1, Math.floor(t * NUM_BUCKETS));
+        buckets[bIdx].push(bin);
+      }
+
+      for (let b = 0; b < NUM_BUCKETS; b++) {
+        if (buckets[b].length === 0) continue;
+        const t = (b + 0.5) / NUM_BUCKETS;
+        hexCtx.fillStyle = interpolator(t);
+        for (const bin of buckets[b]) {
+          hexCtx.save();
+          hexCtx.translate(bin.x, bin.y);
+          hexCtx.fill(hexShape);
+          hexCtx.restore();
+        }
+      }
+
+      hexCtx.restore();
+
+      // Legend bar
+      const grad = legBarCtx.createLinearGradient(0, 0, 140, 0);
+      for (let i = 0; i <= 12; i++) {
+        grad.addColorStop(i / 12, interpolator(i / 12));
+      }
+      legBarCtx.fillStyle = grad;
+      legBarCtx.fillRect(0, 0, 140, 8);
+      legMax.textContent = maxCount;
+    }
+
+    // ── Full redraw ──────────────────────────────────────────────────────────────
+    function redraw() {
+      const radius = +slider.value;
+      radiusLabel.textContent = radius + "px";
+      updateProjection();
+      drawBorders();
+      drawHexes(radius);
+    }
+
+    // ── Init ─────────────────────────────────────────────────────────────────────
+    resize();
+    redraw();
+
+    // Slider: only re-bin, don't re-project or redraw borders
+    slider.addEventListener("input", () => {
+      const radius = +slider.value;
+      radiusLabel.textContent = radius + "px";
+      drawHexes(radius);
+    });
+
+    // Resize observer
+    const ro = new ResizeObserver(() => {
+      resize();
+      redraw();
+    });
+    ro.observe(container);
+  </script>
+</body>
+</html>
