@@ -140,16 +140,19 @@ Format: {fmt}
 Write the file now. No markdown, no explanation."""
 
 
+CLAUDE_BIN = "/usr/local/share/npm-global/bin/claude"
+
+
 def run_one_audit(bid, tool, skill_path, ss_path, html_path, out_path, model):
     skill_content = skill_path.read_text()
     prompt = build_prompt(tool, skill_content, ss_path, html_path, out_path)
     bare = tempfile.mkdtemp(prefix="audit-")
     try:
         subprocess.run(
-            ["claude", "-p", prompt, "--allowedTools", "Read,Write",
+            [CLAUDE_BIN, "-p", prompt, "--allowedTools", "Read,Write",
              "--max-turns", "3", "--model", model, "--permission-mode", "bypassPermissions"],
             capture_output=True, text=True, timeout=120, cwd=bare)
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return None
     finally:
         try: os.rmdir(bare)
@@ -168,6 +171,7 @@ def run_audits(blocks, render_results, block_set, model, parallel):
     tmp_dir.mkdir(parents=True, exist_ok=True)
     results = {}  # bid -> {tool: audit_data}
     tasks = []
+    stats = {"pass": 0, "fail": 0}
 
     for b in blocks:
         bid = b["id"]
@@ -180,9 +184,18 @@ def run_audits(blocks, render_results, block_set, model, parallel):
         results[bid] = {}
         for tool, skill_path in TOOLS.items():
             out = tmp_dir / f"{bid}-{tool}.json"
+            # Resume: skip if already done
+            if out.exists() and out.stat().st_size > 5:
+                try:
+                    data = json.loads(out.read_text())
+                    if "score" in data:
+                        results[bid][tool] = data
+                        stats["pass"] += 1
+                        continue
+                except json.JSONDecodeError:
+                    pass
             tasks.append((bid, tool, skill_path, str(ss), str(html), out, model))
 
-    stats = {"pass": 0, "fail": 0}
     with ThreadPoolExecutor(max_workers=parallel) as pool:
         futures = {pool.submit(run_one_audit, *t): (t[0], t[1]) for t in tasks}
         for f in as_completed(futures):
