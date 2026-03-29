@@ -61,14 +61,15 @@ Examples live in `skills/*/examples/` and double as test fixtures. Add new test 
 
 ## Blocks
 
-Example visualizations live in `blocks/`. Each is a self-contained HTML file generated from `blocks/manifest.json`.
+Example visualizations live in `blocks/`. Each version is a generation run against the manifest.
 
-- `blocks/*.html` — Claude-generated blocks (105)
-- `blocks/gem/*.html` — Gemini-generated blocks (105), same prompts and skills
+- `blocks/manifest.json` — prompts and skill lists (always current)
+- `blocks/v0/` — v0 Claude-generated blocks (105)
+- `blocks/v0/gem/` — v0 Gemini-generated blocks (105), same prompts and skills
 
 **Generating Gemini blocks:**
 ```bash
-python3 scripts/generate-blocks-gemini.py
+python3 scripts/generate-blocks-gemini.py v1   # version arg, defaults to v0
 ```
 Reads manifest, runs `gemini -p --sandbox --yolo` with 5 parallel workers. Skips existing files, so safe to re-run for retries.
 

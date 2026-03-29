@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate blocks using Gemini CLI. Reads manifest.json, outputs to blocks/gem/."""
+"""Generate blocks using Gemini CLI. Reads manifest.json, outputs to blocks/{version}/gem/."""
 import json
 import subprocess
 import os
@@ -10,8 +10,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 PROJ = Path(__file__).resolve().parent.parent
 MANIFEST = PROJ / "blocks" / "manifest.json"
-OUTDIR = PROJ / "blocks" / "gem"
-LOGFILE = PROJ / "temp" / "generate-blocks-gemini.log"
+VERSION = sys.argv[1] if len(sys.argv) > 1 else "v0"
+OUTDIR = PROJ / "blocks" / VERSION / "gem"
+LOGFILE = PROJ / "temp" / f"generate-blocks-gemini-{VERSION}.log"
 MAX_PARALLEL = 5
 
 OUTDIR.mkdir(parents=True, exist_ok=True)
@@ -25,7 +26,7 @@ def run_block(idx, block):
         return ("skip", bid)
 
     prompt = (
-        f"Build this D3.js visualization and save it as blocks/gem/{bid}.html\n\n"
+        f"Build this D3.js visualization and save it as blocks/{VERSION}/gem/{bid}.html\n\n"
         f"IMPORTANT: The output file must contain ONLY valid HTML starting with "
         f"<!DOCTYPE html>. Do not include any markdown fences or explanation.\n\n"
         f"{block['prompt']}"
