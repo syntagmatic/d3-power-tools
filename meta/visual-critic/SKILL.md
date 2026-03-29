@@ -1,6 +1,6 @@
 ---
 name: visual-critic
-description: "Evaluate visual design quality of D3.js visualizations. Use when the user says 'visual critic', 'check design', 'how does it look', or wants a design review. Screenshots the output and scores design intentionality: color harmony, typographic hierarchy, whitespace, data-ink ratio. Does NOT evaluate accessibility, encoding honesty, or interaction robustness."
+description: "Evaluate visual design quality of D3.js visualizations. Use when the user says 'visual critic', 'check design', 'how does it look', or wants a design review. Screenshots the output and scores design intentionality: color harmony, typographic hierarchy, whitespace, data-ink ratio, and overall feel."
 ---
 
 # Visual Critic

@@ -1,6 +1,6 @@
 ---
 name: stress-test
-description: "Stress-test D3.js visualization interactions for race conditions, update storms, and stale closures. Use when the user says 'stress test', 'check interactions', 'race conditions', or wants to verify interaction robustness. Flags un-throttled redraws, infinite feedback loops, mid-transition conflicts, and mouse/touch fights. Does NOT evaluate visual design or data encoding."
+description: "Stress-test D3.js visualization interactions for race conditions, update storms, and stale closures. Use when the user says 'stress test', 'check interactions', 'race conditions', or wants to verify interaction robustness. Flags un-throttled redraws, infinite feedback loops, mid-transition conflicts, and mouse/touch fights."
 ---
 
 # Stress Test

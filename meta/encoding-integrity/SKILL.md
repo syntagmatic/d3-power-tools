@@ -1,6 +1,6 @@
 ---
 name: encoding-integrity
-description: "Audit D3.js visualizations for honest data encoding. Use when the user says 'encoding integrity', 'check honesty', 'lie factor', or wants to verify data representation is truthful. Checks zero baselines, area scaling, dual-axis risk, binning bias, and metamorphic robustness (do visuals scale correctly when data changes?). Does NOT evaluate design quality or interaction bugs."
+description: "Audit D3.js visualizations for honest data encoding. Use when the user says 'encoding integrity', 'check honesty', 'lie factor', or wants to verify data representation is truthful. Checks zero baselines, area scaling, dual-axis risk, binning bias, and metamorphic robustness (do visuals scale correctly when data changes?)."
 ---
 
 # Encoding Integrity

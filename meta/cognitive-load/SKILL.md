@@ -1,6 +1,6 @@
 ---
 name: cognitive-load
-description: "Audit D3.js visualizations for cognitive overload. Use when the user says 'cognitive load', 'check clarity', 'too complex', or wants to verify a visualization is readable. Checks working memory limits, color overload, network density, animation congruence, small multiples fatigue. Evaluates execution, not chart type — a complex chart done well scores high. Does NOT evaluate design polish or encoding honesty."
+description: "Audit D3.js visualizations for cognitive overload. Use when the user says 'cognitive load', 'check clarity', 'too complex', or wants to verify a visualization is readable. Checks working memory limits, color overload, network density, animation congruence, small multiples fatigue. Evaluates execution, not chart type — a complex chart done well scores high."
 ---
 
 # Cognitive Load
