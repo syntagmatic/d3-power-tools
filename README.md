@@ -168,7 +168,7 @@ The workshop. Each tool does one job.
 
 **Inspection tools**
 
-**[polish-tool](meta/polish-tool/SKILL.md)** — Design quality. Color harmony, typographic hierarchy, whitespace, data-ink ratio, overall feel.
+**[visual-critic](meta/visual-critic/SKILL.md)** — Design quality. Color harmony, typographic hierarchy, whitespace, data-ink ratio, overall feel.
 
 **[level-tool](meta/level-tool/SKILL.md)** — Data honesty. Lie factor, zero baselines, metamorphic relations, data join correctness.
 

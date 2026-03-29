@@ -1,6 +1,6 @@
 ---
 name: calibrate-tool
-description: "Measure and tune skill effectiveness. For content skills: compare with-skill vs baseline output. For auditing skills (polish-tool, level-tool, stress-tool, scope-tool): blind evaluation against human anchors. Use when the user says 'calibrate', 'eval', 'test the skill', 'is this skill working', or wants to measure whether a skill improves output."
+description: "Measure and tune skill effectiveness. For content skills: compare with-skill vs baseline output. For auditing skills (visual-critic, level-tool, stress-tool, scope-tool): blind evaluation against human anchors. Use when the user says 'calibrate', 'eval', 'test the skill', 'is this skill working', or wants to measure whether a skill improves output."
 ---
 
 # Calibrate Tool
@@ -68,7 +68,7 @@ Stop when: with-skill is measurably better, baseline can't match it, `--runs 3` 
 
 ## Auditing Skills: Blind Evaluation
 
-The auditing skills (polish-tool, level-tool, stress-tool, scope-tool) produce scores, not code. Calibrating them asks: "does this agent score visualizations honestly and consistently?"
+The auditing skills (visual-critic, level-tool, stress-tool, scope-tool) produce scores, not code. Calibrating them asks: "does this agent score visualizations honestly and consistently?"
 
 ### Context Contamination
 
@@ -111,4 +111,4 @@ Run the same blind eval twice in separate containers. Scores differing by >±1 a
 
 **Baseline already knows it.** D3 APIs the model knows well (treemap, forceSimulation, basic transitions) won't show improvement. Value is in patterns the model wouldn't discover: render queues, color-picking, dirty-flag rendering.
 
-**Checklists encourage box-ticking.** Especially for holistic evaluations (polish-tool). Dimensions are lenses, not checkboxes. Each auditing skill owns a distinct dimension.
+**Checklists encourage box-ticking.** Especially for holistic evaluations (visual-critic). Dimensions are lenses, not checkboxes. Each auditing skill owns a distinct dimension.

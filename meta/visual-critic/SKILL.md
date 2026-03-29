@@ -1,9 +1,9 @@
 ---
-name: polish-tool
+name: visual-critic
 description: "Evaluate the visual design quality of D3.js visualizations through holistic judgment, not checklists. Trigger words: 'polish', 'check design', 'visual quality'. Screenshot the output and assess whether it looks crafted or generic. Scores reflect design intentionality: color harmony, typographic hierarchy, whitespace, data-ink ratio, and overall feel. Does NOT evaluate accessibility (ARIA, keyboard nav) — that belongs to separate agents."
 ---
 
-# Polish Tool
+# Visual Critic
 
 A chart that renders without errors is not a well-designed chart. Most AI-generated visualizations are technically correct but visually generic — default colors, flat typographic hierarchy, cramped layouts, no sense of restraint. This skill evaluates whether a visualization looks *designed*.
 
