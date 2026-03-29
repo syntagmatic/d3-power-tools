@@ -18,6 +18,12 @@ MAX_PARALLEL = 5
 args = sys.argv[1:]
 all_skills = "--all-skills" in args
 args = [a for a in args if a != "--all-skills"]
+MODEL = None
+for i, a in enumerate(args):
+    if a == "--model" and i + 1 < len(args):
+        MODEL = args[i + 1]
+        args = args[:i] + args[i + 2:]
+        break
 
 VERSION = args[0] if args else "v1"
 ONLY_IDS = set(args[1:]) if len(args) > 1 else None
@@ -51,14 +57,17 @@ def run_block(idx, block, defaults):
     t0 = time.time()
 
     try:
+        cmd = [
+            "claude", "-p", prompt,
+            "--allowedTools", "Write,Read",
+            "--max-turns", "5",
+            "--output-format", "stream-json",
+            "--verbose",
+        ]
+        if MODEL:
+            cmd.extend(["--model", MODEL])
         result = subprocess.run(
-            [
-                "claude", "-p", prompt,
-                "--allowedTools", "Write,Read",
-                "--max-turns", "5",
-                "--output-format", "stream-json",
-                "--verbose",
-            ],
+            cmd,
             capture_output=True, text=True, timeout=300,
             cwd=str(staging),
         )
