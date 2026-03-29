@@ -2,15 +2,16 @@
 """
 Audit pipeline for D3 Power Tools blocks.
 
-Render-tests blocks, runs 4 inspection tools in isolated subprocesses,
-aggregates scores, compares to human anchors, and generates a D3 heatmap report.
+Renders blocks, runs 4 inspection tools in isolated subprocesses,
+writes one compact JSON per run to evals/runs/.
 
 Usage:
-  python3 scripts/run-audit-pipeline.py                  # blocks 85-93
-  python3 scripts/run-audit-pipeline.py --blocks 85-105  # wider range
-  python3 scripts/run-audit-pipeline.py --blocks 85-85   # single block
-  python3 scripts/run-audit-pipeline.py --skip-render     # reuse screenshots
-  python3 scripts/run-audit-pipeline.py --persist         # save to git-tracked file
+  python3 scripts/run-audit-pipeline.py                       # v1 blocks 85-93
+  python3 scripts/run-audit-pipeline.py --blocks 1-105        # all blocks
+  python3 scripts/run-audit-pipeline.py --block-set v0        # v0 blocks
+  python3 scripts/run-audit-pipeline.py --model opus          # different model
+  python3 scripts/run-audit-pipeline.py --skip-render         # reuse temp screenshots
+  python3 scripts/run-audit-pipeline.py --report              # regenerate report from runs/
 """
 import argparse
 import json
@@ -24,9 +25,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 PROJ = Path(__file__).resolve().parent.parent
 TEST_SCRIPT = PROJ / "scripts" / "test-viz.py"
-ANCHORS_FILE = PROJ / "evals" / "audit-anchors.json"
-OUTPUT_DIR = PROJ / "evals" / "runs"
-HISTORY_FILE = PROJ / "evals" / "audit-history.json"
+ANCHORS_FILE = PROJ / "evals" / "anchors.json"
+RUNS_DIR = PROJ / "evals" / "runs"
+SCREENSHOT_DIR = PROJ / "temp" / "audit-screenshots"
+REPORT_FILE = PROJ / "evals" / "report.html"
 
 TOOLS = {
     "polish": PROJ / "meta" / "visual-critic" / "SKILL.md",
@@ -37,11 +39,16 @@ TOOLS = {
 
 WEIGHTS = {"polish": 0.30, "level": 0.25, "scope": 0.25, "stress": 0.20}
 
+MODEL_IDS = {
+    "sonnet": "claude-sonnet-4-6",
+    "opus": "claude-opus-4-6",
+    "haiku": "claude-haiku-4-5-20251001",
+}
+
 MANIFEST = json.loads((PROJ / "blocks" / "manifest.json").read_text())
 
 
 def git_sha():
-    """Get current git SHA for versioning."""
     try:
         r = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
                            capture_output=True, text=True, cwd=str(PROJ))
@@ -51,7 +58,6 @@ def git_sha():
 
 
 def git_skill_shas():
-    """Get last-modified SHA for each auditing skill."""
     shas = {}
     for name, path in TOOLS.items():
         try:
@@ -63,471 +69,381 @@ def git_skill_shas():
     return shas
 
 
+def cli_version():
+    try:
+        r = subprocess.run(["claude", "--version"], capture_output=True, text=True)
+        return r.stdout.strip().split("\n")[0]
+    except Exception:
+        return "unknown"
+
+
+def run_tag(block_set, model):
+    """Generate a filename-safe tag: 2026-03-29T08-v1-sonnet."""
+    ts = time.strftime("%Y-%m-%dT%H%M")
+    return f"{ts}-{block_set.replace('/', '-')}-{model}"
+
+
 def parse_block_range(spec):
-    """Parse '85-93' or '85-85' into list of block IDs."""
     parts = spec.split("-", 1) if "-" in spec and not spec.startswith("0") else None
     if parts and len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
         lo, hi = int(parts[0]), int(parts[1])
-        blocks = []
-        for b in MANIFEST["blocks"]:
-            num = int(b["id"].split("-")[0])
-            if lo <= num <= hi:
-                blocks.append(b)
-        return blocks
-    # Single block number
+        return [b for b in MANIFEST["blocks"] if lo <= int(b["id"].split("-")[0]) <= hi]
     if spec.isdigit():
         num = int(spec)
         return [b for b in MANIFEST["blocks"] if int(b["id"].split("-")[0]) == num]
     return []
 
 
-# === Phase 1: Render Tests ===
+# === Phase 1: Render ===
 
-def run_render_tests(blocks, round_dir, block_set):
-    """Run test-viz.py on each block, collect screenshots and pass/fail."""
-    ss_dir = round_dir / "screenshots"
-    ss_dir.mkdir(parents=True, exist_ok=True)
+def run_render(blocks, block_set):
+    SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
     results = {}
-
     for b in blocks:
         bid = b["id"]
-        html_path = PROJ / "blocks" / block_set / f"{bid}.html"
-        ss_path = ss_dir / f"{bid}.png"
+        html = PROJ / "blocks" / block_set / f"{bid}.html"
+        ss = SCREENSHOT_DIR / f"{bid}.png"
         wait = b.get("wait_for", "svg")
-
         print(f"  render {bid}...", end=" ", flush=True)
         try:
             r = subprocess.run(
-                ["python3", str(TEST_SCRIPT), str(html_path),
-                 "--out", str(ss_path), "--wait-for", wait],
-                capture_output=True, text=True, timeout=30, cwd=str(PROJ)
-            )
+                ["python3", str(TEST_SCRIPT), str(html), "--out", str(ss), "--wait-for", wait],
+                capture_output=True, text=True, timeout=30, cwd=str(PROJ))
             passed = "PASS" in r.stdout
-            results[bid] = {"passed": passed, "screenshot": str(ss_path)}
-            print("PASS" if passed else "FAIL")
         except subprocess.TimeoutExpired:
-            results[bid] = {"passed": False, "screenshot": None}
-            print("TIMEOUT")
-
-    out = round_dir / "render-results.json"
-    out.write_text(json.dumps(results, indent=2))
-    passed = sum(1 for r in results.values() if r["passed"])
-    print(f"  Render: {passed}/{len(results)} passed\n")
+            passed = False
+        results[bid] = passed
+        print("PASS" if passed else "FAIL")
+    ok = sum(results.values())
+    print(f"  Render: {ok}/{len(results)} passed\n")
     return results
 
 
-# === Phase 2: Isolated Audit Evaluations ===
+# === Phase 2: Audit ===
 
-def build_audit_prompt(tool_name, skill_content, screenshot_path, html_path, output_path):
-    """Build the prompt for an isolated audit subprocess."""
+def build_prompt(tool_name, skill_content, ss_path, html_path, out_path):
     if tool_name == "stress":
-        output_format = '{"score": <1-10>, "flags": {"update_storm": "pass|fail", "infinite_loop": "pass|fail", "stale_closure": "pass|fail", "handoff_race": "pass|fail", "mouse_touch_fight": "pass|fail"}, "details": "<1-2 sentences>"}'
+        fmt = '{"score":<1-10>,"flags":["<failed_check_names>"],"note":"<1 sentence>"}'
     else:
-        output_format = '{"score": <1-10>, "context": "<what is this viz>", "first_impression": "<1 sentence>", "what_works": "<1-2 specifics>", "what_doesnt": "<1-2 specifics>"}'
+        fmt = '{"score":<1-10>,"note":"<1 sentence what works or doesn\'t>"}'
+    return f"""Evaluate this D3.js visualization.
 
-    return f"""You are evaluating a D3.js visualization. Read the criteria below, then analyze the visualization.
-
-## Evaluation Criteria
-
+## Criteria
 {skill_content}
 
-## Your Task
-
-1. Read the screenshot at {screenshot_path}
+## Task
+1. Read the screenshot at {ss_path}
 2. Read the HTML source at {html_path}
-3. Evaluate according to the criteria above
-4. Write your evaluation as JSON to {output_path}
+3. Score 1-10 per the criteria. Write JSON to {out_path}
 
-Output ONLY this JSON format (no markdown, no explanation):
-{output_format}
-
-Write the JSON file now."""
+Format: {fmt}
+Write the file now. No markdown, no explanation."""
 
 
-def run_single_audit(bid, tool_name, skill_path, screenshot_path, html_path, audit_dir, model):
-    """Run one audit tool against one block in an isolated subprocess."""
-    output_path = audit_dir / f"{tool_name}.json"
-    if output_path.exists() and output_path.stat().st_size > 10:
-        return ("skip", bid, tool_name)
-
+def run_one_audit(bid, tool, skill_path, ss_path, html_path, out_path, model):
     skill_content = skill_path.read_text()
-    prompt = build_audit_prompt(
-        tool_name, skill_content,
-        screenshot_path, html_path, output_path
-    )
-
-    # Isolation: run from a bare temp directory
-    bare_dir = tempfile.mkdtemp(prefix="audit-bare-")
-
+    prompt = build_prompt(tool, skill_content, ss_path, html_path, out_path)
+    bare = tempfile.mkdtemp(prefix="audit-")
     try:
-        result = subprocess.run(
-            ["claude", "-p", prompt,
-             "--allowedTools", "Read,Write",
-             "--max-turns", "3",
-             "--model", model,
-             "--permission-mode", "bypassPermissions"],
-            capture_output=True, text=True, timeout=120,
-            cwd=bare_dir
-        )
+        subprocess.run(
+            ["claude", "-p", prompt, "--allowedTools", "Read,Write",
+             "--max-turns", "3", "--model", model, "--permission-mode", "bypassPermissions"],
+            capture_output=True, text=True, timeout=120, cwd=bare)
     except subprocess.TimeoutExpired:
-        return ("fail", bid, tool_name, "timeout")
+        return None
     finally:
-        # Clean up bare dir
-        try:
-            os.rmdir(bare_dir)
-        except OSError:
-            pass
+        try: os.rmdir(bare)
+        except OSError: pass
 
-    if output_path.exists() and output_path.stat().st_size > 10:
+    if out_path.exists() and out_path.stat().st_size > 5:
         try:
-            json.loads(output_path.read_text())
-            return ("pass", bid, tool_name)
+            return json.loads(out_path.read_text())
         except json.JSONDecodeError:
-            return ("fail", bid, tool_name, "invalid json")
+            pass
+    return None
 
-    return ("fail", bid, tool_name, "no output")
 
-
-def run_audits(blocks, render_results, round_dir, parallel, model, block_set):
-    """Run all audit tools on all blocks."""
+def run_audits(blocks, render_results, block_set, model, parallel):
+    tmp_dir = SCREENSHOT_DIR.parent / "audit-tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    results = {}  # bid -> {tool: audit_data}
     tasks = []
+
     for b in blocks:
         bid = b["id"]
-        rr = render_results.get(bid, {})
-        ss = rr.get("screenshot")
-        html_path = PROJ / "blocks" / block_set / f"{bid}.html"
-        audit_dir = round_dir / "audits" / bid
-        audit_dir.mkdir(parents=True, exist_ok=True)
-
-        if not ss or not Path(ss).exists():
-            print(f"  skip {bid} (no screenshot)")
+        if not render_results.get(bid):
             continue
+        ss = SCREENSHOT_DIR / f"{bid}.png"
+        html = PROJ / "blocks" / block_set / f"{bid}.html"
+        if not ss.exists():
+            continue
+        results[bid] = {}
+        for tool, skill_path in TOOLS.items():
+            out = tmp_dir / f"{bid}-{tool}.json"
+            tasks.append((bid, tool, skill_path, str(ss), str(html), out, model))
 
-        for tool_name, skill_path in TOOLS.items():
-            tasks.append((bid, tool_name, skill_path, ss, str(html_path), audit_dir, model))
-
-    results = {"pass": 0, "fail": 0, "skip": 0}
-
+    stats = {"pass": 0, "fail": 0}
     with ThreadPoolExecutor(max_workers=parallel) as pool:
-        futures = {
-            pool.submit(run_single_audit, *t): (t[0], t[1])
-            for t in tasks
-        }
+        futures = {pool.submit(run_one_audit, *t): (t[0], t[1]) for t in tasks}
         for f in as_completed(futures):
             bid, tool = futures[f]
-            r = f.result()
-            status = r[0]
-            results[status] += 1
-            if status == "pass":
-                print(f"  {bid}/{tool}: PASS")
-            elif status == "skip":
-                print(f"  {bid}/{tool}: SKIP (exists)")
+            data = f.result()
+            if data and "score" in data:
+                results[bid][tool] = data
+                stats["pass"] += 1
+                print(f"  {bid}/{tool}: {data['score']}")
             else:
-                reason = r[3] if len(r) > 3 else "unknown"
-                print(f"  {bid}/{tool}: FAIL ({reason})")
+                stats["fail"] += 1
+                print(f"  {bid}/{tool}: FAIL")
 
-    print(f"\n  Audits: {results['pass']} pass, {results['fail']} fail, {results['skip']} skip\n")
+    print(f"\n  Audits: {stats['pass']} pass, {stats['fail']} fail\n")
     return results
 
 
-# === Phase 3: Aggregate Scores ===
+# === Phase 3: Compact run file ===
 
-def aggregate(blocks, render_results, round_dir, round_num, block_set, model):
-    """Read audit JSONs, compute composites, compare to anchors."""
+def write_run(blocks, render_results, audit_results, block_set, model, tag):
     anchors = {}
     if ANCHORS_FILE.exists():
         anchors = json.loads(ANCHORS_FILE.read_text()).get("anchors", {})
 
-    scores = {}
+    block_scores = {}
     for b in blocks:
         bid = b["id"]
-        entry = {"render": render_results.get(bid, {}).get("passed", False)}
-        audit_dir = round_dir / "audits" / bid
+        rendered = render_results.get(bid, False)
+        entry = {"render": rendered}
 
+        audits = audit_results.get(bid, {})
         for tool in TOOLS:
-            path = audit_dir / f"{tool}.json"
-            if path.exists():
-                try:
-                    data = json.loads(path.read_text())
-                    entry[tool] = data.get("score", None)
-                    if tool == "stress":
-                        entry["stress_flags"] = data.get("flags", {})
-                except (json.JSONDecodeError, KeyError):
-                    entry[tool] = None
+            if tool in audits:
+                entry[tool] = audits[tool]["score"]
+                if tool == "stress":
+                    flags = audits[tool].get("flags", [])
+                    if flags:
+                        entry["flags"] = flags
+                note = audits[tool].get("note", "")
+                if note:
+                    entry[f"{tool}_note"] = note
             else:
                 entry[tool] = None
 
         # Composite
-        if entry["render"] and all(entry.get(t) is not None for t in TOOLS):
-            entry["composite"] = round(sum(
-                entry[t] * WEIGHTS[t] for t in TOOLS
-            ), 2)
+        if rendered and all(entry.get(t) is not None for t in TOOLS):
+            entry["composite"] = round(sum(entry[t] * WEIGHTS[t] for t in TOOLS), 1)
         else:
             entry["composite"] = None
 
-        # Calibration drift
-        if bid in anchors:
-            drift = {}
-            for t in TOOLS:
-                if entry.get(t) is not None and t in anchors[bid]:
-                    drift[t] = entry[t] - anchors[bid][t]
-            entry["drift"] = drift
+        block_scores[bid] = entry
 
-        scores[bid] = entry
-
-    # Write round scores
-    out = round_dir / "scores.json"
-    out.write_text(json.dumps(scores, indent=2, ensure_ascii=False))
-
-    # Append to history
-    history = {"rounds": []}
-    if HISTORY_FILE.exists():
-        try:
-            history = json.loads(HISTORY_FILE.read_text())
-        except json.JSONDecodeError:
-            pass
-
-    history["rounds"].append({
-        "round": round_num,
+    run_data = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "git_sha": git_sha(),
         "skill_shas": git_skill_shas(),
         "block_set": block_set,
-        "model": model,
-        "blocks": scores
-    })
-    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    HISTORY_FILE.write_text(json.dumps(history, indent=2, ensure_ascii=False))
+        "model": MODEL_IDS.get(model, model),
+        "cli_version": cli_version(),
+        "blocks": block_scores,
+    }
+
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    out = RUNS_DIR / f"{tag}.json"
+    out.write_text(json.dumps(run_data, indent=2, ensure_ascii=False))
 
     # Summary
-    composites = [s["composite"] for s in scores.values() if s["composite"] is not None]
+    composites = [s["composite"] for s in block_scores.values() if s["composite"] is not None]
     if composites:
         print(f"  Composite avg: {sum(composites)/len(composites):.1f} (n={len(composites)})")
 
+    # Calibration drift
     drifts = []
-    for s in scores.values():
-        if "drift" in s:
-            drifts.extend(abs(v) for v in s["drift"].values())
+    for bid, s in block_scores.items():
+        if bid in anchors:
+            for t in TOOLS:
+                if s.get(t) is not None and t in anchors[bid]:
+                    d = abs(s[t] - anchors[bid][t])
+                    drifts.append(d)
     if drifts:
         over2 = sum(1 for d in drifts if d > 2)
         print(f"  Calibration: {len(drifts)} comparisons, {over2} beyond ±2")
 
-    return scores
+    print(f"  Run file: {out}")
+    return out
 
 
-# === Phase 4: Report ===
+# === Report generation ===
 
-def generate_report(round_dir, round_num):
-    """Generate a D3 heatmap of audit results."""
-    history = json.loads(HISTORY_FILE.read_text())
+def generate_report():
+    """Read all run files, generate a comparative heatmap."""
+    run_files = sorted(RUNS_DIR.glob("*.json"))
+    if not run_files:
+        print("No run files found"); return
 
-    report_html = f"""<!DOCTYPE html>
+    runs = []
+    for f in run_files:
+        try:
+            runs.append(json.loads(f.read_text()))
+        except json.JSONDecodeError:
+            pass
+
+    report = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Audit Pipeline — Round {round_num}</title>
+<title>Audit Report</title>
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <style>
-  body {{ font-family: system-ui, sans-serif; padding: 32px; background: #fafafa; }}
-  h1 {{ font-size: 22px; font-weight: 400; margin: 0 0 4px; }}
-  h1 b {{ font-weight: 600; }}
-  .meta {{ color: #888; font-size: 13px; margin-bottom: 24px; }}
-  .heatmap {{ font-size: 13px; }}
+  body {{ font-family: system-ui, sans-serif; padding: 32px; background: #fafafa; color: #222; }}
+  h1 {{ font-size: 22px; font-weight: 400; margin: 0 0 4px; }} h1 b {{ font-weight: 600; }}
+  .meta {{ color: #888; font-size: 13px; margin-bottom: 20px; }}
+  .run-selector {{ margin-bottom: 16px; font-size: 13px; }}
+  select {{ font-size: 13px; padding: 4px 8px; }}
   .cell {{ stroke: #fff; stroke-width: 1.5; }}
-  .label {{ font-size: 12px; fill: #333; }}
+  .label {{ font-size: 11px; fill: #333; }}
   .score {{ font-size: 11px; fill: #333; font-weight: 500; text-anchor: middle; dominant-baseline: central; }}
-  .delta {{ font-size: 9px; fill: #666; text-anchor: middle; }}
-  .col-header {{ font-size: 11px; fill: #666; text-anchor: middle; text-transform: uppercase; letter-spacing: 0.05em; }}
-  .legend {{ font-size: 11px; fill: #666; }}
+  .col-hdr {{ font-size: 10px; fill: #666; text-anchor: middle; text-transform: uppercase; letter-spacing: 0.04em; }}
 </style>
 </head>
 <body>
-<h1><b>Audit Pipeline</b> — Round {round_num}</h1>
-<p class="meta">Generated {time.strftime("%Y-%m-%d %H:%M")} · <span id="meta-info"></span></p>
+<h1><b>Audit Report</b></h1>
+<p class="meta">{len(runs)} run(s) · generated {time.strftime("%Y-%m-%d %H:%M")}</p>
+<div class="run-selector">
+  Run: <select id="run-select"></select>
+</div>
 <div id="chart"></div>
 <script>
-const history = {json.dumps(history, ensure_ascii=False)};
-const current = history.rounds[history.rounds.length - 1];
-const prev = history.rounds.length > 1 ? history.rounds[history.rounds.length - 2] : null;
-document.getElementById("meta-info").textContent =
-  `${{current.block_set || "v1"}} blocks · git ${{current.git_sha || "?"}} · ${{current.model || "sonnet"}}`;
-const dims = ["render", "polish", "level", "stress", "scope", "composite"];
-const dimLabels = ["Render", "Polish", "Level", "Stress", "Scope", "Composite"];
-const blocks = Object.keys(current.blocks).sort();
+const runs = {json.dumps(runs, ensure_ascii=False)};
+const dims = ["render","polish","level","stress","scope","composite"];
+const labels = ["Render","Polish","Level","Stress","Scope","Comp"];
+const sel = document.getElementById("run-select");
+runs.forEach((r,i) => {{
+  const o = document.createElement("option");
+  o.value = i;
+  const d = r.timestamp.slice(0,16).replace("T"," ");
+  o.textContent = `${{d}} · ${{r.block_set}} · ${{r.model}}`;
+  sel.appendChild(o);
+}});
+sel.value = runs.length - 1;
 
-const margin = {{top: 40, right: 20, bottom: 20, left: 220}};
-const cellW = 70, cellH = 32;
-const w = margin.left + dims.length * cellW + margin.right;
-const h = margin.top + blocks.length * cellH + margin.bottom;
-
+const margin = {{top: 36, right: 16, bottom: 16, left: 200}};
+const cellW = 62, cellH = 26;
 const color = d3.scaleSequential(d3.interpolateRdYlGn).domain([1, 10]);
 
-const svg = d3.select("#chart").append("svg").attr("width", w).attr("height", h);
-const g = svg.append("g").attr("transform", `translate(${{margin.left}},${{margin.top}})`);
+function draw(idx) {{
+  const run = runs[idx];
+  const bids = Object.keys(run.blocks).sort();
+  const w = margin.left + dims.length * cellW + margin.right;
+  const h = margin.top + (bids.length + 1) * cellH + margin.bottom;
 
-// Column headers
-g.selectAll(".col-header").data(dimLabels).join("text")
-  .attr("class", "col-header")
-  .attr("x", (d, i) => i * cellW + cellW / 2)
-  .attr("y", -12)
-  .text(d => d);
+  d3.select("#chart").selectAll("*").remove();
+  const svg = d3.select("#chart").append("svg").attr("width", w).attr("height", h);
+  const g = svg.append("g").attr("transform", `translate(${{margin.left}},${{margin.top}})`);
 
-// Rows
-blocks.forEach((bid, row) => {{
-  const scores = current.blocks[bid];
-  const prevScores = prev ? prev.blocks[bid] : null;
-  const shortName = bid.replace(/^\\d+[-]/, "").replace(/-/g, " ");
+  g.selectAll(".col-hdr").data(labels).join("text").attr("class","col-hdr")
+    .attr("x",(d,i) => i*cellW+cellW/2).attr("y",-10).text(d=>d);
 
-  // Row label
-  g.append("text").attr("class", "label")
-    .attr("x", -8).attr("y", row * cellH + cellH / 2 + 1)
-    .attr("text-anchor", "end").attr("dominant-baseline", "central")
-    .text(`${{bid.split("-")[0]}} ${{shortName}}`);
-
-  dims.forEach((dim, col) => {{
-    const val = dim === "render" ? (scores.render ? 10 : 1) : scores[dim];
-    const x = col * cellW, y = row * cellH;
-
-    g.append("rect").attr("class", "cell")
-      .attr("x", x).attr("y", y).attr("width", cellW).attr("height", cellH)
-      .attr("fill", val != null ? color(val) : "#eee")
-      .attr("rx", 3);
-
-    if (val != null) {{
-      const label = dim === "render" ? (scores.render ? "\\u2713" : "\\u2717") :
-                    dim === "composite" ? val.toFixed(1) : val;
-      g.append("text").attr("class", "score")
-        .attr("x", x + cellW / 2).attr("y", y + cellH / 2)
-        .text(label);
-    }}
-
-    // Delta annotation
-    if (prevScores && dim !== "render") {{
-      const prevVal = dim === "composite" ? prevScores.composite : prevScores[dim];
-      if (val != null && prevVal != null) {{
-        const delta = dim === "composite" ? +(val - prevVal).toFixed(1) : val - prevVal;
-        if (delta !== 0) {{
-          g.append("text").attr("class", "delta")
-            .attr("x", x + cellW / 2).attr("y", y + cellH - 4)
-            .text((delta > 0 ? "+" : "") + delta);
-        }}
+  bids.forEach((bid,row) => {{
+    const s = run.blocks[bid];
+    const short = bid.replace(/^\\d+-/,"").replace(/-/g," ");
+    g.append("text").attr("class","label")
+      .attr("x",-6).attr("y",row*cellH+cellH/2)
+      .attr("text-anchor","end").attr("dominant-baseline","central")
+      .text(`${{bid.split("-")[0]}} ${{short}}`);
+    dims.forEach((dim,col) => {{
+      const v = dim==="render" ? (s.render?10:1) : s[dim];
+      const x=col*cellW, y=row*cellH;
+      g.append("rect").attr("class","cell")
+        .attr("x",x).attr("y",y).attr("width",cellW).attr("height",cellH)
+        .attr("fill",v!=null?color(v):"#eee").attr("rx",2);
+      if (v!=null) {{
+        const lbl = dim==="render"?(s.render?"✓":"✗"):dim==="composite"?v.toFixed(1):v;
+        g.append("text").attr("class","score")
+          .attr("x",x+cellW/2).attr("y",y+cellH/2).text(lbl);
       }}
-    }}
+    }});
   }});
-}});
 
-// Averages row
-const avgY = blocks.length * cellH + 8;
-g.append("text").attr("class", "label").attr("x", -8).attr("y", avgY + cellH / 2)
-  .attr("text-anchor", "end").attr("dominant-baseline", "central")
-  .attr("font-weight", 600).text("Average");
+  // Average row
+  const ay = bids.length * cellH + 4;
+  g.append("text").attr("class","label").attr("x",-6).attr("y",ay+cellH/2)
+    .attr("text-anchor","end").attr("dominant-baseline","central")
+    .attr("font-weight",600).text("Average");
+  dims.forEach((dim,col) => {{
+    if (dim==="render") return;
+    const vals = bids.map(b=>run.blocks[b][dim]).filter(v=>v!=null);
+    if (!vals.length) return;
+    const avg = (vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(1);
+    const x=col*cellW;
+    g.append("rect").attr("class","cell")
+      .attr("x",x).attr("y",ay).attr("width",cellW).attr("height",cellH)
+      .attr("fill",color(+avg)).attr("rx",2).attr("stroke-width",2);
+    g.append("text").attr("class","score").attr("x",x+cellW/2).attr("y",ay+cellH/2)
+      .attr("font-weight",600).text(avg);
+  }});
+}}
 
-dims.forEach((dim, col) => {{
-  if (dim === "render") return;
-  const vals = blocks.map(b => current.blocks[b][dim]).filter(v => v != null);
-  if (!vals.length) return;
-  const avg = (vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(1);
-  g.append("rect").attr("class", "cell")
-    .attr("x", col * cellW).attr("y", avgY).attr("width", cellW).attr("height", cellH)
-    .attr("fill", color(+avg)).attr("rx", 3).attr("stroke-width", 2);
-  g.append("text").attr("class", "score")
-    .attr("x", col * cellW + cellW / 2).attr("y", avgY + cellH / 2)
-    .attr("font-weight", 600).text(avg);
-}});
+sel.addEventListener("change", () => draw(+sel.value));
+draw(runs.length - 1);
 </script>
 </body>
 </html>"""
 
-    out = round_dir / "report.html"
-    out.write_text(report_html)
-    print(f"  Report: {out}")
+    REPORT_FILE.write_text(report)
+    print(f"  Report: {REPORT_FILE} ({len(runs)} runs)")
 
 
 # === Main ===
 
 def main():
-    parser = argparse.ArgumentParser(description="Audit pipeline for D3 Power Tools blocks")
-    parser.add_argument("--blocks", default="85-93", help="Block range, e.g. '85-93' or '1-105'")
-    parser.add_argument("--block-set", default="v1", help="Block set: 'v0', 'v0/gem', or 'v1'")
-    parser.add_argument("--round", type=int, default=None, help="Round number (auto-increments)")
-    parser.add_argument("--skip-render", action="store_true", help="Reuse previous screenshots")
-    parser.add_argument("--parallel", type=int, default=4, help="Max parallel audit subprocesses")
-    parser.add_argument("--model", default="sonnet", help="Model for audit subprocesses")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser(description="Audit pipeline")
+    ap.add_argument("--blocks", default="85-93")
+    ap.add_argument("--block-set", default="v1", help="v0, v0/gem, or v1")
+    ap.add_argument("--model", default="sonnet", help="sonnet, opus, or haiku")
+    ap.add_argument("--parallel", type=int, default=4)
+    ap.add_argument("--skip-render", action="store_true")
+    ap.add_argument("--report", action="store_true", help="Just regenerate report from existing runs")
+    args = ap.parse_args()
+
+    if args.report:
+        generate_report()
+        return
 
     blocks = parse_block_range(args.blocks)
     if not blocks:
-        print(f"No blocks match range '{args.blocks}'")
-        sys.exit(1)
+        print(f"No blocks match '{args.blocks}'"); sys.exit(1)
 
-    # Verify block set directory exists
-    block_set_dir = PROJ / "blocks" / args.block_set
-    if not block_set_dir.is_dir():
-        print(f"Block set directory not found: {block_set_dir}")
-        sys.exit(1)
+    block_dir = PROJ / "blocks" / args.block_set
+    if not block_dir.is_dir():
+        print(f"Not found: {block_dir}"); sys.exit(1)
 
-    # Filter to blocks that exist in this set
-    existing = [b for b in blocks if (block_set_dir / f"{b['id']}.html").exists()]
-    if len(existing) < len(blocks):
-        print(f"Note: {len(blocks) - len(existing)} blocks not in {args.block_set}, running {len(existing)}")
-    blocks = existing
+    blocks = [b for b in blocks if (block_dir / f"{b['id']}.html").exists()]
+    tag = run_tag(args.block_set, args.model)
 
-    # Determine round number
-    if args.round:
-        round_num = args.round
-    elif HISTORY_FILE.exists():
-        try:
-            h = json.loads(HISTORY_FILE.read_text())
-            round_num = max((r["round"] for r in h["rounds"]), default=0) + 1
-        except (json.JSONDecodeError, KeyError):
-            round_num = 1
-    else:
-        round_num = 1
-
-    round_dir = OUTPUT_DIR / f"round-{round_num}"
-    round_dir.mkdir(parents=True, exist_ok=True)
-
-    sha = git_sha()
-    print(f"=== Audit Pipeline Round {round_num} ===")
-    print(f"Blocks: {args.blocks} ({len(blocks)} blocks, set: {args.block_set})")
-    print(f"Tools: {', '.join(TOOLS.keys())}")
-    print(f"Model: {args.model}, parallel: {args.parallel}, git: {sha}\n")
+    print(f"=== Audit: {tag} ===")
+    print(f"Blocks: {args.blocks} ({len(blocks)}, set: {args.block_set})")
+    print(f"Model: {MODEL_IDS.get(args.model, args.model)}")
+    print(f"Git: {git_sha()}\n")
 
     # Phase 1
-    if args.skip_render:
-        prev_round = round_dir.parent / f"round-{round_num - 1}"
-        rr_path = prev_round / "render-results.json"
-        if rr_path.exists():
-            render_results = json.loads(rr_path.read_text())
-            ss_src = prev_round / "screenshots"
-            ss_dst = round_dir / "screenshots"
-            ss_dst.mkdir(parents=True, exist_ok=True)
-            for f in ss_src.glob("*.png"):
-                (ss_dst / f.name).write_bytes(f.read_bytes())
-            print(f"Phase 1: Reusing {len(render_results)} render results from round {round_num - 1}\n")
-        else:
-            print("Phase 1: No previous render results, running tests...")
-            render_results = run_render_tests(blocks, round_dir, args.block_set)
+    if args.skip_render and any(SCREENSHOT_DIR.glob("*.png")):
+        render_results = {b["id"]: (SCREENSHOT_DIR / f"{b['id']}.png").exists() for b in blocks}
+        print(f"Phase 1: Reusing {sum(render_results.values())} screenshots\n")
     else:
-        print("Phase 1: Render tests")
-        render_results = run_render_tests(blocks, round_dir, args.block_set)
+        print("Phase 1: Render")
+        render_results = run_render(blocks, args.block_set)
 
     # Phase 2
-    print("Phase 2: Audit evaluations")
-    run_audits(blocks, render_results, round_dir, args.parallel, args.model, args.block_set)
+    print("Phase 2: Audit")
+    audit_results = run_audits(blocks, render_results, args.block_set, args.model, args.parallel)
 
     # Phase 3
-    print("Phase 3: Aggregation")
-    aggregate(blocks, render_results, round_dir, round_num, args.block_set, args.model)
+    print("Phase 3: Write run")
+    write_run(blocks, render_results, audit_results, args.block_set, args.model, tag)
 
     # Phase 4
     print("\nPhase 4: Report")
-    generate_report(round_dir, round_num)
+    generate_report()
 
-    print(f"\n=== Done ===")
-    print(f"Results: {round_dir}")
-    print(f"Report:  {round_dir / 'report.html'}")
-    print(f"History: {HISTORY_FILE}")
+    print(f"\n=== Done: {tag} ===")
 
 
 if __name__ == "__main__":
