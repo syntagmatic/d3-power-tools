@@ -1,6 +1,6 @@
 ---
 name: jig-template
-description: "Architectural patterns for combining multiple D3 skills into one visualization — the jig that holds pieces in alignment. Trigger: 'jig', 'compose', 'combine skills', 'layer stack', 'multi-view architecture'. Use when layering Canvas+SVG, coordinating linked views, sequencing initialization, managing shared state, budgeting performance across composed concerns, or deciding SVG vs Canvas tradeoffs."
+description: "Architectural patterns for combining multiple D3 skills into one visualization. Use when the user says 'jig', 'compose', 'combine skills', 'layer stack', or is building multi-view dashboards, linked views, or Canvas+SVG hybrids. Covers layer stacks, initialization sequence, state architecture, dirty-flag rendering, composition archetypes, resize contracts, SVG vs Canvas decisions."
 ---
 
 # Jig Template

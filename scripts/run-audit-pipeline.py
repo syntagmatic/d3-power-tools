@@ -29,10 +29,10 @@ OUTPUT_DIR = PROJ / "temp" / "audit-pipeline"
 PERSIST_FILE = PROJ / "meta" / "evals" / "audit-history.json"
 
 TOOLS = {
-    "polish": PROJ / "meta" / "polish-tool" / "SKILL.md",
-    "level":  PROJ / "meta" / "level-tool" / "SKILL.md",
-    "stress": PROJ / "meta" / "stress-tool" / "SKILL.md",
-    "scope":  PROJ / "meta" / "scope-tool" / "SKILL.md",
+    "polish": PROJ / "meta" / "visual-critic" / "SKILL.md",
+    "level":  PROJ / "meta" / "encoding-integrity" / "SKILL.md",
+    "stress": PROJ / "meta" / "stress-test" / "SKILL.md",
+    "scope":  PROJ / "meta" / "cognitive-load" / "SKILL.md",
 }
 
 WEIGHTS = {"polish": 0.30, "level": 0.25, "scope": 0.25, "stress": 0.20}

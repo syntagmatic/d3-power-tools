@@ -22,7 +22,7 @@ Deleted 3 redundant examples (966 lines): color-compositing (compositing-gallery
 
 ### ~~4. Consolidate meta skills~~ ✓ Partially done
 
-Renamed all meta skills for the power-tool theme. Auditing skills kept separate (research-backed): polish-tool (design), level-tool (honesty), stress-tool (robustness), scope-tool (clarity). Merged adversarial-eval + skill-eval → calibrate-tool. Code guides: square-tool (style), jig-tool (architecture). check-skill merged into sharpen-tool.
+Renamed all meta skills for the power-tool theme. Auditing skills kept separate (research-backed): visual-critic (design), encoding-integrity (honesty), stress-test (robustness), cognitive-load (clarity). Merged adversarial-eval + skill-eval → calibrate-tool. Code guides: d3-idioms (style), jig-template (architecture). check-skill merged into sharpen-tool.
 
 ### ~~5. Clean up archive~~ ✓ Done
 
@@ -32,7 +32,7 @@ Deleted `notes/archive/` (178K, 7 files). Lessons in CONVICTIONS.md, content in 
 
 ## Infrastructure
 
-**Eval as CI.** Wire level-tool metamorphic checks (scaling, permutation, subset, shift) as the first automated eval. Run on every skill commit. If scores drop, the commit is a regression.
+**Eval as CI.** Wire encoding-integrity metamorphic checks (scaling, permutation, subset, shift) as the first automated eval. Run on every skill commit. If scores drop, the commit is a regression.
 
 **Asymmetric evaluation.** Claude generates, a symbolic checker or different model scores. The only way to break shared-bias evaluation.
 

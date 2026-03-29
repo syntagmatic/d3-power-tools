@@ -1,6 +1,6 @@
 ---
 name: stress-test
-description: "Audit D3.js visualizations for interaction race conditions, infinite loops, and 'update storms'. Trigger words: 'stress', 'check interactions', 'race conditions'. Use this skill to stress-test linked views, brushing, and zooming logic. Flags stale closures in event listeners, redundant re-renders, and 'fights' between different input methods (e.g., mouse vs. touch). Ensures high-performance interaction via RAF coalescing and 'Dirty Flag' patterns."
+description: "Stress-test D3.js visualization interactions for race conditions, update storms, and stale closures. Use when the user says 'stress test', 'check interactions', 'race conditions', or wants to verify interaction robustness. Flags un-throttled redraws, infinite feedback loops, mid-transition conflicts, and mouse/touch fights. Does NOT evaluate visual design or data encoding."
 ---
 
 # Stress Test

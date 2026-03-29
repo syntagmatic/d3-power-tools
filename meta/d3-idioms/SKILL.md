@@ -1,6 +1,6 @@
 ---
 name: d3-idioms
-description: "D3.js code style and convention review. Trigger words: 'square', 'check style', 'review code', 'idiomatic D3'. Checks method chaining indentation (2-space new selection, 4-space same), margin convention, .join() data joins with key functions, selection.call() composition, scales-as-functions, reusable chart closure pattern, naming conventions, event handling (this vs arrow functions), anti-patterns. Related skills: `scales`, `motion`, `data-gathering`, `jig-template`."
+description: "D3.js code style and convention review. Use when the user says 'check style', 'review code', 'idiomatic D3', 'd3 idioms', or wants D3 code to follow community conventions. Covers chaining indentation, margin convention, .join() data joins, selection.call() composition, reusable chart pattern, naming, event handling. Related: scales, motion, data-gathering, jig-template."
 ---
 
 # D3 Idioms

@@ -1,6 +1,6 @@
 ---
 name: calibrate-tool
-description: "Measure and tune skill effectiveness. For content skills: compare with-skill vs baseline output. For auditing skills (visual-critic, encoding-integrity, stress-test, cognitive-load): blind evaluation against human anchors. Use when the user says 'calibrate', 'eval', 'test the skill', 'is this skill working', or wants to measure whether a skill improves output."
+description: "Measure and tune skill effectiveness. Use when the user says 'calibrate', 'eval', 'test the skill', or wants to check if a skill improves output. Two modes: content skills (with/without baseline comparison) and auditing skills (blind evaluation against human anchors). Covers diagnosis, eval writing, and iterative improvement."
 ---
 
 # Calibrate Tool

@@ -1,6 +1,6 @@
 ---
 name: cognitive-load
-description: "Audit D3.js visualizations for cognitive overload and perceptual failure modes. Trigger words: 'scope', 'check clarity', 'cognitive load'. Screenshot the output and assess whether the viewer can extract insights without being overwhelmed. Evaluates execution quality of complex charts — a 16-cell SPLOM can be readable or overwhelming depending on how it's done. Flags real perceptual failures, not chart type choices."
+description: "Audit D3.js visualizations for cognitive overload. Use when the user says 'cognitive load', 'check clarity', 'too complex', or wants to verify a visualization is readable. Checks working memory limits, color overload, network density, animation congruence, small multiples fatigue. Evaluates execution, not chart type — a complex chart done well scores high. Does NOT evaluate design polish or encoding honesty."
 ---
 
 # Cognitive Load

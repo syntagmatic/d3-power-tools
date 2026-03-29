@@ -1,6 +1,6 @@
 ---
 name: visual-critic
-description: "Evaluate the visual design quality of D3.js visualizations through holistic judgment, not checklists. Trigger words: 'polish', 'check design', 'visual quality'. Screenshot the output and assess whether it looks crafted or generic. Scores reflect design intentionality: color harmony, typographic hierarchy, whitespace, data-ink ratio, and overall feel. Does NOT evaluate accessibility (ARIA, keyboard nav) — that belongs to separate agents."
+description: "Evaluate visual design quality of D3.js visualizations. Use when the user says 'visual critic', 'check design', 'how does it look', or wants a design review. Screenshots the output and scores design intentionality: color harmony, typographic hierarchy, whitespace, data-ink ratio. Does NOT evaluate accessibility, encoding honesty, or interaction robustness."
 ---
 
 # Visual Critic
