@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Earthquake Depth Globe</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #0a0a1a; color: #e0e0e0; font-family: system-ui, sans-serif; overflow: hidden; }
+  #container { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; width: 100vw; height: 100vh; }
+  #globe-panel { grid-row: 1 / 3; position: relative; }
+  #globe-panel canvas { position: absolute; top: 0; left: 0; }
+  #scatter-panel { position: relative; }
+  #ridge-panel { position: relative; }
+  .panel-label { position: absolute; top: 8px; left: 12px; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #888; z-index: 10; pointer-events: none; }
+  .axis text { fill: #888; font-size: 10px; }
+  .axis line, .axis path { stroke: #333; }
+  .legend { font-size: 10px; }
+  .brush .selection { fill: rgba(255,255,255,0.08); stroke: #aaa; stroke-width: 0.5; }
+  .tooltip { position: absolute; background: rgba(10,10,26,0.92); border: 1px solid #555; padding: 6px 10px; font-size: 11px; pointer-events: none; border-radius: 3px; color: #ddd; z-index: 100; display: none; }
+</style>
+</head>
+<body>
+<div id="container">
+  <div id="globe-panel"><span class="panel-label">Earthquake Globe</span></div>
+  <div id="scatter-panel"><span class="panel-label">Depth vs Magnitude</span></div>
+  <div id="ridge-panel"><span class="panel-label">Depth Distribution by Tectonic Zone</span></div>
+</div>
+<div class="tooltip" id="tip"></div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+import * as topojson from "https://cdn.jsdelivr.net/npm/topojson-client@3/+esm";
+import versor from "https://cdn.jsdelivr.net/npm/versor@0.2/+esm";
+
+// ── Synthetic earthquake data ──────────────────────────────────────
+const rng = d3.randomLcg(42);
+const rand = () => rng();
+
+const zones = [
+  { name: "Ring of Fire", lonRange: [120, 280], latRange: [-50, 60], depthBias: 150, count: 180 },
+  { name: "Mid-Atlantic", lonRange: [-45, -10], latRange: [-55, 65], depthBias: 30, count: 70 },
+  { name: "Alpide Belt", lonRange: [10, 100], latRange: [20, 45], depthBias: 80, count: 90 },
+  { name: "East Africa Rift", lonRange: [28, 42], latRange: [-15, 15], depthBias: 25, count: 60 },
+  { name: "Cascadia / Alaska", lonRange: [-170, -120], latRange: [40, 65], depthBias: 120, count: 50 },
+  { name: "Himalayan Front", lonRange: [70, 100], latRange: [25, 40], depthBias: 100, count: 50 },
+];
+
+const quakes = [];
+for (const z of zones) {
+  for (let i = 0; i < z.count; i++) {
+    const lon = z.lonRange[0] + rand() * (z.lonRange[1] - z.lonRange[0]);
+    const lat = z.latRange[0] + rand() * (z.latRange[1] - z.latRange[0]);
+    // Depth: exponential-ish with zone bias
+    const depth = Math.max(1, z.depthBias * (-Math.log(1 - rand() * 0.95)));
+    const mag = 4.0 + rand() * 3.5 + (depth > 300 ? rand() * 1.5 : 0);
+    quakes.push({
+      lon: ((lon + 180) % 360) - 180,
+      lat: Math.max(-85, Math.min(85, lat + (rand() - 0.5) * 8)),
+      depth: Math.min(700, depth),
+      mag: Math.min(9.2, mag),
+      zone: z.name,
+      id: quakes.length,
+    });
+  }
+}
+
+// ── Color scales ───────────────────────────────────────────────────
+const depthColor = d3.scaleSequential(d3.interpolatePlasma).domain([700, 0]);
+const magRadius = d3.scaleSqrt().domain([4, 9.2]).range([1.5, 10]);
+const zoneColor = d3.scaleOrdinal()
+  .domain(zones.map(z => z.name))
+  .range(["#e6554a", "#45b7d1", "#f0c929", "#7ecb5b", "#c084fc", "#ff8a4c"]);
+
+// ── Layout ─────────────────────────────────────────────────────────
+const globeDiv = d3.select("#globe-panel");
+const scatterDiv = d3.select("#scatter-panel");
+const ridgeDiv = d3.select("#ridge-panel");
+const tip = d3.select("#tip");
+
+const globeRect = globeDiv.node().getBoundingClientRect();
+const scatterRect = scatterDiv.node().getBoundingClientRect();
+const ridgeRect = ridgeDiv.node().getBoundingClientRect();
+
+const gw = globeRect.width, gh = globeRect.height;
+const sw = scatterRect.width, sh = scatterRect.height;
+const rw = ridgeRect.width, rh = ridgeRect.height;
+
+// ── Selection state ────────────────────────────────────────────────
+let selected = new Set(); // indices into quakes
+
+function isSelected(i) { return selected.size === 0 || selected.has(i); }
+
+// ── Globe (Canvas) ─────────────────────────────────────────────────
+function makeCanvas(parent, w, h) {
+  const dpr = devicePixelRatio;
+  const c = parent.append("canvas")
+    .attr("width", w * dpr).attr("height", h * dpr)
+    .style("width", w + "px").style("height", h + "px")
+    .node();
+  const ctx = c.getContext("2d");
+  ctx.scale(dpr, dpr);
+  return { canvas: c, ctx };
+}
+
+const { ctx: bgCtx, canvas: bgCanvas } = makeCanvas(globeDiv, gw, gh);
+const { ctx: fgCtx, canvas: fgCanvas } = makeCanvas(globeDiv, gw, gh);
+
+const globeSize = Math.min(gw, gh) - 40;
+const projection = d3.geoOrthographic()
+  .fitSize([globeSize, globeSize], { type: "Sphere" })
+  .translate([gw / 2, gh / 2]);
+
+const bgPath = d3.geoPath(projection, bgCtx);
+const fgPath = d3.geoPath(projection, fgCtx);
+
+let world;
+async function loadWorld() {
+  world = await d3.json("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json");
+  renderGlobe();
+}
+
+function renderGlobe() {
+  bgCtx.clearRect(0, 0, gw, gh);
+  fgCtx.clearRect(0, 0, gw, gh);
+
+  // Water
+  bgCtx.beginPath();
+  bgPath({ type: "Sphere" });
+  bgCtx.fillStyle = "#0d1b2a";
+  bgCtx.fill();
+  bgCtx.strokeStyle = "#1a3050";
+  bgCtx.lineWidth = 1;
+  bgCtx.stroke();
+
+  // Graticule
+  const graticule = d3.geoGraticule10();
+  bgCtx.beginPath();
+  bgPath(graticule);
+  bgCtx.strokeStyle = "rgba(255,255,255,0.04)";
+  bgCtx.lineWidth = 0.5;
+  bgCtx.stroke();
+
+  // Land
+  if (world) {
+    const land = topojson.feature(world, world.objects.land);
+    bgCtx.beginPath();
+    bgPath(land);
+    bgCtx.fillStyle = "#1a2332";
+    bgCtx.fill();
+
+    const borders = topojson.mesh(world, world.objects.countries, (a, b) => a !== b);
+    bgCtx.beginPath();
+    bgPath(borders);
+    bgCtx.strokeStyle = "rgba(255,255,255,0.08)";
+    bgCtx.lineWidth = 0.3;
+    bgCtx.stroke();
+  }
+
+  // Earthquakes on foreground canvas
+  const hasSelection = selected.size > 0;
+  for (let i = 0; i < quakes.length; i++) {
+    const q = quakes[i];
+    const coords = projection([q.lon, q.lat]);
+    if (!coords) continue;
+    // Check if on visible hemisphere
+    const dist = d3.geoDistance([q.lon, q.lat], projection.invert([gw / 2, gh / 2]));
+    if (dist > Math.PI / 2) continue;
+
+    const r = magRadius(q.mag);
+    const sel = isSelected(i);
+    const ctx = fgCtx;
+    ctx.beginPath();
+    ctx.arc(coords[0], coords[1], r, 0, 2 * Math.PI);
+    ctx.fillStyle = depthColor(q.depth);
+    ctx.globalAlpha = hasSelection ? (sel ? 0.85 : 0.06) : 0.75;
+    ctx.fill();
+    if (sel && hasSelection) {
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 0.5;
+      ctx.stroke();
+    }
+  }
+  fgCtx.globalAlpha = 1;
+}
+
+// Versor drag
+let v0, r0, q0;
+d3.select(fgCanvas).call(
+  d3.drag()
+    .on("start", event => {
+      const p = d3.pointer(event);
+      v0 = projection.invert(p);
+      r0 = projection.rotate();
+      q0 = versor(r0);
+    })
+    .on("drag", event => {
+      const p = d3.pointer(event);
+      const v1 = projection.rotate(r0).invert(p);
+      if (!v1) return;
+      const q1 = versor.multiply(q0, versor.delta(v0, v1));
+      projection.rotate(versor.rotation(q1));
+      renderGlobe();
+    })
+);
+
+// ── Scatter Plot (SVG) ─────────────────────────────────────────────
+const sm = { top: 30, right: 20, bottom: 40, left: 50 };
+const siw = sw - sm.left - sm.right;
+const sih = sh - sm.top - sm.bottom;
+
+const scatterSvg = scatterDiv.append("svg")
+  .attr("width", sw).attr("height", sh);
+const sg = scatterSvg.append("g").attr("transform", `translate(${sm.left},${sm.top})`);
+
+const xS = d3.scaleLinear().domain([3.8, 9.5]).range([0, siw]);
+const yS = d3.scaleLinear().domain([0, 720]).range([sih, 0]);
+
+sg.append("g").attr("class", "axis")
+  .attr("transform", `translate(0,${sih})`)
+  .call(d3.axisBottom(xS).ticks(6).tickSize(-sih))
+  .call(g => g.selectAll(".tick line").attr("stroke-opacity", 0.15))
+  .call(g => g.select(".domain").remove());
+
+sg.append("g").attr("class", "axis")
+  .call(d3.axisLeft(yS).ticks(6).tickSize(-siw))
+  .call(g => g.selectAll(".tick line").attr("stroke-opacity", 0.15))
+  .call(g => g.select(".domain").remove());
+
+sg.append("text").attr("x", siw / 2).attr("y", sih + 32).attr("text-anchor", "middle")
+  .attr("fill", "#888").attr("font-size", 10).text("Magnitude");
+sg.append("text").attr("transform", "rotate(-90)").attr("x", -sih / 2).attr("y", -36)
+  .attr("text-anchor", "middle").attr("fill", "#888").attr("font-size", 10).text("Depth (km)");
+
+const dots = sg.selectAll("circle.dot")
+  .data(quakes)
+  .join("circle")
+  .attr("class", "dot")
+  .attr("cx", d => xS(d.mag))
+  .attr("cy", d => yS(d.depth))
+  .attr("r", d => magRadius(d.mag) * 0.7)
+  .attr("fill", d => depthColor(d.depth))
+  .attr("opacity", 0.7)
+  .attr("stroke", "none");
+
+function updateScatter() {
+  const has = selected.size > 0;
+  dots.attr("opacity", (d, i) => has ? (isSelected(i) ? 0.85 : 0.05) : 0.7)
+    .attr("stroke", (d, i) => has && isSelected(i) ? "#fff" : "none")
+    .attr("stroke-width", 0.5);
+}
+
+// Brush on scatter
+const brush = d3.brush()
+  .extent([[0, 0], [siw, sih]])
+  .on("brush end", event => {
+    if (!event.selection) {
+      selected = new Set();
+    } else {
+      const [[x0, y0], [x1, y1]] = event.selection;
+      selected = new Set();
+      quakes.forEach((q, i) => {
+        const cx = xS(q.mag), cy = yS(q.depth);
+        if (cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1) selected.add(i);
+      });
+    }
+    updateScatter();
+    updateRidgeline();
+    renderGlobe();
+  });
+
+sg.append("g").attr("class", "brush").call(brush);
+
+// Tooltip on scatter
+scatterSvg.on("pointermove", event => {
+  const [mx, my] = d3.pointer(event, sg.node());
+  let nearest = null, minD = 15;
+  for (let i = 0; i < quakes.length; i++) {
+    const dx = xS(quakes[i].mag) - mx, dy = yS(quakes[i].depth) - my;
+    const d = Math.sqrt(dx * dx + dy * dy);
+    if (d < minD) { minD = d; nearest = quakes[i]; }
+  }
+  if (nearest) {
+    tip.style("display", "block")
+      .style("left", (event.clientX + 12) + "px")
+      .style("top", (event.clientY - 20) + "px")
+      .html(`<b>M${nearest.mag.toFixed(1)}</b> · ${nearest.depth.toFixed(0)} km<br>${nearest.zone}`);
+  } else {
+    tip.style("display", "none");
+  }
+});
+scatterSvg.on("pointerleave", () => tip.style("display", "none"));
+
+// ── Ridgeline Plot (SVG) ──────────────────────────────────────────
+const rm = { top: 30, right: 20, bottom: 35, left: 120 };
+const riw = rw - rm.left - rm.right;
+const rih = rh - rm.top - rm.bottom;
+
+const ridgeSvg = ridgeDiv.append("svg")
+  .attr("width", rw).attr("height", rh);
+const rg = ridgeSvg.append("g").attr("transform", `translate(${rm.left},${rm.top})`);
+
+const xR = d3.scaleLinear().domain([0, 720]).range([0, riw]);
+const zoneNames = zones.map(z => z.name);
+const yR = d3.scaleBand().domain(zoneNames).range([0, rih]).paddingInner(0.1);
+
+rg.append("g").attr("class", "axis")
+  .attr("transform", `translate(0,${rih})`)
+  .call(d3.axisBottom(xR).ticks(6).tickSize(-rih))
+  .call(g => g.selectAll(".tick line").attr("stroke-opacity", 0.15))
+  .call(g => g.select(".domain").remove());
+
+rg.append("text").attr("x", riw / 2).attr("y", rih + 28).attr("text-anchor", "middle")
+  .attr("fill", "#888").attr("font-size", 10).text("Depth (km)");
+
+rg.append("g").attr("class", "axis")
+  .call(d3.axisLeft(yR).tickSize(0))
+  .call(g => g.select(".domain").remove());
+
+// KDE
+const gaussian = x => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+
+function kde(kernel, bw, data) {
+  return ticks => ticks.map(t => [t, d3.mean(data, v => kernel((t - v) / bw)) / bw]);
+}
+
+function silverman(values) {
+  const std = d3.deviation(values);
+  const sorted = Float64Array.from(values).sort();
+  const iqr = d3.quantile(sorted, 0.75) - d3.quantile(sorted, 0.25);
+  return 0.9 * Math.min(std, iqr / 1.34) * Math.pow(values.length, -0.2);
+}
+
+const overlap = 0.55;
+const ridgeStep = yR.step();
+const ridgeH = ridgeStep * (1 + overlap);
+
+const depthTicks = d3.range(0, 720, 3);
+
+const ridgePaths = rg.selectAll("g.ridge")
+  .data(zoneNames)
+  .join("g")
+  .attr("class", "ridge")
+  .attr("transform", d => `translate(0,${yR(d) + yR.bandwidth()})`);
+
+ridgePaths.append("path").attr("class", "ridge-area");
+ridgePaths.append("path").attr("class", "ridge-line");
+
+function computeRidges(indices) {
+  const grouped = d3.group(
+    indices !== null ? indices.map(i => quakes[i]) : quakes,
+    d => d.zone
+  );
+  const densities = new Map();
+  let maxD = 0;
+  for (const name of zoneNames) {
+    const pts = grouped.get(name);
+    if (!pts || pts.length < 3) {
+      densities.set(name, depthTicks.map(t => [t, 0]));
+      continue;
+    }
+    const depths = pts.map(d => d.depth);
+    const bw = Math.max(10, silverman(depths));
+    const density = kde(gaussian, bw, depths)(depthTicks);
+    const peak = d3.max(density, d => d[1]);
+    if (peak > maxD) maxD = peak;
+    densities.set(name, density);
+  }
+  return { densities, maxD };
+}
+
+function updateRidgeline() {
+  const indices = selected.size > 0 ? [...selected] : null;
+  const { densities, maxD } = computeRidges(indices);
+  const dScale = d3.scaleLinear([0, maxD || 1], [0, ridgeH]);
+
+  const area = d3.area()
+    .x(d => xR(d[0]))
+    .y0(0)
+    .y1(d => -dScale(d[1]))
+    .curve(d3.curveBasis);
+
+  const line = d3.line()
+    .x(d => xR(d[0]))
+    .y(d => -dScale(d[1]))
+    .curve(d3.curveBasis);
+
+  ridgePaths.select(".ridge-area")
+    .transition().duration(200)
+    .attr("d", d => area(densities.get(d)))
+    .attr("fill", d => zoneColor(d))
+    .attr("fill-opacity", 0.25);
+
+  ridgePaths.select(".ridge-line")
+    .transition().duration(200)
+    .attr("d", d => line(densities.get(d)))
+    .attr("fill", "none")
+    .attr("stroke", d => zoneColor(d))
+    .attr("stroke-width", 1.5)
+    .attr("stroke-opacity", 0.8);
+}
+
+// ── Legends ────────────────────────────────────────────────────────
+// Depth color legend on globe panel
+const legendW = 12, legendH = 150;
+const legendSvg = globeDiv.append("svg")
+  .style("position", "absolute").style("bottom", "20px").style("right", "20px")
+  .attr("width", 70).attr("height", legendH + 40);
+
+const defs = legendSvg.append("defs");
+const grad = defs.append("linearGradient").attr("id", "depth-grad")
+  .attr("x1", 0).attr("y1", 0).attr("x2", 0).attr("y2", 1);
+const nStops = 10;
+for (let i = 0; i <= nStops; i++) {
+  const t = i / nStops;
+  grad.append("stop").attr("offset", `${t * 100}%`).attr("stop-color", depthColor(t * 700));
+}
+
+legendSvg.append("rect").attr("x", 0).attr("y", 10).attr("width", legendW).attr("height", legendH)
+  .attr("fill", "url(#depth-grad)").attr("rx", 2);
+
+const lScale = d3.scaleLinear([0, 700], [10, 10 + legendH]);
+legendSvg.selectAll("text.ltick")
+  .data([0, 200, 400, 700])
+  .join("text").attr("class", "ltick")
+  .attr("x", legendW + 5).attr("y", d => lScale(d) + 3)
+  .attr("fill", "#888").attr("font-size", 9).text(d => d + " km");
+
+legendSvg.append("text").attr("x", 0).attr("y", 7).attr("fill", "#888").attr("font-size", 9).text("Depth");
+
+// Zone legend on ridgeline panel
+const zoneLeg = ridgeSvg.append("g")
+  .attr("transform", `translate(${rw - 130}, 8)`);
+zoneLeg.selectAll("g.zl")
+  .data(zoneNames.slice(0, 4))
+  .join("g").attr("class", "zl")
+  .attr("transform", (d, i) => `translate(0,${i * 14})`)
+  .each(function(d) {
+    d3.select(this).append("rect").attr("width", 8).attr("height", 8).attr("fill", zoneColor(d)).attr("rx", 1);
+    d3.select(this).append("text").attr("x", 12).attr("y", 8).attr("fill", "#888").attr("font-size", 9).text(d);
+  });
+
+// ── Init ───────────────────────────────────────────────────────────
+updateRidgeline();
+loadWorld();
+</script>
+</body>
+</html>

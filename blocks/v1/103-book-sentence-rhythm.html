@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Book Sentence Rhythm</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+  body{margin:0;font-family:"Helvetica Neue",system-ui,sans-serif;background:#fafafa;color:#222;padding:24px 32px}
+  h1{font-size:18px;font-weight:600;margin:0 0 4px}
+  .subtitle{font-size:13px;color:#666;margin:0 0 20px}
+  table{border-collapse:collapse;width:100%}
+  thead th{
+    font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;
+    color:#666;border-bottom:2px solid #ddd;padding:6px 10px;text-align:left;cursor:pointer;
+    user-select:none;white-space:nowrap;
+  }
+  thead th:hover{color:#111}
+  thead th .arrow{font-size:9px;margin-left:3px;color:#999}
+  thead th.active .arrow{color:#e45}
+  tbody tr{border-bottom:1px solid #eee;transition:background .1s}
+  tbody tr:hover{background:#f0f4ff}
+  td{padding:5px 10px;font-size:13px;vertical-align:middle;white-space:nowrap}
+  td.num{text-align:right;font-variant-numeric:tabular-nums}
+  td.spark{padding:2px 6px;line-height:1}
+  td.spark svg{display:block}
+  td.violin{padding:2px 6px;line-height:1}
+  td.violin svg{display:block}
+  .tooltip{
+    position:fixed;pointer-events:none;background:#333;color:#fff;font-size:11px;
+    padding:4px 8px;border-radius:3px;white-space:nowrap;z-index:10;
+    transform:translate(-50%,-100%);margin-top:-8px;opacity:0;transition:opacity .12s;
+  }
+  .tooltip.show{opacity:1}
+</style>
+</head>
+<body>
+<h1>Book Sentence Rhythm</h1>
+<p class="subtitle">20 chapters — word count, sentence-length sparkline, sentence-length violin. Click column headers to sort.</p>
+<div id="container"></div>
+<div class="tooltip" id="tip"></div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data ---
+const rng = d3.randomLcg(42);
+const randNorm = d3.randomNormal.source(rng);
+const randUni = d3.randomUniform.source(rng);
+
+const chapterNames = [
+  "The Awakening","Strangers at Dawn","Undercurrents","Through the Glass",
+  "A Fragile Truce","The Long Corridor","Whispers","Reckoning",
+  "Smoke and Mirrors","The Weight of Names","Crossroads","Night Watch",
+  "Unraveling","The Orchard","Tides","Descent",
+  "A Quiet Rebellion","Embers","The Return","Epilogue"
+];
+
+const chapters = chapterNames.map((name, i) => {
+  // Each chapter gets a characteristic sentence-length distribution
+  const baseMean = 12 + rng() * 14;   // 12–26 words avg
+  const baseStd = 3 + rng() * 6;
+  const numSentences = 40 + Math.floor(rng() * 80); // 40–120 sentences
+  const gen = randNorm(baseMean, baseStd);
+  const sentences = Array.from({length: numSentences}, () => Math.max(3, Math.round(gen())));
+  const wordCount = d3.sum(sentences);
+  return {
+    id: i,
+    name,
+    number: i + 1,
+    sentences,
+    wordCount,
+    avgSentenceLen: d3.mean(sentences),
+    medianSentenceLen: d3.median(sentences),
+    maxSentenceLen: d3.max(sentences)
+  };
+});
+
+// --- Shared domains ---
+const allSentences = chapters.flatMap(d => d.sentences);
+const sentenceLenExtent = d3.extent(allSentences);
+const maxSentences = d3.max(chapters, d => d.sentences.length);
+
+// --- KDE helper ---
+function kde(values, bandwidth, nPoints = 60) {
+  const domain = sentenceLenExtent;
+  const step = (domain[1] - domain[0]) / (nPoints - 1);
+  const points = Array.from({length: nPoints}, (_, i) => domain[0] + i * step);
+  const n = values.length;
+  return points.map(x => {
+    const density = d3.sum(values, v => {
+      const z = (x - v) / bandwidth;
+      return Math.exp(-0.5 * z * z) / Math.sqrt(2 * Math.PI);
+    }) / (n * bandwidth);
+    return [x, density];
+  });
+}
+
+function silverman(values) {
+  const sorted = Float64Array.from(values).sort();
+  const std = d3.deviation(values);
+  const iqr = d3.quantile(sorted, 0.75) - d3.quantile(sorted, 0.25);
+  return 0.9 * Math.min(std, iqr / 1.34) * Math.pow(values.length, -0.2);
+}
+
+// --- Layout constants ---
+const sparkW = 140, sparkH = 28;
+const violinW = 100, violinH = 32;
+
+// Shared y scale for sparklines (sentence length)
+const sparkY = d3.scaleLinear(sentenceLenExtent, [sparkH - 2, 2]);
+
+// Shared x scale for violins (sentence length)
+const violinX = d3.scaleLinear(sentenceLenExtent, [2, violinW - 2]);
+
+// Pre-compute KDE for violins — shared density scale
+const chapterKDE = chapters.map(ch => {
+  const bw = silverman(ch.sentences);
+  return kde(ch.sentences, bw);
+});
+const maxDensity = d3.max(chapterKDE, curve => d3.max(curve, d => d[1]));
+const violinY = d3.scaleLinear([0, maxDensity], [0, violinH / 2 - 1]);
+
+// --- Tooltip ---
+const tip = document.getElementById("tip");
+
+// --- Table ---
+const container = d3.select("#container");
+const table = container.append("table");
+const thead = table.append("thead").append("tr");
+const tbody = table.append("tbody");
+
+const columns = [
+  {key: "number", label: "#", cls: "num", width: 30},
+  {key: "name", label: "Chapter", cls: "", width: null},
+  {key: "wordCount", label: "Words", cls: "num", width: 70},
+  {key: "avgSentenceLen", label: "Avg Sent. Len", cls: "num", width: 100},
+  {key: "sparkline", label: "Sentence Lengths", cls: "spark", width: sparkW + 12},
+  {key: "violin", label: "Distribution", cls: "violin", width: violinW + 12}
+];
+
+let sortKey = "avgSentenceLen", sortAsc = true;
+
+function renderHeader() {
+  thead.selectAll("th").data(columns)
+    .join("th")
+      .classed("active", d => d.key === sortKey)
+      .style("width", d => d.width ? d.width + "px" : null)
+      .html(d => {
+        const arrow = d.key === sortKey ? (sortAsc ? "▲" : "▼") : "";
+        return `${d.label}<span class="arrow">${arrow}</span>`;
+      })
+      .on("click", (_, d) => {
+        if (d.key === "sparkline" || d.key === "violin") return;
+        if (sortKey === d.key) sortAsc = !sortAsc;
+        else { sortKey = d.key; sortAsc = true; }
+        renderTable();
+        renderHeader();
+      });
+}
+
+function renderTable() {
+  const sorted = [...chapters].sort((a, b) => {
+    const va = a[sortKey], vb = b[sortKey];
+    return sortAsc ? d3.ascending(va, vb) : d3.descending(va, vb);
+  });
+
+  const rows = tbody.selectAll("tr").data(sorted, d => d.id)
+    .join("tr");
+
+  rows.selectAll("td").data(d => columns.map(c => ({col: c, chapter: d})))
+    .join("td")
+      .attr("class", d => d.col.cls)
+      .each(function(d) {
+        const cell = d3.select(this);
+        const ch = d.chapter;
+
+        if (d.col.key === "sparkline") {
+          cell.selectAll("*").remove();
+          renderSparkline(cell, ch);
+        } else if (d.col.key === "violin") {
+          cell.selectAll("*").remove();
+          renderViolin(cell, ch);
+        } else if (d.col.key === "avgSentenceLen") {
+          cell.text(ch.avgSentenceLen.toFixed(1));
+        } else if (d.col.key === "number") {
+          cell.text(ch.number);
+        } else {
+          cell.text(ch[d.col.key]);
+        }
+      });
+}
+
+function renderSparkline(cell, ch) {
+  const data = ch.sentences;
+  const x = d3.scaleLinear([0, data.length - 1], [1, sparkW - 1]);
+  const line = d3.line((_, i) => x(i), d => sparkY(d))
+    .curve(d3.curveMonotoneX);
+
+  const svg = cell.append("svg")
+    .attr("width", sparkW).attr("height", sparkH)
+    .attr("viewBox", `0 0 ${sparkW} ${sparkH}`);
+
+  svg.append("path").datum(data)
+    .attr("d", line)
+    .attr("fill", "none").attr("stroke", "#4a7cb5").attr("stroke-width", 1.5);
+
+  // Mark longest sentence
+  const maxIdx = data.indexOf(ch.maxSentenceLen);
+  svg.append("circle")
+    .attr("cx", x(maxIdx)).attr("cy", sparkY(data[maxIdx]))
+    .attr("r", 2.5).attr("fill", "#e45");
+
+  // Hover overlay
+  const overlay = svg.append("rect")
+    .attr("width", sparkW).attr("height", sparkH)
+    .attr("fill", "none").attr("pointer-events", "all");
+
+  overlay.on("pointermove", (event) => {
+    const [mx] = d3.pointer(event, svg.node());
+    const idx = Math.round(x.invert(mx));
+    const clamped = Math.max(0, Math.min(data.length - 1, idx));
+    const val = data[clamped];
+    const longest = clamped === maxIdx;
+
+    // Highlight dot
+    svg.selectAll(".hover-dot").remove();
+    svg.append("circle").attr("class", "hover-dot")
+      .attr("cx", x(clamped)).attr("cy", sparkY(val))
+      .attr("r", 3).attr("fill", longest ? "#e45" : "#4a7cb5");
+
+    const rect = svg.node().getBoundingClientRect();
+    tip.textContent = `Sentence ${clamped + 1}: ${val} words${longest ? " (longest)" : ""}`;
+    tip.style.left = (rect.left + x(clamped)) + "px";
+    tip.style.top = (rect.top + sparkY(val)) + "px";
+    tip.classList.add("show");
+  }).on("pointerleave", () => {
+    svg.selectAll(".hover-dot").remove();
+    tip.classList.remove("show");
+  });
+}
+
+function renderViolin(cell, ch) {
+  const curve = chapterKDE[ch.id];
+
+  const area = d3.area()
+    .x(d => violinX(d[0]))
+    .y0(d => violinH / 2 + violinY(d[1]))
+    .y1(d => violinH / 2 - violinY(d[1]))
+    .curve(d3.curveBasis);
+
+  const svg = cell.append("svg")
+    .attr("width", violinW).attr("height", violinH)
+    .attr("viewBox", `0 0 ${violinW} ${violinH}`);
+
+  // Violin shape
+  svg.append("path").datum(curve)
+    .attr("d", area)
+    .attr("fill", "#4a7cb5").attr("fill-opacity", 0.35)
+    .attr("stroke", "#4a7cb5").attr("stroke-width", 1);
+
+  // Median line
+  const med = d3.median(ch.sentences);
+  svg.append("line")
+    .attr("x1", violinX(med)).attr("x2", violinX(med))
+    .attr("y1", violinH / 2 - 6).attr("y2", violinH / 2 + 6)
+    .attr("stroke", "#222").attr("stroke-width", 1.5);
+
+  // IQR bar
+  const sorted = Float64Array.from(ch.sentences).sort();
+  const q1 = d3.quantile(sorted, 0.25), q3 = d3.quantile(sorted, 0.75);
+  svg.append("rect")
+    .attr("x", violinX(q1)).attr("width", violinX(q3) - violinX(q1))
+    .attr("y", violinH / 2 - 3).attr("height", 6)
+    .attr("fill", "#222").attr("fill-opacity", 0.25).attr("rx", 1);
+}
+
+renderHeader();
+renderTable();
+</script>
+</body>
+</html>

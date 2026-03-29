@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Disagreement — where adversarial critics diverge</title>
+<style>
+  :root {
+    --bg: #fafafa;
+    --text: #1a1a1a;
+    --muted: #666;
+    --font: system-ui, -apple-system, sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    padding: 20px 24px;
+  }
+  h1 { font-size: 20px; font-weight: 600; }
+  .subtitle { font-size: 13px; color: var(--muted); margin-bottom: 14px; }
+  .controls {
+    display: flex; gap: 8px; align-items: center;
+    margin-bottom: 14px; flex-wrap: wrap;
+  }
+  .toggle-btn {
+    padding: 5px 14px; border: 1.5px solid #aaa; border-radius: 4px;
+    background: #fff; font-size: 12px; font-family: var(--font);
+    cursor: pointer; color: var(--text); transition: all 0.15s;
+  }
+  .toggle-btn.active { background: #333; color: #fff; border-color: #333; }
+  .toggle-btn:hover { border-color: #666; }
+  .sep { width: 1px; height: 18px; background: #ccc; margin: 0 4px; }
+  .color-label { font-size: 12px; color: var(--muted); }
+  #chart-container { position: relative; }
+  canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
+  svg { position: relative; z-index: 5; }
+  .tooltip {
+    position: absolute; pointer-events: none; z-index: 10;
+    background: rgba(255,255,255,0.96); border: 1px solid #ccc;
+    border-radius: 5px; padding: 8px 10px; font-size: 12px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.12); display: none;
+    line-height: 1.5; min-width: 170px;
+  }
+  .tooltip .block-id { font-weight: 600; font-size: 13px; }
+  .tooltip .score-row { display: flex; justify-content: space-between; gap: 12px; }
+  .tooltip .score-row .label { color: var(--muted); }
+  .tooltip .score-row .val { font-variant-numeric: tabular-nums; font-weight: 500; }
+  .tooltip .disagree { margin-top: 4px; padding-top: 4px; border-top: 1px solid #eee; font-weight: 600; }
+  .brushed-info {
+    max-width: 960px; margin-top: 10px; font-size: 12px;
+    color: var(--muted); line-height: 1.7;
+  }
+  .brushed-info .count { font-weight: 600; color: var(--text); }
+  .brushed-info .tag {
+    display: inline-block; background: #e8e8ee; padding: 1px 7px;
+    border-radius: 3px; margin: 1px 2px; font-variant-numeric: tabular-nums;
+  }
+  .legend { display: flex; align-items: center; gap: 4px; margin-left: 8px; }
+  .legend-bar {
+    width: 100px; height: 10px; border-radius: 2px;
+  }
+  .legend-label { font-size: 11px; color: var(--muted); }
+</style>
+</head>
+<body>
+<h1>Agent Disagreement</h1>
+<p class="subtitle">Parallel coordinates of adversarial audit scores across 84 blocks — brush axes to filter, hover to inspect</p>
+<div class="controls">
+  <button class="toggle-btn active" id="btn-scores">Agent Scores</button>
+  <button class="toggle-btn" id="btn-delta">Score Deltas (v2−v1)</button>
+  <div class="sep"></div>
+  <span class="color-label">Color by disagreement:</span>
+  <div class="legend">
+    <span class="legend-label">low</span>
+    <canvas class="legend-bar" id="legend-bar" width="100" height="10"></canvas>
+    <span class="legend-label">high</span>
+  </div>
+</div>
+<div id="chart-container">
+  <div class="tooltip" id="tooltip"></div>
+</div>
+<div class="brushed-info" id="brushed-info"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Adversarial agents (matching meta audit skills) ---
+const agentNames = [
+  "Visual Critic",
+  "Encoding Integrity",
+  "Interaction Stress",
+  "Perceptual Red Team",
+  "Metamorphic"
+];
+const agentKeys = ["visual", "encoding", "interaction", "perceptual", "metamorphic"];
+
+// --- Synthetic data: 84 blocks, two rounds of scores ---
+// Seeded PRNG for reproducibility
+const seed = 88;
+let _s = seed;
+const rand = () => { _s = (_s * 16807 + 0) % 2147483647; return (_s & 0x7fffffff) / 0x7fffffff; };
+const randRange = (lo, hi) => lo + rand() * (hi - lo);
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const round1 = v => Math.round(v * 10) / 10;
+
+// Block archetypes create structured disagreement patterns
+const archetypes = [
+  { name: "strong",    bias: [8,8,7,7,8],   spread: [0.8,0.6,1.0,0.8,0.7] },
+  { name: "visual-weak", bias: [4,8,6,7,7], spread: [1.2,0.8,1.0,0.6,0.9] },
+  { name: "fragile-ix",  bias: [7,7,3,6,7], spread: [0.7,1.0,1.5,1.2,0.8] },
+  { name: "deceiver",    bias: [7,3,6,5,8], spread: [0.9,1.5,1.0,1.3,0.7] },
+  { name: "perceptual-trap", bias: [6,7,6,3,6], spread: [1.0,0.8,0.9,1.5,1.0] },
+  { name: "mediocre",    bias: [5,5,5,5,5], spread: [1.2,1.2,1.2,1.2,1.2] },
+  { name: "polarizing",  bias: [9,4,8,3,7], spread: [0.5,1.5,0.7,1.8,1.0] },
+];
+
+function genScores(blockId) {
+  const arch = archetypes[blockId % archetypes.length];
+  return agentKeys.map((_, i) => {
+    const base = arch.bias[i] + (rand() - 0.5) * 2 * arch.spread[i];
+    return round1(clamp(base, 1, 10));
+  });
+}
+
+// v1 (pre-calibration): more variance, lower mean
+// v2 (post-calibration): compressed toward center, some agents shift
+const blocks = [];
+for (let id = 1; id <= 84; id++) {
+  const v1 = genScores(id);
+  // v2: calibration shifts encoding scores up, compresses extremes
+  const v2 = v1.map((s, i) => {
+    let adj = s;
+    if (i === 1) adj += rand() * 1.5;        // encoding gets lenient
+    if (i === 3) adj -= (rand() - 0.3) * 0.8; // perceptual tightens
+    adj = adj * 0.85 + 10 * 0.15;             // regression toward generous
+    return round1(clamp(adj, 1, 10));
+  });
+  const disagreement = v => round1(d3.deviation(v));
+  blocks.push({
+    id,
+    v1, v2,
+    delta: v1.map((s, i) => round1(v2[i] - s)),
+    disagreeV1: disagreement(v1),
+    disagreeV2: disagreement(v2),
+  });
+}
+
+// --- Dimensions for each mode ---
+const scoreDims = [...agentKeys, "disagreement"];
+const scoreDimLabels = [...agentNames, "Disagreement (σ)"];
+const deltaDims = agentKeys.map(k => `d_${k}`);
+const deltaDimLabels = agentNames.map(n => `Δ ${n}`);
+
+function getRow(block, mode) {
+  if (mode === "scores") {
+    const obj = {};
+    agentKeys.forEach((k, i) => obj[k] = block.v2[i]);
+    obj.disagreement = block.disagreeV2;
+    return obj;
+  } else {
+    const obj = {};
+    agentKeys.forEach((k, i) => obj[`d_${k}`] = block.delta[i]);
+    return obj;
+  }
+}
+
+// --- Layout ---
+const margin = { top: 44, right: 36, bottom: 28, left: 36 };
+const width = 940;
+const height = 370;
+const innerW = width - margin.left - margin.right;
+const innerH = height - margin.top - margin.bottom;
+const dpr = window.devicePixelRatio || 1;
+
+const container = document.getElementById("chart-container");
+container.style.width = width + "px";
+container.style.height = height + "px";
+
+// Canvas
+const canvas = document.createElement("canvas");
+canvas.width = width * dpr;
+canvas.height = height * dpr;
+canvas.style.width = width + "px";
+canvas.style.height = height + "px";
+container.prepend(canvas);
+const ctx = canvas.getContext("2d");
+ctx.scale(dpr, dpr);
+
+// Hidden canvas for hover hit-testing
+const hitCanvas = document.createElement("canvas");
+hitCanvas.width = width * dpr;
+hitCanvas.height = height * dpr;
+const hitCtx = hitCanvas.getContext("2d", { willReadFrequently: true });
+hitCtx.scale(dpr, dpr);
+
+// SVG
+const svg = d3.select(container).append("svg")
+  .attr("width", width).attr("height", height)
+  .attr("role", "img")
+  .attr("data-testid", "parcoords");
+svg.append("title").text("Agent Disagreement — parallel coordinates of adversarial audit scores");
+const gAxes = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+// --- Color: Tol Sunset diverging for disagreement ---
+const tolSunset = ["#364B9A","#4A7BB7","#6EA6CD","#98CAE1","#C2E4EF",
+  "#EAECCC","#FEDA8B","#FDB366","#F67E4B","#DD3D2D","#A50026"];
+const disagreeColorScale = d3.scaleLinear()
+  .domain(d3.range(0, 1.001, 1 / (tolSunset.length - 1)).map(t => t * 3))
+  .range(tolSunset)
+  .clamp(true);
+
+// Delta mode: Tol BuRd diverging centered on 0
+const tolBuRd = ["#2166AC","#4393C3","#92C5DE","#D1E5F0","#F7F7F7",
+  "#FDDBC7","#F4A582","#D6604D","#B2182B"];
+const deltaColorScale = d3.scaleLinear()
+  .domain(d3.range(-3, 3.001, 6 / (tolBuRd.length - 1)))
+  .range(tolBuRd)
+  .clamp(true);
+
+// Legend bar
+const legendCanvas = document.getElementById("legend-bar");
+const legendCtx = legendCanvas.getContext("2d");
+
+function drawLegend(scale, lo, hi) {
+  for (let px = 0; px < 100; px++) {
+    const t = lo + (hi - lo) * px / 99;
+    legendCtx.fillStyle = scale(t);
+    legendCtx.fillRect(px, 0, 1, 10);
+  }
+}
+drawLegend(disagreeColorScale, 0, 3);
+
+// --- State ---
+let mode = "scores";
+let dims = scoreDims;
+let dimLabels = scoreDimLabels;
+let brushSelections = {};
+let hoveredBlock = null;
+
+// Scales
+let xScale, yScales;
+
+function buildScales() {
+  const currentDims = mode === "scores" ? scoreDims : deltaDims;
+  dims = currentDims;
+  dimLabels = mode === "scores" ? scoreDimLabels : deltaDimLabels;
+
+  xScale = d3.scalePoint().domain(dims).range([0, innerW]).padding(0.05);
+  yScales = {};
+  dims.forEach(dim => {
+    const vals = blocks.map(b => {
+      const row = getRow(b, mode);
+      return row[dim];
+    });
+    const ext = d3.extent(vals);
+    const pad = (ext[1] - ext[0]) * 0.08 || 0.5;
+    yScales[dim] = d3.scaleLinear()
+      .domain([ext[0] - pad, ext[1] + pad])
+      .range([innerH, 0])
+      .nice();
+  });
+}
+
+function getColor(block) {
+  if (mode === "scores") {
+    return disagreeColorScale(block.disagreeV2);
+  } else {
+    const meanDelta = d3.mean(block.delta);
+    return deltaColorScale(meanDelta);
+  }
+}
+
+// Index-to-color for hit canvas
+const indexToColor = i => {
+  const r = (i + 1) >> 16 & 0xff;
+  const g = (i + 1) >> 8 & 0xff;
+  const b = (i + 1) & 0xff;
+  return `rgb(${r},${g},${b})`;
+};
+
+function drawLine(context, block, dims, xScale, yScales, mode) {
+  const row = getRow(block, mode);
+  context.beginPath();
+  dims.forEach((dim, i) => {
+    const px = xScale(dim);
+    const py = yScales[dim](row[dim]);
+    if (i === 0) context.moveTo(px, py);
+    else context.lineTo(px, py);
+  });
+  context.stroke();
+}
+
+function isBrushed(block) {
+  const row = getRow(block, mode);
+  for (const dim in brushSelections) {
+    const [y0, y1] = brushSelections[dim];
+    const val = row[dim];
+    const lo = yScales[dim].invert(y1); // y1 is lower screen = higher value
+    const hi = yScales[dim].invert(y0);
+    if (val < lo || val > hi) return false;
+  }
+  return true;
+}
+
+function render() {
+  const hasBrush = Object.keys(brushSelections).length > 0;
+  const selected = [];
+  const unselected = [];
+
+  blocks.forEach(b => {
+    if (hasBrush && !isBrushed(b)) unselected.push(b);
+    else selected.push(b);
+  });
+
+  // Main canvas
+  ctx.clearRect(0, 0, width, height);
+  ctx.save();
+  ctx.translate(margin.left, margin.top);
+
+  // Unselected (dimmed)
+  if (hasBrush && unselected.length > 0) {
+    ctx.globalAlpha = 0.06;
+    ctx.lineWidth = 0.8;
+    unselected.forEach(b => {
+      ctx.strokeStyle = getColor(b);
+      drawLine(ctx, b, dims, xScale, yScales, mode);
+    });
+  }
+
+  // Selected
+  const alpha = hasBrush ? 0.75 : Math.max(0.15, Math.min(0.55, 50 / blocks.length));
+  ctx.globalAlpha = alpha;
+  ctx.lineWidth = hasBrush ? 1.8 : 1.2;
+  selected.forEach(b => {
+    ctx.strokeStyle = getColor(b);
+    drawLine(ctx, b, dims, xScale, yScales, mode);
+  });
+
+  // Hovered block highlight
+  if (hoveredBlock !== null) {
+    const b = blocks[hoveredBlock];
+    const isActive = !hasBrush || isBrushed(b);
+    if (isActive) {
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "#1a1a1a";
+      drawLine(ctx, b, dims, xScale, yScales, mode);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = getColor(b);
+      drawLine(ctx, b, dims, xScale, yScales, mode);
+    }
+  }
+
+  ctx.restore();
+
+  // Hit canvas
+  hitCtx.clearRect(0, 0, width * dpr, height * dpr);
+  hitCtx.save();
+  hitCtx.translate(margin.left, margin.top);
+  hitCtx.lineWidth = 6; // fat lines for easier hovering
+  const pool = hasBrush ? selected : blocks;
+  pool.forEach(b => {
+    hitCtx.strokeStyle = indexToColor(b.id - 1);
+    drawLine(hitCtx, b, dims, xScale, yScales, mode);
+  });
+  hitCtx.restore();
+
+  // Info bar
+  updateInfo(hasBrush, selected);
+}
+
+function updateInfo(hasBrush, selected) {
+  const el = document.getElementById("brushed-info");
+  if (hasBrush) {
+    el.innerHTML = `<span class="count">${selected.length} of ${blocks.length}</span> blocks selected: ` +
+      selected.map(b => `<span class="tag">${b.id}</span>`).join("");
+  } else {
+    el.innerHTML = `<span class="count">${blocks.length} blocks</span> — brush any axis to filter`;
+  }
+}
+
+// --- Axes + Brushes ---
+let brushGroups = {};
+
+function buildAxes() {
+  gAxes.selectAll("*").remove();
+  brushSelections = {};
+  brushGroups = {};
+
+  dims.forEach((dim, di) => {
+    const xPos = xScale(dim);
+    const axisG = gAxes.append("g")
+      .attr("transform", `translate(${xPos},0)`);
+
+    const axis = d3.axisLeft(yScales[dim])
+      .ticks(6)
+      .tickSize(-4)
+      .tickFormat(d3.format(mode === "delta" ? "+.1f" : ".1f"));
+
+    axisG.call(axis);
+    axisG.select(".domain").attr("stroke", "#999");
+    axisG.selectAll(".tick line").attr("stroke", "#ddd");
+    axisG.selectAll(".tick text").attr("font-size", "10px").attr("fill", "#777");
+
+    // Label
+    axisG.append("text")
+      .attr("y", -18)
+      .attr("text-anchor", "middle")
+      .attr("font-size", dim === "disagreement" ? "10px" : "11px")
+      .attr("font-weight", "600")
+      .attr("fill", dim === "disagreement" ? "#A50026" : "#333")
+      .text(dimLabels[di]);
+
+    // Brush
+    const bw = 24;
+    const brush = d3.brushY()
+      .extent([[-bw / 2, 0], [bw / 2, innerH]])
+      .on("brush end", function(event) {
+        if (event.selection) {
+          brushSelections[dim] = event.selection;
+        } else {
+          delete brushSelections[dim];
+        }
+        render();
+      });
+
+    const brushG = gAxes.append("g")
+      .attr("class", "brush")
+      .attr("transform", `translate(${xPos},0)`)
+      .call(brush);
+
+    brushG.selectAll(".selection")
+      .attr("rx", 3)
+      .attr("fill", "#4477AA")
+      .attr("fill-opacity", 0.18)
+      .attr("stroke", "#4477AA")
+      .attr("stroke-width", 1.5);
+
+    brushGroups[dim] = { brush, g: brushG };
+  });
+}
+
+// --- Hover / Tooltip ---
+const tooltip = document.getElementById("tooltip");
+
+svg.on("pointermove", function(event) {
+  const [mx, my] = d3.pointer(event);
+  const px = (mx) * dpr;
+  const py = (my) * dpr;
+  if (px < 0 || py < 0 || px >= hitCanvas.width || py >= hitCanvas.height) {
+    hoveredBlock = null;
+    tooltip.style.display = "none";
+    render();
+    return;
+  }
+  const pixel = hitCtx.getImageData(px, py, 1, 1).data;
+  const idx = ((pixel[0] << 16) | (pixel[1] << 8) | pixel[2]) - 1;
+
+  if (idx >= 0 && idx < blocks.length && pixel[3] > 0) {
+    if (hoveredBlock !== idx) {
+      hoveredBlock = idx;
+      render();
+    }
+    showTooltip(blocks[idx], event);
+  } else {
+    if (hoveredBlock !== null) {
+      hoveredBlock = null;
+      tooltip.style.display = "none";
+      render();
+    }
+  }
+});
+
+svg.on("pointerleave", () => {
+  hoveredBlock = null;
+  tooltip.style.display = "none";
+  render();
+});
+
+function showTooltip(block, event) {
+  const row = getRow(block, mode);
+  const currentDims = mode === "scores" ? agentKeys : agentKeys.map(k => `d_${k}`);
+  const labels = mode === "scores" ? agentNames : agentNames.map(n => `Δ ${n}`);
+  const fmt = mode === "scores" ? d3.format(".1f") : d3.format("+.1f");
+
+  let html = `<div class="block-id">Block ${block.id}</div>`;
+  currentDims.forEach((dim, i) => {
+    html += `<div class="score-row"><span class="label">${labels[i]}</span><span class="val">${fmt(row[dim])}</span></div>`;
+  });
+  if (mode === "scores") {
+    html += `<div class="score-row disagree"><span class="label">Disagreement σ</span><span class="val">${block.disagreeV2.toFixed(1)}</span></div>`;
+  }
+
+  tooltip.innerHTML = html;
+  tooltip.style.display = "block";
+
+  const rect = container.getBoundingClientRect();
+  const [mx, my] = d3.pointer(event, container);
+  const tx = mx + 16;
+  const ty = my - 10;
+  tooltip.style.left = (tx + tooltip.offsetWidth > rect.width ? mx - tooltip.offsetWidth - 10 : tx) + "px";
+  tooltip.style.top = (ty < 0 ? my + 16 : ty) + "px";
+}
+
+// --- Mode toggle ---
+function switchMode(newMode) {
+  mode = newMode;
+  document.getElementById("btn-scores").classList.toggle("active", mode === "scores");
+  document.getElementById("btn-delta").classList.toggle("active", mode === "delta");
+
+  if (mode === "scores") {
+    drawLegend(disagreeColorScale, 0, 3);
+    document.querySelector(".color-label").textContent = "Color by disagreement:";
+  } else {
+    drawLegend(deltaColorScale, -3, 3);
+    document.querySelector(".color-label").textContent = "Color by mean delta:";
+  }
+
+  buildScales();
+  buildAxes();
+  render();
+}
+
+document.getElementById("btn-scores").addEventListener("click", () => switchMode("scores"));
+document.getElementById("btn-delta").addEventListener("click", () => switchMode("delta"));
+
+// --- Data attributes for testing ---
+svg.attr("data-selectedCount", blocks.length);
+svg.attr("data-totalCount", blocks.length);
+
+// --- Init ---
+buildScales();
+buildAxes();
+render();
+</script>
+</body>
+</html>

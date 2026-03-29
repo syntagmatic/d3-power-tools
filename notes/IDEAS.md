@@ -8,23 +8,17 @@ What's worth building next. Full backlog in `archive/IDEAS.md`.
 
 ### ~~1. Compress block prompts~~ ✓ Done
 
-All 84 block prompts compressed to avg 29 words (from 160). All 84 v1 blocks generated and tested. Shared defaults.suffix handles boilerplate. Listing pages: `blocks-latest.html` (v1 only), `blocks.html` (archive with v0 Claude/Gemini/v1 + eval scores).
+All 105 block prompts compressed. All 105 v1 blocks generated (85-105 added with simplified prompts). Shared defaults.suffix handles boilerplate. Generation script: `scripts/generate-blocks-claude.py`.
 
 **Next:** Audit v1 blocks (run 5-lens adversarial eval for v0-vs-v1 comparison).
 
-### 2. Compress the largest skills
+### ~~2. Compress the largest skills~~ ✓ Done
 
-Top 6 by line count: cartography (401), data-gathering (394), webgl (385), motion (362), canvas (353), navigation (352). Likely contain API docs models already know. Strip API documentation, keep decision frameworks and warnings. Target: each under 300 lines.
+Six skills compressed: cartography 401→279, data-gathering 394→195, webgl 385→273, motion 362→253, canvas 353→251, navigation 352→286. All under 300 lines. Stripped API docs, kept decision frameworks and warnings.
 
-### 3. Cull redundant examples
+### ~~3. Cull redundant examples~~ ✓ Done
 
-Skills with 3+ examples likely have overlap:
-- `color/`: compositing (420 lines), legend (310), compositing-gallery (205) — "compositing" appears twice
-- `shape-morphing/`: 4 examples — likely overlap
-- `hierarchy-layouts/`: layout-switcher (449) + hierarchy-patterns (350)
-- `network/`: 3 examples (arc, adjacency, chord) — each a different chart type, may all be justified
-
-Read and screenshot each. Keep the best per skill. Update test config.
+Deleted 3 redundant examples (966 lines): color-compositing (compositing-gallery covers it), layout-morph (shape-morph covers point resampling), hierarchy-patterns (layout-switcher covers all 8 layouts). Network examples kept (3 different chart types). Test config updated.
 
 ### 4. Consolidate meta skills (11 → 6)
 

@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Regional Parallel Coordinates Grid</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a2e;
+    color: #e0e0e0;
+    font-family: system-ui, -apple-system, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    padding: 20px;
+  }
+  h1 {
+    font-size: 1.4rem;
+    font-weight: 500;
+    margin-bottom: 4px;
+    color: #f0f0f0;
+  }
+  .subtitle {
+    font-size: 0.8rem;
+    color: #888;
+    margin-bottom: 16px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 8px;
+    width: 960px;
+    height: 640px;
+  }
+  .panel {
+    position: relative;
+    background: #16213e;
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .panel-label {
+    position: absolute;
+    top: 6px;
+    left: 10px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    z-index: 3;
+  }
+  .panel canvas {
+    position: absolute;
+    top: 0; left: 0;
+  }
+  .panel svg {
+    position: absolute;
+    top: 0; left: 0;
+    z-index: 2;
+  }
+  .axis text { font-size: 10px; fill: #aaa; }
+  .axis line, .axis path { stroke: #444; }
+  .axis-label {
+    font-size: 10px;
+    font-weight: 600;
+    fill: #ccc;
+    text-anchor: middle;
+  }
+  .brush .selection {
+    fill: rgba(255, 255, 255, 0.15);
+    stroke: #fff;
+    stroke-width: 1;
+  }
+</style>
+</head>
+<body>
+<h1>Regional Parallel Coordinates</h1>
+<p class="subtitle">200 cars across 4 regions — brush any axis to cross-filter all panels</p>
+<div class="grid" id="grid"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data ---
+const regions = ["North America", "Europe", "Asia", "South America"];
+const regionColors = {
+  "North America": "#4fc3f7",
+  "Europe": "#aed581",
+  "Asia": "#ffb74d",
+  "South America": "#f48fb1"
+};
+const dims = ["Horsepower", "Weight (kg)", "MPG", "Displacement", "Cylinders", "Accel (s)"];
+
+const rng = d3.randomLcg(42);
+const normal = (mu, sigma) => () => mu + d3.randomNormal.source(rng)(0, 1)() * sigma;
+
+// Region-specific distributions for realism
+const regionProfiles = {
+  "North America": { hp: [220, 50], wt: [1800, 300], mpg: [22, 5], disp: [3.5, 1.0], cyl: [6, 1.5], acc: [9, 1.5] },
+  "Europe":        { hp: [160, 40], wt: [1400, 250], mpg: [30, 6], disp: [2.2, 0.7], cyl: [4, 1.0], acc: [8.5, 1.2] },
+  "Asia":          { hp: [150, 35], wt: [1300, 200], mpg: [32, 5], disp: [2.0, 0.6], cyl: [4, 0.8], acc: [8, 1.0] },
+  "South America": { hp: [130, 30], wt: [1200, 200], mpg: [28, 5], disp: [1.8, 0.5], cyl: [4, 0.7], acc: [10, 1.5] }
+};
+
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+function snapCyl(v) { return Math.round(clamp(v, 3, 8)); }
+
+const cars = [];
+for (let i = 0; i < 200; i++) {
+  const region = regions[i % 4];
+  const p = regionProfiles[region];
+  const hp = clamp(normal(...p.hp)(), 60, 400);
+  const wt = clamp(normal(...p.wt)(), 800, 2800);
+  const mpg = clamp(normal(...p.mpg)(), 8, 55);
+  const disp = clamp(normal(...p.disp)(), 0.8, 6.0);
+  const cyl = snapCyl(normal(...p.cyl)());
+  const acc = clamp(normal(...p.acc)(), 4, 16);
+  cars.push({
+    region, id: i,
+    "Horsepower": +hp.toFixed(0),
+    "Weight (kg)": +wt.toFixed(0),
+    "MPG": +mpg.toFixed(1),
+    "Displacement": +disp.toFixed(1),
+    "Cylinders": cyl,
+    "Accel (s)": +acc.toFixed(1)
+  });
+}
+
+// --- Global scales (shared across panels for comparison) ---
+const yScales = {};
+for (const dim of dims) {
+  const extent = d3.extent(cars, d => d[dim]);
+  const pad = (extent[1] - extent[0]) * 0.05;
+  yScales[dim] = d3.scaleLinear()
+    .domain([extent[0] - pad, extent[1] + pad])
+    .range([0, 1]); // normalized; mapped to pixels per panel
+}
+
+// --- Brush state ---
+const brushExtents = {}; // dim -> [y0, y1] in pixel space, or null
+
+// --- Layout ---
+const margin = { top: 30, right: 16, bottom: 16, left: 16 };
+const grid = document.getElementById("grid");
+const panels = [];
+
+for (const region of regions) {
+  const div = document.createElement("div");
+  div.className = "panel";
+  grid.appendChild(div);
+
+  const regionData = cars.filter(d => d.region === region);
+  panels.push({ region, div, data: regionData });
+}
+
+// After DOM layout, measure and build
+requestAnimationFrame(() => {
+  const rect = panels[0].div.getBoundingClientRect();
+  const W = Math.round(rect.width);
+  const H = Math.round(rect.height);
+  const innerW = W - margin.left - margin.right;
+  const innerH = H - margin.top - margin.bottom;
+  const dpr = window.devicePixelRatio || 1;
+
+  const xScale = d3.scalePoint()
+    .domain(dims)
+    .range([0, innerW])
+    .padding(0.08);
+
+  // Per-panel pixel y-scales
+  const yPx = {};
+  for (const dim of dims) {
+    const [lo, hi] = yScales[dim].domain();
+    yPx[dim] = d3.scaleLinear().domain([lo, hi]).range([innerH, 0]);
+  }
+
+  function isSelected(d) {
+    for (const dim in brushExtents) {
+      if (!brushExtents[dim]) continue;
+      const [y0, y1] = brushExtents[dim];
+      const py = yPx[dim](d[dim]);
+      if (py < y0 || py > y1) return false;
+    }
+    return true;
+  }
+
+  function hasBrush() {
+    for (const dim in brushExtents) {
+      if (brushExtents[dim]) return true;
+    }
+    return false;
+  }
+
+  // Build each panel
+  for (const panel of panels) {
+    // Canvas layers: background (dimmed) + foreground (selected)
+    const bgCanvas = document.createElement("canvas");
+    const fgCanvas = document.createElement("canvas");
+    for (const c of [bgCanvas, fgCanvas]) {
+      c.width = W * dpr;
+      c.height = H * dpr;
+      c.style.width = W + "px";
+      c.style.height = H + "px";
+      panel.div.appendChild(c);
+    }
+    const bgCtx = bgCanvas.getContext("2d");
+    const fgCtx = fgCanvas.getContext("2d");
+    for (const ctx of [bgCtx, fgCtx]) {
+      ctx.scale(dpr, dpr);
+      ctx.translate(margin.left, margin.top);
+    }
+
+    panel.bgCtx = bgCtx;
+    panel.fgCtx = fgCtx;
+    panel.W = W;
+    panel.H = H;
+    panel.innerW = innerW;
+    panel.innerH = innerH;
+
+    // SVG overlay for axes + brushes
+    const svg = d3.select(panel.div).append("svg")
+      .attr("width", W).attr("height", H);
+
+    const g = svg.append("g")
+      .attr("transform", `translate(${margin.left},${margin.top})`);
+
+    // Label
+    const label = document.createElement("div");
+    label.className = "panel-label";
+    label.style.color = regionColors[panel.region];
+    label.textContent = `${panel.region} (${panel.data.length})`;
+    panel.div.appendChild(label);
+
+    // Axes
+    for (const dim of dims) {
+      const x = xScale(dim);
+      const axisG = g.append("g")
+        .attr("class", "axis")
+        .attr("transform", `translate(${x},0)`)
+        .call(d3.axisLeft(yPx[dim]).ticks(5).tickSize(-4));
+
+      axisG.select(".domain").remove();
+
+      // Axis title
+      axisG.append("text")
+        .attr("class", "axis-label")
+        .attr("y", -12)
+        .text(dim);
+    }
+
+    // Brushes (one per axis)
+    for (const dim of dims) {
+      const x = xScale(dim);
+      const brushG = g.append("g")
+        .attr("class", "brush")
+        .attr("transform", `translate(${x - 12},0)`);
+
+      const brush = d3.brushY()
+        .extent([[0, 0], [24, innerH]])
+        .on("brush end", function(event) {
+          if (event.selection) {
+            brushExtents[dim] = event.selection;
+          } else {
+            brushExtents[dim] = null;
+          }
+          renderAll();
+        });
+
+      brushG.call(brush);
+      panel.brushes = panel.brushes || {};
+      panel.brushes[dim] = { group: brushG, brush };
+    }
+  }
+
+  function drawLine(ctx, d) {
+    ctx.beginPath();
+    let first = true;
+    for (const dim of dims) {
+      const x = xScale(dim);
+      const y = yPx[dim](d[dim]);
+      if (first) { ctx.moveTo(x, y); first = false; }
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+
+  function renderPanel(panel) {
+    const { bgCtx, fgCtx, innerW, innerH, data } = panel;
+    const color = regionColors[panel.region];
+    const active = hasBrush();
+
+    bgCtx.clearRect(-margin.left, -margin.top, panel.W, panel.H);
+    fgCtx.clearRect(-margin.left, -margin.top, panel.W, panel.H);
+
+    if (!active) {
+      // No brush — draw all lines at moderate opacity
+      fgCtx.strokeStyle = color;
+      fgCtx.globalAlpha = 0.4;
+      fgCtx.lineWidth = 1.2;
+      for (const d of data) drawLine(fgCtx, d);
+      fgCtx.globalAlpha = 1;
+    } else {
+      // Background: all lines dimmed
+      bgCtx.strokeStyle = color;
+      bgCtx.globalAlpha = 0.07;
+      bgCtx.lineWidth = 1;
+      for (const d of data) drawLine(bgCtx, d);
+      bgCtx.globalAlpha = 1;
+
+      // Foreground: selected lines
+      fgCtx.strokeStyle = color;
+      fgCtx.globalAlpha = 0.7;
+      fgCtx.lineWidth = 1.5;
+      for (const d of data) {
+        if (isSelected(d)) drawLine(fgCtx, d);
+      }
+      fgCtx.globalAlpha = 1;
+    }
+  }
+
+  function renderAll() {
+    for (const panel of panels) renderPanel(panel);
+  }
+
+  renderAll();
+});
+</script>
+</body>
+</html>

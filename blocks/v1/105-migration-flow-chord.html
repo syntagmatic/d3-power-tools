@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Migration Flow Chord Diagram</title>
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #0a0a12;
+    color: #ccc;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    padding: 24px;
+  }
+  h1 { font-size: 1.3rem; font-weight: 500; color: #eee; margin-bottom: 4px; }
+  .subtitle { font-size: 0.85rem; color: #888; margin-bottom: 16px; }
+  #chord-container { position: relative; }
+  #tooltip {
+    position: fixed;
+    pointer-events: none;
+    background: rgba(15,15,25,0.94);
+    border: 1px solid #444;
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    color: #ddd;
+    display: none;
+    z-index: 10;
+    max-width: 260px;
+  }
+  #tooltip .tt-title { font-weight: 600; color: #fff; margin-bottom: 4px; }
+  #tooltip .tt-in { color: #6fc; }
+  #tooltip .tt-out { color: #f96; }
+  #tooltip .tt-net { font-weight: 600; }
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin: 12px 0 8px;
+  }
+  .controls label { font-size: 0.82rem; color: #aaa; }
+  .controls input[type=range] {
+    width: 280px;
+    accent-color: #68b;
+  }
+  .decade-label { font-size: 1rem; font-weight: 600; color: #fff; min-width: 50px; }
+  .controls button {
+    background: #2a2a3a;
+    border: 1px solid #555;
+    color: #ccc;
+    border-radius: 4px;
+    padding: 4px 14px;
+    cursor: pointer;
+    font-size: 0.82rem;
+  }
+  .controls button:hover { background: #3a3a4a; }
+  #area-container { margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<h1>Global Migration Flows by Region</h1>
+<p class="subtitle">Chord widths show migration volume per decade &middot; Stacked area shows net migration over time</p>
+
+<div id="chord-container"></div>
+
+<div class="controls">
+  <button id="play-btn">&#9654; Play</button>
+  <label>Decade</label>
+  <input type="range" id="decade-slider" min="0" max="4" step="1" value="0">
+  <span class="decade-label" id="decade-display">1970s</span>
+</div>
+
+<div id="area-container"></div>
+
+<div id="tooltip"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// ── Regions & colors ──
+const regions = [
+  "N. America", "S. America", "W. Europe", "E. Europe",
+  "Sub-Saharan Africa", "MENA", "South Asia", "East Asia"
+];
+const n = regions.length;
+const decades = ["1970s", "1980s", "1990s", "2000s", "2010s"];
+
+const color = d3.scaleOrdinal()
+  .domain(regions)
+  .range(["#4e79a7","#59a14f","#f28e2b","#e15759","#76b7b2","#edc948","#af7aa1","#ff9da7"]);
+
+// ── Synthetic migration data ──
+// Base flow patterns that evolve over decades
+// matrix[decade][source][target] = migration volume (thousands)
+const seed = (() => {
+  let s = 42;
+  return () => { s = (s * 16807 + 0) % 2147483647; return s / 2147483647; };
+})();
+
+const baseFlows = Array.from({length: n}, (_, i) =>
+  Array.from({length: n}, (_, j) => {
+    if (i === j) return 0;
+    return Math.round(20 + seed() * 180);
+  })
+);
+
+// Decade multipliers capturing real-ish trends
+const decadeMatrices = decades.map((dec, di) => {
+  const m = Array.from({length: n}, () => new Array(n).fill(0));
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      if (i === j) continue;
+      let v = baseFlows[i][j];
+      // S.America → N.America grows over time
+      if (i === 1 && j === 0) v *= 1 + di * 0.35;
+      // E.Europe → W.Europe surges post-1990
+      if (i === 3 && j === 2) v *= di >= 2 ? 1.5 + (di - 2) * 0.6 : 0.5;
+      // South Asia → MENA (Gulf migration boom 2000s+)
+      if (i === 6 && j === 5) v *= di >= 3 ? 2.0 + (di - 3) * 0.8 : 0.7;
+      // Sub-Saharan Africa → W.Europe grows
+      if (i === 4 && j === 2) v *= 1 + di * 0.25;
+      // East Asia → N.America grows
+      if (i === 7 && j === 0) v *= 1 + di * 0.3;
+      // MENA → W.Europe grows after 2000s
+      if (i === 5 && j === 2) v *= di >= 3 ? 1.8 + (di - 3) * 0.5 : 0.8;
+      // General slight increase over time
+      v *= 1 + di * 0.08;
+      // Add some noise
+      v *= 0.85 + seed() * 0.3;
+      m[i][j] = Math.round(Math.max(5, v));
+    }
+  }
+  return m;
+});
+
+// ── Net migration per region per decade (for stacked area) ──
+const netData = decades.map((dec, di) => {
+  const entry = {decade: dec, year: 1975 + di * 10};
+  for (let j = 0; j < n; j++) {
+    let inflow = 0, outflow = 0;
+    for (let i = 0; i < n; i++) {
+      if (i === j) continue;
+      inflow += decadeMatrices[di][i][j];
+      outflow += decadeMatrices[di][j][i];
+    }
+    entry[regions[j]] = inflow - outflow;
+  }
+  return entry;
+});
+
+// ── Chord diagram ──
+const chordW = 560, chordH = 560;
+const outerR = Math.min(chordW, chordH) / 2 - 60;
+const innerR = outerR - 24;
+
+const chordSvg = d3.select("#chord-container").append("svg")
+  .attr("width", chordW).attr("height", chordH)
+  .attr("viewBox", `0 0 ${chordW} ${chordH}`);
+
+const chordG = chordSvg.append("g")
+  .attr("transform", `translate(${chordW/2},${chordH/2})`);
+
+const chordLayout = d3.chord()
+  .padAngle(0.04)
+  .sortSubgroups(d3.descending);
+
+const arcGen = d3.arc().innerRadius(innerR).outerRadius(outerR);
+const ribbonGen = d3.ribbon().radius(innerR);
+
+// Initial render
+const groupsG = chordG.append("g").attr("class", "groups");
+const ribbonsG = chordG.append("g").attr("class", "ribbons");
+const labelsG = chordG.append("g").attr("class", "labels");
+
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+const dur = ms => reducedMotion.matches ? 0 : ms;
+
+let currentDecade = 0;
+
+function updateChord(di, animate = true) {
+  currentDecade = di;
+  const matrix = decadeMatrices[di];
+  const chords = chordLayout(matrix);
+  const t = animate ? d3.transition().duration(dur(600)).ease(d3.easeCubicInOut) : null;
+
+  // Groups (arcs)
+  const arcs = groupsG.selectAll("path")
+    .data(chords.groups, d => d.index);
+
+  arcs.join(
+    enter => enter.append("path")
+      .attr("d", arcGen)
+      .attr("fill", d => color(regions[d.index]))
+      .attr("stroke", "#1a1a2e")
+      .attr("stroke-width", 1.5)
+      .style("cursor", "pointer"),
+    update => animate
+      ? update.transition(t).attrTween("d", function(d) {
+          const prev = d3.select(this).datum();
+          const i = d3.interpolate(
+            {startAngle: prev.startAngle, endAngle: prev.endAngle},
+            {startAngle: d.startAngle, endAngle: d.endAngle}
+          );
+          return t => arcGen(i(t));
+        })
+      : update.attr("d", arcGen)
+  ).on("pointerenter", (event, d) => showGroupTooltip(event, d, di))
+   .on("pointermove", moveTooltip)
+   .on("pointerleave", hideTooltip);
+
+  // Store data for tooltip arc lookup
+  groupsG.selectAll("path").each(function(d) { d3.select(this).datum(d); });
+
+  // Ribbons
+  const ribbons = ribbonsG.selectAll("path")
+    .data(chords, d => `${d.source.index}-${d.target.index}`);
+
+  ribbons.join(
+    enter => enter.append("path")
+      .attr("d", ribbonGen)
+      .attr("fill", d => color(regions[d.source.index]))
+      .attr("fill-opacity", 0.55)
+      .attr("stroke", "none"),
+    update => animate
+      ? update.transition(t).attrTween("d", function(d) {
+          const prev = d3.select(this).datum();
+          const i = d3.interpolate(
+            {source: {startAngle: prev.source.startAngle, endAngle: prev.source.endAngle},
+             target: {startAngle: prev.target.startAngle, endAngle: prev.target.endAngle}},
+            {source: {startAngle: d.source.startAngle, endAngle: d.source.endAngle},
+             target: {startAngle: d.target.startAngle, endAngle: d.target.endAngle}}
+          );
+          return t => ribbonGen(i(t));
+        })
+      : update.attr("d", ribbonGen),
+    exit => exit.transition(t).attr("fill-opacity", 0).remove()
+  ).attr("fill", d => color(regions[d.source.index]));
+
+  ribbonsG.selectAll("path").each(function(d) { d3.select(this).datum(d); });
+
+  // Labels
+  const labels = labelsG.selectAll("text")
+    .data(chords.groups, d => d.index);
+
+  labels.join(
+    enter => enter.append("text")
+      .attr("font-size", "11px")
+      .attr("fill", "#ccc")
+      .text(d => regions[d.index]),
+    update => update
+  ).transition(animate ? t : null)
+   .attr("transform", d => {
+     const angle = (d.startAngle + d.endAngle) / 2;
+     const rotate = angle * 180 / Math.PI - 90;
+     const flip = angle > Math.PI;
+     return `rotate(${rotate}) translate(${outerR + 12}) ${flip ? "rotate(180)" : ""}`;
+   })
+   .attr("text-anchor", d => (d.startAngle + d.endAngle) / 2 > Math.PI ? "end" : "start");
+}
+
+// ── Tooltip ──
+const tooltip = d3.select("#tooltip");
+
+function showGroupTooltip(event, d, di) {
+  const region = regions[d.index];
+  const matrix = decadeMatrices[di];
+  let inflow = 0, outflow = 0;
+  for (let i = 0; i < n; i++) {
+    if (i === d.index) continue;
+    inflow += matrix[i][d.index];
+    outflow += matrix[d.index][i];
+  }
+  const net = inflow - outflow;
+  const netClass = net >= 0 ? "tt-in" : "tt-out";
+
+  tooltip.html(`
+    <div class="tt-title">${region} — ${decades[di]}</div>
+    <div class="tt-in">Immigration: ${d3.format(",")(inflow)}k</div>
+    <div class="tt-out">Emigration: ${d3.format(",")(outflow)}k</div>
+    <div class="tt-net ${netClass}">Net: ${net >= 0 ? "+" : ""}${d3.format(",")(net)}k</div>
+  `).style("display", "block");
+  moveTooltip(event);
+
+  // Highlight connected ribbons
+  ribbonsG.selectAll("path")
+    .attr("fill-opacity", r =>
+      r.source.index === d.index || r.target.index === d.index ? 0.8 : 0.08
+    );
+  groupsG.selectAll("path")
+    .attr("opacity", g => g.index === d.index ? 1 : 0.4);
+}
+
+function moveTooltip(event) {
+  tooltip.style("left", (event.clientX + 14) + "px")
+         .style("top", (event.clientY - 10) + "px");
+}
+
+function hideTooltip() {
+  tooltip.style("display", "none");
+  ribbonsG.selectAll("path").attr("fill-opacity", 0.55);
+  groupsG.selectAll("path").attr("opacity", 1);
+}
+
+// ── Slider + play button ──
+const slider = document.getElementById("decade-slider");
+const decadeDisplay = document.getElementById("decade-display");
+const playBtn = document.getElementById("play-btn");
+let playing = false, playTimer = null;
+
+slider.addEventListener("input", () => {
+  const di = +slider.value;
+  decadeDisplay.textContent = decades[di];
+  updateChord(di);
+  updateAreaHighlight(di);
+});
+
+playBtn.addEventListener("click", () => {
+  if (playing) {
+    clearInterval(playTimer);
+    playBtn.textContent = "▶ Play";
+    playing = false;
+  } else {
+    playing = true;
+    playBtn.textContent = "⏸ Pause";
+    function step() {
+      let next = (+slider.value + 1) % decades.length;
+      slider.value = next;
+      decadeDisplay.textContent = decades[next];
+      updateChord(next);
+      updateAreaHighlight(next);
+    }
+    step();
+    playTimer = setInterval(step, 1800);
+  }
+});
+
+// ── Stacked area chart ──
+const areaMargin = {top: 20, right: 140, bottom: 34, left: 56};
+const areaW = 660, areaH = 200;
+const areaInnerW = areaW - areaMargin.left - areaMargin.right;
+const areaInnerH = areaH - areaMargin.top - areaMargin.bottom;
+
+// Separate positive and negative regions for diverging stacked area
+const positiveRegions = [];
+const negativeRegions = [];
+
+// Classify by average net
+for (const r of regions) {
+  const avg = d3.mean(netData, d => d[r]);
+  if (avg >= 0) positiveRegions.push(r);
+  else negativeRegions.push(r);
+}
+
+const stackPos = d3.stack()
+  .keys(positiveRegions)
+  .value((d, key) => Math.max(0, d[key]))
+  .offset(d3.stackOffsetNone);
+
+const stackNeg = d3.stack()
+  .keys(negativeRegions)
+  .value((d, key) => Math.min(0, d[key]))
+  .offset(d3.stackOffsetNone);
+
+const seriesPos = stackPos(netData);
+const seriesNeg = stackNeg(netData);
+
+const x = d3.scaleLinear()
+  .domain(d3.extent(netData, d => d.year))
+  .range([0, areaInnerW]);
+
+const allVals = [...seriesPos.flatMap(s => s.flatMap(d => [d[0], d[1]])),
+                 ...seriesNeg.flatMap(s => s.flatMap(d => [d[0], d[1]]))];
+const y = d3.scaleLinear()
+  .domain(d3.extent(allVals)).nice()
+  .range([areaInnerH, 0]);
+
+const areaSvg = d3.select("#area-container").append("svg")
+  .attr("width", areaW).attr("height", areaH)
+  .attr("viewBox", `0 0 ${areaW} ${areaH}`);
+
+const areaG = areaSvg.append("g")
+  .attr("transform", `translate(${areaMargin.left},${areaMargin.top})`);
+
+// Zero line
+areaG.append("line")
+  .attr("x1", 0).attr("x2", areaInnerW)
+  .attr("y1", y(0)).attr("y2", y(0))
+  .attr("stroke", "#555").attr("stroke-dasharray", "3,3");
+
+const areaGen = d3.area()
+  .x(d => x(d.data.year))
+  .y0(d => y(d[0]))
+  .y1(d => y(d[1]))
+  .curve(d3.curveMonotoneX);
+
+// Draw negative series
+for (const s of seriesNeg) {
+  areaG.append("path")
+    .datum(s)
+    .attr("d", areaGen)
+    .attr("fill", color(s.key))
+    .attr("fill-opacity", 0.7)
+    .attr("stroke", "none");
+}
+
+// Draw positive series
+for (const s of seriesPos) {
+  areaG.append("path")
+    .datum(s)
+    .attr("d", areaGen)
+    .attr("fill", color(s.key))
+    .attr("fill-opacity", 0.7)
+    .attr("stroke", "none");
+}
+
+// Axes
+areaG.append("g")
+  .attr("transform", `translate(0,${areaInnerH})`)
+  .call(d3.axisBottom(x).ticks(5).tickFormat(d => `${d}s`))
+  .selectAll("text,line,path").attr("stroke", "#666").attr("fill", "#999");
+
+areaG.append("g")
+  .call(d3.axisLeft(y).ticks(5).tickFormat(d => `${d > 0 ? "+" : ""}${d}k`))
+  .selectAll("text,line,path").attr("stroke", "#666").attr("fill", "#999");
+
+areaG.append("text")
+  .attr("x", -areaMargin.left + 8).attr("y", -8)
+  .attr("fill", "#888").attr("font-size", "11px")
+  .text("Net migration (thousands)");
+
+// Legend (right side)
+const legendG = areaSvg.append("g")
+  .attr("transform", `translate(${areaW - areaMargin.right + 12}, ${areaMargin.top})`);
+
+[...positiveRegions, ...negativeRegions].forEach((r, i) => {
+  const g = legendG.append("g").attr("transform", `translate(0, ${i * 16})`);
+  g.append("rect").attr("width", 10).attr("height", 10)
+    .attr("fill", color(r)).attr("rx", 2);
+  g.append("text").attr("x", 14).attr("y", 9)
+    .attr("fill", "#aaa").attr("font-size", "10px").text(r);
+});
+
+// Decade highlight line
+const highlightLine = areaG.append("line")
+  .attr("y1", 0).attr("y2", areaInnerH)
+  .attr("stroke", "#fff").attr("stroke-width", 2)
+  .attr("stroke-opacity", 0.6);
+
+function updateAreaHighlight(di) {
+  const yr = 1975 + di * 10;
+  highlightLine.transition().duration(dur(400))
+    .attr("x1", x(yr)).attr("x2", x(yr));
+}
+
+// ── Init ──
+updateChord(0, false);
+updateAreaHighlight(0);
+
+</script>
+</body>
+</html>

@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Skill Constellation — Force-Directed Co-occurrence Network</title>
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0e1a;
+    color: #c8cdd8;
+    font-family: "Inter", system-ui, sans-serif;
+    overflow: hidden;
+    height: 100vh;
+  }
+  #container { width: 100%; height: 100vh; position: relative; }
+  svg { display: block; }
+  .title {
+    position: absolute; top: 20px; left: 24px;
+    font-size: 15px; font-weight: 600; color: #e0e4ec;
+    pointer-events: none;
+  }
+  .subtitle {
+    position: absolute; top: 42px; left: 24px;
+    font-size: 11px; color: #6b7280;
+    pointer-events: none;
+  }
+  .legend {
+    position: absolute; bottom: 20px; left: 24px;
+    font-size: 10px; color: #6b7280;
+    pointer-events: none;
+    line-height: 1.6;
+  }
+  .legend-row { display: flex; align-items: center; gap: 6px; }
+  .legend-swatch {
+    width: 10px; height: 10px; border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .tooltip {
+    position: absolute; pointer-events: none;
+    background: rgba(15, 20, 35, 0.92);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 6px; padding: 8px 12px;
+    font-size: 11px; line-height: 1.5;
+    color: #d1d5db; max-width: 240px;
+    opacity: 0; transition: opacity 0.15s;
+    backdrop-filter: blur(8px);
+  }
+  .tooltip strong { color: #f3f4f6; font-weight: 600; }
+  .tooltip .count { color: #9ca3af; }
+</style>
+</head>
+<body>
+<div id="container">
+  <div class="title">Skill Constellation</div>
+  <div class="subtitle">Force-directed network of skill co-occurrence across 105 blocks</div>
+  <div class="legend" id="legend"></div>
+  <div class="tooltip" id="tooltip"></div>
+</div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// ── Real co-occurrence data from blocks/manifest.json ──
+const skillCounts = {
+  "color":28,"annotation":21,"motion":21,"distributions":19,"canvas":19,
+  "brushing":18,"time-series":17,"network":16,"scales":16,"responsive":13,
+  "data-table":12,"hierarchy-layouts":12,"cartography":12,"force":11,
+  "sparkcharts":9,"linked-views":9,"small-multiples":9,"navigation":9,
+  "parallel-coordinates":7,"edge-bundling":7,"webgl":7,
+  "hierarchy-interaction":6,"shape-morphing":5,"visual-texture":5,
+  "canvas-accessibility":5,"data-gathering":2
+};
+
+const coOccurrences = [
+  ["annotation","color",6],["color","distributions",5],["annotation","distributions",5],
+  ["data-table","sparkcharts",5],["color","network",5],["motion","network",5],
+  ["color","motion",5],["canvas","cartography",5],["annotation","time-series",5],
+  ["brushing","parallel-coordinates",4],["brushing","distributions",4],
+  ["color","responsive",4],["color","data-table",4],["annotation","brushing",4],
+  ["color","hierarchy-layouts",4],["motion","shape-morphing",4],["force","network",4],
+  ["annotation","responsive",4],["annotation","motion",4],
+  ["annotation","small-multiples",4],["canvas","navigation",4],
+  ["canvas-accessibility","data-table",4],["annotation","scales",4],["color","scales",4],
+  ["brushing","linked-views",3],["brushing","time-series",3],["canvas","distributions",3],
+  ["responsive","small-multiples",3],["canvas","edge-bundling",3],["brushing","color",3],
+  ["cartography","motion",3],["canvas","linked-views",3],["brushing","scales",3],
+  ["network","scales",3],["linked-views","parallel-coordinates",3],["motion","time-series",3],
+  ["distributions","responsive",2],["distributions","force",2],
+  ["linked-views","time-series",2],["brushing","canvas",2],
+  ["small-multiples","time-series",2],["responsive","time-series",2],
+  ["color","hierarchy-interaction",2],["hierarchy-layouts","motion",2],
+  ["edge-bundling","hierarchy-layouts",2],["canvas","hierarchy-layouts",2],
+  ["canvas","force",2],["data-table","network",2],["annotation","network",2],
+  ["hierarchy-layouts","navigation",2],["color","navigation",2],
+  ["brushing","network",2],["cartography","color",2],["canvas","motion",2],
+  ["cartography","distributions",2],["motion","responsive",2],["canvas","time-series",2],
+  ["color","visual-texture",2],["distributions","visual-texture",2],["canvas","color",2]
+];
+
+// ── Categorize skills into groups ──
+const groups = {
+  "Seeing patterns":     ["parallel-coordinates","brushing","linked-views","distributions"],
+  "Seeing structure":    ["hierarchy-layouts","hierarchy-interaction","edge-bundling","force","network"],
+  "Seeing place":        ["cartography"],
+  "Seeing change":       ["time-series","motion","shape-morphing"],
+  "Making it legible":   ["scales","color","visual-texture","annotation","data-table","canvas-accessibility","sparkcharts","small-multiples"],
+  "Making it work":      ["canvas","webgl","navigation","responsive"],
+  "Before you render":   ["data-gathering"]
+};
+
+const groupColors = {
+  "Seeing patterns":   "#6366f1",
+  "Seeing structure":  "#f59e0b",
+  "Seeing place":      "#10b981",
+  "Seeing change":     "#ef4444",
+  "Making it legible": "#8b5cf6",
+  "Making it work":    "#06b6d4",
+  "Before you render": "#78716c"
+};
+
+const skillToGroup = {};
+for (const [group, skills] of Object.entries(groups)) {
+  for (const s of skills) skillToGroup[s] = group;
+}
+
+// ── Build graph ──
+const nodes = Object.entries(skillCounts).map(([id, count]) => ({
+  id, count, group: skillToGroup[id] || "Other"
+}));
+
+const nodeById = new Map(nodes.map(n => [n.id, n]));
+
+const links = coOccurrences.map(([source, target, value]) => ({
+  source, target, value
+}));
+
+// ── Scales ──
+const radiusScale = d3.scaleSqrt()
+  .domain(d3.extent(nodes, d => d.count))
+  .range([6, 28]);
+
+const linkWidthScale = d3.scaleLinear()
+  .domain([1, d3.max(links, d => d.value)])
+  .range([0.5, 4]);
+
+const linkOpacityScale = d3.scaleLinear()
+  .domain([1, d3.max(links, d => d.value)])
+  .range([0.08, 0.45]);
+
+// ── Layout ──
+const container = document.getElementById("container");
+const { width, height } = container.getBoundingClientRect();
+
+const svg = d3.select("#container").append("svg")
+  .attr("width", width)
+  .attr("height", height);
+
+// Glow filter for nodes
+const defs = svg.append("defs");
+const glow = defs.append("filter").attr("id", "glow");
+glow.append("feGaussianBlur").attr("stdDeviation", 3).attr("result", "blur");
+const merge = glow.append("feMerge");
+merge.append("feMergeNode").attr("in", "blur");
+merge.append("feMergeNode").attr("in", "SourceGraphic");
+
+const g = svg.append("g");
+
+// ── Zoom ──
+const zoom = d3.zoom()
+  .scaleExtent([0.3, 5])
+  .on("zoom", e => g.attr("transform", e.transform));
+svg.call(zoom);
+
+// ── Links ──
+const linkG = g.append("g");
+const linkSel = linkG.selectAll("line")
+  .data(links)
+  .join("line")
+    .attr("stroke", "#4b5563")
+    .attr("stroke-width", d => linkWidthScale(d.value))
+    .attr("stroke-opacity", d => linkOpacityScale(d.value));
+
+// ── Nodes ──
+const nodeG = g.append("g");
+const nodeSel = nodeG.selectAll("g")
+  .data(nodes, d => d.id)
+  .join("g")
+    .attr("cursor", "grab")
+    .call(d3.drag()
+      .on("start", dragStart)
+      .on("drag", dragged)
+      .on("end", dragEnd));
+
+nodeSel.append("circle")
+  .attr("r", d => radiusScale(d.count))
+  .attr("fill", d => groupColors[d.group] || "#666")
+  .attr("fill-opacity", 0.75)
+  .attr("stroke", d => d3.color(groupColors[d.group] || "#666").brighter(0.8))
+  .attr("stroke-width", 1.2)
+  .attr("filter", "url(#glow)");
+
+// Labels for larger nodes
+nodeSel.filter(d => d.count >= 9)
+  .append("text")
+    .text(d => d.id)
+    .attr("text-anchor", "middle")
+    .attr("dy", d => radiusScale(d.count) + 13)
+    .attr("fill", "#9ca3af")
+    .attr("font-size", "10px")
+    .attr("font-family", "Inter, system-ui, sans-serif")
+    .attr("pointer-events", "none");
+
+// ── Tooltip ──
+const tooltip = d3.select("#tooltip");
+
+nodeSel
+  .on("pointerenter", (event, d) => {
+    // Highlight connected
+    const connected = new Set();
+    links.forEach(l => {
+      const sid = typeof l.source === "object" ? l.source.id : l.source;
+      const tid = typeof l.target === "object" ? l.target.id : l.target;
+      if (sid === d.id) connected.add(tid);
+      if (tid === d.id) connected.add(sid);
+    });
+    connected.add(d.id);
+
+    nodeSel.select("circle")
+      .attr("fill-opacity", n => connected.has(n.id) ? 0.95 : 0.15)
+      .attr("stroke-opacity", n => connected.has(n.id) ? 1 : 0.15);
+    nodeSel.select("text")
+      .attr("fill-opacity", n => connected.has(n.id) ? 1 : 0.15);
+
+    linkSel
+      .attr("stroke-opacity", l => {
+        const sid = typeof l.source === "object" ? l.source.id : l.source;
+        const tid = typeof l.target === "object" ? l.target.id : l.target;
+        return (sid === d.id || tid === d.id) ? 0.6 : 0.02;
+      })
+      .attr("stroke", l => {
+        const sid = typeof l.source === "object" ? l.source.id : l.source;
+        const tid = typeof l.target === "object" ? l.target.id : l.target;
+        return (sid === d.id || tid === d.id)
+          ? d3.color(groupColors[d.group] || "#666").brighter(0.5)
+          : "#4b5563";
+      });
+
+    // Tooltip content
+    const pairs = links
+      .filter(l => {
+        const sid = typeof l.source === "object" ? l.source.id : l.source;
+        const tid = typeof l.target === "object" ? l.target.id : l.target;
+        return sid === d.id || tid === d.id;
+      })
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 5)
+      .map(l => {
+        const sid = typeof l.source === "object" ? l.source.id : l.source;
+        const tid = typeof l.target === "object" ? l.target.id : l.target;
+        const other = sid === d.id ? tid : sid;
+        return `${other} <span class="count">×${l.value}</span>`;
+      });
+
+    tooltip.html(
+      `<strong>${d.id}</strong><br>` +
+      `<span class="count">${d.group} · ${d.count} blocks</span><br>` +
+      (pairs.length ? `<br>Top co-occurrences:<br>${pairs.join("<br>")}` : "")
+    );
+    tooltip.style("opacity", 1);
+  })
+  .on("pointermove", event => {
+    tooltip
+      .style("left", (event.pageX + 14) + "px")
+      .style("top", (event.pageY - 10) + "px");
+  })
+  .on("pointerleave", () => {
+    nodeSel.select("circle")
+      .attr("fill-opacity", 0.75)
+      .attr("stroke-opacity", 1);
+    nodeSel.select("text").attr("fill-opacity", 1);
+    linkSel
+      .attr("stroke", "#4b5563")
+      .attr("stroke-opacity", d => linkOpacityScale(d.value));
+    tooltip.style("opacity", 0);
+  });
+
+// ── Simulation ──
+const simulation = d3.forceSimulation(nodes)
+  .force("link", d3.forceLink(links).id(d => d.id).distance(d => 100 - d.value * 8).strength(d => 0.3 + d.value * 0.08))
+  .force("charge", d3.forceManyBody().strength(d => -radiusScale(d.count) * 12))
+  .force("center", d3.forceCenter(width / 2, height / 2))
+  .force("collision", d3.forceCollide().radius(d => radiusScale(d.count) + 4))
+  .force("x", d3.forceX(width / 2).strength(0.04))
+  .force("y", d3.forceY(height / 2).strength(0.04))
+  .on("tick", () => {
+    linkSel
+      .attr("x1", d => d.source.x)
+      .attr("y1", d => d.source.y)
+      .attr("x2", d => d.target.x)
+      .attr("y2", d => d.target.y);
+    nodeSel.attr("transform", d => `translate(${d.x},${d.y})`);
+  });
+
+// ── Drag ──
+function dragStart(event, d) {
+  if (!event.active) simulation.alphaTarget(0.3).restart();
+  d.fx = d.x; d.fy = d.y;
+  d3.select(this).attr("cursor", "grabbing");
+}
+function dragged(event, d) {
+  d.fx = event.x; d.fy = event.y;
+}
+function dragEnd(event, d) {
+  if (!event.active) simulation.alphaTarget(0);
+  d.fx = null; d.fy = null;
+  d3.select(this).attr("cursor", "grab");
+}
+
+// ── Legend ──
+const legendEl = document.getElementById("legend");
+for (const [group, color] of Object.entries(groupColors)) {
+  const row = document.createElement("div");
+  row.className = "legend-row";
+  row.innerHTML = `<span class="legend-swatch" style="background:${color}"></span>${group}`;
+  legendEl.appendChild(row);
+}
+
+// ── Resize ──
+const ro = new ResizeObserver(([entry]) => {
+  const { width: w, height: h } = entry.contentRect;
+  svg.attr("width", w).attr("height", h);
+  simulation.force("center", d3.forceCenter(w / 2, h / 2));
+  simulation.force("x", d3.forceX(w / 2).strength(0.04));
+  simulation.force("y", d3.forceY(h / 2).strength(0.04));
+  simulation.alpha(0.3).restart();
+});
+ro.observe(container);
+</script>
+</body>
+</html>

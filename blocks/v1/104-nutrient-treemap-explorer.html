@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Nutrient Treemap Explorer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #1a1a2e; color: #e0e0e0; }
+  #container { width: 100vw; height: 100vh; display: flex; flex-direction: column; }
+  #breadcrumb { padding: 8px 16px; font-size: 13px; background: #16213e; border-bottom: 1px solid #0f3460; min-height: 32px; display: flex; align-items: center; gap: 4px; }
+  #breadcrumb span { cursor: pointer; color: #8ecae6; }
+  #breadcrumb span:hover { text-decoration: underline; }
+  #breadcrumb span.sep { color: #555; cursor: default; }
+  #breadcrumb span.current { color: #e0e0e0; cursor: default; }
+  #treemap { flex: 1; position: relative; overflow: hidden; min-height: 0; }
+  #parcoords-container { height: 220px; background: #16213e; border-top: 2px solid #0f3460; position: relative; }
+  canvas { position: absolute; top: 0; left: 0; }
+  #parcoords-svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+  .treemap-cell { position: absolute; overflow: hidden; cursor: pointer; border: 1px solid rgba(0,0,0,0.3); transition: opacity 0.15s; }
+  .treemap-cell .label { padding: 3px 5px; font-size: 11px; line-height: 1.2; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,0.7); pointer-events: none; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .treemap-cell.dimmed { opacity: 0.2; }
+  .treemap-cell.highlighted { border: 2px solid #fff; z-index: 10; }
+  .axis text { fill: #aaa; font-size: 11px; }
+  .axis line, .axis path { stroke: #444; }
+  .axis-label { fill: #ccc; font-size: 12px; font-weight: 600; cursor: default; }
+  .brush .selection { fill: #8ecae6; fill-opacity: 0.3; stroke: #8ecae6; stroke-width: 1; }
+  #info { position: absolute; bottom: 8px; right: 12px; font-size: 11px; color: #666; }
+</style>
+</head>
+<body>
+<div id="container">
+  <div id="breadcrumb"></div>
+  <div id="treemap"></div>
+  <div id="parcoords-container">
+    <canvas id="parcoords-canvas"></canvas>
+    <svg id="parcoords-svg"></svg>
+  </div>
+</div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic Data ---
+const foodGroups = {
+  "Fruits": [
+    { name: "Apple", calories: 52, protein: 0.3, fat: 0.2, carbs: 14, fiber: 2.4, sugar: 10.4 },
+    { name: "Banana", calories: 89, protein: 1.1, fat: 0.3, carbs: 23, fiber: 2.6, sugar: 12.2 },
+    { name: "Orange", calories: 47, protein: 0.9, fat: 0.1, carbs: 12, fiber: 2.4, sugar: 9.4 },
+    { name: "Strawberry", calories: 32, protein: 0.7, fat: 0.3, carbs: 7.7, fiber: 2.0, sugar: 4.9 },
+    { name: "Blueberry", calories: 57, protein: 0.7, fat: 0.3, carbs: 14, fiber: 2.4, sugar: 10 },
+    { name: "Mango", calories: 60, protein: 0.8, fat: 0.4, carbs: 15, fiber: 1.6, sugar: 13.7 },
+    { name: "Grape", calories: 69, protein: 0.7, fat: 0.2, carbs: 18, fiber: 0.9, sugar: 16 },
+    { name: "Pineapple", calories: 50, protein: 0.5, fat: 0.1, carbs: 13, fiber: 1.4, sugar: 10 },
+    { name: "Watermelon", calories: 30, protein: 0.6, fat: 0.2, carbs: 8, fiber: 0.4, sugar: 6.2 },
+    { name: "Peach", calories: 39, protein: 0.9, fat: 0.3, carbs: 10, fiber: 1.5, sugar: 8.4 },
+    { name: "Pear", calories: 57, protein: 0.4, fat: 0.1, carbs: 15, fiber: 3.1, sugar: 9.8 },
+    { name: "Cherry", calories: 50, protein: 1.0, fat: 0.3, carbs: 12, fiber: 1.6, sugar: 8.5 },
+  ],
+  "Vegetables": [
+    { name: "Broccoli", calories: 34, protein: 2.8, fat: 0.4, carbs: 7, fiber: 2.6, sugar: 1.7 },
+    { name: "Carrot", calories: 41, protein: 0.9, fat: 0.2, carbs: 10, fiber: 2.8, sugar: 4.7 },
+    { name: "Spinach", calories: 23, protein: 2.9, fat: 0.4, carbs: 3.6, fiber: 2.2, sugar: 0.4 },
+    { name: "Kale", calories: 49, protein: 4.3, fat: 0.9, carbs: 9, fiber: 3.6, sugar: 2.3 },
+    { name: "Tomato", calories: 18, protein: 0.9, fat: 0.2, carbs: 3.9, fiber: 1.2, sugar: 2.6 },
+    { name: "Bell Pepper", calories: 31, protein: 1.0, fat: 0.3, carbs: 6, fiber: 2.1, sugar: 4.2 },
+    { name: "Cucumber", calories: 15, protein: 0.7, fat: 0.1, carbs: 3.6, fiber: 0.5, sugar: 1.7 },
+    { name: "Sweet Potato", calories: 86, protein: 1.6, fat: 0.1, carbs: 20, fiber: 3.0, sugar: 4.2 },
+    { name: "Cauliflower", calories: 25, protein: 1.9, fat: 0.3, carbs: 5, fiber: 2.0, sugar: 1.9 },
+    { name: "Zucchini", calories: 17, protein: 1.2, fat: 0.3, carbs: 3.1, fiber: 1.0, sugar: 2.5 },
+  ],
+  "Grains": [
+    { name: "White Rice", calories: 130, protein: 2.7, fat: 0.3, carbs: 28, fiber: 0.4, sugar: 0.1 },
+    { name: "Brown Rice", calories: 112, protein: 2.3, fat: 0.8, carbs: 24, fiber: 1.8, sugar: 0.4 },
+    { name: "Oats", calories: 389, protein: 16.9, fat: 6.9, carbs: 66, fiber: 10.6, sugar: 0.9 },
+    { name: "Quinoa", calories: 120, protein: 4.4, fat: 1.9, carbs: 21, fiber: 2.8, sugar: 0.9 },
+    { name: "Wheat Bread", calories: 265, protein: 9.4, fat: 3.2, carbs: 49, fiber: 2.7, sugar: 5.0 },
+    { name: "Pasta", calories: 131, protein: 5.0, fat: 1.1, carbs: 25, fiber: 1.8, sugar: 0.6 },
+    { name: "Corn", calories: 96, protein: 3.4, fat: 1.5, carbs: 21, fiber: 2.4, sugar: 4.5 },
+    { name: "Barley", calories: 123, protein: 2.3, fat: 0.4, carbs: 28, fiber: 3.8, sugar: 0.3 },
+    { name: "Rye Bread", calories: 259, protein: 8.5, fat: 3.3, carbs: 48, fiber: 5.8, sugar: 3.9 },
+  ],
+  "Proteins": [
+    { name: "Chicken Breast", calories: 165, protein: 31, fat: 3.6, carbs: 0, fiber: 0, sugar: 0 },
+    { name: "Salmon", calories: 208, protein: 20, fat: 13, carbs: 0, fiber: 0, sugar: 0 },
+    { name: "Egg", calories: 155, protein: 13, fat: 11, carbs: 1.1, fiber: 0, sugar: 1.1 },
+    { name: "Tofu", calories: 76, protein: 8, fat: 4.8, carbs: 1.9, fiber: 0.3, sugar: 0.5 },
+    { name: "Beef Sirloin", calories: 271, protein: 26, fat: 18, carbs: 0, fiber: 0, sugar: 0 },
+    { name: "Tuna", calories: 132, protein: 28, fat: 1.3, carbs: 0, fiber: 0, sugar: 0 },
+    { name: "Lentils", calories: 116, protein: 9, fat: 0.4, carbs: 20, fiber: 7.9, sugar: 1.8 },
+    { name: "Black Beans", calories: 132, protein: 8.9, fat: 0.5, carbs: 24, fiber: 8.7, sugar: 0.3 },
+    { name: "Chickpeas", calories: 164, protein: 8.9, fat: 2.6, carbs: 27, fiber: 7.6, sugar: 4.8 },
+    { name: "Pork Loin", calories: 143, protein: 26, fat: 3.5, carbs: 0, fiber: 0, sugar: 0 },
+    { name: "Shrimp", calories: 99, protein: 24, fat: 0.3, carbs: 0.2, fiber: 0, sugar: 0 },
+  ],
+  "Dairy": [
+    { name: "Whole Milk", calories: 61, protein: 3.2, fat: 3.3, carbs: 4.8, fiber: 0, sugar: 5.1 },
+    { name: "Cheddar", calories: 403, protein: 25, fat: 33, carbs: 1.3, fiber: 0, sugar: 0.5 },
+    { name: "Greek Yogurt", calories: 59, protein: 10, fat: 0.7, carbs: 3.6, fiber: 0, sugar: 3.2 },
+    { name: "Butter", calories: 717, protein: 0.9, fat: 81, carbs: 0.1, fiber: 0, sugar: 0.1 },
+    { name: "Cottage Cheese", calories: 98, protein: 11, fat: 4.3, carbs: 3.4, fiber: 0, sugar: 2.7 },
+    { name: "Mozzarella", calories: 280, protein: 28, fat: 17, carbs: 3.1, fiber: 0, sugar: 1.0 },
+    { name: "Cream Cheese", calories: 342, protein: 5.9, fat: 34, carbs: 4.1, fiber: 0, sugar: 3.2 },
+    { name: "Parmesan", calories: 431, protein: 38, fat: 29, carbs: 4.1, fiber: 0, sugar: 0.9 },
+  ],
+  "Nuts & Seeds": [
+    { name: "Almonds", calories: 579, protein: 21, fat: 50, carbs: 22, fiber: 12.5, sugar: 4.4 },
+    { name: "Walnuts", calories: 654, protein: 15, fat: 65, carbs: 14, fiber: 6.7, sugar: 2.6 },
+    { name: "Peanuts", calories: 567, protein: 26, fat: 49, carbs: 16, fiber: 8.5, sugar: 4.7 },
+    { name: "Cashews", calories: 553, protein: 18, fat: 44, carbs: 30, fiber: 3.3, sugar: 5.9 },
+    { name: "Sunflower Seeds", calories: 584, protein: 21, fat: 51, carbs: 20, fiber: 8.6, sugar: 2.6 },
+    { name: "Chia Seeds", calories: 486, protein: 17, fat: 31, carbs: 42, fiber: 34.4, sugar: 0.8 },
+    { name: "Flax Seeds", calories: 534, protein: 18, fat: 42, carbs: 29, fiber: 27.3, sugar: 1.6 },
+    { name: "Pumpkin Seeds", calories: 559, protein: 30, fat: 49, carbs: 11, fiber: 6.0, sugar: 1.4 },
+    { name: "Pistachios", calories: 560, protein: 20, fat: 45, carbs: 28, fiber: 10.6, sugar: 7.7 },
+  ],
+  "Sweets": [
+    { name: "Dark Chocolate", calories: 546, protein: 5, fat: 31, carbs: 60, fiber: 7, sugar: 48 },
+    { name: "Honey", calories: 304, protein: 0.3, fat: 0, carbs: 82, fiber: 0.2, sugar: 82 },
+    { name: "Maple Syrup", calories: 260, protein: 0, fat: 0.1, carbs: 67, fiber: 0, sugar: 60 },
+    { name: "Ice Cream", calories: 207, protein: 3.5, fat: 11, carbs: 24, fiber: 0.7, sugar: 21 },
+    { name: "Brownie", calories: 466, protein: 5.5, fat: 29, carbs: 50, fiber: 1.8, sugar: 35 },
+    { name: "Cookie", calories: 488, protein: 5.1, fat: 24, carbs: 65, fiber: 1.5, sugar: 33 },
+    { name: "Donut", calories: 452, protein: 4.9, fat: 25, carbs: 51, fiber: 0.8, sugar: 18 },
+  ],
+};
+
+// Build hierarchy and flat leaf list
+const hierarchyData = {
+  name: "All Foods",
+  children: Object.entries(foodGroups).map(([group, foods]) => ({
+    name: group,
+    children: foods.map(f => ({ ...f, group })),
+  })),
+};
+
+const root = d3.hierarchy(hierarchyData)
+  .sum(d => d.calories || 0)
+  .sort((a, b) => b.value - a.value);
+
+const leaves = root.leaves();
+const dims = ["calories", "protein", "fat", "carbs", "fiber", "sugar"];
+
+// Group colors
+const groupColor = d3.scaleOrdinal()
+  .domain(Object.keys(foodGroups))
+  .range(["#e76f51", "#2a9d8f", "#e9c46a", "#f4a261", "#8ecae6", "#b5838d", "#d4a5a5"]);
+
+// --- Treemap ---
+const treemapDiv = document.getElementById("treemap");
+let currentFocus = root;
+
+function layoutTreemap() {
+  const { width, height } = treemapDiv.getBoundingClientRect();
+  d3.treemap().size([width, height]).paddingInner(2).paddingTop(20).round(true)(root);
+}
+
+function renderTreemap(focus) {
+  currentFocus = focus;
+  const { width, height } = treemapDiv.getBoundingClientRect();
+  const x = d3.scaleLinear().domain([focus.x0, focus.x1]).rangeRound([0, width]);
+  const y = d3.scaleLinear().domain([focus.y0, focus.y1]).rangeRound([0, height]);
+
+  treemapDiv.innerHTML = "";
+
+  // Show group headers when zoomed to root
+  const nodes = focus === root ? focus.children || [] : focus.leaves ? focus.leaves() : [focus];
+  const showLeaves = focus !== root;
+  const displayNodes = showLeaves ? (focus.leaves ? focus.leaves() : [focus]) : [];
+
+  // Group headers
+  if (focus === root && focus.children) {
+    for (const group of focus.children) {
+      const gw = x(group.x1) - x(group.x0);
+      const gh = y(group.y1) - y(group.y0);
+      if (gw < 2 || gh < 2) continue;
+      const div = document.createElement("div");
+      div.className = "treemap-cell";
+      div.style.cssText = `left:${x(group.x0)}px;top:${y(group.y0)}px;width:${gw}px;height:${gh}px;background:${d3.color(groupColor(group.data.name)).darker(0.5)};`;
+      div.dataset.group = group.data.name;
+      const label = document.createElement("div");
+      label.className = "label";
+      label.style.fontWeight = "700";
+      label.style.fontSize = "13px";
+      label.textContent = group.data.name;
+      div.appendChild(label);
+      div.addEventListener("click", () => { renderTreemap(group); updateBreadcrumb(); });
+      treemapDiv.appendChild(div);
+
+      // Leaf cells inside group
+      for (const leaf of group.leaves()) {
+        const lw = x(leaf.x1) - x(leaf.x0);
+        const lh = y(leaf.y1) - y(leaf.y0);
+        if (lw < 3 || lh < 3) continue;
+        const cell = document.createElement("div");
+        cell.className = "treemap-cell";
+        cell.style.cssText = `left:${x(leaf.x0)}px;top:${y(leaf.y0)}px;width:${lw}px;height:${lh}px;background:${groupColor(leaf.data.group)};`;
+        cell.dataset.name = leaf.data.name;
+        cell.dataset.group = leaf.data.group;
+        const cl = document.createElement("div");
+        cl.className = "label";
+        if (lw > 40 && lh > 18) cl.textContent = leaf.data.name;
+        cell.appendChild(cl);
+        cell.addEventListener("click", (e) => { e.stopPropagation(); renderTreemap(group); updateBreadcrumb(); });
+        treemapDiv.appendChild(cell);
+      }
+    }
+  } else {
+    // Zoomed into a group — show leaves
+    const leavesArr = focus.leaves ? focus.leaves() : [focus];
+    for (const leaf of leavesArr) {
+      const lw = x(leaf.x1) - x(leaf.x0);
+      const lh = y(leaf.y1) - y(leaf.y0);
+      if (lw < 2 || lh < 2) continue;
+      const cell = document.createElement("div");
+      cell.className = "treemap-cell";
+      cell.style.cssText = `left:${x(leaf.x0)}px;top:${y(leaf.y0)}px;width:${lw}px;height:${lh}px;background:${groupColor(leaf.data.group)};`;
+      cell.dataset.name = leaf.data.name;
+      cell.dataset.group = leaf.data.group;
+      const cl = document.createElement("div");
+      cl.className = "label";
+      cl.style.fontSize = lw > 80 ? "13px" : "11px";
+      if (lw > 30 && lh > 16) cl.textContent = leaf.data.name;
+      cell.appendChild(cl);
+      treemapDiv.appendChild(cell);
+    }
+  }
+
+  applyHighlightToTreemap();
+  updateBreadcrumb();
+}
+
+function updateBreadcrumb() {
+  const bc = document.getElementById("breadcrumb");
+  bc.innerHTML = "";
+  const path = currentFocus.ancestors().reverse();
+  path.forEach((node, i) => {
+    if (i > 0) {
+      const sep = document.createElement("span");
+      sep.className = "sep";
+      sep.textContent = " / ";
+      bc.appendChild(sep);
+    }
+    const span = document.createElement("span");
+    span.textContent = node.data.name;
+    if (i === path.length - 1) {
+      span.className = "current";
+    } else {
+      span.addEventListener("click", () => { renderTreemap(node); });
+    }
+    bc.appendChild(span);
+  });
+}
+
+// --- Parallel Coordinates ---
+const pcContainer = document.getElementById("parcoords-container");
+const pcCanvas = document.getElementById("parcoords-canvas");
+const pcSvg = d3.select("#parcoords-svg");
+const pcMargin = { top: 30, right: 30, bottom: 10, left: 30 };
+let pcWidth, pcHeight;
+const scales = {};
+const brushFilters = {};
+let highlightedNames = new Set();
+
+function setupParcoords() {
+  const rect = pcContainer.getBoundingClientRect();
+  pcWidth = rect.width - pcMargin.left - pcMargin.right;
+  pcHeight = rect.height - pcMargin.top - pcMargin.bottom;
+
+  const dpr = window.devicePixelRatio || 1;
+  pcCanvas.width = rect.width * dpr;
+  pcCanvas.height = rect.height * dpr;
+  pcCanvas.style.width = rect.width + "px";
+  pcCanvas.style.height = rect.height + "px";
+  const ctx = pcCanvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  const xScale = d3.scalePoint().domain(dims).range([0, pcWidth]).padding(0.05);
+
+  // Build scales per dimension
+  for (const dim of dims) {
+    const extent = d3.extent(leaves, d => d.data[dim]);
+    scales[dim] = d3.scaleLinear().domain([extent[0], extent[1]]).nice().range([pcHeight, 0]);
+  }
+
+  pcSvg.selectAll("*").remove();
+  const g = pcSvg.append("g").attr("transform", `translate(${pcMargin.left},${pcMargin.top})`);
+
+  // Axes
+  for (const dim of dims) {
+    const axG = g.append("g")
+      .attr("class", "axis")
+      .attr("transform", `translate(${xScale(dim)},0)`)
+      .call(d3.axisLeft(scales[dim]).ticks(5));
+
+    axG.append("text")
+      .attr("class", "axis-label")
+      .attr("y", -12)
+      .attr("text-anchor", "middle")
+      .text(dim.charAt(0).toUpperCase() + dim.slice(1));
+
+    // Brush
+    const brush = d3.brushY()
+      .extent([[-12, 0], [12, pcHeight]])
+      .on("brush end", function(event) {
+        if (!event.selection) {
+          delete brushFilters[dim];
+        } else {
+          const [y0, y1] = event.selection;
+          brushFilters[dim] = d => {
+            const v = scales[dim](d.data[dim]);
+            return v >= y0 && v <= y1;
+          };
+        }
+        updateFromBrush();
+      });
+
+    axG.append("g").attr("class", "brush").call(brush);
+  }
+
+  drawParcoords(xScale);
+}
+
+function drawParcoords(xScaleOverride) {
+  const rect = pcContainer.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const ctx = pcCanvas.getContext("2d");
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, rect.width, rect.height);
+  ctx.translate(pcMargin.left, pcMargin.top);
+
+  const xScale = xScaleOverride || d3.scalePoint().domain(dims).range([0, pcWidth]).padding(0.05);
+
+  const hasFilter = Object.keys(brushFilters).length > 0;
+  const selected = hasFilter
+    ? leaves.filter(d => Object.values(brushFilters).every(fn => fn(d)))
+    : [];
+
+  // Ghost lines
+  const alpha = Math.max(0.03, Math.min(0.3, 80 / leaves.length));
+  ctx.lineWidth = 1;
+  for (const leaf of leaves) {
+    const isHighlighted = !hasFilter || selected.includes(leaf);
+    ctx.strokeStyle = isHighlighted && !hasFilter
+      ? d3.color(groupColor(leaf.data.group)).copy({ opacity: 0.5 })
+      : `rgba(100,100,120,${alpha})`;
+    ctx.beginPath();
+    dims.forEach((dim, i) => {
+      const x = xScale(dim), y = scales[dim](leaf.data[dim]);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+
+  // Highlighted lines
+  if (hasFilter) {
+    ctx.lineWidth = 1.8;
+    for (const leaf of selected) {
+      ctx.strokeStyle = d3.color(groupColor(leaf.data.group)).copy({ opacity: 0.85 });
+      ctx.beginPath();
+      dims.forEach((dim, i) => {
+        const x = xScale(dim), y = scales[dim](leaf.data[dim]);
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    }
+  }
+
+  // Highlight by treemap hover — if names are in highlightedNames
+  if (highlightedNames.size > 0) {
+    ctx.lineWidth = 2.5;
+    for (const leaf of leaves) {
+      if (!highlightedNames.has(leaf.data.name)) continue;
+      ctx.strokeStyle = "#fff";
+      ctx.beginPath();
+      dims.forEach((dim, i) => {
+        const x = xScale(dim), y = scales[dim](leaf.data[dim]);
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    }
+  }
+
+  ctx.restore();
+}
+
+function updateFromBrush() {
+  const hasFilter = Object.keys(brushFilters).length > 0;
+  const selectedNames = hasFilter
+    ? new Set(leaves.filter(d => Object.values(brushFilters).every(fn => fn(d))).map(d => d.data.name))
+    : new Set();
+
+  // Highlight treemap cells
+  const cells = treemapDiv.querySelectorAll(".treemap-cell[data-name]");
+  cells.forEach(cell => {
+    if (!hasFilter) {
+      cell.classList.remove("dimmed", "highlighted");
+    } else if (selectedNames.has(cell.dataset.name)) {
+      cell.classList.remove("dimmed");
+      cell.classList.add("highlighted");
+    } else {
+      cell.classList.add("dimmed");
+      cell.classList.remove("highlighted");
+    }
+  });
+
+  // Also dim/highlight group cells
+  if (currentFocus === root) {
+    const groupCells = treemapDiv.querySelectorAll(".treemap-cell[data-group]:not([data-name])");
+    groupCells.forEach(cell => {
+      if (!hasFilter) {
+        cell.classList.remove("dimmed");
+      } else {
+        const groupLeaves = leaves.filter(l => l.data.group === cell.dataset.group);
+        const anySelected = groupLeaves.some(l => selectedNames.has(l.data.name));
+        cell.classList.toggle("dimmed", !anySelected);
+      }
+    });
+  }
+
+  const xScale = d3.scalePoint().domain(dims).range([0, pcWidth]).padding(0.05);
+  drawParcoords(xScale);
+}
+
+function applyHighlightToTreemap() {
+  // Re-apply brush filter highlight after treemap re-render
+  if (Object.keys(brushFilters).length > 0) updateFromBrush();
+}
+
+// --- Resize ---
+const ro = new ResizeObserver(() => {
+  layoutTreemap();
+  renderTreemap(currentFocus);
+  setupParcoords();
+});
+ro.observe(treemapDiv);
+ro.observe(pcContainer);
+
+// Initial render
+layoutTreemap();
+renderTreemap(root);
+setupParcoords();
+</script>
+</body>
+</html>

@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Test Coverage Heatmap — Skills × Test Dimensions</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,sans-serif;background:#fafafa;color:#222;display:flex;justify-content:center;padding:24px 16px}
+  .container{max-width:1100px;width:100%}
+  h1{font-size:1.25rem;font-weight:600;margin:0 0 4px}
+  .subtitle{font-size:.85rem;color:#666;margin:0 0 16px}
+  .controls{display:flex;gap:16px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+  .controls label{font-size:.8rem;color:#555}
+  .controls select{font-size:.8rem;padding:2px 6px}
+  .legend{display:flex;align-items:center;gap:6px;font-size:.75rem;color:#555;margin-left:auto}
+  .legend-bar{width:180px;height:12px;border-radius:2px}
+  .legend-labels{display:flex;justify-content:space-between;width:180px}
+
+  table{border-collapse:separate;border-spacing:0;width:100%;font-size:.78rem}
+  thead th{position:sticky;top:0;background:#fafafa;z-index:2;padding:4px 2px;font-weight:600;cursor:pointer;user-select:none;border-bottom:2px solid #ccc;white-space:nowrap}
+  thead th:first-child{text-align:left;min-width:160px;position:sticky;left:0;z-index:3;background:#fafafa}
+  thead th:not(:first-child){writing-mode:vertical-rl;text-orientation:mixed;transform:rotate(180deg);height:130px;text-align:left;font-weight:500}
+  thead th .sort-arrow{font-size:.65rem;opacity:.5;margin-left:2px}
+  thead th[aria-sort="ascending"] .sort-arrow,
+  thead th[aria-sort="descending"] .sort-arrow{opacity:1}
+
+  tbody tr{transition:background .1s}
+  tbody tr:hover td:first-child{background:#e8e8e8 !important}
+  tbody tr:hover td{filter:brightness(1.08)}
+  td{padding:3px 2px;text-align:center;font-variant-numeric:tabular-nums;transition:background .15s,color .15s;border:1px solid rgba(255,255,255,.6)}
+  td:first-child{text-align:left;font-weight:500;position:sticky;left:0;background:#fafafa;z-index:1;border:none;border-bottom:1px solid #eee;padding-left:6px}
+  td.cell{min-width:36px;border-radius:2px;cursor:default;font-size:.72rem}
+
+  .table-wrap{max-height:70vh;overflow:auto;border:1px solid #ddd;border-radius:6px;background:#fff}
+
+  .summary-row td{font-weight:700;border-top:2px solid #999}
+  .summary-row td:first-child{font-style:italic}
+
+  .tooltip{position:fixed;pointer-events:none;background:rgba(30,30,30,.92);color:#fff;padding:8px 12px;border-radius:6px;font-size:.78rem;line-height:1.4;z-index:100;max-width:260px;display:none;box-shadow:0 4px 12px rgba(0,0,0,.25)}
+  .tooltip strong{color:#8be9fd}
+
+  @media(max-width:600px){
+    thead th:not(:first-child){height:80px;font-size:.7rem}
+    td.cell{min-width:28px;font-size:.65rem}
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Test Coverage Heatmap</h1>
+  <p class="subtitle">Coverage depth across skills and test dimensions — darker cells indicate stronger coverage</p>
+  <div class="controls">
+    <label>Palette: <select id="palette-select">
+      <option value="blues" selected>Blues</option>
+      <option value="viridis">Viridis</option>
+      <option value="cividis">Cividis (CVD-safe)</option>
+      <option value="magma">Magma</option>
+    </select></label>
+    <label>Sort by: <select id="sort-select">
+      <option value="name">Skill name</option>
+      <option value="total-desc">Total coverage ↓</option>
+      <option value="total-asc">Total coverage ↑</option>
+      <option value="gaps">Most gaps first</option>
+    </select></label>
+    <div class="legend">
+      <span>0%</span>
+      <canvas id="legend-bar" class="legend-bar" width="180" height="12"></canvas>
+      <span>100%</span>
+    </div>
+  </div>
+  <div class="table-wrap" role="region" aria-label="Test coverage heatmap table" tabindex="0">
+    <table role="grid" aria-label="Test coverage by skill and dimension">
+      <thead><tr id="header-row"></tr></thead>
+      <tbody id="body"></tbody>
+    </table>
+  </div>
+  <div class="tooltip" id="tooltip"></div>
+</div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// ── Synthetic data ──────────────────────────────────────────────────
+const skills = [
+  "parallel-coordinates","brushing","linked-views","distributions",
+  "hierarchy-layouts","hierarchy-interaction","edge-bundling","force","network",
+  "cartography","time-series","motion","shape-morphing",
+  "scales","color","visual-texture","annotation","data-table","canvas-accessibility",
+  "canvas","webgl","navigation","responsive",
+  "data-gathering","sparkcharts","small-multiples"
+];
+
+const dimensions = [
+  "Renders without error",
+  "Visual correctness",
+  "Axis / label accuracy",
+  "Color encoding fidelity",
+  "Interaction: hover",
+  "Interaction: brush",
+  "Interaction: zoom",
+  "Interaction: click",
+  "Responsive resize",
+  "Canvas DPI",
+  "Keyboard accessible",
+  "Screen reader",
+  "Performance (1K pts)",
+  "Performance (100K pts)",
+  "Cross-browser",
+  "Dark mode"
+];
+
+// Seeded PRNG for reproducibility
+function mulberry32(a) {
+  return function() {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const rand = mulberry32(42);
+
+// Coverage profiles — some dimensions are naturally lower for certain skill groups
+const interactionSkills = new Set(["brushing","linked-views","hierarchy-interaction","navigation","force","network"]);
+const canvasSkills = new Set(["canvas","webgl","cartography","force","edge-bundling"]);
+const a11ySkills = new Set(["canvas-accessibility","data-table","annotation"]);
+
+const data = skills.map(skill => {
+  const row = { skill, values: {} };
+  dimensions.forEach(dim => {
+    let base = 30 + rand() * 55; // 30-85 base
+
+    // Boost render/visual for all
+    if (dim === "Renders without error") base = 70 + rand() * 30;
+    if (dim === "Visual correctness") base = 55 + rand() * 40;
+
+    // Interaction skills get high interaction scores
+    if (dim.startsWith("Interaction") && interactionSkills.has(skill)) base = 65 + rand() * 35;
+    if (dim.startsWith("Interaction") && !interactionSkills.has(skill)) base *= 0.6;
+
+    // Canvas/perf skills
+    if ((dim.includes("Performance") || dim === "Canvas DPI") && canvasSkills.has(skill)) base = 60 + rand() * 40;
+    if (dim.includes("100K") && !canvasSkills.has(skill)) base *= 0.3;
+
+    // a11y
+    if ((dim === "Keyboard accessible" || dim === "Screen reader") && a11ySkills.has(skill)) base = 75 + rand() * 25;
+    if ((dim === "Keyboard accessible" || dim === "Screen reader") && !a11ySkills.has(skill)) base *= 0.45;
+
+    // Dark mode & cross-browser are generally lower
+    if (dim === "Dark mode") base *= 0.55;
+    if (dim === "Cross-browser") base *= 0.75;
+
+    // Responsive
+    if (dim === "Responsive resize" && skill === "responsive") base = 90 + rand() * 10;
+
+    row.values[dim] = Math.max(0, Math.min(100, Math.round(base)));
+  });
+  row.total = d3.mean(dimensions, dim => row.values[dim]);
+  row.gaps = dimensions.filter(dim => row.values[dim] < 30).length;
+  return row;
+});
+
+// Column averages
+const colAvg = {};
+dimensions.forEach(dim => {
+  colAvg[dim] = d3.mean(data, d => d.values[dim]);
+});
+
+// ── Color scales ────────────────────────────────────────────────────
+const palettes = {
+  blues: d3.interpolateBlues,
+  viridis: d3.interpolateViridis,
+  cividis: d3.interpolateCividis,
+  magma: d3.interpolateMagma
+};
+
+let colorScale = d3.scaleSequential(palettes.blues).domain([0, 100]);
+
+function textColor(bg) {
+  return d3.lab(bg).l < 55 ? "#fff" : "#111";
+}
+
+// ── Render legend ───────────────────────────────────────────────────
+function renderLegend() {
+  const canvas = document.getElementById("legend-bar");
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width, h = canvas.height;
+  for (let x = 0; x < w; x++) {
+    ctx.fillStyle = colorScale(x / w * 100);
+    ctx.fillRect(x, 0, 1, h);
+  }
+}
+renderLegend();
+
+// ── Render table ────────────────────────────────────────────────────
+const headerRow = d3.select("#header-row");
+const tbody = d3.select("#body");
+const tooltip = d3.select("#tooltip");
+
+// Build header
+function buildHeader() {
+  headerRow.selectAll("th").remove();
+  const ths = headerRow.selectAll("th")
+    .data(["Skill", ...dimensions])
+    .join("th")
+    .attr("scope", "col")
+    .attr("aria-sort", "none")
+    .html(d => d + '<span class="sort-arrow">↕</span>');
+}
+buildHeader();
+
+function sortData(sortMode) {
+  switch (sortMode) {
+    case "total-desc": data.sort((a, b) => b.total - a.total); break;
+    case "total-asc": data.sort((a, b) => a.total - b.total); break;
+    case "gaps": data.sort((a, b) => b.gaps - a.gaps || a.total - b.total); break;
+    default: data.sort((a, b) => d3.ascending(a.skill, b.skill));
+  }
+}
+
+function renderBody() {
+  // Data rows
+  const rows = tbody.selectAll("tr.data-row")
+    .data(data, d => d.skill)
+    .join("tr")
+    .attr("class", "data-row");
+
+  rows.selectAll("td")
+    .data(d => [d.skill, ...dimensions.map(dim => ({ skill: d.skill, dim, value: d.values[dim] }))])
+    .join("td")
+    .attr("class", (d, i) => i === 0 ? "" : "cell")
+    .each(function(d, i) {
+      const el = d3.select(this);
+      if (i === 0) {
+        el.text(d)
+          .style("background-color", null)
+          .style("color", null);
+      } else {
+        const bg = colorScale(d.value);
+        el.text(d.value)
+          .style("background-color", bg)
+          .style("color", textColor(bg));
+      }
+    });
+
+  // Summary row
+  tbody.selectAll("tr.summary-row").remove();
+  const summaryRow = tbody.append("tr").attr("class", "summary-row");
+  summaryRow.selectAll("td")
+    .data(["Column avg", ...dimensions.map(dim => ({ dim, value: Math.round(colAvg[dim]) }))])
+    .join("td")
+    .attr("class", (d, i) => i === 0 ? "" : "cell")
+    .each(function(d, i) {
+      const el = d3.select(this);
+      if (i === 0) {
+        el.text(d);
+      } else {
+        const bg = colorScale(d.value);
+        el.text(d.value)
+          .style("background-color", bg)
+          .style("color", textColor(bg));
+      }
+    });
+}
+
+sortData("name");
+renderBody();
+
+// ── Tooltip ─────────────────────────────────────────────────────────
+d3.select("tbody").on("mouseover", function(event) {
+  const td = event.target.closest("td.cell");
+  if (!td) { tooltip.style("display", "none"); return; }
+  const d = d3.select(td).datum();
+  if (!d || !d.skill) return;
+  const pct = d.value;
+  const label = pct >= 80 ? "Strong" : pct >= 50 ? "Moderate" : pct >= 30 ? "Weak" : "Critical gap";
+  tooltip
+    .style("display", "block")
+    .html(`<strong>${d.skill}</strong><br>${d.dim}<br>Coverage: ${pct}% — ${label}`);
+}).on("mousemove", function(event) {
+  tooltip
+    .style("left", Math.min(event.clientX + 14, window.innerWidth - 280) + "px")
+    .style("top", (event.clientY - 40) + "px");
+}).on("mouseout", function() {
+  tooltip.style("display", "none");
+});
+
+// ── Controls ────────────────────────────────────────────────────────
+d3.select("#palette-select").on("change", function() {
+  colorScale = d3.scaleSequential(palettes[this.value]).domain([0, 100]);
+  renderLegend();
+  renderBody();
+});
+
+d3.select("#sort-select").on("change", function() {
+  sortData(this.value);
+  renderBody();
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tidal Harmonic Decomposition</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background: #0a0e17;
+    color: #c8cdd5;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px 16px;
+  }
+  h1 {
+    font-size: 22px;
+    font-weight: 600;
+    color: #e8ecf1;
+    margin-bottom: 4px;
+    letter-spacing: -0.3px;
+  }
+  .subtitle {
+    font-size: 13px;
+    color: #6b7280;
+    margin-bottom: 20px;
+  }
+  .container {
+    width: 100%;
+    max-width: 1100px;
+  }
+  .controls {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    user-select: none;
+    padding: 4px 10px;
+    border-radius: 6px;
+    background: #141926;
+    border: 1px solid #1e2536;
+    transition: border-color 0.15s;
+  }
+  .toggle:hover { border-color: #2a3550; }
+  .toggle .swatch {
+    width: 12px; height: 12px;
+    border-radius: 3px;
+    transition: opacity 0.2s;
+  }
+  .toggle.off .swatch { opacity: 0.2; }
+  .toggle.off .label { opacity: 0.4; }
+  .toggle .label { transition: opacity 0.2s; }
+  .toggle .period { color: #6b7280; font-size: 11px; margin-left: 2px; }
+  .panel {
+    background: #111724;
+    border: 1px solid #1e2536;
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 14px;
+  }
+  .panel-title {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: #6b7280;
+    margin-bottom: 10px;
+  }
+  .row { display: flex; gap: 14px; }
+  .row > .panel { flex: 1; min-width: 0; }
+  svg text { fill: #8b95a5; }
+  .axis line, .axis path { stroke: #2a3550; }
+  .axis text { font-size: 10px; fill: #6b7280; }
+  .annotation-line { stroke: #6b7280; stroke-width: 0.8; stroke-dasharray: 3,3; }
+  .annotation-text { font-size: 11px; fill: #9ca3af; }
+  .annotation-badge {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+  }
+  .grid line { stroke: #1a2235; stroke-width: 0.5; }
+  .grid path { display: none; }
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: #1a2236;
+    border: 1px solid #2a3550;
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 11px;
+    line-height: 1.5;
+    color: #c8cdd5;
+    display: none;
+    z-index: 10;
+  }
+  .hover-line { stroke: #4b5563; stroke-width: 1; stroke-dasharray: 2,2; pointer-events: none; }
+</style>
+</head>
+<body>
+<h1>Tidal Harmonic Decomposition</h1>
+<p class="subtitle">14-day synthetic signal from M2, S2, K1, O1 constituents &middot; toggle harmonics to isolate contributions</p>
+<div class="container">
+  <div class="controls" id="controls"></div>
+  <div class="panel" id="main-panel">
+    <div class="panel-title">Composite Tidal Signal</div>
+    <div id="main-chart"></div>
+  </div>
+  <div class="row">
+    <div class="panel" id="cycle-panel">
+      <div class="panel-title">Cycle Plot &middot; Daily Pattern (24h)</div>
+      <div id="cycle-chart"></div>
+    </div>
+    <div class="panel" id="ridge-panel">
+      <div class="panel-title">Ridgeline &middot; Amplitude Distributions</div>
+      <div id="ridge-chart"></div>
+    </div>
+  </div>
+</div>
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+// ─── Harmonic constituents ───────────────────────────────────────────
+const harmonics = [
+  { id: 'M2', name: 'M2 (Principal Lunar)', period: 12.4206, amplitude: 1.0,  phase: 0,    color: '#60a5fa' },
+  { id: 'S2', name: 'S2 (Principal Solar)', period: 12.0,    amplitude: 0.46, phase: 0.3,  color: '#f59e0b' },
+  { id: 'K1', name: 'K1 (Luni-Solar Diurnal)', period: 23.9345, amplitude: 0.58, phase: 1.2, color: '#34d399' },
+  { id: 'O1', name: 'O1 (Lunar Diurnal)',   period: 25.8193, amplitude: 0.41, phase: 2.1,  color: '#f472b6' }
+];
+
+const TAU = 2 * Math.PI;
+const DAYS = 14;
+const HOURS = DAYS * 24;
+const DT = 0.25; // 15-min resolution
+const compositeColor = '#e8ecf1';
+
+// ─── State ───────────────────────────────────────────────────────────
+const state = {
+  active: new Set(harmonics.map(h => h.id)),
+  hoverHour: null
+};
+const dispatch = d3.dispatch('toggle', 'hover');
+
+// ─── Generate data ───────────────────────────────────────────────────
+const timeSteps = d3.range(0, HOURS, DT);
+const startDate = new Date(Date.UTC(2026, 2, 15)); // Mar 15
+
+function tidalValue(h, t) {
+  return h.amplitude * Math.cos(TAU * t / h.period - h.phase);
+}
+
+const data = timeSteps.map(t => {
+  const d = { t, date: new Date(+startDate + t * 3600000) };
+  harmonics.forEach(h => { d[h.id] = tidalValue(h, t); });
+  d.composite = harmonics.reduce((s, h) => s + d[h.id], 0);
+  return d;
+});
+
+// Active composite (respects toggles)
+function activeComposite(d) {
+  return harmonics.reduce((s, h) => s + (state.active.has(h.id) ? d[h.id] : 0), 0);
+}
+
+// ─── Spring/neap detection ───────────────────────────────────────────
+// Spring: M2 and S2 in phase (beat ~ 14.77 days → every ~7.38 days alternating)
+// Phase difference between M2 and S2 at time t
+function m2s2PhaseDiff(t) {
+  const p1 = TAU * t / 12.4206;
+  const p2 = TAU * t / 12.0 - 0.3;
+  let diff = ((p1 - p2) % TAU + TAU) % TAU;
+  return diff > Math.PI ? TAU - diff : diff;
+}
+
+const annotations = [];
+// Scan for spring (phase diff ~0) and neap (phase diff ~π/2) events
+let lastType = null;
+for (let t = 6; t < HOURS - 6; t += 0.5) {
+  const pd = m2s2PhaseDiff(t);
+  if (pd < 0.08 && lastType !== 'spring') {
+    annotations.push({ t, type: 'spring', label: 'Spring Tide', sub: 'M2 + S2 in phase' });
+    lastType = 'spring';
+  } else if (Math.abs(pd - Math.PI / 2) < 0.08 && lastType !== 'neap') {
+    annotations.push({ t, type: 'neap', label: 'Neap Tide', sub: 'M2 + S2 in quadrature' });
+    lastType = 'neap';
+  } else if (pd > 0.3 && pd < Math.PI / 2 - 0.3) {
+    lastType = null;
+  }
+}
+
+// ─── Controls ────────────────────────────────────────────────────────
+const controlsDiv = d3.select('#controls');
+harmonics.forEach(h => {
+  const tog = controlsDiv.append('div')
+    .attr('class', 'toggle')
+    .datum(h)
+    .on('click', function(_, d) {
+      if (state.active.has(d.id)) state.active.delete(d.id);
+      else state.active.add(d.id);
+      d3.select(this).classed('off', !state.active.has(d.id));
+      dispatch.call('toggle');
+    });
+  tog.append('div').attr('class', 'swatch').style('background', h.color);
+  tog.append('span').attr('class', 'label').text(h.id);
+  tog.append('span').attr('class', 'period').text(`${h.period.toFixed(1)}h`);
+});
+
+// ─── Main chart ──────────────────────────────────────────────────────
+const mainMargin = { top: 28, right: 20, bottom: 30, left: 44 };
+const mainWidth = 1068, mainHeight = 260;
+const mW = mainWidth - mainMargin.left - mainMargin.right;
+const mH = mainHeight - mainMargin.top - mainMargin.bottom;
+
+const mainSvg = d3.select('#main-chart').append('svg')
+  .attr('viewBox', `0 0 ${mainWidth} ${mainHeight}`)
+  .attr('width', '100%');
+const mainG = mainSvg.append('g')
+  .attr('transform', `translate(${mainMargin.left},${mainMargin.top})`);
+
+const xMain = d3.scaleUtc()
+  .domain(d3.extent(data, d => d.date))
+  .range([0, mW]);
+const yMain = d3.scaleLinear()
+  .domain([-2.8, 2.8])
+  .range([mH, 0]);
+
+// Grid
+mainG.append('g').attr('class', 'grid')
+  .call(d3.axisLeft(yMain).tickSize(-mW).tickFormat('').ticks(6));
+
+// Axes
+mainG.append('g').attr('class', 'axis')
+  .attr('transform', `translate(0,${mH})`)
+  .call(d3.axisBottom(xMain)
+    .ticks(d3.utcDay.every(1))
+    .tickFormat(d3.utcFormat('%b %d')));
+mainG.append('g').attr('class', 'axis')
+  .call(d3.axisLeft(yMain).ticks(6).tickFormat(d => d === 0 ? '0' : d3.format('+.1f')(d)));
+
+// Y label
+mainSvg.append('text')
+  .attr('transform', `translate(14,${mainMargin.top + mH / 2}) rotate(-90)`)
+  .attr('text-anchor', 'middle')
+  .attr('font-size', 11)
+  .attr('fill', '#6b7280')
+  .text('Height (m)');
+
+// Zero line
+mainG.append('line')
+  .attr('x1', 0).attr('x2', mW)
+  .attr('y1', yMain(0)).attr('y2', yMain(0))
+  .attr('stroke', '#2a3550').attr('stroke-width', 1);
+
+const line = d3.line().x(d => xMain(d.date)).curve(d3.curveMonotoneX);
+
+// Component lines
+const componentPaths = {};
+harmonics.forEach(h => {
+  componentPaths[h.id] = mainG.append('path')
+    .datum(data)
+    .attr('fill', 'none')
+    .attr('stroke', h.color)
+    .attr('stroke-width', 1.2)
+    .attr('opacity', 0.6)
+    .attr('d', line.y(d => yMain(d[h.id])));
+});
+
+// Composite line
+const compositePath = mainG.append('path')
+  .datum(data)
+  .attr('fill', 'none')
+  .attr('stroke', compositeColor)
+  .attr('stroke-width', 2)
+  .attr('d', line.y(d => yMain(d.composite)));
+
+// ─── Annotations on main chart ───────────────────────────────────────
+const annoG = mainG.append('g').attr('class', 'annotations');
+
+annotations.forEach((a, i) => {
+  const x = xMain(new Date(+startDate + a.t * 3600000));
+  const isSpring = a.type === 'spring';
+  const yTop = isSpring ? -4 : 8;
+  const badgeColor = isSpring ? '#60a5fa' : '#f59e0b';
+
+  annoG.append('line')
+    .attr('x1', x).attr('x2', x)
+    .attr('y1', 0).attr('y2', mH)
+    .attr('class', 'annotation-line')
+    .attr('stroke', badgeColor)
+    .attr('opacity', 0.35);
+
+  const badge = annoG.append('g')
+    .attr('transform', `translate(${x},${yTop})`);
+
+  badge.append('rect')
+    .attr('x', -30).attr('y', -12)
+    .attr('width', 60).attr('height', 16)
+    .attr('rx', 3)
+    .attr('fill', badgeColor)
+    .attr('opacity', 0.15);
+  badge.append('text')
+    .attr('text-anchor', 'middle')
+    .attr('dy', '-0.1em')
+    .attr('class', 'annotation-badge')
+    .attr('fill', badgeColor)
+    .text(a.label);
+});
+
+// ─── Hover interaction on main ───────────────────────────────────────
+const hoverLine = mainG.append('line')
+  .attr('class', 'hover-line')
+  .attr('y1', 0).attr('y2', mH)
+  .style('display', 'none');
+
+const hoverDots = mainG.append('g');
+const tooltip = d3.select('#tooltip');
+
+const bisect = d3.bisector(d => d.date).left;
+
+mainSvg.append('rect')
+  .attr('transform', `translate(${mainMargin.left},${mainMargin.top})`)
+  .attr('width', mW).attr('height', mH)
+  .attr('fill', 'transparent')
+  .on('mousemove', function(event) {
+    const [mx] = d3.pointer(event, mainG.node());
+    const date = xMain.invert(mx);
+    const idx = bisect(data, date);
+    const d = data[Math.min(idx, data.length - 1)];
+    const x = xMain(d.date);
+
+    hoverLine.attr('x1', x).attr('x2', x).style('display', null);
+    hoverDots.selectAll('circle').remove();
+
+    let html = `<strong>${d3.utcFormat('%b %d, %H:%M')(d.date)}</strong><br>`;
+    harmonics.forEach(h => {
+      if (state.active.has(h.id)) {
+        hoverDots.append('circle')
+          .attr('cx', x).attr('cy', yMain(d[h.id]))
+          .attr('r', 3).attr('fill', h.color);
+        html += `<span style="color:${h.color}">${h.id}: ${d[h.id].toFixed(3)}m</span><br>`;
+      }
+    });
+    const comp = activeComposite(d);
+    hoverDots.append('circle')
+      .attr('cx', x).attr('cy', yMain(comp))
+      .attr('r', 4).attr('fill', compositeColor);
+    html += `Σ: ${comp.toFixed(3)}m`;
+
+    tooltip.html(html).style('display', 'block');
+    const rect = document.getElementById('main-chart').getBoundingClientRect();
+    tooltip.style('left', (rect.left + mainMargin.left + x + 12) + 'px')
+      .style('top', (rect.top + mainMargin.top + yMain(comp) - 20) + 'px');
+
+    // Linked hover
+    state.hoverHour = ((d.t % 24) + 24) % 24;
+    dispatch.call('hover');
+  })
+  .on('mouseleave', function() {
+    hoverLine.style('display', 'none');
+    hoverDots.selectAll('circle').remove();
+    tooltip.style('display', 'none');
+    state.hoverHour = null;
+    dispatch.call('hover');
+  });
+
+// ─── Cycle plot (daily pattern) ──────────────────────────────────────
+const cycMargin = { top: 16, right: 16, bottom: 30, left: 40 };
+const cycWidth = 520, cycHeight = 220;
+const cW = cycWidth - cycMargin.left - cycMargin.right;
+const cH = cycHeight - cycMargin.top - cycMargin.bottom;
+
+const cycSvg = d3.select('#cycle-chart').append('svg')
+  .attr('viewBox', `0 0 ${cycWidth} ${cycHeight}`)
+  .attr('width', '100%');
+const cycG = cycSvg.append('g')
+  .attr('transform', `translate(${cycMargin.left},${cycMargin.top})`);
+
+const xCyc = d3.scaleLinear().domain([0, 24]).range([0, cW]);
+const yCyc = d3.scaleLinear().domain([-2.8, 2.8]).range([cH, 0]);
+
+cycG.append('g').attr('class', 'grid')
+  .call(d3.axisLeft(yCyc).tickSize(-cW).tickFormat('').ticks(5));
+cycG.append('g').attr('class', 'axis')
+  .attr('transform', `translate(0,${cH})`)
+  .call(d3.axisBottom(xCyc).ticks(8).tickFormat(d => `${d}:00`));
+cycG.append('g').attr('class', 'axis')
+  .call(d3.axisLeft(yCyc).ticks(5).tickFormat(d3.format('.1f')));
+
+cycG.append('line')
+  .attr('x1', 0).attr('x2', cW)
+  .attr('y1', yCyc(0)).attr('y2', yCyc(0))
+  .attr('stroke', '#2a3550');
+
+// Group data by day and overlay
+const cycLine = d3.line().x(d => xCyc(d.hourOfDay)).y(d => yCyc(d.value)).curve(d3.curveMonotoneX);
+
+function buildCycleData() {
+  const byDay = d3.group(data, d => Math.floor(d.t / 24));
+  const paths = [];
+  byDay.forEach((dayData, dayIdx) => {
+    const pts = dayData.map(d => ({
+      hourOfDay: d.t % 24,
+      value: activeComposite(d)
+    }));
+    paths.push({ dayIdx, pts });
+  });
+  return paths;
+}
+
+const cycPaths = cycG.append('g');
+const cycMeanPath = cycG.append('path')
+  .attr('fill', 'none')
+  .attr('stroke', compositeColor)
+  .attr('stroke-width', 2.5);
+const cycHoverLine = cycG.append('line')
+  .attr('class', 'hover-line')
+  .attr('y1', 0).attr('y2', cH)
+  .style('display', 'none');
+
+function updateCycle() {
+  const cycles = buildCycleData();
+
+  const sel = cycPaths.selectAll('path').data(cycles, d => d.dayIdx);
+  sel.join('path')
+    .attr('fill', 'none')
+    .attr('stroke', compositeColor)
+    .attr('stroke-width', 0.7)
+    .attr('opacity', 0.2)
+    .attr('d', d => cycLine(d.pts));
+
+  // Mean line by hour
+  const hourBins = d3.range(0, 24, DT);
+  const meanPts = hourBins.map(h => {
+    const vals = cycles.map(c => {
+      const pt = c.pts.find(p => Math.abs(p.hourOfDay - h) < DT / 2);
+      return pt ? pt.value : 0;
+    });
+    return { hourOfDay: h, value: d3.mean(vals) };
+  });
+  cycMeanPath.datum(meanPts).attr('d', cycLine);
+}
+updateCycle();
+
+// ─── Ridgeline plot ──────────────────────────────────────────────────
+const ridgeMargin = { top: 10, right: 20, bottom: 30, left: 54 };
+const ridgeWidth = 520, ridgeHeight = 220;
+const rW = ridgeWidth - ridgeMargin.left - ridgeMargin.right;
+const rH = ridgeHeight - ridgeMargin.top - ridgeMargin.bottom;
+
+const ridgeSvg = d3.select('#ridge-chart').append('svg')
+  .attr('viewBox', `0 0 ${ridgeWidth} ${ridgeHeight}`)
+  .attr('width', '100%');
+const ridgeG = ridgeSvg.append('g')
+  .attr('transform', `translate(${ridgeMargin.left},${ridgeMargin.top})`);
+
+const xRidge = d3.scaleLinear().domain([-1.2, 1.2]).range([0, rW]);
+const yRidgeBand = d3.scaleBand()
+  .domain(harmonics.map(h => h.id).reverse())
+  .range([0, rH])
+  .padding(0.05);
+
+ridgeG.append('g').attr('class', 'axis')
+  .attr('transform', `translate(0,${rH})`)
+  .call(d3.axisBottom(xRidge).ticks(6).tickFormat(d3.format('.1f')));
+ridgeG.append('g').attr('class', 'axis')
+  .call(d3.axisLeft(yRidgeBand).tickSize(0))
+  .select('.domain').remove();
+
+// KDE helper
+function kde(kernel, thresholds, values) {
+  return thresholds.map(t => [t, d3.mean(values, v => kernel(t - v))]);
+}
+function epanechnikov(bandwidth) {
+  return x => Math.abs(x /= bandwidth) <= 1 ? 0.75 * (1 - x * x) / bandwidth : 0;
+}
+
+const ridgeArea = d3.area()
+  .curve(d3.curveBasis)
+  .x(d => xRidge(d[0]))
+  .y0(0)
+  .y1(d => -d[1]);
+
+const ridgeGroups = {};
+const ridgeXTicks = d3.range(-1.2, 1.21, 0.02);
+
+function updateRidge() {
+  harmonics.forEach(h => {
+    const isActive = state.active.has(h.id);
+    const values = data.map(d => d[h.id]);
+    const bw = 0.9 * Math.min(d3.deviation(values), (d3.quantile(values.sort(d3.ascending), 0.75) - d3.quantile(values, 0.25)) / 1.34) * Math.pow(values.length, -0.2);
+    const density = kde(epanechnikov(bw), ridgeXTicks, values);
+    const maxDensity = d3.max(density, d => d[1]);
+    const bandH = yRidgeBand.bandwidth();
+    const scale = bandH * 0.85 / maxDensity;
+
+    const scaledArea = d3.area()
+      .curve(d3.curveBasis)
+      .x(d => xRidge(d[0]))
+      .y0(0)
+      .y1(d => -d[1] * scale);
+
+    if (!ridgeGroups[h.id]) {
+      ridgeGroups[h.id] = ridgeG.append('g')
+        .attr('transform', `translate(0,${yRidgeBand(h.id) + bandH})`);
+      ridgeGroups[h.id].append('path');
+    }
+
+    ridgeGroups[h.id].select('path')
+      .datum(density)
+      .transition().duration(300)
+      .attr('d', scaledArea)
+      .attr('fill', h.color)
+      .attr('fill-opacity', isActive ? 0.35 : 0.08)
+      .attr('stroke', h.color)
+      .attr('stroke-width', isActive ? 1.5 : 0.5)
+      .attr('opacity', isActive ? 1 : 0.3);
+  });
+}
+updateRidge();
+
+// Amplitude label
+ridgeSvg.append('text')
+  .attr('transform', `translate(${ridgeMargin.left + rW / 2},${ridgeHeight - 4})`)
+  .attr('text-anchor', 'middle')
+  .attr('font-size', 10)
+  .attr('fill', '#6b7280')
+  .text('Instantaneous amplitude (m)');
+
+// ─── Dispatch handlers ───────────────────────────────────────────────
+dispatch.on('toggle', () => {
+  // Update main chart paths
+  harmonics.forEach(h => {
+    componentPaths[h.id]
+      .transition().duration(300)
+      .attr('opacity', state.active.has(h.id) ? 0.6 : 0.05)
+      .attr('stroke-width', state.active.has(h.id) ? 1.2 : 0.5);
+  });
+
+  // Recompute composite
+  compositePath
+    .transition().duration(300)
+    .attr('d', line.y(d => yMain(activeComposite(d))));
+
+  updateCycle();
+  updateRidge();
+});
+
+dispatch.on('hover', () => {
+  if (state.hoverHour !== null) {
+    cycHoverLine
+      .attr('x1', xCyc(state.hoverHour))
+      .attr('x2', xCyc(state.hoverHour))
+      .style('display', null);
+  } else {
+    cycHoverLine.style('display', 'none');
+  }
+});
+</script>
+</body>
+</html>
