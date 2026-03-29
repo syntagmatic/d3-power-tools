@@ -63,7 +63,7 @@ def run_block(idx, block):
             cmd.extend(["--model", MODEL])
         result = subprocess.run(
             cmd,
-            capture_output=True, text=True, timeout=300,
+            capture_output=True, text=True, timeout=600,
             cwd=str(staging),
         )
     except subprocess.TimeoutExpired:

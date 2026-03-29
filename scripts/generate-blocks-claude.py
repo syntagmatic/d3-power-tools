@@ -195,7 +195,7 @@ def run_block(idx, block, defaults):
                 cmd, stdout=sf, stderr=subprocess.PIPE, text=True,
                 cwd=str(staging))
             try:
-                _, stderr = proc.communicate(timeout=300)
+                _, stderr = proc.communicate(timeout=600)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
@@ -206,7 +206,7 @@ def run_block(idx, block, defaults):
                 return {"bid": bid, "status": "fail", "error": "timeout",
                         "skills_requested": block["skills"],
                         "skills_triggered": parse_skill_reads(stream),
-                        "skills_missed": block["skills"], "elapsed_s": 300}
+                        "skills_missed": block["skills"], "elapsed_s": 600}
 
         class _Result:
             pass
