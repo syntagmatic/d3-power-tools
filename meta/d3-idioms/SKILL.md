@@ -1,13 +1,13 @@
 ---
 name: d3-idioms
-description: "D3.js code style and convention review. Use when the user says 'check style', 'review code', 'idiomatic D3', 'd3 idioms', or wants D3 code to follow community conventions. Covers chaining indentation, margin convention, .join() data joins, selection.call() composition, reusable chart pattern, naming, event handling. Related: scales, motion, data-gathering, jig-template."
+description: "Complete D3.js code review: style, patterns, and architecture. Use when the user says 'review code', 'idiomatic D3', 'd3 idioms', or wants a D3 code review. Covers chaining indentation, margin convention, data joins, selection.call(), reusable chart pattern, naming, event handling, SVG vs Canvas decisions, Canvas+SVG layering, state management, and render loop structure."
 ---
 
 # D3 Idioms
 
-D3 code that follows the library's conventions is code others can read, debug, and extend. Break them and you lose the visual structure that makes chains parseable, the data binding that makes updates correct, and the composition patterns that keep charts maintainable. Every rule here explains what goes wrong when you ignore it — and when ignoring it is the right call.
+D3 code that follows the library's conventions is code others can read, debug, and extend. This skill covers both line-level style (chaining, naming) and architectural patterns (SVG vs Canvas, state management, render loops). Every rule explains what breaks when you ignore it — and when ignoring it is the right call.
 
-Related skills: `motion` (`.join()` with enter/update/exit callbacks), `data-gathering` (accessor patterns), `jig-template` (structural patterns for multi-layer apps).
+Related skills: `motion` (`.join()` with enter/update/exit callbacks), `data-gathering` (accessor patterns), `jig-template` (multi-view composition archetypes).
 
 ## Method Chaining & Indentation
 
@@ -163,6 +163,46 @@ Break convention for multiple scales on the same axis: `y1`/`y2` for dual-y, `xB
 
 **Namespaced events:** `.on("click.highlight", fn1).on("click.tooltip", fn2)` — without namespaces, the second handler silently replaces the first. Essential when zoom + brush + custom click share an element.
 
+## Architecture Patterns
+
+### SVG vs Canvas
+
+| | Few updates | Continuous updates (drag, animation) |
+|---|---|---|
+| **<500 elements** | SVG | SVG |
+| **500–5K** | SVG or Canvas | Canvas |
+| **5K+** | Canvas | Canvas (or WebGL at 500K+) |
+
+Element count is only one factor. 2K SVG circles with hover = fine. 2K with drag-to-reorder = jank (reflow per frame). Force simulation at 300 nodes redraws 60×/sec — Canvas even at low counts. 500 complex geo paths slower in SVG than 5K circles.
+
+### Canvas + SVG Hybrid
+
+The idiomatic pattern for interactive Canvas: Canvas renders data marks, SVG overlay captures pointer events and renders axes, tooltips, brushes. `pointer-events: none` on Canvas, `pointer-events: all` on SVG.
+
+```js
+// Container: position:relative. Canvas + SVG: position:absolute, same dimensions.
+// Canvas: ctx.translate(margin.left, margin.top) so coordinates match SVG's g transform.
+```
+
+### State Separation
+
+Three kinds of state. Mixing them causes bugs:
+- **Data state** — raw dataset, never mutated by interaction. `Object.freeze(data)`.
+- **View state** — scales, layout positions. Derived from data + dimensions. Recomputed on resize.
+- **Interaction state** — selections, brush extents, zoom transforms. References data by key, never index.
+
+### Render Loop
+
+Coalesce redraws with a dirty flag — without it, a brush event that updates three views triggers three separate `requestAnimationFrame` calls with stale intermediate states:
+
+```js
+let dirty = false;
+function markDirty() { if (!dirty) { dirty = true; requestAnimationFrame(render); } }
+function render() { dirty = false; /* redraw */ }
+```
+
+Call `markDirty()` from event handlers instead of drawing directly.
+
 ## Common Pitfalls
 
 1. **Manual for-loops instead of selections.** `data.forEach(d => svg.append("rect")...)` bypasses data join — no exit, no transitions, no key identity. Use `.selectAll().data().join()`. Exception: Canvas rendering where there's no DOM to join against.
@@ -190,6 +230,9 @@ Break convention for multiple scales on the same axis: `y1`/`y2` for dual-y, `xB
 | Events | `event.currentTarget` or `function` | Arrow fn + `this` | Handler targets wrong element or throws |
 | Transitions | `.join()` callbacks, shared `t` | Unnamed transitions | Transitions on same element cancel each other |
 | DOM | D3 selections throughout | `getElementById`, jQuery | Bypasses data binding, breaks update pattern |
+| Renderer | SVG <500, Canvas 500+, WebGL 500K+ | Wrong renderer for scale | Perf issues or unnecessary complexity |
+| State | Data/view/interaction separated | Mutating data on brush | Interaction corrupts source data |
+| Render loop | Dirty flag + rAF | Drawing in event handler | Redundant redraws, stale intermediate states |
 
 ## References
 
