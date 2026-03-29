@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Three Views of One Network</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #fafafa; }
+  h1 { text-align: center; font-size: 20px; font-weight: 600; padding: 16px 0 2px; color: #222; }
+  .subtitle { text-align: center; font-size: 13px; color: #777; margin-bottom: 10px; }
+  .container { display: flex; justify-content: center; gap: 10px; padding: 0 10px; }
+  .panel {
+    width: 386px; height: 520px; background: #fff;
+    border: 1px solid #e0e0e0; border-radius: 6px;
+    position: relative; overflow: hidden;
+  }
+  .panel-title {
+    text-align: center; font-size: 12px; font-weight: 600;
+    color: #555; padding: 8px 0 2px; letter-spacing: 0.3px;
+    text-transform: uppercase;
+  }
+  .panel svg { display: block; }
+  .panel canvas { position: absolute; }
+  .tooltip {
+    position: fixed; pointer-events: none; background: rgba(20,20,20,0.88); color: #fff;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    font-size: 11px; padding: 5px 9px; border-radius: 4px;
+    display: none; z-index: 100; white-space: nowrap;
+  }
+  .controls {
+    display: flex; justify-content: center; align-items: center; gap: 18px;
+    margin-top: 8px; padding-bottom: 8px;
+  }
+  .controls label {
+    font-size: 11px; color: #888; display: flex; align-items: center; gap: 6px;
+  }
+  .controls input[type=range] { width: 100px; accent-color: #4477AA; }
+  .legend { display: flex; gap: 14px; justify-content: center; margin-top: 6px; }
+  .legend-item { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #555; }
+  .legend-swatch { width: 10px; height: 10px; border-radius: 50%; }
+</style>
+</head>
+<body>
+<h1>Three Views of One Network</h1>
+<p class="subtitle">Hover any node to highlight its connections across all three panels</p>
+<div class="legend" id="legend"></div>
+<div class="container">
+  <div class="panel" id="force-panel">
+    <div class="panel-title">Force-Directed</div>
+  </div>
+  <div class="panel" id="bundle-panel">
+    <div class="panel-title">Radial Edge Bundling</div>
+  </div>
+  <div class="panel" id="chord-panel">
+    <div class="panel-title">Chord Diagram</div>
+  </div>
+</div>
+<div class="controls">
+  <label>Bundle tension <input type="range" id="tension-slider" min="0" max="100" value="85"> <span id="tension-val">0.85</span></label>
+</div>
+<div class="tooltip" id="tooltip"></div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(() => {
+"use strict";
+
+// --- Tol bright palette ---
+const COLORS = ["#4477AA","#EE6677","#228833","#CCBB44","#AA3377"];
+const GROUP_NAMES = ["Cortex","Limbic","Thalamus","Basal","Stem"];
+
+// --- Legend ---
+const legend = d3.select("#legend");
+GROUP_NAMES.forEach((name, i) => {
+  const item = legend.append("span").attr("class", "legend-item");
+  item.append("span").attr("class", "legend-swatch").style("background", COLORS[i]);
+  item.append("span").text(name);
+});
+
+// --- Deterministic RNG ---
+const rng = d3.randomLcg(12345);
+const rand = () => rng();
+
+// --- Generate 40 nodes in 5 groups ---
+const nodes = [];
+for (let g = 0; g < 5; g++) {
+  for (let i = 0; i < 8; i++) {
+    nodes.push({ id: g * 8 + i, name: `${GROUP_NAMES[g]}-${i + 1}`, group: g });
+  }
+}
+
+// --- Generate edges with interesting structure ---
+const edgeSet = new Set();
+const edges = [];
+const addEdge = (s, t, weight = 1) => {
+  const key = s < t ? `${s}-${t}` : `${t}-${s}`;
+  if (s !== t && !edgeSet.has(key)) {
+    edgeSet.add(key);
+    edges.push({ source: s, target: t, weight });
+  }
+};
+
+// Within-group: moderate density (~3-4 edges per node within group)
+for (let g = 0; g < 5; g++) {
+  const members = nodes.filter(n => n.group === g);
+  for (let i = 0; i < members.length; i++) {
+    for (let j = i + 1; j < members.length; j++) {
+      if (rand() < 0.5) addEdge(members[i].id, members[j].id, 2 + rand() * 3);
+    }
+  }
+}
+
+// Between-group: structured cross-connections (some group pairs more connected)
+const crossProb = [
+  [0, 0.15, 0.04, 0.02, 0.01],
+  [0.15, 0, 0.12, 0.03, 0.02],
+  [0.04, 0.12, 0, 0.10, 0.03],
+  [0.02, 0.03, 0.10, 0, 0.08],
+  [0.01, 0.02, 0.03, 0.08, 0],
+];
+for (let i = 0; i < nodes.length; i++) {
+  for (let j = i + 1; j < nodes.length; j++) {
+    const gi = nodes[i].group, gj = nodes[j].group;
+    if (gi !== gj && rand() < crossProb[gi][gj]) {
+      addEdge(i, j, 1 + rand() * 2);
+    }
+  }
+}
+
+// --- Adjacency lookup ---
+const neighbors = new Map(nodes.map(n => [n.id, new Set()]));
+edges.forEach(e => { neighbors.get(e.source).add(e.target); neighbors.get(e.target).add(e.source); });
+
+// --- d3.dispatch for linked hover ---
+const dispatch = d3.dispatch("highlight", "clear");
+
+// --- Tooltip ---
+const tooltip = d3.select("#tooltip");
+const showTip = (evt, text) => {
+  tooltip.style("display", "block")
+    .style("left", (evt.clientX + 14) + "px")
+    .style("top", (evt.clientY - 12) + "px")
+    .text(text);
+};
+const hideTip = () => tooltip.style("display", "none");
+
+// ===================================================================
+// PANEL 1: FORCE-DIRECTED LAYOUT
+// ===================================================================
+{
+  const W = 386, H = 494;
+  const svg = d3.select("#force-panel").append("svg").attr("width", W).attr("height", H);
+  const cx = W / 2, cy = H / 2;
+
+  // Pentagon centroids for group positioning
+  const centroids = d3.range(5).map(i => {
+    const a = (i / 5) * 2 * Math.PI - Math.PI / 2;
+    return { x: cx + 90 * Math.cos(a), y: cy + 90 * Math.sin(a) };
+  });
+
+  const simNodes = nodes.map(d => ({ ...d }));
+  const simLinks = edges.map(e => ({ source: e.source, target: e.target, weight: e.weight }));
+
+  const simulation = d3.forceSimulation(simNodes)
+    .force("link", d3.forceLink(simLinks).id(d => d.id).distance(35).strength(0.5))
+    .force("charge", d3.forceManyBody().strength(-40).distanceMax(200))
+    .force("x", d3.forceX(d => centroids[d.group].x).strength(0.14))
+    .force("y", d3.forceY(d => centroids[d.group].y).strength(0.14))
+    .force("collide", d3.forceCollide(7).iterations(2))
+    .stop();
+
+  // Pre-compute layout
+  for (let i = 0; i < 300; i++) simulation.tick();
+
+  const linkG = svg.append("g");
+  const nodeG = svg.append("g");
+
+  const linkSel = linkG.selectAll("line").data(simLinks).join("line")
+    .attr("x1", d => d.source.x).attr("y1", d => d.source.y)
+    .attr("x2", d => d.target.x).attr("y2", d => d.target.y)
+    .attr("stroke", "#aaa").attr("stroke-opacity", 0.25).attr("stroke-width", 1);
+
+  const nodeSel = nodeG.selectAll("circle").data(simNodes).join("circle")
+    .attr("cx", d => d.x).attr("cy", d => d.y)
+    .attr("r", 5.5)
+    .attr("fill", d => COLORS[d.group])
+    .attr("stroke", "#fff").attr("stroke-width", 1.2)
+    .style("cursor", "pointer");
+
+  nodeSel
+    .on("pointerenter", (evt, d) => { showTip(evt, d.name); dispatch.call("highlight", null, { nodeId: d.id, group: d.group }); })
+    .on("pointermove", (evt) => { tooltip.style("left", (evt.clientX + 14) + "px").style("top", (evt.clientY - 12) + "px"); })
+    .on("pointerleave", () => { hideTip(); dispatch.call("clear"); });
+
+  dispatch.on("highlight.force", ({ nodeId, group }) => {
+    const conn = nodeId != null ? neighbors.get(nodeId) : null;
+    nodeSel
+      .attr("opacity", d => {
+        if (nodeId != null) return d.id === nodeId || conn.has(d.id) ? 1 : 0.12;
+        return d.group === group ? 1 : 0.12;
+      })
+      .attr("r", d => d.id === nodeId ? 7.5 : 5.5);
+
+    linkSel
+      .attr("stroke-opacity", d => {
+        if (nodeId != null) return (d.source.id === nodeId || d.target.id === nodeId) ? 0.85 : 0.03;
+        return (d.source.group === group || d.target.group === group) ? 0.5 : 0.02;
+      })
+      .attr("stroke-width", d => {
+        if (nodeId != null) return (d.source.id === nodeId || d.target.id === nodeId) ? 2 : 0.5;
+        return 1;
+      })
+      .attr("stroke", d => {
+        if (nodeId != null && (d.source.id === nodeId || d.target.id === nodeId)) {
+          return COLORS[nodes[nodeId].group];
+        }
+        return "#aaa";
+      });
+
+    // Raise highlighted edges
+    linkSel.filter(d => nodeId != null && (d.source.id === nodeId || d.target.id === nodeId)).raise();
+  });
+
+  dispatch.on("clear.force", () => {
+    nodeSel.attr("opacity", 1).attr("r", 5.5);
+    linkSel.attr("stroke-opacity", 0.25).attr("stroke-width", 1).attr("stroke", "#aaa");
+  });
+}
+
+// ===================================================================
+// PANEL 2: RADIAL EDGE BUNDLING (Canvas edges + SVG nodes)
+// ===================================================================
+{
+  const W = 386, H = 494;
+  const panel = d3.select("#bundle-panel");
+  const dpr = window.devicePixelRatio || 1;
+
+  // Canvas for bundled edges
+  const canvas = panel.append("canvas")
+    .attr("width", W * dpr).attr("height", H * dpr)
+    .style("width", W + "px").style("height", H + "px")
+    .style("top", "26px").style("left", "0");
+  const ctx = canvas.node().getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  // SVG for nodes and labels
+  const svg = panel.append("svg")
+    .attr("width", W).attr("height", H)
+    .style("position", "absolute").style("top", "26px").style("left", "0");
+
+  const radius = Math.min(W, H) / 2 - 70;
+
+  // Build hierarchy: root -> groups -> leaves
+  const hierData = [{ id: "root", parent: null }];
+  for (let g = 0; g < 5; g++) {
+    hierData.push({ id: `grp-${g}`, parent: "root", group: g });
+    nodes.filter(n => n.group === g).forEach(n => {
+      hierData.push({ id: `n-${n.id}`, parent: `grp-${g}`, nodeId: n.id, name: n.name, group: g });
+    });
+  }
+
+  const root = d3.stratify().id(d => d.id).parentId(d => d.parent)(hierData);
+  d3.cluster()
+    .size([2 * Math.PI, radius])
+    .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth)(root);
+
+  const leaves = root.leaves();
+  const leafById = new Map(leaves.map(l => [l.data.nodeId, l]));
+
+  // Compute LCA paths for bundled edges
+  const bundledLinks = edges.map(e => {
+    const s = leafById.get(e.source), t = leafById.get(e.target);
+    return s && t ? { path: s.path(t), source: e.source, target: e.target } : null;
+  }).filter(Boolean);
+
+  let currentBeta = 0.85;
+
+  // Convert radial to cartesian
+  const radToCart = (angle, r) => [r * Math.cos(angle - Math.PI / 2), r * Math.sin(angle - Math.PI / 2)];
+
+  // Draw bundled edges on Canvas using d3.line with context
+  const lineGen = d3.line().x(d => d[0]).y(d => d[1]).context(ctx);
+
+  function drawEdges(highlightNodeId, highlightGroup) {
+    ctx.clearRect(0, 0, W, H);
+    ctx.save();
+    ctx.translate(W / 2, H / 2);
+
+    // Use curveBundle with current beta
+    lineGen.curve(d3.curveBundle.beta(currentBeta));
+
+    const isHighlighting = highlightNodeId != null || highlightGroup != null;
+
+    // Draw non-highlighted first, then highlighted on top
+    for (let pass = 0; pass < (isHighlighting ? 2 : 1); pass++) {
+      for (const link of bundledLinks) {
+        const isHit = highlightNodeId != null
+          ? (link.source === highlightNodeId || link.target === highlightNodeId)
+          : highlightGroup != null
+            ? (nodes[link.source].group === highlightGroup || nodes[link.target].group === highlightGroup)
+            : false;
+
+        if (isHighlighting && pass === 0 && isHit) continue;   // skip highlighted in first pass
+        if (isHighlighting && pass === 1 && !isHit) continue;   // skip non-highlighted in second pass
+
+        const pts = link.path.map(p => radToCart(p.x, p.y));
+
+        if (isHighlighting) {
+          if (isHit) {
+            const col = highlightNodeId != null ? COLORS[nodes[link.source].group] : COLORS[highlightGroup];
+            ctx.strokeStyle = col;
+            ctx.globalAlpha = 0.75;
+            ctx.lineWidth = 1.8;
+          } else {
+            ctx.strokeStyle = "#999";
+            ctx.globalAlpha = 0.04;
+            ctx.lineWidth = 0.5;
+          }
+        } else {
+          ctx.strokeStyle = "#777";
+          ctx.globalAlpha = 0.22;
+          ctx.lineWidth = 0.8;
+        }
+
+        ctx.beginPath();
+        lineGen(pts);
+        ctx.stroke();
+      }
+    }
+
+    ctx.restore();
+  }
+
+  drawEdges(null, null);
+
+  // SVG nodes on perimeter
+  const g = svg.append("g").attr("transform", `translate(${W / 2},${H / 2})`);
+
+  const nodeGs = g.selectAll("g.bnode").data(leaves).join("g")
+    .attr("class", "bnode")
+    .attr("transform", d => `rotate(${d.x * 180 / Math.PI - 90}) translate(${d.y},0)`)
+    .style("cursor", "pointer");
+
+  nodeGs.append("circle")
+    .attr("r", 4)
+    .attr("fill", d => COLORS[d.data.group])
+    .attr("stroke", "#fff").attr("stroke-width", 0.8);
+
+  nodeGs.append("text")
+    .attr("dy", "0.31em")
+    .attr("x", d => d.x < Math.PI ? 8 : -8)
+    .attr("text-anchor", d => d.x < Math.PI ? "start" : "end")
+    .attr("transform", d => d.x >= Math.PI ? "rotate(180)" : null)
+    .attr("font-size", 8)
+    .attr("fill", "#555")
+    .text(d => d.data.name);
+
+  nodeGs
+    .on("pointerenter", (evt, d) => { showTip(evt, d.data.name); dispatch.call("highlight", null, { nodeId: d.data.nodeId, group: d.data.group }); })
+    .on("pointermove", (evt) => { tooltip.style("left", (evt.clientX + 14) + "px").style("top", (evt.clientY - 12) + "px"); })
+    .on("pointerleave", () => { hideTip(); dispatch.call("clear"); });
+
+  dispatch.on("highlight.bundle", ({ nodeId, group }) => {
+    drawEdges(nodeId, nodeId != null ? null : group);
+    nodeGs.select("circle")
+      .attr("opacity", d => {
+        if (nodeId != null) return (d.data.nodeId === nodeId || neighbors.get(nodeId).has(d.data.nodeId)) ? 1 : 0.12;
+        return d.data.group === group ? 1 : 0.12;
+      })
+      .attr("r", d => d.data.nodeId === nodeId ? 6 : 4);
+  });
+
+  dispatch.on("clear.bundle", () => {
+    drawEdges(null, null);
+    nodeGs.select("circle").attr("opacity", 1).attr("r", 4);
+  });
+
+  // Tension slider
+  d3.select("#tension-slider").on("input", function() {
+    currentBeta = +this.value / 100;
+    d3.select("#tension-val").text(currentBeta.toFixed(2));
+    drawEdges(null, null);
+  });
+}
+
+// ===================================================================
+// PANEL 3: CHORD DIAGRAM
+// ===================================================================
+{
+  const W = 386, H = 494;
+  const svg = d3.select("#chord-panel").append("svg").attr("width", W).attr("height", H);
+
+  const outerRadius = Math.min(W, H) / 2 - 65;
+  const innerRadius = outerRadius - 22;
+
+  // Build 5x5 weighted matrix
+  const matrix = Array.from({ length: 5 }, () => new Array(5).fill(0));
+  edges.forEach(e => {
+    const sg = nodes[e.source].group, tg = nodes[e.target].group;
+    const w = e.weight || 1;
+    matrix[sg][tg] += w;
+    if (sg !== tg) matrix[tg][sg] += w;
+  });
+
+  const chord = d3.chord().padAngle(0.05).sortSubgroups(d3.descending);
+  const chords = chord(matrix);
+
+  const arcGen = d3.arc().innerRadius(innerRadius).outerRadius(outerRadius);
+  const ribbonGen = d3.ribbon().radius(innerRadius);
+
+  const g = svg.append("g").attr("transform", `translate(${W / 2},${H / 2})`);
+
+  // Ribbons (draw first so arcs are on top)
+  const ribbons = g.append("g").selectAll("path").data(chords).join("path")
+    .attr("d", ribbonGen)
+    .attr("fill", d => COLORS[d.source.index])
+    .attr("stroke", d => d3.color(COLORS[d.source.index]).darker(0.3))
+    .attr("stroke-width", 0.3)
+    .attr("opacity", 0.6);
+
+  // Group arcs
+  const groupArcs = g.append("g").selectAll("path").data(chords.groups).join("path")
+    .attr("d", arcGen)
+    .attr("fill", d => COLORS[d.index])
+    .attr("stroke", "#fff").attr("stroke-width", 0.8)
+    .style("cursor", "pointer");
+
+  // Group labels
+  g.append("g").selectAll("text").data(chords.groups).join("text")
+    .each(d => { d.angle = (d.startAngle + d.endAngle) / 2; })
+    .attr("dy", "0.35em")
+    .attr("transform", d =>
+      `rotate(${d.angle * 180 / Math.PI - 90}) translate(${outerRadius + 12}) ${d.angle > Math.PI ? "rotate(180)" : ""}`)
+    .attr("text-anchor", d => d.angle > Math.PI ? "end" : "start")
+    .attr("font-size", 11).attr("font-weight", 500)
+    .attr("fill", "#444")
+    .text(d => GROUP_NAMES[d.index]);
+
+  // Tick marks on arcs
+  const groupTicks = (d, step) => {
+    const k = (d.endAngle - d.startAngle) / d.value;
+    return d3.range(0, d.value, step).map(v => ({ value: v, angle: v * k + d.startAngle }));
+  };
+
+  const ticks = g.append("g").selectAll("g").data(chords.groups).join("g")
+    .selectAll("g").data(d => groupTicks(d, 5)).join("g")
+    .attr("transform", d => `rotate(${d.angle * 180 / Math.PI - 90}) translate(${outerRadius},0)`);
+
+  ticks.append("line").attr("x2", 4).attr("stroke", "#888").attr("stroke-width", 0.5);
+
+  groupArcs
+    .on("pointerenter", (evt, d) => { showTip(evt, `${GROUP_NAMES[d.index]} — ${Math.round(d.value)} connections`); dispatch.call("highlight", null, { nodeId: null, group: d.index }); })
+    .on("pointermove", (evt) => { tooltip.style("left", (evt.clientX + 14) + "px").style("top", (evt.clientY - 12) + "px"); })
+    .on("pointerleave", () => { hideTip(); dispatch.call("clear"); });
+
+  dispatch.on("highlight.chord", ({ nodeId, group }) => {
+    const targetGroup = nodeId != null ? nodes[nodeId].group : group;
+    groupArcs.attr("opacity", d => d.index === targetGroup ? 1 : 0.2);
+    ribbons
+      .attr("opacity", d => (d.source.index === targetGroup || d.target.index === targetGroup) ? 0.85 : 0.04)
+      .attr("stroke-width", d => (d.source.index === targetGroup || d.target.index === targetGroup) ? 0.6 : 0.3);
+  });
+
+  dispatch.on("clear.chord", () => {
+    groupArcs.attr("opacity", 1);
+    ribbons.attr("opacity", 0.6).attr("stroke-width", 0.3);
+  });
+}
+
+})();
+</script>
+</body>
+</html>

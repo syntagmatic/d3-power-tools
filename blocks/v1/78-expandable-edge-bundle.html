@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Expandable Edge Bundle</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa; color: #333;
+    display: flex; justify-content: center; align-items: center;
+    min-height: 100vh;
+  }
+  #container { position: relative; width: 1200px; height: 800px; }
+  canvas, svg { position: absolute; top: 0; left: 0; }
+  .controls {
+    position: absolute; top: 12px; left: 12px; z-index: 10;
+    background: rgba(255,255,255,0.92); border-radius: 8px;
+    padding: 10px 14px; font-size: 13px;
+    box-shadow: 0 1px 6px rgba(0,0,0,0.1);
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .controls .row { display: flex; align-items: center; gap: 8px; }
+  .controls label { min-width: 56px; color: #555; }
+  .controls span { min-width: 28px; text-align: right; font-variant-numeric: tabular-nums;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace; font-size: 12px; }
+  .controls input[type=range] { width: 110px; }
+  .hint {
+    position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%);
+    z-index: 10; font-size: 12px; color: #888;
+    background: rgba(255,255,255,0.85); padding: 4px 12px; border-radius: 4px;
+  }
+  .tooltip {
+    position: absolute; pointer-events: none; background: rgba(20,20,30,0.88);
+    color: #fff; padding: 8px 12px; border-radius: 5px; font-size: 12px;
+    display: none; z-index: 20; line-height: 1.5; max-width: 240px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+  }
+</style>
+</head>
+<body>
+<div id="container">
+  <div class="controls">
+    <div class="row">
+      <label for="tension">Bundle &beta;:</label>
+      <input type="range" id="tension" min="0" max="1" step="0.05" value="0.3">
+      <span id="tension-val">0.30</span>
+    </div>
+  </div>
+  <div class="hint">Click an internal node to collapse/expand its subtree</div>
+  <div class="tooltip" id="tooltip"></div>
+</div>
+<script>
+// --- Tol palette ---
+const TOL = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377","#BBBBBB"];
+
+// --- Synthetic data: software module hierarchy with cross-links ---
+const rng = d3.randomLcg(42);
+
+const modules = ["core","render","data","network","auth","storage"];
+const subNames = ["parser","cache","handler","queue","validator","encoder",
+  "decoder","router","bridge","factory","adapter","logger","stream","pool","mapper"];
+
+const flat = [{ id: "root", parent: null }];
+const leafIds = [];
+
+modules.forEach((mod, mi) => {
+  flat.push({ id: mod, parent: "root", module: mi });
+  const nSub = 3 + Math.floor(rng() * 3);
+  const subs = d3.shuffle(subNames.slice(), rng).slice(0, nSub);
+  subs.forEach(sub => {
+    const subId = `${mod}.${sub}`;
+    flat.push({ id: subId, parent: mod, module: mi });
+    const nLeaf = 2 + Math.floor(rng() * 4);
+    for (let k = 0; k < nLeaf; k++) {
+      const leafId = `${subId}.${String.fromCharCode(97 + k)}`;
+      flat.push({ id: leafId, parent: subId, module: mi });
+      leafIds.push(leafId);
+    }
+  });
+});
+
+// Cross-module edges (~100), biased toward cross-module connections
+const edges = [];
+const edgeSet = new Set();
+while (edges.length < 100) {
+  const s = leafIds[Math.floor(rng() * leafIds.length)];
+  const t = leafIds[Math.floor(rng() * leafIds.length)];
+  if (s === t) continue;
+  const sm = s.split(".")[0], tm = t.split(".")[0];
+  if (sm === tm && rng() < 0.5) continue;
+  const key = [s, t].sort().join("|");
+  if (edgeSet.has(key)) continue;
+  edgeSet.add(key);
+  edges.push({ source: s, target: t });
+}
+
+// --- Dimensions ---
+const W = 1200, H = 800;
+const cx = W / 2, cy = H / 2;
+const outerRadius = Math.min(cx, cy) - 100;
+const dpr = devicePixelRatio || 1;
+
+const container = document.getElementById("container");
+
+// Canvas for edges
+const canvas = d3.select(container).append("canvas")
+  .attr("width", W * dpr).attr("height", H * dpr)
+  .style("width", `${W}px`).style("height", `${H}px`)
+  .node();
+const ctx = canvas.getContext("2d");
+ctx.scale(dpr, dpr);
+
+// SVG for nodes, labels, interaction
+const svg = d3.select(container).append("svg")
+  .attr("width", W).attr("height", H)
+  .style("font-family", "system-ui, -apple-system, sans-serif");
+const gMain = svg.append("g").attr("transform", `translate(${cx},${cy})`);
+
+const tooltip = d3.select("#tooltip");
+
+// --- Hierarchy ---
+const root = d3.stratify().id(d => d.id).parentId(d => d.parent)(flat);
+
+const getModuleIndex = d => {
+  let n = d;
+  while (n.depth > 1) n = n.parent;
+  return modules.indexOf(n.data.id);
+};
+
+// --- Layout ---
+const cluster = d3.cluster()
+  .size([2 * Math.PI, outerRadius])
+  .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth);
+
+function recomputeLayout() {
+  cluster(root);
+}
+
+// Stash polar positions for animation
+function stashPositions() {
+  root.each(d => { d.x0 = d.x; d.y0 = d.y; });
+}
+
+// Initialize
+recomputeLayout();
+stashPositions();
+
+// --- Edge aggregation ---
+function visibleAncestor(nodeMap, id) {
+  let n = nodeMap.get(id);
+  if (!n) return null;
+  while (n.depth > 0) {
+    if (n.parent && n.parent.children && n.parent.children.includes(n)) return n;
+    n = n.parent;
+  }
+  return n;
+}
+
+function computeLinks() {
+  const nodeMap = new Map();
+  root.each(d => nodeMap.set(d.data.id, d));
+
+  const aggMap = new Map();
+  for (const e of edges) {
+    const src = visibleAncestor(nodeMap, e.source);
+    const tgt = visibleAncestor(nodeMap, e.target);
+    if (!src || !tgt || src === tgt) continue;
+    const key = [src.data.id, tgt.data.id].sort().join("|");
+    if (!aggMap.has(key)) {
+      aggMap.set(key, { path: src.path(tgt), count: 0, key });
+    }
+    aggMap.get(key).count++;
+  }
+  return [...aggMap.values()];
+}
+
+// --- Polar to Cartesian ---
+function polar2cart(angle, radius) {
+  const a = angle - Math.PI / 2;
+  return [radius * Math.cos(a), radius * Math.sin(a)];
+}
+
+// --- Drawing ---
+let currentBeta = 0.15;
+let hoveredNode = null;
+let animating = false;
+
+function drawEdges(interpFn) {
+  ctx.clearRect(0, 0, W, H);
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  const links = computeLinks();
+
+  // Build line generator using Cartesian coords with canvas context
+  const line = d3.line()
+    .curve(d3.curveBundle.beta(currentBeta))
+    .x(d => interpFn ? interpFn(d)[0] : polar2cart(d.x, d.y)[0])
+    .y(d => interpFn ? interpFn(d)[1] : polar2cart(d.x, d.y)[1])
+    .context(ctx);
+
+  // Hover highlighting
+  let connectedKeys = null;
+  if (hoveredNode && !animating) {
+    const hoverIds = new Set();
+    const walk = n => {
+      hoverIds.add(n.data.id);
+      if (n.children) n.children.forEach(walk);
+      if (n._children) n._children.forEach(walk);
+    };
+    walk(hoveredNode);
+    connectedKeys = new Set();
+    const nodeMap = new Map();
+    root.each(d => nodeMap.set(d.data.id, d));
+    for (const e of edges) {
+      if (hoverIds.has(e.source) || hoverIds.has(e.target)) {
+        const src = visibleAncestor(nodeMap, e.source);
+        const tgt = visibleAncestor(nodeMap, e.target);
+        if (src && tgt && src !== tgt) {
+          connectedKeys.add([src.data.id, tgt.data.id].sort().join("|"));
+        }
+      }
+    }
+  }
+
+  const faded = [], highlighted = [];
+  for (const l of links) {
+    if (connectedKeys && connectedKeys.has(l.key)) highlighted.push(l);
+    else faded.push(l);
+  }
+
+  // Draw faded edges
+  for (const l of faded) {
+    ctx.strokeStyle = connectedKeys ? "rgba(150,150,150,0.06)" : "rgba(100,110,130,0.22)";
+    ctx.lineWidth = connectedKeys ? 0.5 : Math.max(0.5, Math.sqrt(l.count) * 0.8);
+    ctx.beginPath();
+    line(l.path);
+    ctx.stroke();
+  }
+
+  // Draw highlighted edges on top
+  for (const l of highlighted) {
+    const modIdx = getModuleIndex(l.path[0]);
+    ctx.strokeStyle = d3.color(TOL[modIdx]).copy({ opacity: 0.75 });
+    ctx.lineWidth = Math.max(1.5, Math.sqrt(l.count) * 2);
+    ctx.beginPath();
+    line(l.path);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+function renderNodes(interpFn) {
+  gMain.selectAll("*").remove();
+
+  const allVisible = [];
+  const collectVisible = node => {
+    if (node.depth > 0) allVisible.push(node);
+    if (node.children) node.children.forEach(collectVisible);
+  };
+  collectVisible(root);
+
+  const isLeaf = d => !d.children && !d._children;
+  const isCollapsed = d => !d.children && d._children;
+  const isInternal = d => (d.children && d.children.length > 0) || d._children;
+
+  const pos = d => {
+    if (interpFn) return interpFn(d);
+    return polar2cart(d.x, d.y);
+  };
+
+  const leaves = allVisible.filter(isLeaf);
+  const internals = allVisible.filter(d => d.depth >= 1 && isInternal(d));
+
+  // Module group labels at depth 1
+  const depth1 = allVisible.filter(d => d.depth === 1);
+  for (const d of depth1) {
+    const angle = d.x;
+    const labelR = outerRadius + 24;
+    const [lx, ly] = polar2cart(angle, labelR);
+    const deg = angle * 180 / Math.PI;
+    const flip = deg > 90 && deg < 270;
+    gMain.append("text")
+      .attr("x", lx).attr("y", ly)
+      .attr("transform", `rotate(${flip ? deg + 180 : deg}, ${lx}, ${ly})`)
+      .attr("text-anchor", flip ? "end" : "start")
+      .attr("dy", "0.35em")
+      .attr("font-size", "13px")
+      .attr("font-weight", 700)
+      .attr("fill", d3.color(TOL[getModuleIndex(d)]).darker(0.6))
+      .attr("pointer-events", "none")
+      .text(d.data.id);
+  }
+
+  // Leaf labels
+  for (const d of leaves) {
+    const angle = d.x;
+    const labelR = d.y + 8;
+    const [lx, ly] = interpFn ? interpFn(d, 8) : polar2cart(angle, labelR);
+    const deg = angle * 180 / Math.PI;
+    const flip = deg > 90 && deg < 270;
+    // Only show if enough angular space
+    const siblings = d.parent ? (d.parent.children || []).length : 1;
+    if (siblings > 6) continue;
+    gMain.append("text")
+      .attr("x", lx).attr("y", ly)
+      .attr("transform", `rotate(${flip ? deg + 180 : deg}, ${lx}, ${ly})`)
+      .attr("text-anchor", flip ? "end" : "start")
+      .attr("dy", "0.35em")
+      .attr("font-size", "9px")
+      .attr("fill", "#666")
+      .attr("pointer-events", "none")
+      .text(d.data.id.split(".").pop());
+  }
+
+  // Leaf dots
+  const leafCircles = gMain.selectAll("circle.leaf")
+    .data(leaves, d => d.data.id)
+    .join("circle")
+    .attr("class", "leaf")
+    .attr("cx", d => pos(d)[0])
+    .attr("cy", d => pos(d)[1])
+    .attr("r", 3)
+    .attr("fill", d => TOL[getModuleIndex(d)])
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 0.8);
+
+  // Internal node markers
+  const intG = gMain.selectAll("g.internal")
+    .data(internals, d => d.data.id)
+    .join("g")
+    .attr("class", "internal")
+    .attr("transform", d => {
+      const [px, py] = pos(d);
+      return `translate(${px},${py})`;
+    })
+    .style("cursor", "pointer");
+
+  intG.append("circle")
+    .attr("r", d => d.depth === 1 ? 7 : 5)
+    .attr("fill", d => isCollapsed(d)
+      ? d3.color(TOL[getModuleIndex(d)]).darker(0.3)
+      : "#fff")
+    .attr("stroke", d => d3.color(TOL[getModuleIndex(d)]).darker(0.6))
+    .attr("stroke-width", 1.5);
+
+  // Show +/- indicator
+  intG.filter(isCollapsed).append("text")
+    .attr("text-anchor", "middle").attr("dy", "0.35em")
+    .attr("font-size", d => d.depth === 1 ? "11px" : "9px")
+    .attr("font-weight", 700)
+    .attr("fill", "#fff").attr("pointer-events", "none")
+    .text("+");
+
+  intG.filter(d => d.children && d.children.length > 0).append("text")
+    .attr("text-anchor", "middle").attr("dy", "0.3em")
+    .attr("font-size", "9px").attr("font-weight", 700)
+    .attr("fill", d => d3.color(TOL[getModuleIndex(d)]).darker(0.8))
+    .attr("pointer-events", "none")
+    .text("\u2212");
+
+  // Count badge for collapsed nodes
+  intG.filter(isCollapsed).each(function(d) {
+    const count = countDescendantLeaves(d);
+    d3.select(this).append("text")
+      .attr("text-anchor", "middle").attr("dy", "-10px")
+      .attr("font-size", "9px").attr("fill", "#888")
+      .attr("pointer-events", "none")
+      .text(count);
+  });
+
+  // Click to toggle
+  intG.on("click", (event, d) => {
+    event.stopPropagation();
+    if (animating) return;
+    toggleNode(d);
+  });
+
+  // Invisible hit targets for leaf hover
+  gMain.selectAll("circle.hit")
+    .data(leaves, d => d.data.id)
+    .join("circle")
+    .attr("class", "hit")
+    .attr("cx", d => pos(d)[0])
+    .attr("cy", d => pos(d)[1])
+    .attr("r", 10)
+    .attr("fill", "transparent")
+    .on("pointerenter", onEnter)
+    .on("pointermove", onMove)
+    .on("pointerleave", onLeave);
+
+  intG.on("pointerenter", onEnter)
+    .on("pointermove", onMove)
+    .on("pointerleave", onLeave);
+}
+
+function countDescendantLeaves(d) {
+  let count = 0;
+  const walk = n => {
+    if (!n.children && !n._children) count++;
+    if (n.children) n.children.forEach(walk);
+    if (n._children) n._children.forEach(walk);
+  };
+  walk(d);
+  return count;
+}
+
+// --- Hover ---
+function onEnter(event, d) {
+  if (animating) return;
+  hoveredNode = d;
+  drawEdges();
+  const ids = new Set();
+  const walk = n => {
+    ids.add(n.data.id);
+    if (n.children) n.children.forEach(walk);
+    if (n._children) n._children.forEach(walk);
+  };
+  walk(d);
+  const nEdges = edges.filter(e => ids.has(e.source) || ids.has(e.target)).length;
+  const name = d.data.id;
+  const collapsed = !d.children && d._children;
+  tooltip.style("display", "block")
+    .html(`<strong>${name}</strong><br>Connections: ${nEdges}${collapsed ? `<br>Hidden leaves: ${countDescendantLeaves(d)}` : ""}`);
+}
+
+function onMove(event) {
+  const [mx, my] = d3.pointer(event, container);
+  tooltip.style("left", `${mx + 14}px`).style("top", `${my - 10}px`);
+}
+
+function onLeave() {
+  hoveredNode = null;
+  drawEdges();
+  tooltip.style("display", "none");
+}
+
+// --- Animated collapse/expand with polar interpolation ---
+function toggleNode(d) {
+  // Stash old positions before structural change
+  root.each(n => { n.x0 = n.x; n.y0 = n.y; });
+
+  // Toggle children
+  if (d.children) {
+    d._children = d.children;
+    d.children = null;
+  } else if (d._children) {
+    d.children = d._children;
+    d._children = null;
+  }
+
+  // Re-run layout
+  recomputeLayout();
+
+  // For newly appearing nodes (expand), start them at parent's old position
+  if (d.children) {
+    const walk = n => {
+      if (n.x0 === undefined) {
+        n.x0 = d.x0;
+        n.y0 = d.y0;
+      }
+      if (n.children) n.children.forEach(walk);
+    };
+    d.children.forEach(walk);
+  }
+
+  // For collapsing: nodes that will disappear should converge to parent's new pos
+  // They're already gone from .children, stored in _children
+  // The edge aggregation handles this automatically
+
+  // Animate with polar interpolation
+  animating = true;
+  const duration = 650;
+  const ease = d3.easeCubicInOut;
+  const timer = d3.timer(elapsed => {
+    const t = Math.min(1, ease(elapsed / duration));
+
+    // Interpolation function: given a node, return Cartesian [x, y]
+    // Interpolates angle and radius in polar space for smooth radial motion
+    const interpFn = (node, extraR = 0) => {
+      const fromAngle = node.x0 !== undefined ? node.x0 : node.x;
+      const fromRadius = node.y0 !== undefined ? node.y0 : node.y;
+      const toAngle = node.x;
+      const toRadius = node.y;
+      const angle = fromAngle + (toAngle - fromAngle) * t;
+      const radius = fromRadius + (toRadius - fromRadius) * t + extraR;
+      return polar2cart(angle, radius);
+    };
+
+    drawEdges(interpFn);
+    renderNodes(interpFn);
+
+    if (t >= 1) {
+      timer.stop();
+      animating = false;
+      stashPositions();
+      drawEdges();
+      renderNodes();
+    }
+  });
+}
+
+// --- Tension slider ---
+document.getElementById("tension").addEventListener("input", function() {
+  currentBeta = +this.value;
+  document.getElementById("tension-val").textContent = this.value;
+  drawEdges();
+});
+
+// --- Initial render ---
+renderNodes();
+drawEdges();
+</script>
+</body>
+</html>

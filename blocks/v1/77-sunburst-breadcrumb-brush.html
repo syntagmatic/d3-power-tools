@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sunburst Breadcrumb Brush</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa; color: #333;
+    display: flex; justify-content: center; align-items: flex-start;
+    min-height: 100vh; padding: 16px 0;
+  }
+  #container {
+    width: 1200px; max-width: 100%;
+    display: grid;
+    grid-template-columns: 1fr 280px;
+    grid-template-rows: auto auto 1fr;
+    gap: 0;
+  }
+  h1 {
+    grid-column: 1 / -1;
+    font-size: 18px; font-weight: 600;
+    padding: 8px 20px 4px;
+    color: #222;
+  }
+  #breadcrumb {
+    grid-column: 1 / -1;
+    min-height: 36px; padding: 4px 20px;
+    display: flex; align-items: center; gap: 0;
+    flex-wrap: wrap;
+  }
+  .crumb {
+    display: inline-block; padding: 3px 10px;
+    border-radius: 3px; font-size: 12px; font-weight: 600;
+    cursor: pointer; color: #333; transition: filter 0.15s;
+    white-space: nowrap;
+  }
+  .crumb:hover { filter: brightness(0.92); }
+  .crumb-sep { margin: 0 3px; color: #aaa; font-size: 13px; }
+  #sunburst-wrap {
+    position: relative; display: flex;
+    justify-content: center; align-items: center;
+    min-height: 640px;
+  }
+  #sidebar {
+    padding: 16px 20px 16px 8px;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  .stat-card {
+    background: #fff; border: 1px solid #e4e4e4;
+    border-radius: 6px; padding: 12px 14px;
+  }
+  .stat-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: #888; margin-bottom: 4px; }
+  .stat-value { font-size: 22px; font-weight: 700; font-family: "SF Mono", Monaco, "Cascadia Code", monospace; }
+  .stat-sub { font-size: 11px; color: #999; margin-top: 2px; }
+  .legend-item { display: flex; align-items: center; gap: 8px; font-size: 12px; margin: 3px 0; }
+  .legend-swatch { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; }
+  .tooltip {
+    position: absolute; pointer-events: none;
+    background: rgba(15,15,15,0.92); color: #fff;
+    padding: 10px 14px; border-radius: 5px;
+    font-size: 12px; line-height: 1.5;
+    display: none; z-index: 10;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+    max-width: 220px;
+  }
+  .hint {
+    font-size: 11px; color: #aaa; text-align: center;
+    padding: 4px 0;
+  }
+</style>
+</head>
+<body>
+<div id="container">
+  <h1>Product Taxonomy Explorer</h1>
+  <div id="breadcrumb"></div>
+  <div id="sunburst-wrap">
+    <div class="tooltip" id="tooltip"></div>
+  </div>
+  <div id="sidebar">
+    <div class="stat-card">
+      <div class="stat-label">Selected Products</div>
+      <div class="stat-value" id="stat-count">--</div>
+      <div class="stat-sub" id="stat-pct"></div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Revenue</div>
+      <div class="stat-value" id="stat-revenue">--</div>
+      <div class="stat-sub" id="stat-rev-pct"></div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Departments</div>
+      <div id="legend"></div>
+    </div>
+    <div class="hint">Drag outer ring to brush. Click inner arcs to zoom. Click center to zoom out.</div>
+  </div>
+</div>
+<script>
+// Tol Bright palette — colorblind-safe
+const TOL = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377"];
+
+// --- Synthetic data: 4-level product taxonomy (~150 leaves) ---
+const rng = d3.randomLcg(42);
+const rand = (lo, hi) => lo + rng() * (hi - lo);
+
+const departments = ["Electronics","Clothing","Home & Garden","Food & Drink","Sports","Beauty"];
+const catPool = [
+  ["Phones","Laptops","Audio","Cameras","Wearables"],
+  ["Men","Women","Kids","Accessories","Shoes"],
+  ["Furniture","Kitchen","Bedding","Decor","Garden Tools"],
+  ["Snacks","Beverages","Dairy","Bakery","Frozen"],
+  ["Fitness","Outdoor","Team Sports","Water Sports","Winter"],
+  ["Skincare","Makeup","Fragrance","Hair Care","Bath"]
+];
+const prodNames = ["Basic","Premium","Pro","Eco","Classic","Deluxe","Mini","Studio"];
+
+const buildTree = () => departments.map((dept, di) => {
+  const nCats = 3 + Math.floor(rng() * 3); // 3-5 categories
+  return {
+    name: dept,
+    children: catPool[di].slice(0, nCats).map(cat => {
+      const nProds = 3 + Math.floor(rng() * 5); // 3-7 products per subcategory
+      return {
+        name: cat,
+        children: d3.range(nProds).map(i => ({
+          name: `${cat} ${prodNames[i % prodNames.length]}`,
+          revenue: Math.round(rand(800, 18000))
+        }))
+      };
+    })
+  };
+});
+
+const data = { name: "All Products", children: buildTree() };
+const root = d3.hierarchy(data)
+  .sum(d => d.revenue || 0)
+  .sort((a, b) => b.value - a.value);
+
+const totalLeaves = root.leaves().length;
+const totalValue = root.value;
+const fmt = d3.format(",");
+const fmtPct = d3.format(".1%");
+
+// --- Color encoding ---
+const deptColor = d3.scaleOrdinal().domain(departments).range(TOL);
+
+const getDept = d => {
+  let n = d;
+  while (n.depth > 1) n = n.parent;
+  return n.data.name;
+};
+
+// Depth-adjusted color: deeper = lighter, less chroma
+const nodeColor = d => {
+  if (d.depth === 0) return "#f0f0f0";
+  const base = d3.hcl(deptColor(getDept(d)));
+  const df = d.depth - 1;
+  base.l = Math.min(90, base.l + df * 14);
+  base.c = Math.max(12, (base.c || 40) - df * 10);
+  return base.toString();
+};
+
+// Desaturated color for brushed-out arcs
+const desatColor = d => {
+  const c = d3.hcl(nodeColor(d));
+  c.c = Math.max(0, (c.c || 0) * 0.08);
+  c.l = Math.min(92, (c.l || 70) * 1.08);
+  return c.toString();
+};
+
+// --- Layout ---
+const size = 620;
+const radius = size / 2;
+
+const partition = d3.partition().size([2 * Math.PI, radius]);
+partition(root);
+
+const arc = d3.arc()
+  .startAngle(d => d.x0)
+  .endAngle(d => d.x1)
+  .padAngle(d => Math.min((d.x1 - d.x0) / 2, 0.005))
+  .padRadius(radius / 2)
+  .innerRadius(d => d.y0)
+  .outerRadius(d => Math.max(d.y0, d.y1 - 1));
+
+const svg = d3.select("#sunburst-wrap").append("svg")
+  .attr("width", size).attr("height", size)
+  .attr("viewBox", [-size/2, -size/2, size, size])
+  .style("font-family", "system-ui, -apple-system, sans-serif")
+  .style("cursor", "default");
+
+const g = svg.append("g");
+
+// Stash current positions for transitions
+root.each(d => {
+  d.current = { x0: d.x0, x1: d.x1, y0: d.y0, y1: d.y1 };
+});
+
+const descendants = root.descendants().filter(d => d.depth > 0);
+
+const paths = g.selectAll("path.arc")
+  .data(descendants)
+  .join("path")
+    .attr("class", "arc")
+    .attr("d", d => arc(d.current))
+    .attr("fill", d => nodeColor(d))
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 0.5)
+    .style("cursor", "pointer");
+
+// --- Arc labels ---
+const labelArc = d3.arc()
+  .startAngle(d => d.x0)
+  .endAngle(d => d.x1)
+  .innerRadius(d => (d.y0 + d.y1) / 2)
+  .outerRadius(d => (d.y0 + d.y1) / 2);
+
+const shouldShowLabel = d => {
+  const angSpan = d.current.x1 - d.current.x0;
+  const midR = (d.current.y0 + d.current.y1) / 2;
+  const arcLen = angSpan * midR;
+  const radLen = d.current.y1 - d.current.y0;
+  return arcLen > 32 && radLen > 18 && d.current.y1 > 0;
+};
+
+const labels = g.selectAll("text.arc-label")
+  .data(descendants)
+  .join("text")
+    .attr("class", "arc-label")
+    .attr("pointer-events", "none")
+    .attr("text-anchor", "middle")
+    .attr("dy", "0.35em")
+    .attr("font-size", d => d.depth === 1 ? "11px" : "9px")
+    .attr("font-weight", d => d.depth === 1 ? 600 : 400)
+    .attr("fill", "#222");
+
+const updateLabelPositions = () => {
+  labels.each(function(d) {
+    const el = d3.select(this);
+    const show = shouldShowLabel(d);
+    el.attr("opacity", show ? 1 : 0);
+    if (show) {
+      const angle = (d.current.x0 + d.current.x1) / 2;
+      const r = (d.current.y0 + d.current.y1) / 2;
+      const x = r * Math.sin(angle);
+      const y = -r * Math.cos(angle);
+      const deg = angle * 180 / Math.PI;
+      const flip = angle > Math.PI;
+      // Truncate label if arc is small
+      const arcLen = (d.current.x1 - d.current.x0) * r;
+      const maxChars = Math.floor(arcLen / 6);
+      const name = d.data.name;
+      el.text(name.length > maxChars ? name.slice(0, maxChars - 1) + "\u2026" : name);
+      el.attr("transform", `translate(${x},${y}) rotate(${flip ? deg - 180 : deg})`);
+    }
+  });
+};
+updateLabelPositions();
+
+// --- Center circle for zoom-out ---
+const centerCircle = g.append("circle")
+  .attr("r", root.y1 || 40)
+  .attr("fill", "#fafafa")
+  .attr("stroke", "#e0e0e0")
+  .attr("stroke-width", 1)
+  .style("cursor", "pointer")
+  .on("click", () => {
+    if (currentFocus !== root) zoomTo(currentFocus.parent || root);
+  });
+
+const centerText = g.append("text")
+  .attr("text-anchor", "middle")
+  .attr("dy", "0.35em")
+  .attr("font-size", "11px")
+  .attr("fill", "#999")
+  .attr("pointer-events", "none")
+  .text("\u2190 Back");
+centerText.attr("opacity", 0);
+
+// --- Radial brush on outer ring ---
+let brushAngleStart = null, brushAngleEnd = null, brushActive = false;
+const selectedLeaves = new Set();
+
+// Brush visual elements
+const brushGroup = g.append("g").attr("class", "brush-overlay");
+const brushArcPath = brushGroup.append("path")
+  .attr("fill", "#4477AA").attr("opacity", 0.25)
+  .attr("stroke", "#4477AA").attr("stroke-width", 1.5)
+  .attr("display", "none");
+const brushLineStart = brushGroup.append("line")
+  .attr("stroke", "#4477AA").attr("stroke-width", 1)
+  .attr("stroke-dasharray", "3,2").attr("display", "none");
+const brushLineEnd = brushGroup.append("line")
+  .attr("stroke", "#4477AA").attr("stroke-width", 1)
+  .attr("stroke-dasharray", "3,2").attr("display", "none");
+
+const getAngle = (event) => {
+  const [mx, my] = d3.pointer(event, g.node());
+  let a = Math.atan2(mx, -my);
+  if (a < 0) a += 2 * Math.PI;
+  return a;
+};
+
+const getRadius = (event) => {
+  const [mx, my] = d3.pointer(event, g.node());
+  return Math.sqrt(mx * mx + my * my);
+};
+
+// Outer ring bounds (from leaves)
+const outerR = () => {
+  const leaves = root.leaves();
+  return leaves.length > 0 ? leaves[0].current.y1 : radius * 0.9;
+};
+const innerR = () => {
+  const leaves = root.leaves();
+  return leaves.length > 0 ? leaves[0].current.y0 : radius * 0.6;
+};
+
+const updateBrushVisuals = () => {
+  if (!brushActive || brushAngleStart == null || brushAngleEnd == null) {
+    brushArcPath.attr("display", "none");
+    brushLineStart.attr("display", "none");
+    brushLineEnd.attr("display", "none");
+    return;
+  }
+  const oR = outerR(), iR = innerR();
+  const lo = Math.min(brushAngleStart, brushAngleEnd);
+  const hi = Math.max(brushAngleStart, brushAngleEnd);
+
+  // Highlight arc on outer edge
+  const arcGen = d3.arc()
+    .innerRadius(iR - 2).outerRadius(oR + 4)
+    .startAngle(lo).endAngle(hi);
+  brushArcPath.attr("display", null).attr("d", arcGen());
+
+  // Radial guide lines
+  const drawLine = (line, angle) => {
+    line.attr("display", null)
+      .attr("x1", (iR - 4) * Math.sin(angle))
+      .attr("y1", -(iR - 4) * Math.cos(angle))
+      .attr("x2", (oR + 6) * Math.sin(angle))
+      .attr("y2", -(oR + 6) * Math.cos(angle));
+  };
+  drawLine(brushLineStart, lo);
+  drawLine(brushLineEnd, hi);
+};
+
+const applyBrushSelection = () => {
+  selectedLeaves.clear();
+  if (!brushActive || brushAngleStart == null || brushAngleEnd == null) {
+    paths.transition().duration(200).attr("fill", d => nodeColor(d)).attr("opacity", 1);
+    updateStats();
+    return;
+  }
+  const lo = Math.min(brushAngleStart, brushAngleEnd);
+  const hi = Math.max(brushAngleStart, brushAngleEnd);
+
+  // Select leaves whose midpoint angle falls in brush range
+  root.leaves().forEach(leaf => {
+    const mid = (leaf.current.x0 + leaf.current.x1) / 2;
+    if (mid >= lo && mid <= hi) selectedLeaves.add(leaf);
+  });
+
+  // Build ancestor set for coloring
+  const ancestorSet = new Set();
+  selectedLeaves.forEach(leaf => {
+    let n = leaf;
+    while (n) { ancestorSet.add(n); n = n.parent; }
+  });
+
+  paths.attr("fill", d => {
+    if (selectedLeaves.size === 0) return nodeColor(d);
+    return (selectedLeaves.has(d) || ancestorSet.has(d)) ? nodeColor(d) : desatColor(d);
+  }).attr("opacity", d => {
+    if (selectedLeaves.size === 0) return 1;
+    return (selectedLeaves.has(d) || ancestorSet.has(d)) ? 1 : 0.6;
+  });
+
+  updateStats();
+};
+
+// Pointer events for radial brush
+let brushRafId = 0;
+
+svg.on("pointerdown", event => {
+  const r = getRadius(event);
+  const iR = innerR(), oR = outerR();
+  // Only start brush on outer ring area (with generous hit zone)
+  if (r >= iR * 0.85 && r <= oR + 30) {
+    brushActive = true;
+    brushAngleStart = getAngle(event);
+    brushAngleEnd = brushAngleStart;
+    svg.node().setPointerCapture(event.pointerId);
+    event.preventDefault();
+    event.stopPropagation();
+  }
+});
+
+svg.on("pointermove", event => {
+  if (!brushActive) {
+    // Tooltip handling
+    return;
+  }
+  brushAngleEnd = getAngle(event);
+  cancelAnimationFrame(brushRafId);
+  brushRafId = requestAnimationFrame(() => {
+    updateBrushVisuals();
+    applyBrushSelection();
+  });
+});
+
+svg.on("pointerup", event => {
+  if (!brushActive) return;
+  // Cancel if drag was too small (likely a click)
+  if (Math.abs(brushAngleEnd - brushAngleStart) < 0.03) {
+    brushActive = false;
+    brushAngleStart = brushAngleEnd = null;
+    updateBrushVisuals();
+    applyBrushSelection();
+  }
+  // Otherwise keep brush active — click elsewhere to clear
+});
+
+// Clear brush on double-click or clicking center
+svg.on("dblclick", () => {
+  brushActive = false;
+  brushAngleStart = brushAngleEnd = null;
+  updateBrushVisuals();
+  applyBrushSelection();
+});
+
+// --- Stats sidebar ---
+const updateStats = () => {
+  const selCount = selectedLeaves.size;
+  const count = selCount > 0 ? selCount : totalLeaves;
+  const selValue = selCount > 0 ? d3.sum([...selectedLeaves], d => d.value) : totalValue;
+
+  d3.select("#stat-count").text(fmt(count));
+  d3.select("#stat-pct").text(
+    selCount > 0 ? `${fmtPct(count / totalLeaves)} of ${totalLeaves} products` : `of ${totalLeaves} total`
+  );
+  d3.select("#stat-revenue").text(`$${fmt(selValue)}`);
+  d3.select("#stat-rev-pct").text(
+    selCount > 0 ? `${fmtPct(selValue / totalValue)} of $${fmt(totalValue)}` : `total revenue`
+  );
+};
+updateStats();
+
+// --- Legend ---
+const legend = d3.select("#legend");
+departments.forEach((dept, i) => {
+  const item = legend.append("div").attr("class", "legend-item");
+  item.append("div").attr("class", "legend-swatch")
+    .style("background", TOL[i]);
+  item.append("span").text(dept);
+});
+
+// --- Breadcrumb ---
+let currentFocus = root;
+const breadcrumb = d3.select("#breadcrumb");
+
+const updateBreadcrumb = node => {
+  const trail = node.ancestors().reverse();
+  breadcrumb.selectAll("*").remove();
+  trail.forEach((d, i) => {
+    if (i > 0) breadcrumb.append("span").attr("class", "crumb-sep").text("\u203A");
+    breadcrumb.append("span")
+      .attr("class", "crumb")
+      .style("background", d.depth > 0 ? nodeColor(d) : "#e8e8e8")
+      .text(d.data.name)
+      .on("click", () => zoomTo(d));
+  });
+  // Show selection context in breadcrumb
+  if (selectedLeaves.size > 0) {
+    breadcrumb.append("span").attr("class", "crumb-sep").text("\u2014");
+    breadcrumb.append("span")
+      .attr("class", "crumb")
+      .style("background", "#4477AA").style("color", "#fff")
+      .text(`${selectedLeaves.size} selected`);
+  }
+};
+updateBreadcrumb(root);
+
+// --- Zoom on click (inner rings) ---
+const zoomTo = p => {
+  currentFocus = p;
+  // Clear brush on zoom
+  brushActive = false;
+  brushAngleStart = brushAngleEnd = null;
+  selectedLeaves.clear();
+  updateBrushVisuals();
+
+  root.each(d => {
+    d.target = {
+      x0: Math.max(0, Math.min(1, (d.x0 - p.x0) / (p.x1 - p.x0))) * 2 * Math.PI,
+      x1: Math.max(0, Math.min(1, (d.x1 - p.x0) / (p.x1 - p.x0))) * 2 * Math.PI,
+      y0: Math.max(0, d.y0 - p.depth),
+      y1: Math.max(0, d.y1 - p.depth),
+    };
+  });
+
+  paths.interrupt();
+  labels.interrupt();
+
+  const t = svg.transition().duration(750).ease(d3.easeCubicOut);
+
+  paths.transition(t)
+    .tween("data", d => {
+      const i = d3.interpolate(d.current, d.target);
+      return t => { d.current = i(t); };
+    })
+    .attrTween("d", d => () => arc(d.current))
+    .attr("fill", d => nodeColor(d))
+    .attr("opacity", d => (d.current.y1 <= 0 || d.current.y0 >= radius) ? 0 : 1);
+
+  // Fade labels during transition, recalculate at end
+  labels.transition(t).attr("opacity", 0);
+
+  t.end().then(() => {
+    updateLabelPositions();
+    paths.attr("pointer-events", d =>
+      d.current.y1 > 0 && d.current.y0 < radius ? "auto" : "none"
+    );
+  }).catch(() => {});
+
+  // Show/hide back text
+  centerText.attr("opacity", p === root ? 0 : 0.7);
+  updateBreadcrumb(p);
+  updateStats();
+};
+
+paths.on("click", (event, d) => {
+  if (brushActive) return; // Don't zoom while brushing
+  if (d.children) {
+    event.stopPropagation();
+    zoomTo(d);
+  }
+});
+
+// --- Tooltip ---
+const tooltip = d3.select("#tooltip");
+paths.on("pointerenter", (event, d) => {
+  if (brushActive) return;
+  tooltip.style("display", "block")
+    .html(`<strong>${d.data.name}</strong><br>
+           Revenue: $${fmt(d.value)}<br>
+           ${fmtPct(d.value / totalValue)} of total<br>
+           Depth ${d.depth}: ${["Root","Department","Category","Product"][d.depth] || ""}${d.children ? ` (${d.leaves().length} products)` : ""}`);
+})
+.on("pointermove", event => {
+  const wrap = document.getElementById("sunburst-wrap");
+  const [mx, my] = d3.pointer(event, wrap);
+  tooltip.style("left", `${mx + 16}px`).style("top", `${my - 12}px`);
+})
+.on("pointerleave", () => tooltip.style("display", "none"));
+</script>
+</body>
+</html>

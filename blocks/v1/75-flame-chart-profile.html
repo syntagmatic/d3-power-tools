@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CPU Flame Chart — 800 Stack Frames</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa; color: #222; padding: 20px;
+  }
+  h1 { font-size: 16px; font-weight: 600; margin-bottom: 2px; }
+  .subtitle { font-size: 12px; color: #666; margin-bottom: 10px; }
+  #chart-container {
+    position: relative; border: 1px solid #ddd; border-radius: 4px;
+    overflow: hidden; background: #fff;
+  }
+  canvas { display: block; }
+  .tooltip {
+    position: absolute; pointer-events: none; background: rgba(20,20,20,0.92); color: #fff;
+    padding: 8px 12px; border-radius: 4px; font-size: 12px; line-height: 1.5;
+    opacity: 0; transition: opacity 0.1s; white-space: nowrap; z-index: 10;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+  }
+  .tooltip strong { font-family: system-ui, sans-serif; }
+  .breadcrumb {
+    margin-top: 6px; font-size: 12px; color: #666; height: 18px;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+  }
+  .breadcrumb span { cursor: pointer; }
+  .breadcrumb span:hover { color: #4477AA; text-decoration: underline; }
+  .legend { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 12px; }
+  .legend-item {
+    display: flex; align-items: center; gap: 4px;
+    font-size: 11px; color: #555; cursor: default;
+  }
+  .legend-swatch {
+    width: 12px; height: 12px; border-radius: 2px; flex-shrink: 0;
+  }
+  .info-bar {
+    margin-top: 4px; font-size: 11px; color: #999;
+    display: flex; gap: 16px;
+  }
+</style>
+</head>
+<body>
+<h1>CPU Profile — Flame Chart</h1>
+<p class="subtitle">Click a frame to zoom into that subtree. Double-click or click breadcrumb to zoom out. Scroll to zoom horizontally.</p>
+<div id="chart-container"></div>
+<div class="breadcrumb" id="breadcrumb"></div>
+<div class="legend" id="legend"></div>
+<div class="info-bar">
+  <span id="zoom-info">Zoom: 1.0x</span>
+  <span id="frame-count"></span>
+</div>
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+(() => {
+  // --- Dimensions ---
+  const W = Math.min(1200, window.innerWidth - 40);
+  const TOTAL_H = 800;
+  const ROW_H = 20;
+  const AXIS_H = 24;
+  const dpr = devicePixelRatio;
+
+  // --- Tol bright palette for 8 modules ---
+  const moduleColors = {
+    core:      '#4477AA',
+    http:      '#EE6677',
+    database:  '#228833',
+    auth:      '#CCBB44',
+    cache:     '#66CCEE',
+    logging:   '#AA3377',
+    scheduler: '#BBBBBB',
+    io:        '#CC6600'
+  };
+  const modules = Object.keys(moduleColors);
+
+  // --- Synthetic data: ~800 stack frames across 8 modules ---
+  const rng = d3.randomLcg(42);
+  const rand = (a, b) => a + rng() * (b - a);
+  const randInt = (a, b) => Math.floor(rand(a, b + 1));
+  const pick = arr => arr[randInt(0, arr.length - 1)];
+
+  const funcNames = {
+    core:      ['main', 'processRequest', 'handleEvent', 'dispatch', 'init', 'runLoop', 'schedule', 'transform', 'validate', 'execute', 'configure', 'bootstrap'],
+    http:      ['parseRequest', 'sendResponse', 'routeMatch', 'middleware', 'compress', 'serializeJSON', 'parseHeaders', 'handleCORS', 'negotiate', 'stream', 'chunkedWrite', 'tlsHandshake'],
+    database:  ['query', 'connect', 'serialize', 'indexLookup', 'joinTables', 'aggregate', 'prepareStmt', 'fetchRows', 'commitTx', 'rollback', 'planQuery', 'scanIndex'],
+    auth:      ['authenticate', 'verifyToken', 'hashPassword', 'checkPermissions', 'refreshSession', 'validateCert', 'signJWT', 'rateLimit', 'decryptPayload', 'lookupUser'],
+    cache:     ['get', 'set', 'evict', 'hashKey', 'serialize', 'checkTTL', 'warmup', 'invalidate', 'rebalanceShard', 'compactLog'],
+    logging:   ['log', 'formatMessage', 'writeBuffer', 'rotateFile', 'compress', 'filter', 'enrich', 'batchFlush', 'sampleTrace'],
+    scheduler: ['tick', 'enqueue', 'dequeue', 'prioritize', 'rebalance', 'checkDeadline', 'yield', 'forkWorker', 'joinBarrier'],
+    io:        ['read', 'write', 'flush', 'poll', 'allocBuffer', 'copyStream', 'compress', 'encrypt', 'mmap', 'fsync']
+  };
+
+  const rows = [];
+  let idCounter = 0;
+
+  const addNode = (parentId, mod, funcName, totalTime) => {
+    const id = String(idCounter++);
+    rows.push({ id, parentId, name: funcName, module: mod, total_time: totalTime, self_time: 0 });
+    return id;
+  };
+
+  // Root
+  const rootId = addNode('', 'core', 'main', 10000);
+
+  // Recursive tree builder targeting ~800 nodes
+  const buildChildren = (parentId, parentMod, parentTime, depth, maxDepth) => {
+    if (depth >= maxDepth || parentTime < 3 || idCounter > 850) return;
+    const nChildren = randInt(2, Math.min(6, Math.ceil(parentTime / 20)));
+    let remaining = parentTime;
+
+    for (let i = 0; i < nChildren && remaining > 2 && idCounter < 850; i++) {
+      const isLast = i === nChildren - 1;
+      const childTime = isLast
+        ? Math.max(1, remaining)
+        : Math.max(1, Math.round(rand(2, remaining * 0.55)));
+      remaining -= childTime;
+      if (childTime < 1) continue;
+
+      // 65% same module as parent, 35% cross-module call
+      const mod = rng() < 0.65 ? parentMod : pick(modules);
+      const fn = pick(funcNames[mod]);
+
+      const childId = addNode(parentId, mod, fn, childTime);
+      if (childTime > 8 && depth < maxDepth - 1) {
+        buildChildren(childId, mod, childTime, depth + 1, maxDepth);
+      }
+    }
+  };
+
+  // Top-level calls spread across all modules
+  const topEntries = [
+    ['http', 'parseRequest', 2200],
+    ['core', 'processRequest', 1800],
+    ['database', 'query', 1500],
+    ['auth', 'authenticate', 1000],
+    ['cache', 'get', 800],
+    ['scheduler', 'tick', 900],
+    ['logging', 'log', 700],
+    ['io', 'read', 1100]
+  ];
+
+  for (const [mod, fn, time] of topEntries) {
+    const cid = addNode(rootId, mod, fn, time);
+    buildChildren(cid, mod, time, 1, randInt(4, 7));
+  }
+
+  // Compute self_time = total_time - sum(children total_time)
+  const childSums = new Map();
+  for (const r of rows) {
+    if (r.parentId) {
+      childSums.set(r.parentId, (childSums.get(r.parentId) || 0) + r.total_time);
+    }
+  }
+  for (const r of rows) {
+    r.self_time = Math.max(0, r.total_time - (childSums.get(r.id) || 0));
+  }
+
+  d3.select('#frame-count').text(`${rows.length} stack frames`);
+
+  // --- Hierarchy + Partition ---
+  const root = d3.stratify().id(d => d.id).parentId(d => d.parentId || null)(rows);
+  root.sum(d => d.self_time || 0).sort((a, b) => b.value - a.value);
+
+  const maxDepth = root.height;
+  const chartH = Math.min(TOTAL_H - AXIS_H, (maxDepth + 1) * ROW_H + 4);
+  const totalH = chartH + AXIS_H;
+
+  const partition = d3.partition().size([W, (maxDepth + 1) * ROW_H]).padding(0.5);
+  partition(root);
+
+  const allNodes = root.descendants();
+
+  // --- Name hash for lightness variation ---
+  const nameHash = s => {
+    let h = 0;
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) & 0xffff;
+    return h;
+  };
+
+  // Pre-compute colors for all nodes
+  for (const d of allNodes) {
+    const base = d3.color(moduleColors[d.data.module] || '#BBBBBB');
+    const variation = (nameHash(d.data.name) % 30 - 15) / 100;
+    d._color = base.brighter(variation).formatHex();
+    d._colorHover = base.brighter(variation + 0.3).formatHex();
+  }
+
+  // --- Canvas setup ---
+  const container = d3.select('#chart-container')
+    .style('width', W + 'px').style('height', totalH + 'px');
+
+  const canvas = container.append('canvas')
+    .attr('width', W * dpr).attr('height', totalH * dpr)
+    .style('width', W + 'px').style('height', totalH + 'px')
+    .node();
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  // SVG overlay for zoom events + axis
+  const svg = container.append('svg')
+    .attr('width', W).attr('height', totalH)
+    .style('position', 'absolute').style('top', '0').style('left', '0');
+
+  svg.append('rect').attr('width', W).attr('height', totalH)
+    .attr('fill', 'none').attr('pointer-events', 'all')
+    .style('cursor', 'default');
+
+  // Time axis
+  const timeScale = d3.scaleLinear().domain([0, 10000]).range([0, W]);
+  const axisG = svg.append('g')
+    .attr('transform', `translate(0,${chartH})`);
+
+  const drawAxis = transform => {
+    const zx = transform.rescaleX(timeScale);
+    const axis = d3.axisBottom(zx)
+      .ticks(Math.max(4, Math.floor(W / 120)))
+      .tickFormat(d => d >= 1000 ? (d / 1000).toFixed(1) + 's' : d + 'ms');
+    axisG.call(axis);
+    axisG.selectAll('text').attr('font-size', 10).attr('fill', '#666');
+    axisG.selectAll('line').attr('stroke', '#ddd');
+    axisG.select('.domain').attr('stroke', '#ddd');
+  };
+
+  const tooltip = d3.select('#tooltip');
+  const zoomInfo = d3.select('#zoom-info');
+
+  // --- LOD thresholds with hysteresis ---
+  // LOD 0: no labels. LOD 1: function name. LOD 2: function + module + time.
+  let lodLevel = 0;
+  const updateLOD = k => {
+    if (lodLevel === 0 && k >= 2.5) lodLevel = 1;
+    else if (lodLevel === 1 && k < 2.0) lodLevel = 0;
+    if (lodLevel === 1 && k >= 8) lodLevel = 2;
+    else if (lodLevel === 2 && k < 6.5) lodLevel = 1;
+    return lodLevel;
+  };
+
+  // --- Hover state ---
+  let hoveredNode = null;
+
+  // --- Drawing ---
+  const draw = transform => {
+    ctx.clearRect(0, 0, W, totalH);
+    const k = transform.k;
+    const tx = transform.x;
+    const lod = updateLOD(k);
+
+    // Draw frames bottom-up (flame convention: root at bottom)
+    for (const d of allNodes) {
+      const x0 = d.x0 * k + tx;
+      const x1 = d.x1 * k + tx;
+      const w = x1 - x0;
+
+      // Cull off-screen and sub-pixel
+      if (x1 < 0 || x0 > W) continue;
+      if (w < 0.5) continue;
+
+      // Flame chart: root at bottom, children stack upward
+      const y = chartH - d.y0 - ROW_H;
+      if (y + ROW_H < 0 || y > chartH) continue;
+
+      const cx0 = Math.max(0, x0);
+      const cx1 = Math.min(W, x1);
+      const cw = cx1 - cx0;
+
+      // Fill rectangle
+      const isHovered = d === hoveredNode;
+      ctx.fillStyle = isHovered ? d._colorHover : d._color;
+      ctx.fillRect(cx0, y, cw, ROW_H - 1);
+
+      // Subtle left border for depth perception
+      if (w > 4) {
+        ctx.fillStyle = 'rgba(255,255,255,0.25)';
+        ctx.fillRect(cx0, y, 1, ROW_H - 1);
+      }
+
+      // LOD labels
+      if (w > 30 && lod >= 1) {
+        ctx.fillStyle = '#111';
+        ctx.font = '11px system-ui, sans-serif';
+        ctx.textBaseline = 'middle';
+
+        let label;
+        if (lod >= 2 && w > 120) {
+          label = `${d.data.module}::${d.data.name} (${d.data.total_time}ms)`;
+        } else {
+          label = d.data.name;
+        }
+
+        const maxChars = Math.floor((cw - 8) / 6.5);
+        if (maxChars > 2) {
+          const text = label.length > maxChars ? label.slice(0, maxChars - 1) + '\u2026' : label;
+          ctx.fillText(text, cx0 + 4, y + ROW_H / 2);
+        }
+      } else if (w > 50 && lod === 0) {
+        // Even at LOD 0, show labels for wide-enough frames
+        ctx.fillStyle = '#333';
+        ctx.font = '10px system-ui, sans-serif';
+        ctx.textBaseline = 'middle';
+        const maxChars = Math.floor((cw - 8) / 6);
+        if (maxChars > 3) {
+          const label = d.data.name;
+          const text = label.length > maxChars ? label.slice(0, maxChars - 1) + '\u2026' : label;
+          ctx.fillText(text, cx0 + 4, y + ROW_H / 2);
+        }
+      }
+    }
+
+    // Hover highlight outline
+    if (hoveredNode) {
+      const d = hoveredNode;
+      const x0 = d.x0 * k + tx;
+      const x1 = d.x1 * k + tx;
+      const y = chartH - d.y0 - ROW_H;
+      ctx.strokeStyle = '#111';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(
+        Math.max(0.5, x0 + 0.5), y + 0.5,
+        Math.min(W - 1, x1) - Math.max(0, x0) - 1, ROW_H - 2
+      );
+    }
+
+    drawAxis(transform);
+    zoomInfo.text(`Zoom: ${d3.format('.1f')(k)}x`);
+  };
+
+  // --- rAF-throttled zoom ---
+  let currentTransform = d3.zoomIdentity;
+  let frameId = null;
+
+  const scheduleRedraw = () => {
+    if (!frameId) {
+      frameId = requestAnimationFrame(() => {
+        draw(currentTransform);
+        frameId = null;
+      });
+    }
+  };
+
+  const zoom = d3.zoom()
+    .scaleExtent([1, 200])
+    .translateExtent([[0, 0], [W, totalH]])
+    .extent([[0, 0], [W, totalH]])
+    .on('zoom', ({ transform }) => {
+      // Constrain to horizontal only
+      currentTransform = d3.zoomIdentity.translate(transform.x, 0).scale(transform.k);
+      scheduleRedraw();
+    });
+
+  svg.call(zoom);
+
+  // --- Hit detection: deepest node under pointer ---
+  const findNode = (mx, my) => {
+    const k = currentTransform.k;
+    const tx = currentTransform.x;
+    let best = null;
+
+    for (const d of allNodes) {
+      const x0 = d.x0 * k + tx;
+      const x1 = d.x1 * k + tx;
+      if (x1 - x0 < 0.5) continue;
+      const y = chartH - d.y0 - ROW_H;
+      if (mx >= x0 && mx <= x1 && my >= y && my <= y + ROW_H) {
+        if (!best || d.depth > best.depth) best = d;
+      }
+    }
+    return best;
+  };
+
+  // --- Tooltip ---
+  svg.on('pointermove', event => {
+    const [mx, my] = d3.pointer(event);
+    const node = findNode(mx, my);
+    const prevHovered = hoveredNode;
+    hoveredNode = node;
+
+    if (node) {
+      const pct = d3.format('.1%')(node.data.total_time / 10000);
+      const selfPct = d3.format('.1%')(node.data.self_time / 10000);
+      tooltip.style('opacity', 1)
+        .html(
+          `<strong>${node.data.module}::${node.data.name}</strong><br>` +
+          `Total: ${node.data.total_time}ms (${pct})<br>` +
+          `Self: ${node.data.self_time}ms (${selfPct})<br>` +
+          `Depth: ${node.depth}`
+        )
+        .style('left', Math.min(event.pageX + 14, window.innerWidth - 260) + 'px')
+        .style('top', (event.pageY - 60) + 'px');
+      svg.select('rect').style('cursor', 'pointer');
+    } else {
+      tooltip.style('opacity', 0);
+      svg.select('rect').style('cursor', 'default');
+    }
+
+    if (prevHovered !== hoveredNode) scheduleRedraw();
+  });
+
+  svg.on('pointerleave', () => {
+    hoveredNode = null;
+    tooltip.style('opacity', 0);
+    scheduleRedraw();
+  });
+
+  // --- Click to zoom to subtree ---
+  const updateBreadcrumb = node => {
+    const crumbEl = d3.select('#breadcrumb');
+    if (!node || node === root) {
+      crumbEl.html('<span style="color:#999">root</span>');
+      return;
+    }
+    const ancestors = node.ancestors().reverse();
+    crumbEl.html('');
+    ancestors.forEach((a, i) => {
+      if (i > 0) crumbEl.append('span').text(' \u203A ').style('color', '#ccc');
+      crumbEl.append('span')
+        .text(a.data.name)
+        .style('color', a === node ? '#222' : '#4477AA')
+        .style('font-weight', a === node ? '600' : '400')
+        .on('click', () => zoomToNode(a));
+    });
+  };
+
+  const zoomToNode = node => {
+    if (!node) return;
+    const k = W / (node.x1 - node.x0);
+    const tx = -node.x0 * k;
+    svg.transition().duration(500).ease(d3.easeCubicOut)
+      .call(zoom.transform, d3.zoomIdentity.translate(tx, 0).scale(k));
+    updateBreadcrumb(node);
+  };
+
+  svg.on('click', event => {
+    const [mx, my] = d3.pointer(event);
+    const node = findNode(mx, my);
+    if (!node || node === root) return;
+    zoomToNode(node);
+  });
+
+  // Double-click to reset
+  svg.on('dblclick.zoom', null);
+  svg.on('dblclick', () => {
+    svg.transition().duration(500).ease(d3.easeCubicOut)
+      .call(zoom.transform, d3.zoomIdentity);
+    updateBreadcrumb(null);
+  });
+
+  // --- Legend ---
+  const legendEl = d3.select('#legend');
+  for (const [mod, color] of Object.entries(moduleColors)) {
+    const item = legendEl.append('div').attr('class', 'legend-item');
+    item.append('div').attr('class', 'legend-swatch').style('background', color);
+    item.append('span').text(mod);
+  }
+
+  // --- Initial draw ---
+  updateBreadcrumb(null);
+  draw(d3.zoomIdentity);
+})();
+</script>
+</body>
+</html>

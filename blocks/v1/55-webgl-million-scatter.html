@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>1M-Point WebGL Scatterplot</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #fafafa; font-family: system-ui, -apple-system, sans-serif; }
+  #container { position: relative; width: 1200px; height: 800px; margin: 0 auto; }
+  canvas, svg { position: absolute; top: 0; left: 0; }
+  canvas { pointer-events: none; }
+  svg { pointer-events: all; }
+  #controls { position: absolute; top: 12px; right: 20px; display: flex; gap: 10px; align-items: center; z-index: 10; }
+  #controls label { font-size: 13px; color: #555; cursor: pointer; user-select: none; }
+  #controls input[type=checkbox] { margin-right: 3px; }
+  #fps-display { position: absolute; top: 12px; left: 90px; font: 12px "SF Mono", Monaco, "Cascadia Code", monospace; color: #888; z-index: 10; }
+  .axis text { font-size: 11px; fill: #666; }
+  .axis path, .axis line { stroke: #ccc; }
+  .title { font-size: 15px; font-weight: 600; fill: #333; }
+  .subtitle { font-size: 12px; fill: #888; }
+  #inset-container { position: absolute; bottom: 56px; right: 20px; width: 200px; height: 160px; background: #fff; border: 1px solid #ddd; border-radius: 4px; overflow: hidden; z-index: 5; }
+  #inset-title { position: absolute; top: 4px; left: 8px; font-size: 11px; color: #666; z-index: 6; pointer-events: none; }
+  #inset-canvas { width: 200px; height: 160px; }
+  .brush .selection { fill: rgba(68, 119, 170, 0.15); stroke: #4477AA; stroke-width: 1.5; }
+  #context-lost-msg { display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 16px; color: #AA3377; background: #fff; padding: 16px 24px; border-radius: 8px; border: 2px solid #AA3377; z-index: 20; }
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="gl-canvas"></canvas>
+  <canvas id="c2d-canvas" style="display:none"></canvas>
+  <svg id="overlay"></svg>
+  <div id="controls">
+    <label><input type="checkbox" id="toggle-canvas"> Canvas 2D fallback</label>
+  </div>
+  <div id="fps-display"></div>
+  <div id="inset-container">
+    <div id="inset-title">Brushed subset histogram</div>
+    <canvas id="inset-canvas"></canvas>
+  </div>
+  <div id="context-lost-msg">WebGL context lost — restoring...</div>
+</div>
+
+<script>
+const W = 1200, H = 800;
+const margin = { top: 50, right: 240, bottom: 50, left: 70 };
+const plotW = W - margin.left - margin.right;
+const plotH = H - margin.top - margin.bottom;
+const N = 1_000_000;
+const dpr = devicePixelRatio || 1;
+
+// Tol colorblind-safe palette
+const tolPalette = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377"];
+
+// --- Synthetic data: 6 Gaussian clusters with structure ---
+const clusters = [
+  { cx: 0.25, cy: 0.7, sx: 0.08, sy: 0.06, n: 0.22 },
+  { cx: 0.5,  cy: 0.5, sx: 0.12, sy: 0.10, n: 0.20 },
+  { cx: 0.75, cy: 0.3, sx: 0.07, sy: 0.09, n: 0.18 },
+  { cx: 0.35, cy: 0.3, sx: 0.05, sy: 0.05, n: 0.15 },
+  { cx: 0.65, cy: 0.7, sx: 0.06, sy: 0.04, n: 0.13 },
+  { cx: 0.15, cy: 0.4, sx: 0.10, sy: 0.12, n: 0.12 },
+];
+function randn() { let u = 0, v = 0; while (!u) u = Math.random(); while (!v) v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
+
+const dataX = new Float32Array(N);
+const dataY = new Float32Array(N);
+const dataC = new Uint8Array(N); // cluster index
+let idx = 0;
+for (let ci = 0; ci < clusters.length; ci++) {
+  const c = clusters[ci];
+  const count = Math.round(c.n * N);
+  for (let j = 0; j < count && idx < N; j++, idx++) {
+    dataX[idx] = c.cx + randn() * c.sx;
+    dataY[idx] = c.cy + randn() * c.sy;
+    dataC[idx] = ci;
+  }
+}
+// Fill remainder into cluster 0
+while (idx < N) { dataX[idx] = clusters[0].cx + randn() * clusters[0].sx; dataY[idx] = clusters[0].cy + randn() * clusters[0].sy; dataC[idx] = 0; idx++; }
+
+// --- D3 Scales ---
+const xScale = d3.scaleLinear([d3.min(dataX), d3.max(dataX)], [margin.left, margin.left + plotW]).nice();
+const yScale = d3.scaleLinear([d3.min(dataY), d3.max(dataY)], [margin.top + plotH, margin.top]).nice();
+
+// --- Setup canvases and SVG ---
+const glCanvas = document.getElementById("gl-canvas");
+const c2dCanvas = document.getElementById("c2d-canvas");
+const svgEl = document.getElementById("overlay");
+[glCanvas, c2dCanvas].forEach(c => { c.width = W * dpr; c.height = H * dpr; c.style.width = W + "px"; c.style.height = H + "px"; });
+svgEl.setAttribute("width", W); svgEl.setAttribute("height", H);
+svgEl.setAttribute("viewBox", `0 0 ${W} ${H}`);
+
+const svg = d3.select(svgEl);
+const ctx2d = c2dCanvas.getContext("2d");
+ctx2d.scale(dpr, dpr);
+
+// --- Precompute pixel positions ---
+const pixelX = new Float32Array(N);
+const pixelY = new Float32Array(N);
+for (let i = 0; i < N; i++) { pixelX[i] = xScale(dataX[i]); pixelY[i] = yScale(dataY[i]); }
+
+// Parse Tol colors to [r,g,b] normalized
+const tolRGB = tolPalette.map(hex => {
+  const c = d3.rgb(hex);
+  return [c.r / 255, c.g / 255, c.b / 255];
+});
+
+// --- WebGL Setup ---
+let gl, program, visBuf, vao, uRes, uDpr;
+let contextLost = false;
+
+const vsSource = `#version 300 es
+in vec2 a_position;
+in vec4 a_color;
+in float a_visibility;
+uniform vec2 u_resolution;
+uniform float u_dpr;
+out vec4 v_color;
+out float v_vis;
+void main() {
+  vec2 clip = (a_position / u_resolution) * 2.0 - 1.0;
+  clip.y = -clip.y;
+  gl_Position = vec4(clip, 0.0, 1.0);
+  gl_PointSize = 3.0 * u_dpr;
+  v_color = a_color;
+  v_vis = a_visibility;
+}`;
+
+const fsSource = `#version 300 es
+precision mediump float;
+in vec4 v_color;
+in float v_vis;
+out vec4 fragColor;
+void main() {
+  float dist = length(gl_PointCoord - 0.5);
+  if (dist > 0.5) discard;
+  float aa = 1.0 - smoothstep(0.35, 0.5, dist);
+  fragColor = vec4(v_color.rgb, v_color.a * v_vis * aa);
+}`;
+
+function compileShader(gl, type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) { console.error(gl.getShaderInfoLog(s)); gl.deleteShader(s); return null; }
+  return s;
+}
+
+function initWebGL() {
+  gl = glCanvas.getContext("webgl2", { antialias: true, premultipliedAlpha: false, alpha: true });
+  if (!gl) { console.error("WebGL2 not supported"); return false; }
+
+  const vs = compileShader(gl, gl.VERTEX_SHADER, vsSource);
+  const fs = compileShader(gl, gl.FRAGMENT_SHADER, fsSource);
+  program = gl.createProgram();
+  gl.attachShader(program, vs); gl.attachShader(program, fs);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) { console.error(gl.getProgramInfoLog(program)); return false; }
+  gl.useProgram(program);
+
+  uRes = gl.getUniformLocation(program, "u_resolution");
+  uDpr = gl.getUniformLocation(program, "u_dpr");
+  gl.uniform2f(uRes, W, H);
+  gl.uniform1f(uDpr, dpr);
+
+  gl.viewport(0, 0, W * dpr, H * dpr);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+  // Build buffers
+  const positions = new Float32Array(N * 2);
+  const colors = new Float32Array(N * 4);
+  for (let i = 0; i < N; i++) {
+    positions[i * 2] = pixelX[i];
+    positions[i * 2 + 1] = pixelY[i];
+    const rgb = tolRGB[dataC[i]];
+    colors[i * 4] = rgb[0]; colors[i * 4 + 1] = rgb[1]; colors[i * 4 + 2] = rgb[2]; colors[i * 4 + 3] = 0.35;
+  }
+
+  vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+
+  const posBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+  const posLoc = gl.getAttribLocation(program, "a_position");
+  gl.enableVertexAttribArray(posLoc);
+  gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+  const colBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, colBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, colors, gl.STATIC_DRAW);
+  const colLoc = gl.getAttribLocation(program, "a_color");
+  gl.enableVertexAttribArray(colLoc);
+  gl.vertexAttribPointer(colLoc, 4, gl.FLOAT, false, 0, 0);
+
+  // Visibility buffer (dynamic)
+  const visData = new Float32Array(N).fill(1.0);
+  visBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, visBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, visData, gl.DYNAMIC_DRAW);
+  const visLoc = gl.getAttribLocation(program, "a_visibility");
+  gl.enableVertexAttribArray(visLoc);
+  gl.vertexAttribPointer(visLoc, 1, gl.FLOAT, false, 0, 0);
+
+  return true;
+}
+
+// Context loss / restoration
+glCanvas.addEventListener("webglcontextlost", e => {
+  e.preventDefault();
+  contextLost = true;
+  document.getElementById("context-lost-msg").style.display = "block";
+});
+glCanvas.addEventListener("webglcontextrestored", () => {
+  contextLost = false;
+  document.getElementById("context-lost-msg").style.display = "none";
+  initWebGL();
+  drawWebGL();
+});
+
+let webglOK = initWebGL();
+
+// --- Draw functions ---
+const visibility = new Float32Array(N).fill(1.0);
+let brushActive = false;
+let brushedCount = 0;
+
+function drawWebGL() {
+  if (!gl || contextLost) return;
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.useProgram(program);
+  gl.bindVertexArray(vao);
+  gl.drawArrays(gl.POINTS, 0, N);
+}
+
+function drawCanvas2D() {
+  ctx2d.clearRect(0, 0, W, H);
+  const r = 1.5;
+  for (let i = 0; i < N; i++) {
+    const v = visibility[i];
+    if (v < 0.05) continue; // skip fully faded
+    const rgb = tolPalette[dataC[i]];
+    ctx2d.globalAlpha = 0.35 * v;
+    ctx2d.fillStyle = rgb;
+    ctx2d.fillRect(pixelX[i] - r, pixelY[i] - r, r * 2, r * 2);
+  }
+  ctx2d.globalAlpha = 1;
+}
+
+// --- FPS tracking ---
+let frameCount = 0, lastFpsTime = performance.now(), currentFps = 0;
+const fpsEl = document.getElementById("fps-display");
+let useCanvas2D = false;
+
+function measureFps() {
+  frameCount++;
+  const now = performance.now();
+  if (now - lastFpsTime >= 500) {
+    currentFps = Math.round(frameCount / ((now - lastFpsTime) / 1000));
+    frameCount = 0;
+    lastFpsTime = now;
+    const mode = useCanvas2D ? "Canvas 2D" : "WebGL";
+    fpsEl.textContent = `${mode}: ${currentFps} FPS | ${brushActive ? brushedCount.toLocaleString() + " brushed" : N.toLocaleString() + " points"}`;
+  }
+}
+
+function draw() {
+  measureFps();
+  if (useCanvas2D) drawCanvas2D(); else drawWebGL();
+}
+
+// Initial draw
+draw();
+
+// --- SVG axes ---
+const xAxis = svg.append("g").attr("class", "axis").attr("transform", `translate(0,${margin.top + plotH})`).call(d3.axisBottom(xScale).ticks(Math.floor(plotW / 80)));
+const yAxis = svg.append("g").attr("class", "axis").attr("transform", `translate(${margin.left},0)`).call(d3.axisLeft(yScale).ticks(Math.floor(plotH / 60)));
+
+svg.append("text").attr("class", "title").attr("x", margin.left).attr("y", 24).text("1M-Point WebGL Scatterplot with SDF Circles");
+svg.append("text").attr("class", "subtitle").attr("x", margin.left).attr("y", 42).text("Brush to select — inset shows 2D histogram of brushed points. Toggle Canvas 2D fallback to compare FPS.");
+
+// Axis labels
+svg.append("text").attr("x", margin.left + plotW / 2).attr("y", H - 8).attr("text-anchor", "middle").attr("font-size", 12).attr("fill", "#666").text("X");
+svg.append("text").attr("transform", `rotate(-90)`).attr("x", -(margin.top + plotH / 2)).attr("y", 16).attr("text-anchor", "middle").attr("font-size", 12).attr("fill", "#666").text("Y");
+
+// Legend
+const legend = svg.append("g").attr("transform", `translate(${W - 220}, ${margin.top})`);
+tolPalette.forEach((c, i) => {
+  const g = legend.append("g").attr("transform", `translate(0, ${i * 20})`);
+  g.append("circle").attr("r", 5).attr("cx", 5).attr("cy", 0).attr("fill", c).attr("opacity", 0.8);
+  g.append("text").attr("x", 16).attr("y", 4).attr("font-size", 11).attr("fill", "#555").text(`Cluster ${i + 1}`);
+});
+
+// --- Brush ---
+const brushG = svg.append("g").attr("class", "brush");
+const brush = d3.brush()
+  .extent([[margin.left, margin.top], [margin.left + plotW, margin.top + plotH]])
+  .on("brush end", onBrush);
+brushG.call(brush);
+
+function onBrush({ selection }) {
+  if (!selection) {
+    // Clear brush
+    brushActive = false;
+    visibility.fill(1.0);
+    brushedCount = 0;
+    updateVisibility();
+    drawInsetHistogram(null);
+    draw();
+    return;
+  }
+  brushActive = true;
+  const [[x0, y0], [x1, y1]] = selection;
+  brushedCount = 0;
+  for (let i = 0; i < N; i++) {
+    const inBrush = pixelX[i] >= x0 && pixelX[i] <= x1 && pixelY[i] >= y0 && pixelY[i] <= y1;
+    visibility[i] = inBrush ? 1.0 : 0.08;
+    if (inBrush) brushedCount++;
+  }
+  updateVisibility();
+  draw();
+  drawInsetHistogram(selection);
+}
+
+function updateVisibility() {
+  if (!useCanvas2D && gl && !contextLost) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, visBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, visibility);
+  }
+}
+
+// --- Inset 2D Histogram ---
+const insetCanvas = document.getElementById("inset-canvas");
+const insetW = 200, insetH = 160;
+insetCanvas.width = insetW * dpr;
+insetCanvas.height = insetH * dpr;
+insetCanvas.style.width = insetW + "px";
+insetCanvas.style.height = insetH + "px";
+const ictx = insetCanvas.getContext("2d");
+ictx.scale(dpr, dpr);
+
+function drawInsetHistogram(selection) {
+  ictx.clearRect(0, 0, insetW, insetH);
+  if (!selection) {
+    ictx.fillStyle = "#999";
+    ictx.font = "11px system-ui";
+    ictx.textAlign = "center";
+    ictx.fillText("Brush to see histogram", insetW / 2, insetH / 2);
+    return;
+  }
+
+  const [[x0, y0], [x1, y1]] = selection;
+  const bins = 20;
+  const pad = { top: 22, right: 8, bottom: 18, left: 28 };
+  const gw = insetW - pad.left - pad.right;
+  const gh = insetH - pad.top - pad.bottom;
+  const grid = new Float64Array(bins * bins);
+
+  // Bin brushed points
+  for (let i = 0; i < N; i++) {
+    if (visibility[i] < 0.5) continue;
+    const bx = Math.floor(((pixelX[i] - x0) / (x1 - x0)) * bins);
+    const by = Math.floor(((pixelY[i] - y0) / (y1 - y0)) * bins);
+    if (bx >= 0 && bx < bins && by >= 0 && by < bins) grid[by * bins + bx]++;
+  }
+
+  const maxCount = Math.max(1, d3.max(grid));
+  const colorScale = d3.scaleSequential([0, maxCount], d3.interpolateBlues);
+  const cellW = gw / bins, cellH = gh / bins;
+
+  for (let r = 0; r < bins; r++) {
+    for (let c = 0; c < bins; c++) {
+      const v = grid[r * bins + c];
+      ictx.fillStyle = v > 0 ? colorScale(v) : "#f5f5f5";
+      ictx.fillRect(pad.left + c * cellW, pad.top + r * cellH, cellW + 0.5, cellH + 0.5);
+    }
+  }
+
+  // Border
+  ictx.strokeStyle = "#ccc";
+  ictx.strokeRect(pad.left, pad.top, gw, gh);
+
+  // Labels
+  ictx.fillStyle = "#666";
+  ictx.font = "9px system-ui";
+  ictx.textAlign = "center";
+  ictx.fillText(xScale.invert(x0).toFixed(2), pad.left, insetH - 4);
+  ictx.fillText(xScale.invert(x1).toFixed(2), pad.left + gw, insetH - 4);
+  ictx.textAlign = "right";
+  ictx.fillText(yScale.invert(y1).toFixed(2), pad.left - 3, pad.top + 8);
+  ictx.fillText(yScale.invert(y0).toFixed(2), pad.left - 3, pad.top + gh);
+}
+
+drawInsetHistogram(null);
+
+// --- Canvas 2D fallback toggle ---
+const toggleEl = document.getElementById("toggle-canvas");
+toggleEl.addEventListener("change", () => {
+  useCanvas2D = toggleEl.checked;
+  if (useCanvas2D) {
+    c2dCanvas.style.display = "block";
+    glCanvas.style.display = "none";
+  } else {
+    c2dCanvas.style.display = "none";
+    glCanvas.style.display = "block";
+    updateVisibility();
+  }
+  draw();
+});
+
+// Continuous FPS counter via rAF
+function fpsLoop() {
+  measureFps();
+  requestAnimationFrame(fpsLoop);
+}
+requestAnimationFrame(fpsLoop);
+</script>
+</body>
+</html>

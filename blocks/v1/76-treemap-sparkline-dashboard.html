@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Treemap Sparkline Dashboard</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa; color: #333;
+  }
+  #dashboard { width: 100%; max-width: 1200px; margin: 0 auto; }
+
+  /* KPI strip */
+  #kpi-strip {
+    display: flex; gap: 12px; padding: 14px 16px; flex-wrap: wrap;
+    background: #fff; border-bottom: 1px solid #e0e0e0;
+  }
+  .kpi-card {
+    flex: 1 1 180px; min-width: 140px; padding: 10px 14px;
+    border: 1px solid #e8e8e8; border-radius: 6px; background: #fff;
+  }
+  .kpi-label {
+    font-size: 10px; color: #888; text-transform: uppercase;
+    letter-spacing: 0.6px; margin-bottom: 2px;
+  }
+  .kpi-value {
+    font-size: 24px; font-weight: 700;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    line-height: 1.2;
+  }
+  .kpi-delta {
+    font-size: 12px; font-weight: 600; margin-top: 1px;
+  }
+  .kpi-spark svg { display: block; margin-top: 4px; }
+  .up { color: #228833; }
+  .down { color: #EE6677; }
+
+  /* Treemap */
+  #treemap-wrapper {
+    width: 100%; height: 620px; position: relative; overflow: hidden;
+  }
+  #treemap-wrapper svg { display: block; }
+  .leaf-cell { cursor: pointer; }
+  .leaf-cell:hover rect.leaf-bg { stroke: #333; stroke-width: 1.5; }
+
+  /* Tooltip */
+  .tooltip {
+    position: absolute; pointer-events: none;
+    background: rgba(15,15,15,0.92); color: #fff;
+    padding: 10px 14px; border-radius: 5px;
+    font-size: 12px; line-height: 1.5;
+    display: none; z-index: 10; max-width: 260px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+  }
+  .tooltip strong { font-size: 13px; }
+  .tooltip .division-tag {
+    display: inline-block; padding: 1px 6px; border-radius: 3px;
+    font-size: 10px; font-weight: 600; margin-left: 4px;
+    color: #fff; opacity: 0.9;
+  }
+  .tooltip svg { display: block; margin-top: 6px; }
+</style>
+</head>
+<body>
+<div id="dashboard">
+  <div id="kpi-strip"></div>
+  <div id="treemap-wrapper">
+    <div class="tooltip" id="tooltip"></div>
+  </div>
+</div>
+<script>
+const TOL = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377","#BBBBBB"];
+
+// --- Seeded random ---
+const rng = d3.randomLcg(2024);
+const rand = (lo, hi) => lo + rng() * (hi - lo);
+const pick = arr => arr[Math.floor(rng() * arr.length)];
+
+// --- Synthetic data: 5 divisions, ~100 product lines ---
+const divisions = [
+  { name: "Cloud Services", products: ["Platform","Compute","Storage","Functions","CDN","Registry","Mesh","Queue","Stream","Vault","Monitor","Deploy","Migrate","Gateway","Cache","DNS","Firewall","LB","Scheduler","Container","Serverless","K8s Engine","Pub/Sub","IAM"] },
+  { name: "Enterprise", products: ["Suite","CRM","ERP","HCM","SCM","Analytics","BI","Workflow","Compliance","Audit","Identity","SSO","DLP","Backup","Archive","DocSign","Collaborate","ServiceDesk","Config Mgmt","Procurement"] },
+  { name: "Consumer", products: ["App","Wallet","Photos","Mail","Music","Maps","Health","Fitness","News","Games","Social","Cloud Drive","Video","Podcast","Browser","Messenger","Calendar","Notes","Weather","Translate"] },
+  { name: "Analytics", products: ["Warehouse","Lake","Pipe","ML Hub","Viz","Query","Catalog","Lineage","Notebook","Feature Store","Vector DB","ETL","Orchestrator","Governance","Data Mesh","Streaming","Profiler","Scheduler"] },
+  { name: "Security", products: ["Shield","Sentinel","Vault Pro","Armor","Detect","Respond","Encrypt","Audit Pro","Zero Trust","WAF","SIEM","SOAR","Threat Intel","Pen Test","Endpoint","Compliance AI","Incident Mgr","Key Mgmt"] }
+];
+
+const hierarchyData = {
+  name: "Company",
+  children: divisions.map(div => ({
+    name: div.name,
+    children: div.products.map(p => {
+      // Base annual revenue 2-80M, with realistic seasonal + trend
+      const base = rand(2e6, 80e6);
+      const trend = rand(-0.04, 0.06); // monthly growth rate
+      const seasonality = rand(0.02, 0.12);
+      const monthly = d3.range(12).map(m => {
+        const seasonal = 1 + seasonality * Math.sin((m - 2) * Math.PI / 6); // peak mid-year
+        const growth = 1 + trend * m;
+        const noise = 1 + rand(-0.05, 0.05);
+        return Math.max(0, +(base / 12 * growth * seasonal * noise).toFixed(0));
+      });
+      return {
+        name: p,
+        monthly,
+        annual: d3.sum(monthly)
+      };
+    })
+  }))
+};
+
+const root = d3.hierarchy(hierarchyData)
+  .sum(d => d.annual || 0)
+  .sort((a, b) => b.value - a.value);
+
+const divColor = d3.scaleOrdinal()
+  .domain(divisions.map(d => d.name))
+  .range(TOL);
+
+const getDivision = node => {
+  let n = node;
+  while (n.depth > 1) n = n.parent;
+  return n.data.name;
+};
+
+// Shared y-domain for all sparklines (relative: 0 to 1 after normalizing each)
+// Actually use per-division shared domains for honest comparison within divisions
+const allLeaves = root.leaves();
+const globalMonthlyExtent = d3.extent(allLeaves.flatMap(d => d.data.monthly));
+
+// --- KPI strip ---
+const totalRevenue = root.value;
+const totalMonthly = d3.range(12).map(m => d3.sum(allLeaves, d => d.data.monthly[m]));
+const yoyPct = (totalMonthly[11] - totalMonthly[0]) / totalMonthly[0];
+const topDiv = d3.greatest(root.children, d => d.value);
+const productCount = allLeaves.length;
+
+// Growth leaders
+const leafGrowth = allLeaves.map(d => {
+  const m = d.data.monthly;
+  const avgGrowth = d3.mean(d3.range(1, 12), i => (m[i] - m[i - 1]) / m[i - 1]);
+  return { node: d, growth: avgGrowth };
+}).sort((a, b) => b.growth - a.growth);
+const growthLeader = leafGrowth[0].node;
+
+const kpis = [
+  {
+    label: "Total Revenue", value: `$${(totalRevenue / 1e9).toFixed(2)}B`,
+    delta: yoyPct, deltaLabel: "Jan→Dec",
+    spark: totalMonthly
+  },
+  {
+    label: "Products", value: productCount,
+    sub: `across ${divisions.length} divisions`,
+    spark: root.children.map(d => d.leaves().length), sparkType: "bar"
+  },
+  {
+    label: "Top Division", value: topDiv.data.name,
+    sub: `$${(topDiv.value / 1e9).toFixed(2)}B`,
+    spark: d3.range(12).map(m => d3.sum(topDiv.leaves(), d => d.data.monthly[m]))
+  },
+  {
+    label: "Growth Leader", value: growthLeader.data.name,
+    delta: leafGrowth[0].growth, deltaLabel: "avg MoM",
+    spark: growthLeader.data.monthly
+  }
+];
+
+// Render KPI strip
+const strip = d3.select("#kpi-strip");
+kpis.forEach(kpi => {
+  const card = strip.append("div").attr("class", "kpi-card");
+  card.append("div").attr("class", "kpi-label").text(kpi.label);
+  card.append("div").attr("class", "kpi-value").text(kpi.value);
+
+  if (kpi.delta != null) {
+    const cls = kpi.delta >= 0 ? "up" : "down";
+    const arrow = kpi.delta >= 0 ? "▲" : "▼";
+    card.append("div").attr("class", `kpi-delta ${cls}`)
+      .text(`${arrow} ${d3.format("+.1%")(kpi.delta)} ${kpi.deltaLabel || ""}`);
+  }
+  if (kpi.sub) {
+    card.append("div").style("font-size", "11px").style("color", "#888").text(kpi.sub);
+  }
+
+  if (kpi.spark) {
+    const sw = 120, sh = 24;
+    const sparkSvg = card.append("div").attr("class", "kpi-spark")
+      .append("svg").attr("width", sw).attr("height", sh);
+
+    if (kpi.sparkType === "bar") {
+      const x = d3.scaleBand().domain(d3.range(kpi.spark.length)).range([0, sw]).padding(0.25);
+      const y = d3.scaleLinear([0, d3.max(kpi.spark)], [sh, 1]);
+      sparkSvg.selectAll("rect").data(kpi.spark).join("rect")
+        .attr("x", (_, i) => x(i)).attr("y", d => y(d))
+        .attr("width", x.bandwidth()).attr("height", d => sh - y(d))
+        .attr("fill", (_, i) => TOL[i]).attr("rx", 1);
+    } else {
+      const x = d3.scaleLinear([0, kpi.spark.length - 1], [1, sw - 1]);
+      const y = d3.scaleLinear(d3.extent(kpi.spark), [sh - 1, 1]);
+      const area = d3.area().x((_, i) => x(i)).y0(sh).y1(d => y(d)).curve(d3.curveMonotoneX);
+      const line = d3.line().x((_, i) => x(i)).y(d => y(d)).curve(d3.curveMonotoneX);
+      sparkSvg.append("path").datum(kpi.spark).attr("d", area)
+        .attr("fill", "#4477AA").attr("opacity", 0.12);
+      sparkSvg.append("path").datum(kpi.spark).attr("d", line)
+        .attr("fill", "none").attr("stroke", "#4477AA").attr("stroke-width", 1.5);
+      // Endpoint dot
+      sparkSvg.append("circle")
+        .attr("cx", x(kpi.spark.length - 1)).attr("cy", y(kpi.spark.at(-1)))
+        .attr("r", 2).attr("fill", "#4477AA");
+    }
+  }
+});
+
+// --- Treemap ---
+const wrapper = document.getElementById("treemap-wrapper");
+const tooltip = d3.select("#tooltip");
+const monthLabels = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+// Sparkline threshold: cells >= these px get sparklines
+let SPARK_MIN_W = 60, SPARK_MIN_H = 40;
+
+function render() {
+  const width = wrapper.clientWidth;
+  const height = wrapper.clientHeight || 620;
+
+  // Adjust sparkline thresholds based on available width
+  if (width < 600) {
+    SPARK_MIN_W = 50; SPARK_MIN_H = 35;
+  } else if (width < 900) {
+    SPARK_MIN_W = 55; SPARK_MIN_H = 38;
+  } else {
+    SPARK_MIN_W = 60; SPARK_MIN_H = 40;
+  }
+
+  d3.select(wrapper).select("svg").remove();
+
+  const treemap = d3.treemap()
+    .size([width, height])
+    .tile(d3.treemapSquarify)
+    .paddingInner(2)
+    .paddingTop(20)
+    .paddingRight(1)
+    .paddingBottom(1)
+    .paddingLeft(1)
+    .round(true);
+
+  treemap(root);
+
+  const svg = d3.select(wrapper).append("svg")
+    .attr("width", width).attr("height", height)
+    .style("font-family", "system-ui, -apple-system, sans-serif");
+
+  const nodes = root.descendants().filter(d => d.depth > 0);
+
+  // Division groups (depth 1)
+  const divGroups = svg.selectAll("g.div-group")
+    .data(nodes.filter(d => d.depth === 1))
+    .join("g").attr("class", "div-group")
+    .attr("transform", d => `translate(${d.x0},${d.y0})`);
+
+  divGroups.append("rect")
+    .attr("width", d => d.x1 - d.x0)
+    .attr("height", d => d.y1 - d.y0)
+    .attr("fill", d => {
+      const c = d3.color(divColor(d.data.name));
+      c.opacity = 0.12;
+      return c;
+    })
+    .attr("stroke", d => divColor(d.data.name))
+    .attr("stroke-width", 1.5)
+    .attr("rx", 3);
+
+  // Division labels
+  divGroups.append("text")
+    .attr("x", 5).attr("y", 14)
+    .attr("font-size", "11px").attr("font-weight", 700)
+    .attr("fill", d => d3.color(divColor(d.data.name)).darker(0.8))
+    .text(d => {
+      const w = d.x1 - d.x0;
+      if (w < 50) return "";
+      const full = `${d.data.name} — $${(d.value / 1e6).toFixed(0)}M`;
+      return w > 180 ? full : d.data.name;
+    });
+
+  // Leaf cells
+  const leaves = nodes.filter(d => !d.children);
+  const leafG = svg.selectAll("g.leaf-cell")
+    .data(leaves)
+    .join("g").attr("class", "leaf-cell")
+    .attr("transform", d => `translate(${d.x0},${d.y0})`);
+
+  leafG.append("rect").attr("class", "leaf-bg")
+    .attr("width", d => Math.max(0, d.x1 - d.x0))
+    .attr("height", d => Math.max(0, d.y1 - d.y0))
+    .attr("fill", d => {
+      const c = d3.color(divColor(getDivision(d)));
+      return c.brighter(0.6);
+    })
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 0.5)
+    .attr("rx", 2);
+
+  // Leaf content: sparkline or label or nothing
+  leafG.each(function(d) {
+    const g = d3.select(this);
+    const cw = d.x1 - d.x0;
+    const ch = d.y1 - d.y0;
+    const data = d.data.monthly;
+    const col = d3.color(divColor(getDivision(d))).darker(0.5);
+
+    if (cw >= SPARK_MIN_W && ch >= SPARK_MIN_H) {
+      // Product name (truncated)
+      const labelH = 14;
+      const maxTextW = cw - 6;
+      const nameG = g.append("text")
+        .attr("x", 3).attr("y", labelH)
+        .attr("font-size", "9px").attr("font-weight", 600)
+        .attr("fill", "#333")
+        .text(d.data.name);
+      // Truncate if needed
+      nameG.each(function() {
+        let t = d.data.name;
+        while (this.getComputedTextLength() > maxTextW && t.length > 1) {
+          t = t.slice(0, -1);
+          d3.select(this).text(t + "…");
+        }
+        if (t.length <= 1) d3.select(this).remove();
+      });
+
+      // Revenue label
+      if (cw > 80) {
+        g.append("text")
+          .attr("x", cw - 3).attr("y", labelH)
+          .attr("text-anchor", "end")
+          .attr("font-size", "8px").attr("fill", "#888")
+          .attr("font-family", "'SF Mono', Monaco, 'Cascadia Code', monospace")
+          .text(`$${(d.value / 1e6).toFixed(0)}M`);
+      }
+
+      // Sparkline
+      const px = 3, py = labelH + 3;
+      const sw = cw - px * 2, sh = ch - py - 3;
+      if (sw > 12 && sh > 10) {
+        const x = d3.scaleLinear([0, 11], [px, px + sw]);
+        const y = d3.scaleLinear(d3.extent(data), [py + sh, py + 1]);
+
+        // Area fill
+        const area = d3.area()
+          .x((_, i) => x(i)).y0(py + sh).y1(v => y(v))
+          .curve(d3.curveMonotoneX);
+        g.append("path").datum(data).attr("d", area)
+          .attr("fill", col.toString()).attr("opacity", 0.12);
+
+        // Line
+        const line = d3.line()
+          .x((_, i) => x(i)).y(v => y(v))
+          .curve(d3.curveMonotoneX);
+        g.append("path").datum(data).attr("d", line)
+          .attr("fill", "none").attr("stroke", col).attr("stroke-width", 1.2);
+
+        // Endpoint dot
+        g.append("circle")
+          .attr("cx", x(11)).attr("cy", y(data[11]))
+          .attr("r", 1.5).attr("fill", col);
+
+        // Min/max dots if cell is large enough
+        if (sh > 20 && sw > 40) {
+          const iMin = d3.minIndex(data);
+          const iMax = d3.maxIndex(data);
+          if (iMax !== 11) {
+            g.append("circle")
+              .attr("cx", x(iMax)).attr("cy", y(data[iMax]))
+              .attr("r", 1.2).attr("fill", "#228833").attr("opacity", 0.7);
+          }
+          if (iMin !== 11) {
+            g.append("circle")
+              .attr("cx", x(iMin)).attr("cy", y(data[iMin]))
+              .attr("r", 1.2).attr("fill", "#EE6677").attr("opacity", 0.7);
+          }
+        }
+      }
+    } else if (cw > 28 && ch > 18) {
+      // Just name, centered
+      g.append("text")
+        .attr("x", cw / 2).attr("y", ch / 2 + 3)
+        .attr("text-anchor", "middle")
+        .attr("font-size", "8px").attr("fill", "#555")
+        .text(() => {
+          const name = d.data.name;
+          return name.length > Math.floor(cw / 5) ? name.slice(0, Math.floor(cw / 5)) + "…" : name;
+        });
+    }
+    // Tiny cells: color only
+  });
+
+  // Tooltip
+  leafG.on("pointerenter", function(event, d) {
+    d3.select(this).raise();
+    const data = d.data.monthly;
+    const div = getDivision(d);
+    const change = (data[11] - data[0]) / data[0];
+    const cls = change >= 0 ? "up" : "down";
+    const arrow = change >= 0 ? "▲" : "▼";
+
+    let html = `<strong>${d.data.name}</strong>`;
+    html += `<span class="division-tag" style="background:${divColor(div)}">${div}</span><br>`;
+    html += `Annual: <b>$${(d.value / 1e6).toFixed(1)}M</b><br>`;
+    html += `Trend: <span style="color:${change >= 0 ? '#228833' : '#EE6677'}">${arrow} ${d3.format("+.1%")(change)}</span> Jan→Dec`;
+
+    // Tooltip sparkline
+    const tw = 200, th = 40;
+    tooltip.html(html);
+    const tSvg = tooltip.append("svg").attr("width", tw).attr("height", th);
+    const tx = d3.scaleLinear([0, 11], [0, tw]);
+    const ty = d3.scaleLinear(d3.extent(data), [th - 2, 2]);
+    const tArea = d3.area().x((_, i) => tx(i)).y0(th).y1(v => ty(v)).curve(d3.curveMonotoneX);
+    const tLine = d3.line().x((_, i) => tx(i)).y(v => ty(v)).curve(d3.curveMonotoneX);
+    tSvg.append("path").datum(data).attr("d", tArea).attr("fill", "#fff").attr("opacity", 0.1);
+    tSvg.append("path").datum(data).attr("d", tLine)
+      .attr("fill", "none").attr("stroke", "#fff").attr("stroke-width", 1.5);
+
+    // Month labels at start and end
+    tSvg.append("text").attr("x", 1).attr("y", th - 1)
+      .attr("font-size", "8px").attr("fill", "#999").text("Jan");
+    tSvg.append("text").attr("x", tw - 1).attr("y", th - 1)
+      .attr("text-anchor", "end").attr("font-size", "8px").attr("fill", "#999").text("Dec");
+
+    tooltip.style("display", "block");
+  })
+  .on("pointermove", function(event) {
+    const [mx, my] = d3.pointer(event, wrapper);
+    const tipW = 260, tipH = 120;
+    const left = mx + tipW + 16 > width ? mx - tipW - 8 : mx + 12;
+    const top = Math.min(my - 10, height - tipH);
+    tooltip.style("left", `${left}px`).style("top", `${Math.max(0, top)}px`);
+  })
+  .on("pointerleave", function() {
+    tooltip.style("display", "none");
+  });
+}
+
+render();
+
+// ResizeObserver — skip height-only changes
+let lastWidth = 0;
+const ro = new ResizeObserver(([entry]) => {
+  const w = entry.contentRect.width;
+  if (Math.abs(w - lastWidth) < 1) return;
+  lastWidth = w;
+  render();
+});
+ro.observe(wrapper);
+</script>
+</body>
+</html>

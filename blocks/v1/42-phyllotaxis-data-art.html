@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Phyllotaxis Data Art</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #111;
+    color: #ccc;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    padding: 20px;
+  }
+  h1 {
+    font-size: 1.4rem;
+    font-weight: 300;
+    letter-spacing: 0.05em;
+    color: #eee;
+    margin-bottom: 12px;
+  }
+  .subtitle {
+    font-size: 0.8rem;
+    color: #666;
+    margin-bottom: 16px;
+    letter-spacing: 0.03em;
+  }
+  #canvas-container {
+    position: relative;
+    width: 800px;
+    height: 600px;
+  }
+  canvas {
+    display: block;
+    border-radius: 6px;
+  }
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 24px;
+    margin-top: 20px;
+    align-items: flex-end;
+    justify-content: center;
+  }
+  .control-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .control-group label {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #777;
+  }
+  .control-group .value {
+    font-size: 0.65rem;
+    color: #555;
+    text-align: right;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+  }
+  input[type="range"] {
+    width: 150px;
+    accent-color: #66ccee;
+  }
+  .btn {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    color: #aaa;
+    padding: 7px 18px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: system-ui;
+    font-size: 0.8rem;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .btn:hover { background: #252525; border-color: #555; }
+  .btn.active { border-color: #66ccee; color: #66ccee; }
+  .palette-row {
+    display: flex;
+    gap: 6px;
+  }
+  .palette-swatch {
+    width: 18px;
+    height: 18px;
+    border-radius: 3px;
+    cursor: pointer;
+    border: 2px solid transparent;
+    transition: border-color 0.15s;
+  }
+  .palette-swatch.active { border-color: #fff; }
+</style>
+</head>
+<body>
+
+<h1>Phyllotaxis</h1>
+<p class="subtitle">Golden-angle spiral with oscillating arm structure</p>
+<div id="canvas-container"></div>
+
+<div class="controls">
+  <div class="control-group">
+    <label>Dots</label>
+    <input type="range" id="slider-count" min="200" max="5000" step="100" value="2000">
+    <span class="value" id="val-count">2000</span>
+  </div>
+  <div class="control-group">
+    <label>Angle Offset</label>
+    <input type="range" id="slider-offset" min="-0.5" max="0.5" step="0.001" value="0">
+    <span class="value" id="val-offset">0.000</span>
+  </div>
+  <div class="control-group">
+    <label>Speed</label>
+    <input type="range" id="slider-speed" min="0" max="3" step="0.05" value="0.8">
+    <span class="value" id="val-speed">0.80</span>
+  </div>
+  <div class="control-group">
+    <label>Dot Size</label>
+    <input type="range" id="slider-size" min="0.5" max="6" step="0.1" value="2.0">
+    <span class="value" id="val-size">2.0</span>
+  </div>
+  <div class="control-group">
+    <label>Palette</label>
+    <div class="palette-row" id="palette-picker"></div>
+  </div>
+  <button class="btn active" id="btn-play">Pause</button>
+</div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(() => {
+  // --- Constants ---
+  const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5)); // ~137.508 degrees
+  const W = 800, H = 600;
+  const cx = W / 2, cy = H / 2;
+  const maxR = Math.min(cx, cy) - 20;
+
+  // --- Palettes: each is an array of base colors for additive glow ---
+  const palettes = {
+    ocean:   ["rgba(50,130,240,A)", "rgba(70,200,240,A)", "rgba(140,240,255,A)"],
+    fire:    ["rgba(240,70,20,A)",  "rgba(255,180,40,A)", "rgba(255,240,100,A)"],
+    aurora:  ["rgba(50,240,140,A)", "rgba(100,180,250,A)", "rgba(200,120,255,A)"],
+    gold:    ["rgba(220,190,60,A)", "rgba(255,220,100,A)", "rgba(255,250,180,A)"],
+    cyber:   ["rgba(0,240,200,A)",  "rgba(120,80,255,A)", "rgba(240,50,200,A)"],
+  };
+  const paletteColors = {
+    ocean: "#3db8e8", fire: "#e8713d", aurora: "#40c878",
+    gold: "#d4b840", cyber: "#00ddb4"
+  };
+
+  let activePalette = "ocean";
+
+  // --- Canvas setup (DPR-aware) ---
+  const container = d3.select("#canvas-container");
+  const dpr = devicePixelRatio || 1;
+  const canvas = container.append("canvas")
+    .attr("width", W * dpr).attr("height", H * dpr)
+    .style("width", `${W}px`).style("height", `${H}px`)
+    .node();
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  // --- Build palette picker ---
+  const pickerDiv = d3.select("#palette-picker");
+  Object.entries(paletteColors).forEach(([name, hex]) => {
+    pickerDiv.append("div")
+      .attr("class", `palette-swatch${name === activePalette ? " active" : ""}`)
+      .style("background", hex)
+      .attr("title", name)
+      .on("click", function() {
+        activePalette = name;
+        pickerDiv.selectAll(".palette-swatch").classed("active", false);
+        d3.select(this).classed("active", true);
+      });
+  });
+
+  // --- State ---
+  let dotCount = 2000;
+  let angleOffset = 0;
+  let speed = 0.8;
+  let dotSize = 2.0;
+  let playing = true;
+  let time = 0;
+  let animId = null;
+
+  // Pointer interaction: attract/repel dots near cursor
+  let pointer = null;
+  d3.select(canvas)
+    .on("pointermove", (event) => {
+      const [px, py] = d3.pointer(event, canvas);
+      pointer = { x: px, y: py };
+    })
+    .on("pointerleave", () => { pointer = null; });
+
+  // --- Sliders ---
+  const wire = (id, setter, fmt) => {
+    const slider = document.getElementById(`slider-${id}`);
+    const valEl = document.getElementById(`val-${id}`);
+    slider.addEventListener("input", () => {
+      const v = +slider.value;
+      setter(v);
+      valEl.textContent = fmt(v);
+    });
+  };
+  wire("count", v => { dotCount = v; }, v => v);
+  wire("offset", v => { angleOffset = v; }, v => v.toFixed(3));
+  wire("speed", v => { speed = v; }, v => v.toFixed(2));
+  wire("size", v => { dotSize = v; }, v => v.toFixed(1));
+
+  document.getElementById("btn-play").addEventListener("click", function() {
+    playing = !playing;
+    this.textContent = playing ? "Pause" : "Play";
+    this.classList.toggle("active", playing);
+    if (playing && !animId) loop();
+  });
+
+  // --- Precompute color strings for each dot layer ---
+  const makeColorStr = (template, alpha) => template.replace("A", alpha.toFixed(3));
+
+  // --- Draw ---
+  function draw() {
+    // Black background
+    ctx.globalCompositeOperation = "source-over";
+    ctx.fillStyle = "#111";
+    ctx.fillRect(0, 0, W, H);
+
+    // Additive blending for glow
+    ctx.globalCompositeOperation = "lighter";
+
+    const pal = palettes[activePalette];
+    // Oscillating angle perturbation
+    const oscillation = playing ? Math.sin(time * 0.4) * 0.015 : 0;
+    const currentAngle = GOLDEN_ANGLE + angleOffset + oscillation;
+
+    // Secondary oscillation for radius breathing
+    const breathe = 1 + Math.sin(time * 0.25) * 0.03;
+
+    const n = dotCount;
+    const baseAlpha = Math.min(0.25, 160 / n); // scale alpha with count
+
+    // Draw in 3 passes with slightly different parameters for richer glow
+    // Inner passes: smaller/brighter core. Outer passes: larger/dimmer halo.
+    for (let pass = 0; pass < 3; pass++) {
+      const passAngle = currentAngle + pass * 0.00015;
+      const passAlpha = baseAlpha * [1, 0.6, 0.35][pass];
+      const passSize = dotSize * [0.8, 1.3, 2.0][pass];
+      const color = makeColorStr(pal[pass], passAlpha);
+
+      ctx.fillStyle = color;
+      ctx.beginPath();
+
+      for (let i = 0; i < n; i++) {
+        const theta = i * passAngle;
+        // Square root spacing: uniform area density
+        const r = maxR * Math.sqrt(i / n) * breathe;
+
+        let x = cx + r * Math.cos(theta);
+        let y = cy + r * Math.sin(theta);
+
+        // Pointer interaction: slight repulsion
+        if (pointer) {
+          const dx = x - pointer.x;
+          const dy = y - pointer.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist < 80 && dist > 0) {
+            const force = (80 - dist) / 80 * 15;
+            x += (dx / dist) * force;
+            y += (dy / dist) * force;
+          }
+        }
+
+        ctx.moveTo(x + passSize, y);
+        ctx.arc(x, y, passSize, 0, Math.PI * 2);
+      }
+      ctx.fill();
+    }
+
+    // Reset compositing
+    ctx.globalCompositeOperation = "source-over";
+  }
+
+  // --- Animation loop ---
+  function loop() {
+    if (!playing) { animId = null; return; }
+    if (speed > 0) time += speed * 0.016;
+    draw();
+    animId = requestAnimationFrame(loop);
+  }
+
+  // Reduced motion: still render, just don't animate
+  const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+  if (reducedMotion.matches) {
+    playing = false;
+    document.getElementById("btn-play").textContent = "Play";
+    document.getElementById("btn-play").classList.remove("active");
+  }
+
+  // Initial draw + start
+  draw();
+  if (playing) loop();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebGL Animated Treemap — Revenue vs Headcount</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px;
+  }
+  h1 { font-size: 18px; font-weight: 600; color: #222; margin-bottom: 4px; }
+  .subtitle { font-size: 13px; color: #666; margin-bottom: 16px; }
+  .controls { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
+  button {
+    font-family: inherit;
+    font-size: 13px;
+    padding: 6px 18px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    background: #fff;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  button:hover { background: #f0f0f0; }
+  button.active { background: #4477AA; color: #fff; border-color: #4477AA; }
+  .container { position: relative; }
+  canvas { display: block; }
+  svg { position: absolute; top: 0; left: 0; pointer-events: none; }
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: rgba(255,255,255,0.96);
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    padding: 8px 10px;
+    font-size: 12px;
+    line-height: 1.5;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+    display: none;
+    white-space: nowrap;
+  }
+  .tooltip strong { font-weight: 600; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 10px; }
+  .legend-item { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #444; }
+  .legend-swatch { width: 14px; height: 14px; border-radius: 2px; }
+</style>
+</head>
+<body>
+<h1>5,000-Leaf Treemap: Revenue vs Headcount</h1>
+<p class="subtitle">WebGL instanced quads animating between two value columns at 60fps. Click a cell for details.</p>
+<div class="controls">
+  <button id="btn-revenue" class="active">Revenue</button>
+  <button id="btn-headcount">Headcount</button>
+</div>
+<div class="container" id="container">
+  <canvas id="glcanvas"></canvas>
+  <div class="tooltip" id="tooltip"></div>
+</div>
+<div class="legend" id="legend"></div>
+
+<script>
+(() => {
+  // --- Dimensions ---
+  const W = 1200, H = 800;
+  const dpr = devicePixelRatio || 1;
+
+  // --- Tol palette ---
+  const TOL = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377","#BBBBBB"];
+
+  // --- Synthetic data: 10 sectors, 50 divisions, ~5000 leaves ---
+  const sectors = [
+    "Technology","Finance","Healthcare","Energy","Consumer",
+    "Industrial","Materials","Telecom","Utilities","Real Estate"
+  ];
+  const rng = d3.randomLcg(42);
+  const rand = d3.randomNormal.source(rng)(0, 1);
+  const randU = () => rng();
+
+  const children = [];
+  const divsPerSector = 5;
+  const leavesPerDiv = 100; // 10 * 5 * 100 = 5000
+  for (let s = 0; s < sectors.length; s++) {
+    const sectorChildren = [];
+    for (let d = 0; d < divsPerSector; d++) {
+      const divChildren = [];
+      const baseRevenue = 50 + randU() * 200;
+      const baseHeadcount = 20 + randU() * 80;
+      for (let l = 0; l < leavesPerDiv; l++) {
+        const revScale = Math.exp(rand() * 1.2);
+        const hcScale = Math.exp(rand() * 0.9);
+        // Inverse correlation: high revenue divisions have lower headcount ratio
+        const hcFactor = 0.3 + 0.7 * (1 - s / sectors.length);
+        divChildren.push({
+          name: `${sectors[s][0]}${d}-${l}`,
+          revenue: Math.max(1, baseRevenue * revScale),
+          headcount: Math.max(1, baseHeadcount * hcScale * hcFactor),
+          sector: s
+        });
+      }
+      sectorChildren.push({ name: `Div ${d + 1}`, children: divChildren });
+    }
+    children.push({ name: sectors[s], children: sectorChildren });
+  }
+
+  const rootData = { name: "Root", children };
+
+  // --- Build two treemap layouts ---
+  const treemap = d3.treemap()
+    .size([W, H])
+    .padding(1)
+    .paddingTop(14)
+    .round(true)
+    .tile(d3.treemapResquarify); // stable for animation
+
+  function computeLayout(valueAccessor) {
+    const root = d3.hierarchy(rootData)
+      .sum(valueAccessor)
+      .sort((a, b) => b.value - a.value);
+    treemap(root);
+    return root;
+  }
+
+  const rootRevenue = computeLayout(d => d.revenue || 0);
+  const rootHeadcount = computeLayout(d => d.headcount || 0);
+
+  // Collect leaves in consistent order
+  const leavesRevenue = rootRevenue.leaves();
+  const leavesHeadcount = rootHeadcount.leaves();
+  const N = leavesRevenue.length;
+
+  // Build index map for headcount leaves keyed by data reference
+  const hcMap = new Map();
+  leavesHeadcount.forEach(l => hcMap.set(l.data, l));
+
+  // --- Color by sector ---
+  const colorScale = d3.scaleOrdinal(sectors, TOL.concat(TOL).slice(0, sectors.length));
+
+  function hexToGL(hex) {
+    const c = d3.rgb(hex);
+    return [c.r / 255, c.g / 255, c.b / 255];
+  }
+
+  // --- Prepare layout arrays ---
+  // Layout A = revenue, Layout B = headcount
+  // Each leaf: x0, y0, x1, y1
+  const layoutA = new Float32Array(N * 4);
+  const layoutB = new Float32Array(N * 4);
+  const colors = new Float32Array(N * 4);
+  const leafData = new Array(N);
+
+  for (let i = 0; i < N; i++) {
+    const lr = leavesRevenue[i];
+    layoutA[i * 4] = lr.x0;
+    layoutA[i * 4 + 1] = lr.y0;
+    layoutA[i * 4 + 2] = lr.x1;
+    layoutA[i * 4 + 3] = lr.y1;
+
+    const lh = hcMap.get(lr.data);
+    layoutB[i * 4] = lh.x0;
+    layoutB[i * 4 + 1] = lh.y0;
+    layoutB[i * 4 + 2] = lh.x1;
+    layoutB[i * 4 + 3] = lh.y1;
+
+    const [r, g, b] = hexToGL(colorScale(sectors[lr.data.sector]));
+    colors[i * 4] = r;
+    colors[i * 4 + 1] = g;
+    colors[i * 4 + 2] = b;
+    colors[i * 4 + 3] = 0.85;
+
+    leafData[i] = lr.data;
+  }
+
+  // Also collect internal nodes for group labels
+  const groupNodes = rootRevenue.descendants().filter(d => d.depth === 1);
+  const groupNodesHC = rootHeadcount.descendants().filter(d => d.depth === 1);
+  const groupMap = new Map();
+  groupNodesHC.forEach(g => groupMap.set(g.data, g));
+
+  // --- WebGL Setup ---
+  const canvas = document.getElementById("glcanvas");
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + "px";
+  canvas.style.height = H + "px";
+
+  const gl = canvas.getContext("webgl2", {
+    antialias: true,
+    premultipliedAlpha: false,
+    alpha: true
+  });
+  gl.viewport(0, 0, W * dpr, H * dpr);
+
+  // --- Shaders ---
+  const vsSource = `#version 300 es
+    in vec2 a_quad;
+    in vec4 a_rect;    // x0, y0, x1, y1 — current interpolated
+    in vec4 a_color;
+    uniform vec2 u_resolution;
+    out vec4 v_color;
+    out vec2 v_uv;
+
+    void main() {
+      float x0 = a_rect.x, y0 = a_rect.y, x1 = a_rect.z, y1 = a_rect.w;
+      float w = x1 - x0, h = y1 - y0;
+      // a_quad is unit quad [0,1]x[0,1]
+      vec2 pos = vec2(x0 + a_quad.x * w, y0 + a_quad.y * h);
+      vec2 clip = (pos / u_resolution) * 2.0 - 1.0;
+      clip.y = -clip.y;
+      gl_Position = vec4(clip, 0.0, 1.0);
+      v_color = a_color;
+      v_uv = a_quad;
+    }
+  `;
+
+  const fsSource = `#version 300 es
+    precision mediump float;
+    in vec4 v_color;
+    in vec2 v_uv;
+    out vec4 fragColor;
+
+    void main() {
+      fragColor = v_color;
+    }
+  `;
+
+  function compileShader(src, type) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      console.error(gl.getShaderInfoLog(s));
+      gl.deleteShader(s);
+      return null;
+    }
+    return s;
+  }
+
+  const vs = compileShader(vsSource, gl.VERTEX_SHADER);
+  const fs = compileShader(fsSource, gl.FRAGMENT_SHADER);
+  const program = gl.createProgram();
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    console.error(gl.getProgramInfoLog(program));
+  }
+  gl.useProgram(program);
+
+  // --- Buffers ---
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+
+  // Unit quad: two triangles [0,0],[1,0],[1,1],[0,0],[1,1],[0,1]
+  const quadVerts = new Float32Array([0,0, 1,0, 1,1, 0,0, 1,1, 0,1]);
+  const quadBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, quadVerts, gl.STATIC_DRAW);
+  const aQuad = gl.getAttribLocation(program, "a_quad");
+  gl.enableVertexAttribArray(aQuad);
+  gl.vertexAttribPointer(aQuad, 2, gl.FLOAT, false, 0, 0);
+
+  // Per-instance rect (x0, y0, x1, y1)
+  const currentRects = new Float32Array(N * 4);
+  // Initialize to layout A
+  currentRects.set(layoutA);
+
+  const rectBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, rectBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, currentRects, gl.DYNAMIC_DRAW);
+  const aRect = gl.getAttribLocation(program, "a_rect");
+  gl.enableVertexAttribArray(aRect);
+  gl.vertexAttribPointer(aRect, 4, gl.FLOAT, false, 0, 0);
+  gl.vertexAttribDivisor(aRect, 1);
+
+  // Per-instance color
+  const colorBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, colorBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, colors, gl.STATIC_DRAW);
+  const aColor = gl.getAttribLocation(program, "a_color");
+  gl.enableVertexAttribArray(aColor);
+  gl.vertexAttribPointer(aColor, 4, gl.FLOAT, false, 0, 0);
+  gl.vertexAttribDivisor(aColor, 1);
+
+  // Uniforms
+  const uRes = gl.getUniformLocation(program, "u_resolution");
+  gl.uniform2f(uRes, W, H);
+
+  // Blend
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+  // --- SVG overlay for group labels ---
+  const container = document.getElementById("container");
+  container.style.width = W + "px";
+  container.style.height = H + "px";
+
+  const svg = d3.select(container).append("svg")
+    .attr("width", W)
+    .attr("height", H)
+    .style("pointer-events", "none");
+
+  const labelsGroup = svg.append("g").attr("class", "labels");
+
+  function updateLabels(t) {
+    const labelData = groupNodes.map((g, i) => {
+      const gh = groupMap.get(g.data);
+      return {
+        name: g.data.name,
+        x0: g.x0 + (gh.x0 - g.x0) * t,
+        y0: g.y0 + (gh.y0 - g.y0) * t,
+        x1: g.x1 + (gh.x1 - g.x1) * t,
+        y1: g.y1 + (gh.y1 - g.y1) * t,
+      };
+    });
+
+    const labels = labelsGroup.selectAll("text")
+      .data(labelData, d => d.name);
+
+    labels.enter().append("text")
+      .attr("font-size", 11)
+      .attr("font-weight", 600)
+      .attr("fill", "#333")
+      .attr("font-family", "system-ui, sans-serif")
+      .merge(labels)
+      .attr("x", d => d.x0 + 3)
+      .attr("y", d => d.y0 + 11)
+      .text(d => d.name)
+      .attr("opacity", d => (d.x1 - d.x0 > 60 && d.y1 - d.y0 > 16) ? 1 : 0);
+
+    labels.exit().remove();
+  }
+
+  // --- Animation state ---
+  let currentLayout = "revenue"; // or "headcount"
+  let animating = false;
+  let animT = 0; // 0 = layoutA (revenue), 1 = layoutB (headcount)
+  let targetT = 0;
+  let animStart = 0;
+  let animFrom = 0;
+  const DURATION = 800;
+
+  function easeInOutCubic(t) {
+    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  }
+
+  function draw() {
+    gl.clearColor(0.98, 0.98, 0.98, 1.0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(program);
+    gl.bindVertexArray(vao);
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, N);
+  }
+
+  function interpolateRects(t) {
+    for (let i = 0; i < N * 4; i++) {
+      currentRects[i] = layoutA[i] + (layoutB[i] - layoutA[i]) * t;
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, rectBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, currentRects);
+  }
+
+  function tick(now) {
+    if (animating) {
+      const elapsed = now - animStart;
+      const progress = Math.min(1, elapsed / DURATION);
+      const eased = easeInOutCubic(progress);
+      animT = animFrom + (targetT - animFrom) * eased;
+
+      interpolateRects(animT);
+      draw();
+      updateLabels(animT);
+
+      if (progress >= 1) {
+        animating = false;
+        animT = targetT;
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+
+  function switchTo(layout) {
+    if (layout === currentLayout && !animating) return;
+    currentLayout = layout;
+    animFrom = animT;
+    targetT = layout === "revenue" ? 0 : 1;
+    animStart = performance.now();
+    animating = true;
+
+    document.getElementById("btn-revenue").classList.toggle("active", layout === "revenue");
+    document.getElementById("btn-headcount").classList.toggle("active", layout === "headcount");
+  }
+
+  // --- Initial draw ---
+  interpolateRects(0);
+  draw();
+  updateLabels(0);
+  requestAnimationFrame(tick);
+
+  // --- Button handlers ---
+  document.getElementById("btn-revenue").addEventListener("click", () => switchTo("revenue"));
+  document.getElementById("btn-headcount").addEventListener("click", () => switchTo("headcount"));
+
+  // --- Tooltip on pointer events ---
+  const tooltip = document.getElementById("tooltip");
+
+  canvas.addEventListener("pointermove", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+
+    // Find leaf under pointer
+    let found = -1;
+    for (let i = N - 1; i >= 0; i--) {
+      const x0 = currentRects[i * 4];
+      const y0 = currentRects[i * 4 + 1];
+      const x1 = currentRects[i * 4 + 2];
+      const y1 = currentRects[i * 4 + 3];
+      if (mx >= x0 && mx <= x1 && my >= y0 && my <= y1) {
+        found = i;
+        break;
+      }
+    }
+
+    if (found >= 0) {
+      const d = leafData[found];
+      const sectorName = sectors[d.sector];
+      tooltip.innerHTML = `<strong>${sectorName}</strong> / ${d.name}<br>` +
+        `Revenue: $${d.revenue.toFixed(1)}M<br>` +
+        `Headcount: ${d.headcount.toFixed(0)}`;
+      tooltip.style.display = "block";
+      const tx = Math.min(e.clientX - rect.left + 12, W - 180);
+      const ty = Math.min(e.clientY - rect.top - 28, H - 60);
+      tooltip.style.left = tx + "px";
+      tooltip.style.top = ty + "px";
+      canvas.style.cursor = "pointer";
+    } else {
+      tooltip.style.display = "none";
+      canvas.style.cursor = "default";
+    }
+  });
+
+  canvas.addEventListener("pointerleave", () => {
+    tooltip.style.display = "none";
+    canvas.style.cursor = "default";
+  });
+
+  // --- Legend ---
+  const legend = document.getElementById("legend");
+  sectors.forEach((s, i) => {
+    const item = document.createElement("div");
+    item.className = "legend-item";
+    const swatch = document.createElement("div");
+    swatch.className = "legend-swatch";
+    swatch.style.background = colorScale(s);
+    item.appendChild(swatch);
+    item.appendChild(document.createTextNode(s));
+    legend.appendChild(item);
+  });
+
+  // --- Context loss handling ---
+  canvas.addEventListener("webglcontextlost", e => e.preventDefault());
+  canvas.addEventListener("webglcontextrestored", () => {
+    // Reinitialize would go here
+    console.warn("WebGL context restored");
+  });
+})();
+</script>
+</body>
+</html>

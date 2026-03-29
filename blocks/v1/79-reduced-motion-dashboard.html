@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reduced Motion Dashboard</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa; color: #333;
+  }
+  .header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 14px 24px; max-width: 1200px; margin: 0 auto;
+    border-bottom: 1px solid #e0e0e0;
+  }
+  .header h1 { font-size: 15px; font-weight: 600; flex: 1; color: #222; }
+  .motion-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; color: #555; padding: 4px 10px;
+    border-radius: 12px; background: #eef5ee; border: 1px solid #c6dcc6;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .motion-badge.reduced { background: #fef3e6; border-color: #e8c88a; }
+  .motion-badge .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: #228833;
+  }
+  .motion-badge.reduced .dot { background: #cc7a00; }
+  .toggle-btn {
+    padding: 5px 12px; border: 1px solid #aaa; border-radius: 4px;
+    background: #fff; cursor: pointer; font-size: 11px; font-family: inherit;
+    color: #444;
+  }
+  .toggle-btn:hover { background: #f0f0f0; }
+  .toggle-btn.active { background: #4477AA; color: #fff; border-color: #4477AA; }
+  .reset-btn {
+    padding: 5px 12px; border: 1px solid #aaa; border-radius: 4px;
+    background: #fff; cursor: pointer; font-size: 11px; font-family: inherit;
+    color: #444;
+  }
+  .reset-btn:hover { background: #f0f0f0; }
+  .dashboard {
+    display: grid; grid-template-columns: 1fr 1fr 1fr;
+    gap: 14px; padding: 14px 24px; max-width: 1200px; margin: 0 auto;
+  }
+  .panel {
+    background: #fff; border: 1px solid #ddd; border-radius: 6px;
+    padding: 14px; overflow: hidden;
+  }
+  .panel-title {
+    font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.5px; color: #777; margin-bottom: 8px;
+  }
+  .panel svg { display: block; }
+  .tooltip {
+    position: fixed; pointer-events: none;
+    background: rgba(0,0,0,0.82); color: #fff; border-radius: 4px;
+    padding: 6px 10px; font-size: 11px; line-height: 1.4;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    white-space: nowrap; opacity: 0; z-index: 10;
+  }
+  .brush .selection { fill: #4477AA; fill-opacity: 0.12; stroke: #4477AA; stroke-width: 1; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Crossfilter Dashboard &mdash; Reduced Motion Support</h1>
+  <div class="motion-badge" id="badge">
+    <span class="dot"></span>
+    <span id="badgeText">Motion: 300ms</span>
+  </div>
+  <button class="toggle-btn" id="motionToggle">Override: Reduce Motion</button>
+  <button class="reset-btn" id="resetBtn">Reset</button>
+</div>
+<div class="dashboard">
+  <div class="panel">
+    <div class="panel-title">Revenue by Category</div>
+    <div id="bar"></div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">Monthly Revenue</div>
+    <div id="line"></div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">Satisfaction vs Volume</div>
+    <div id="scatter"></div>
+  </div>
+</div>
+<div class="tooltip" id="tip"></div>
+
+<script>
+(() => {
+  // -- Palette: Tol colorblind-safe --
+  const TOL = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377"];
+  const CATS = ["Electronics","Clothing","Food","Services","Health","Media"];
+  const catColor = d => TOL[CATS.indexOf(d)];
+
+  // -- Synthetic data: 300 records with realistic structure --
+  const rng = d3.randomLcg(42);
+  const data = d3.range(300).map(i => {
+    const catIdx = Math.floor(rng() * 6);
+    const cat = CATS[catIdx];
+    const monthIdx = Math.floor(rng() * 24);
+    const date = new Date(2023, monthIdx);
+    // Cluster: electronics high revenue, food low; health high satisfaction
+    const revBase = [70, 40, 25, 50, 55, 35][catIdx];
+    const satBase = [5, 6, 7, 5, 8, 6][catIdx];
+    return {
+      id: i, category: cat, catIdx,
+      revenue: Math.max(5, revBase + (rng() - 0.5) * 60),
+      date, monthIdx,
+      satisfaction: Math.max(1, Math.min(10, satBase + (rng() - 0.5) * 4)),
+      volume: Math.max(5, 30 + rng() * 70 + catIdx * 5)
+    };
+  });
+
+  // -- Motion state --
+  const mq = matchMedia("(prefers-reduced-motion: reduce)");
+  let osReducedMotion = mq.matches;
+  let manualOverride = null; // null = follow OS, true/false = manual
+
+  const isReduced = () => manualOverride !== null ? manualOverride : osReducedMotion;
+  const dur = (ms = 300) => isReduced() ? 0 : ms;
+
+  // Listen for OS-level changes at runtime
+  mq.addEventListener("change", () => {
+    osReducedMotion = mq.matches;
+    if (manualOverride === null) updateMotionUI();
+  });
+
+  // -- UI wiring --
+  const badge = document.getElementById("badge");
+  const badgeText = document.getElementById("badgeText");
+  const toggleBtn = document.getElementById("motionToggle");
+  const tip = document.getElementById("tip");
+
+  const updateMotionUI = () => {
+    const reduced = isReduced();
+    badge.classList.toggle("reduced", reduced);
+    badgeText.textContent = reduced ? "Motion: instant" : "Motion: 300ms";
+    if (manualOverride !== null) {
+      toggleBtn.classList.add("active");
+      toggleBtn.textContent = manualOverride ? "Override: Enable Motion" : "Override: Reduce Motion";
+    } else {
+      toggleBtn.classList.remove("active");
+      toggleBtn.textContent = "Override: Reduce Motion";
+    }
+  };
+
+  toggleBtn.addEventListener("click", () => {
+    if (manualOverride === null) manualOverride = true;
+    else if (manualOverride === true) manualOverride = false;
+    else manualOverride = null; // cycle: null -> true -> false -> null
+    updateMotionUI();
+  });
+  updateMotionUI();
+
+  // -- Tooltip --
+  const showTip = (evt, html) => {
+    tip.innerHTML = html;
+    tip.style.opacity = 1;
+    const r = tip.getBoundingClientRect();
+    tip.style.left = Math.min(evt.clientX + 12, window.innerWidth - r.width - 8) + "px";
+    tip.style.top = (evt.clientY - r.height - 8) + "px";
+  };
+  const hideTip = () => { tip.style.opacity = 0; };
+
+  // -- Filter state --
+  let selectedCat = null;
+  let brushedIds = null;
+  const dispatch = d3.dispatch("filter");
+
+  const getFiltered = (exclude) => {
+    let f = data;
+    if (selectedCat && exclude !== "bar") f = f.filter(d => d.category === selectedCat);
+    if (brushedIds && exclude !== "scatter") f = f.filter(d => brushedIds.has(d.id));
+    return f;
+  };
+
+  // Reset
+  let scatterBrushG, scatterBrush;
+  document.getElementById("resetBtn").addEventListener("click", () => {
+    selectedCat = null;
+    brushedIds = null;
+    if (scatterBrushG) scatterBrushG.call(scatterBrush.move, null);
+    dispatch.call("filter");
+  });
+
+  // -- Dimensions --
+  const pw = 370, ph = 380;
+
+  // ============ BAR CHART ============
+  const barM = { top: 10, right: 16, bottom: 26, left: 80 };
+  const barW = pw - barM.left - barM.right;
+  const barH = ph - barM.top - barM.bottom;
+
+  const barSvg = d3.select("#bar").append("svg")
+    .attr("width", pw).attr("height", ph)
+    .append("g").attr("transform", `translate(${barM.left},${barM.top})`);
+
+  const barX = d3.scaleLinear().range([0, barW]);
+  const barY = d3.scaleBand().domain(CATS).range([0, barH]).padding(0.2);
+  const barXAxisG = barSvg.append("g").attr("transform", `translate(0,${barH})`);
+  const barYAxisG = barSvg.append("g");
+
+  barYAxisG.call(d3.axisLeft(barY).tickSize(0)).select(".domain").remove();
+  barYAxisG.selectAll("text").style("font-size", "11px");
+
+  // Ghost bars for full dataset context
+  const barGhost = barSvg.append("g");
+  const barFG = barSvg.append("g");
+
+  const renderBar = () => {
+    // Full dataset totals (ghost)
+    const allRolled = d3.rollup(data, v => d3.sum(v, d => d.revenue), d => d.category);
+    const allVals = CATS.map(c => ({ cat: c, val: allRolled.get(c) || 0 }));
+
+    // Filtered totals
+    const filtered = getFiltered("bar");
+    const rolled = d3.rollup(filtered, v => d3.sum(v, d => d.revenue), d => d.category);
+    const vals = CATS.map(c => ({ cat: c, val: rolled.get(c) || 0 }));
+
+    const maxVal = d3.max(allVals, d => d.val) * 1.05;
+    barX.domain([0, maxVal]);
+    barXAxisG.transition().duration(dur()).call(d3.axisBottom(barX).ticks(5, "~s"));
+
+    // Ghost bars
+    barGhost.selectAll("rect")
+      .data(allVals, d => d.cat)
+      .join("rect")
+        .attr("y", d => barY(d.cat))
+        .attr("height", barY.bandwidth())
+        .attr("x", 0)
+        .attr("fill", "#e8e8e8")
+        .attr("rx", 2)
+      .transition().duration(dur())
+        .attr("width", d => barX(d.val));
+
+    // Foreground bars
+    barFG.selectAll("rect")
+      .data(vals, d => d.cat)
+      .join("rect")
+        .attr("y", d => barY(d.cat))
+        .attr("height", barY.bandwidth())
+        .attr("x", 0)
+        .attr("fill", d => catColor(d.cat))
+        .attr("rx", 2)
+        .attr("opacity", d => !selectedCat || d.cat === selectedCat ? 0.85 : 0.25)
+        .attr("stroke", d => d.cat === selectedCat ? "#222" : "none")
+        .attr("stroke-width", d => d.cat === selectedCat ? 1.5 : 0)
+        .style("cursor", "pointer")
+        .on("click", (e, d) => {
+          selectedCat = selectedCat === d.cat ? null : d.cat;
+          dispatch.call("filter");
+        })
+        .on("pointerenter", function(e, d) {
+          showTip(e, `<b>${d.cat}</b><br>Revenue: ${d3.format(",.0f")(d.val)}`);
+        })
+        .on("pointermove", function(e) {
+          showTip(e, tip.innerHTML);
+        })
+        .on("pointerleave", function() { hideTip(); })
+      .transition().duration(dur())
+        .attr("width", d => barX(d.val));
+  };
+
+  // ============ LINE CHART ============
+  const lineM = { top: 10, right: 16, bottom: 26, left: 44 };
+  const lineW = pw - lineM.left - lineM.right;
+  const lineH = ph - lineM.top - lineM.bottom;
+
+  const lineSvg = d3.select("#line").append("svg")
+    .attr("width", pw).attr("height", ph)
+    .append("g").attr("transform", `translate(${lineM.left},${lineM.top})`);
+
+  const lineX = d3.scaleTime().range([0, lineW]);
+  const lineY = d3.scaleLinear().range([lineH, 0]);
+  const lineXAxisG = lineSvg.append("g").attr("transform", `translate(0,${lineH})`);
+  const lineYAxisG = lineSvg.append("g");
+  const ghostPaths = lineSvg.append("g");
+  const fgPaths = lineSvg.append("g");
+
+  // Crosshair
+  const crossG = lineSvg.append("g").style("display", "none");
+  const crossLine = crossG.append("line").attr("y1", 0).attr("y2", lineH)
+    .attr("stroke", "#aaa").attr("stroke-dasharray", "3,3");
+  const crossDots = crossG.append("g");
+  const crossLabel = crossG.append("text")
+    .attr("fill", "#555").attr("font-size", "10px").attr("text-anchor", "middle");
+
+  // Precompute all dates sorted
+  const allDates = [...new Set(data.map(d => +d.date))].sort((a, b) => a - b);
+  lineX.domain(d3.extent(allDates, d => new Date(d)));
+
+  const buildSeries = (subset) => {
+    const byMonth = d3.rollup(subset, v => d3.sum(v, d => d.revenue), d => d.category, d => +d.date);
+    return CATS.map(cat => ({
+      cat,
+      values: allDates.map(t => ({ date: new Date(t), val: byMonth.get(cat)?.get(t) || 0 }))
+    }));
+  };
+
+  const line = d3.line().x(d => lineX(d.date)).y(d => lineY(d.val)).curve(d3.curveMonotoneX);
+
+  const renderLine = () => {
+    const allSeries = buildSeries(data);
+    const filtered = getFiltered("line");
+    const fgSeries = buildSeries(filtered);
+
+    const maxY = d3.max(allSeries, s => d3.max(s.values, v => v.val));
+    lineY.domain([0, maxY * 1.1]);
+
+    lineXAxisG.transition().duration(dur())
+      .call(d3.axisBottom(lineX).ticks(6).tickFormat(d3.timeFormat("%b '%y")));
+    lineYAxisG.transition().duration(dur())
+      .call(d3.axisLeft(lineY).ticks(5, "~s"));
+
+    // Ghost lines (full data, dimmed)
+    ghostPaths.selectAll("path")
+      .data(allSeries, d => d.cat)
+      .join("path")
+        .attr("fill", "none")
+        .attr("stroke", "#ddd")
+        .attr("stroke-width", 1.5)
+      .transition().duration(dur())
+        .attr("d", d => line(d.values));
+
+    // Foreground lines (filtered)
+    fgPaths.selectAll("path")
+      .data(fgSeries, d => d.cat)
+      .join("path")
+        .attr("fill", "none")
+        .attr("stroke", d => catColor(d.cat))
+        .attr("stroke-width", 2)
+        .attr("opacity", d => !selectedCat || d.cat === selectedCat ? 1 : 0.12)
+      .transition().duration(dur())
+        .attr("d", d => line(d.values));
+
+    // Crosshair overlay
+    lineSvg.selectAll(".line-overlay").data([0]).join("rect")
+      .attr("class", "line-overlay")
+      .attr("width", lineW).attr("height", lineH)
+      .attr("fill", "none").attr("pointer-events", "all")
+      .on("pointerenter", () => crossG.style("display", null))
+      .on("pointerleave", () => { crossG.style("display", "none"); hideTip(); })
+      .on("pointermove", function(event) {
+        const [mx] = d3.pointer(event);
+        crossLine.attr("x1", mx).attr("x2", mx);
+
+        const dateTarget = lineX.invert(mx);
+        const bisect = d3.bisector(d => d.date).left;
+        const activeSeries = (!selectedCat ? fgSeries : fgSeries.filter(s => s.cat === selectedCat));
+
+        crossDots.selectAll("circle")
+          .data(activeSeries, d => d.cat)
+          .join("circle")
+            .attr("r", 3.5)
+            .attr("fill", d => catColor(d.cat))
+            .attr("stroke", "#fff").attr("stroke-width", 1)
+            .each(function(d) {
+              const idx = Math.min(bisect(d.values, dateTarget), d.values.length - 1);
+              d3.select(this).attr("cx", lineX(d.values[idx].date)).attr("cy", lineY(d.values[idx].val));
+            });
+
+        const nearDate = allDates.reduce((a, b) =>
+          Math.abs(new Date(b) - dateTarget) < Math.abs(new Date(a) - dateTarget) ? b : a
+        );
+        crossLabel.attr("x", mx).attr("y", -2).text(d3.timeFormat("%b %Y")(new Date(nearDate)));
+      });
+  };
+
+  // ============ SCATTER CHART ============
+  const scatM = { top: 10, right: 16, bottom: 30, left: 44 };
+  const scatW = pw - scatM.left - scatM.right;
+  const scatH = ph - scatM.top - scatM.bottom;
+
+  const scatSvg = d3.select("#scatter").append("svg")
+    .attr("width", pw).attr("height", ph)
+    .append("g").attr("transform", `translate(${scatM.left},${scatM.top})`);
+
+  const scatX = d3.scaleLinear().domain(d3.extent(data, d => d.satisfaction)).nice().range([0, scatW]);
+  const scatY = d3.scaleLinear().domain(d3.extent(data, d => d.volume)).nice().range([scatH, 0]);
+
+  scatSvg.append("g").attr("transform", `translate(0,${scatH})`)
+    .call(d3.axisBottom(scatX).ticks(6))
+    .append("text").attr("x", scatW).attr("y", -4)
+    .attr("fill", "#666").attr("text-anchor", "end").attr("font-size", "10px").text("Satisfaction");
+  scatSvg.append("g").call(d3.axisLeft(scatY).ticks(6))
+    .append("text").attr("x", 4).attr("y", 10)
+    .attr("fill", "#666").attr("font-size", "10px").text("Volume");
+
+  const dotsG = scatSvg.append("g");
+
+  const renderScatter = () => {
+    const filtered = getFiltered("scatter");
+    const filteredSet = new Set(filtered.map(d => d.id));
+    const hasFilter = selectedCat || brushedIds;
+
+    dotsG.selectAll("circle")
+      .data(data, d => d.id)
+      .join(
+        enter => enter.append("circle")
+          .attr("cx", d => scatX(d.satisfaction))
+          .attr("cy", d => scatY(d.volume))
+          .attr("r", 3.5)
+          .attr("fill", d => catColor(d.category)),
+        update => update,
+        exit => exit.call(e => e.transition().duration(dur(200)).attr("r", 0).remove())
+      )
+      .on("pointerenter", function(e, d) {
+        d3.select(this).attr("r", 6).attr("stroke", "#222").attr("stroke-width", 1.5);
+        showTip(e, `<b>${d.category}</b><br>Sat: ${d3.format(".1f")(d.satisfaction)}<br>Vol: ${d3.format(".0f")(d.volume)}<br>Rev: ${d3.format(",.0f")(d.revenue)}`);
+      })
+      .on("pointermove", (e) => showTip(e, tip.innerHTML))
+      .on("pointerleave", function(e, d) {
+        d3.select(this).attr("r", 3.5).attr("stroke", "none");
+        hideTip();
+      })
+      .transition().duration(dur())
+        .attr("opacity", d => !hasFilter || filteredSet.has(d.id) ? 0.75 : 0.07);
+
+    // Brush
+    if (!scatterBrush) {
+      scatterBrush = d3.brush()
+        .extent([[0, 0], [scatW, scatH]])
+        .on("brush end", (event) => {
+          if (!event.sourceEvent) return; // prevent feedback loop
+          if (!event.selection) {
+            brushedIds = null;
+          } else {
+            const [[x0, y0], [x1, y1]] = event.selection;
+            brushedIds = new Set(
+              data.filter(d => {
+                const cx = scatX(d.satisfaction), cy = scatY(d.volume);
+                return cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1;
+              }).map(d => d.id)
+            );
+          }
+          dispatch.call("filter");
+        });
+      scatterBrushG = scatSvg.append("g").attr("class", "brush").call(scatterBrush);
+    }
+  };
+
+  // ============ LINK & RENDER ============
+  dispatch.on("filter", () => {
+    renderBar();
+    renderLine();
+    renderScatter();
+  });
+
+  renderBar();
+  renderLine();
+  renderScatter();
+})();
+</script>
+</body>
+</html>

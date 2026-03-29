@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>US Healthcare Spending per Capita by State</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa; display: flex; justify-content: center; padding: 24px;
+  }
+  .container { width: 1200px; max-width: 100%; }
+  h1 { font-size: 20px; font-weight: 600; color: #222; margin-bottom: 4px; }
+  .subtitle { font-size: 13px; color: #666; margin-bottom: 12px; line-height: 1.4; }
+  .controls { display: flex; gap: 10px; margin-bottom: 12px; align-items: center; flex-wrap: wrap; }
+  .controls button {
+    padding: 6px 14px; border: 1px solid #999; border-radius: 4px;
+    background: #fff; cursor: pointer; font-size: 13px; font-family: inherit;
+    transition: background 0.15s, color 0.15s;
+  }
+  .controls button:hover { background: #eee; }
+  .controls button:focus-visible { outline: 2px solid #4477AA; outline-offset: 2px; }
+  .controls button[aria-pressed="true"] { background: #4477AA; color: #fff; border-color: #4477AA; }
+  .kbd-hint { font-size: 11px; color: #888; margin-left: auto; }
+  .map-wrap { position: relative; }
+  canvas { display: block; border: 1px solid #ddd; border-radius: 4px; }
+  canvas:focus { outline: 2px solid #4477AA; outline-offset: 2px; }
+  .focus-overlay { position: absolute; top: 0; left: 0; pointer-events: none; }
+  .legend { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
+  .legend-title { font-size: 12px; color: #444; font-weight: 500; }
+  .legend-bar { display: flex; }
+  .legend-cell { width: 56px; height: 14px; }
+  .legend-labels { display: flex; font-size: 11px; color: #555; margin-top: 2px; }
+  .legend-labels span { width: 56px; text-align: center; }
+  .legend-labels span:first-child { text-align: left; }
+  .legend-labels span:last-child { text-align: right; }
+  #live-region { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+  .table-container {
+    display: none; max-height: 520px; overflow-y: auto;
+    border: 1px solid #ddd; border-radius: 4px; margin-top: 8px;
+  }
+  table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+  thead { position: sticky; top: 0; z-index: 2; }
+  th {
+    text-align: left; padding: 8px 10px; border-bottom: 2px solid #ccc;
+    cursor: pointer; user-select: none; font-weight: 600; background: #f5f5f5;
+  }
+  th:hover { background: #e8e8e8; }
+  th:focus-visible { outline: 2px solid #4477AA; outline-offset: -2px; }
+  th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td { padding: 6px 10px; border-bottom: 1px solid #eee; }
+  tr.highlighted { background: #dceefb; }
+  tbody tr:hover { background: #f0f0f0; }
+  .sort-arrow { font-size: 10px; margin-left: 4px; opacity: 0.5; }
+  th[aria-sort] .sort-arrow { opacity: 1; }
+  .bar-cell { position: relative; padding-right: 50px !important; }
+  .bar-fill { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); height: 12px; border-radius: 2px; opacity: 0.7; }
+  .bar-value { position: relative; z-index: 1; font-variant-numeric: tabular-nums; font-size: 12px; }
+
+  /* Forced colors: pattern fills handled in canvas, but table gets system colors */
+  @media (forced-colors: active) {
+    .controls button { border: 2px solid ButtonText; }
+    .controls button[aria-pressed="true"] { background: Highlight; color: HighlightText; }
+    canvas { border-color: ButtonText; }
+    th, td { border-color: ButtonText; }
+    tr.highlighted { outline: 2px solid Highlight; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>US Healthcare Spending per Capita by State</h1>
+  <p class="subtitle">Arrow keys navigate states in geographic order (west to east). Enter selects. Tab exits map.</p>
+  <div class="controls">
+    <button id="btn-map" aria-pressed="true">Map</button>
+    <button id="btn-table" aria-pressed="false">Table</button>
+    <span class="kbd-hint" id="kbd-hint">Arrow keys: navigate &middot; Enter: select &middot; Esc: deselect</span>
+  </div>
+  <div class="map-wrap" id="map-wrap">
+    <canvas id="map-canvas" tabindex="0" role="application"
+      aria-label="US state choropleth map of healthcare spending per capita. Use arrow keys to navigate states, Enter to select.">
+      Choropleth map showing healthcare spending per capita for 51 US states and territories. Use arrow keys to navigate.
+    </canvas>
+    <svg class="focus-overlay" id="focus-svg"></svg>
+  </div>
+  <div id="legend-wrap"></div>
+  <div class="table-container" id="table-container" aria-hidden="true">
+    <table id="data-table" aria-label="Healthcare spending data by state" role="grid">
+      <thead><tr role="row"></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div id="live-region" aria-live="assertive" aria-atomic="true" role="status"></div>
+</div>
+
+<script type="module">
+import * as topojson from "https://cdn.jsdelivr.net/npm/topojson-client@3/+esm";
+
+// State FIPS → name
+const stateNames = {
+  "01":"Alabama","02":"Alaska","04":"Arizona","05":"Arkansas","06":"California",
+  "08":"Colorado","09":"Connecticut","10":"Delaware","11":"District of Columbia",
+  "12":"Florida","13":"Georgia","15":"Hawaii","16":"Idaho","17":"Illinois",
+  "18":"Indiana","19":"Iowa","20":"Kansas","21":"Kentucky","22":"Louisiana",
+  "23":"Maine","24":"Maryland","25":"Massachusetts","26":"Michigan","27":"Minnesota",
+  "28":"Mississippi","29":"Missouri","30":"Montana","31":"Nebraska","32":"Nevada",
+  "33":"New Hampshire","34":"New Jersey","35":"New Mexico","36":"New York",
+  "37":"North Carolina","38":"North Dakota","39":"Ohio","40":"Oklahoma",
+  "41":"Oregon","42":"Pennsylvania","44":"Rhode Island","45":"South Carolina",
+  "46":"South Dakota","47":"Tennessee","48":"Texas","49":"Utah","50":"Vermont",
+  "51":"Virginia","53":"Washington","54":"West Virginia","55":"Wisconsin","56":"Wyoming"
+};
+
+// Synthetic healthcare spending data (plausible per-capita values $6k-$14k)
+const rng = d3.randomLcg(42);
+const stateData = new Map();
+const baseSeed = {
+  "06":9200,"36":11800,"25":13200,"11":14100,"09":12600,"08":8400,
+  "48":7800,"12":9600,"17":10200,"39":9800,"42":10500,"34":12100,
+  "24":11400,"51":10100,"13":8900,"37":8700,"47":8200,"21":8500,
+  "28":7600,"01":7900,"22":8100,"05":7400,"40":7700,"20":8300,
+  "31":8800,"27":10900,"55":10600,"19":9400,"29":8600,"18":9100,
+  "26":9900,"44":11600,"50":11200,"33":11500,"23":10800,"10":10300,
+  "53":10000,"41":9500,"32":8000,"16":7500,"30":8700,"56":9300,
+  "38":9600,"46":9000,"49":7800,"35":7200,"04":7900,"15":9700,
+  "02":12400,"54":8400,"45":8000
+};
+
+Object.keys(stateNames).forEach(fips => {
+  const base = baseSeed[fips] || 8500;
+  const jitter = Math.round((rng() - 0.5) * 1200);
+  stateData.set(fips, {
+    fips,
+    name: stateNames[fips],
+    spending: Math.max(6500, Math.min(14500, base + jitter)),
+  });
+});
+
+// Geographic sort: approximate centroid longitude (west → east)
+const geoLon = {
+  "02":-153,"15":-155,"53":-120,"41":-120,"06":-119,"32":-117,"04":-111,
+  "49":-111,"16":-114,"30":-109,"56":-107,"08":-105,"35":-106,"38":-100,
+  "46":-100,"31":-100,"20":-98,"40":-97,"48":-99,"27":-94,"19":-93,
+  "29":-92,"05":-92,"22":-92,"55":-89,"17":-89,"28":-90,"26":-84,
+  "18":-86,"47":-86,"01":-87,"13":-83,"39":-82,"21":-85,"12":-81,
+  "54":-80,"51":-79,"37":-79,"45":-81,"42":-77,"36":-75,"34":-74,
+  "24":-76,"10":-75,"11":-77,"09":-72,"44":-71,"25":-71,"50":-72,
+  "33":-71,"23":-69
+};
+
+const geoSorted = [...stateData.values()].sort((a, b) =>
+  (geoLon[a.fips] ?? 0) - (geoLon[b.fips] ?? 0)
+);
+
+// Color scale: Tol sequential blue ramp (5 steps)
+const tolColors = ["#BBCCEE", "#77AADD", "#4477AA", "#225588", "#114477"];
+const extent = d3.extent(geoSorted, d => d.spending);
+const color = d3.scaleQuantize(extent, tolColors);
+const fmt = d3.format("$,.0f");
+
+// Forced colors detection
+const forcedColorsQuery = matchMedia("(forced-colors: active)");
+let useForcedColors = forcedColorsQuery.matches;
+forcedColorsQuery.addEventListener("change", () => {
+  useForcedColors = forcedColorsQuery.matches;
+  render();
+});
+
+// Canvas pattern fills for forced-colors mode
+const patternDefs = [
+  { name: "sparse-dots", draw: (ctx, s) => { ctx.fillRect(0,0,s,s); ctx.fillStyle="#000"; for(let y=0;y<s;y+=6) for(let x=0;x<s;x+=6){ ctx.beginPath(); ctx.arc(x+3,y+3,1,0,Math.PI*2); ctx.fill(); }} },
+  { name: "diagonal-thin", draw: (ctx, s) => { ctx.fillRect(0,0,s,s); ctx.strokeStyle="#000"; ctx.lineWidth=1; for(let i=-s;i<2*s;i+=8){ ctx.beginPath(); ctx.moveTo(i,0); ctx.lineTo(i+s,s); ctx.stroke(); }} },
+  { name: "crosshatch", draw: (ctx, s) => { ctx.fillRect(0,0,s,s); ctx.strokeStyle="#000"; ctx.lineWidth=1; for(let i=-s;i<2*s;i+=6){ ctx.beginPath(); ctx.moveTo(i,0); ctx.lineTo(i+s,s); ctx.stroke(); ctx.beginPath(); ctx.moveTo(i+s,0); ctx.lineTo(i,s); ctx.stroke(); }} },
+  { name: "diagonal-thick", draw: (ctx, s) => { ctx.fillRect(0,0,s,s); ctx.strokeStyle="#000"; ctx.lineWidth=2; for(let i=-s;i<2*s;i+=5){ ctx.beginPath(); ctx.moveTo(i,0); ctx.lineTo(i+s,s); ctx.stroke(); }} },
+  { name: "dense-fill", draw: (ctx, s) => { ctx.fillStyle="#000"; ctx.fillRect(0,0,s,s); } },
+];
+
+const patternCanvases = patternDefs.map(({ draw }) => {
+  const size = 16;
+  const c = document.createElement("canvas");
+  c.width = c.height = size;
+  const cx = c.getContext("2d");
+  cx.fillStyle = "#fff";
+  draw(cx, size);
+  return c;
+});
+
+// Load geometry
+const us = await d3.json("https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json");
+const states = topojson.feature(us, us.objects.states).features;
+const stateMesh = topojson.mesh(us, us.objects.states, (a, b) => a !== b);
+const nation = topojson.merge(us, us.objects.states.geometries);
+
+// Map FIPS (number in topo) to features
+const featureById = new Map(states.map(f => [String(f.id).padStart(2, "0"), f]));
+
+// Dimensions
+const W = 960, H = 600;
+const projection = d3.geoAlbersUsa().fitSize([W - 20, H - 20], nation).translate([W/2, H/2]);
+const path = d3.geoPath(projection);
+
+// Canvas setup
+const canvas = document.getElementById("map-canvas");
+const dpr = devicePixelRatio || 1;
+canvas.width = W * dpr; canvas.height = H * dpr;
+canvas.style.width = W + "px"; canvas.style.height = H + "px";
+const ctx = canvas.getContext("2d");
+ctx.scale(dpr, dpr);
+
+// SVG focus overlay
+const svg = d3.select("#focus-svg").attr("width", W).attr("height", H)
+  .style("width", W + "px").style("height", H + "px");
+
+// Canvas path generator
+const canvasPath = d3.geoPath(projection, ctx);
+
+// State
+let focusedIdx = -1;
+let selectedFips = null;
+const liveRegion = document.getElementById("live-region");
+
+function announce(text) {
+  liveRegion.textContent = "";
+  requestAnimationFrame(() => { liveRegion.textContent = text; });
+}
+
+// Render map
+function render() {
+  ctx.save();
+  ctx.clearRect(0, 0, W, H);
+
+  if (useForcedColors) {
+    // Draw with patterns
+    const quantiles = color.thresholds ? color.thresholds() : color.quantiles?.() ?? [];
+    for (const f of states) {
+      const fips = String(f.id).padStart(2, "0");
+      const d = stateData.get(fips);
+      if (!d) continue;
+      const ci = tolColors.indexOf(color(d.spending));
+      const patIdx = Math.max(0, Math.min(ci, patternCanvases.length - 1));
+      const pat = ctx.createPattern(patternCanvases[patIdx], "repeat");
+      ctx.beginPath(); canvasPath(f);
+      ctx.fillStyle = pat; ctx.fill();
+    }
+  } else {
+    // Batch by fill color for performance
+    const byColor = d3.group(states, f => {
+      const fips = String(f.id).padStart(2, "0");
+      const d = stateData.get(fips);
+      return d ? color(d.spending) : "#ccc";
+    });
+    for (const [c, group] of byColor) {
+      ctx.beginPath();
+      for (const f of group) canvasPath(f);
+      ctx.fillStyle = c; ctx.fill();
+    }
+  }
+
+  // Internal borders
+  ctx.beginPath(); canvasPath(stateMesh);
+  ctx.strokeStyle = "#fff"; ctx.lineWidth = 0.7; ctx.stroke();
+
+  // Nation outline
+  ctx.beginPath(); canvasPath(nation);
+  ctx.strokeStyle = "#333"; ctx.lineWidth = 1.2; ctx.stroke();
+
+  // Highlight selected state
+  if (selectedFips) {
+    const f = featureById.get(selectedFips);
+    if (f) {
+      ctx.beginPath(); canvasPath(f);
+      ctx.strokeStyle = "#EE6677"; ctx.lineWidth = 2.5; ctx.stroke();
+    }
+  }
+
+  ctx.restore();
+  drawFocusRing();
+}
+
+// SVG focus ring overlay
+function drawFocusRing() {
+  svg.selectAll("*").remove();
+  if (focusedIdx < 0 || !document.activeElement?.closest("#map-wrap")) return;
+  const d = geoSorted[focusedIdx];
+  const f = featureById.get(d.fips);
+  if (!f) return;
+
+  svg.append("path")
+    .attr("d", path(f))
+    .attr("fill", "none")
+    .attr("stroke", "#1a73e8")
+    .attr("stroke-width", 2.5)
+    .attr("stroke-dasharray", "5,3")
+    .attr("filter", "drop-shadow(0 0 2px rgba(255,255,255,0.9))");
+}
+
+// Keyboard navigation
+canvas.addEventListener("keydown", e => {
+  const n = geoSorted.length;
+  if (!n) return;
+
+  switch (e.key) {
+    case "ArrowRight":
+    case "ArrowDown":
+      focusedIdx = focusedIdx < 0 ? 0 : Math.min(focusedIdx + 1, n - 1);
+      break;
+    case "ArrowLeft":
+    case "ArrowUp":
+      focusedIdx = focusedIdx < 0 ? 0 : Math.max(focusedIdx - 1, 0);
+      break;
+    case "Home":
+      focusedIdx = 0;
+      break;
+    case "End":
+      focusedIdx = n - 1;
+      break;
+    case "Enter":
+    case " ":
+      if (focusedIdx >= 0) {
+        const d = geoSorted[focusedIdx];
+        selectedFips = selectedFips === d.fips ? null : d.fips;
+        announce(selectedFips
+          ? `${d.name}, ${fmt(d.spending)} per capita, selected`
+          : "Selection cleared");
+        render();
+        highlightTableRow();
+      }
+      e.preventDefault();
+      return;
+    case "Escape":
+      selectedFips = null;
+      focusedIdx = -1;
+      announce("Selection cleared");
+      render();
+      highlightTableRow();
+      e.preventDefault();
+      return;
+    default:
+      return; // Let unhandled keys (Tab) pass through
+  }
+
+  e.preventDefault();
+  const d = geoSorted[focusedIdx];
+  announceState(d);
+  render();
+});
+
+let announceTimer;
+function announceState(d) {
+  clearTimeout(announceTimer);
+  announceTimer = setTimeout(() => {
+    announce(`${d.name}, ${fmt(d.spending)} per capita`);
+  }, 150);
+}
+
+// Pointer interaction: click to select, hover for focus
+canvas.addEventListener("pointerdown", e => {
+  canvas.focus();
+  const [mx, my] = [e.offsetX, e.offsetY];
+  const hit = findState(mx, my);
+  if (hit) {
+    const d = stateData.get(hit);
+    if (d) {
+      selectedFips = selectedFips === hit ? null : hit;
+      focusedIdx = geoSorted.findIndex(s => s.fips === hit);
+      announce(selectedFips
+        ? `${d.name}, ${fmt(d.spending)} per capita, selected`
+        : "Selection cleared");
+      render();
+      highlightTableRow();
+    }
+  }
+});
+
+canvas.addEventListener("pointermove", e => {
+  const [mx, my] = [e.offsetX, e.offsetY];
+  const hit = findState(mx, my);
+  canvas.style.cursor = hit ? "pointer" : "default";
+});
+
+canvas.addEventListener("blur", () => {
+  // Keep focusedIdx for resume, just hide ring
+  drawFocusRing();
+});
+
+canvas.addEventListener("focus", () => {
+  if (focusedIdx < 0) focusedIdx = 0;
+  const d = geoSorted[focusedIdx];
+  announceState(d);
+  render();
+});
+
+// Hit detection using d3.geoContains (51 features — fast enough)
+function findState(mx, my) {
+  const pt = projection.invert([mx, my]);
+  if (!pt) return null;
+  for (const f of states) {
+    if (d3.geoContains(f, pt)) return String(f.id).padStart(2, "0");
+  }
+  return null;
+}
+
+// Legend
+const legendWrap = d3.select("#legend-wrap");
+const legendDiv = legendWrap.append("div").attr("class", "legend");
+legendDiv.append("span").attr("class", "legend-title").text("Spending per capita");
+
+const legendBar = legendDiv.append("div").attr("class", "legend-bar");
+tolColors.forEach(c => {
+  legendBar.append("div").attr("class", "legend-cell").style("background", c);
+});
+
+const thresholds = color.thresholds();
+const legendLabels = legendWrap.append("div").attr("class", "legend-labels")
+  .style("margin-left", "130px").style("width", `${tolColors.length * 52}px`);
+legendLabels.append("span").text(fmt(extent[0]));
+thresholds.forEach(t => legendLabels.append("span").text(fmt(t)));
+legendLabels.append("span").text(fmt(extent[1]));
+
+// ---- Table view ----
+const columns = [
+  { key: "name", label: "State", type: "string" },
+  { key: "spending", label: "Spending per Capita", type: "number", format: fmt },
+  { key: "rank", label: "Rank", type: "number", format: d3.format(",") },
+];
+
+// Compute ranks
+const ranked = [...stateData.values()].sort((a, b) => b.spending - a.spending);
+ranked.forEach((d, i) => d.rank = i + 1);
+
+let sortKey = "name", sortDir = 1;
+const barScale = d3.scaleLinear(extent, [0, 100]);
+
+function renderTable() {
+  const sorted = [...stateData.values()].sort((a, b) => {
+    const cmp = d3.ascending(a[sortKey], b[sortKey]);
+    return cmp * sortDir;
+  });
+
+  const thead = d3.select("#data-table thead tr");
+  thead.selectAll("th").data(columns, d => d.key).join("th")
+    .attr("role", "columnheader")
+    .attr("tabindex", "0")
+    .attr("class", d => d.type === "number" ? "num" : null)
+    .attr("aria-sort", d => d.key === sortKey ? (sortDir === 1 ? "ascending" : "descending") : "none")
+    .html(d => {
+      const arrow = d.key === sortKey ? (sortDir === 1 ? "\u25B2" : "\u25BC") : "\u25B4";
+      return `${d.label}<span class="sort-arrow">${arrow}</span>`;
+    })
+    .on("click", (e, d) => handleSort(d))
+    .on("keydown", (e, d) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleSort(d); }
+    });
+
+  const tbody = d3.select("#data-table tbody");
+  const rows = tbody.selectAll("tr").data(sorted, d => d.fips).join("tr")
+    .attr("role", "row")
+    .classed("highlighted", d => d.fips === selectedFips);
+
+  rows.selectAll("td").data(d => columns.map(col => ({ col, value: d[col.key], raw: d })))
+    .join("td")
+    .attr("role", "gridcell")
+    .attr("class", d => d.col.type === "number" && d.col.key !== "spending" ? "num" : null)
+    .each(function(d) {
+      const td = d3.select(this);
+      td.selectAll("*").remove();
+      td.text("");
+      if (d.col.key === "spending") {
+        td.classed("bar-cell num", true);
+        td.append("div").attr("class", "bar-fill")
+          .style("width", barScale(d.value) + "%")
+          .style("background", color(d.value));
+        td.append("span").attr("class", "bar-value").text(fmt(d.value));
+      } else {
+        td.text(d.col.format ? d.col.format(d.value) : d.value);
+      }
+    });
+
+  rows.on("pointerenter", (e, d) => {
+    focusedIdx = geoSorted.findIndex(s => s.fips === d.fips);
+    render();
+  }).on("pointerleave", () => {
+    render();
+  }).on("click", (e, d) => {
+    selectedFips = selectedFips === d.fips ? null : d.fips;
+    focusedIdx = geoSorted.findIndex(s => s.fips === d.fips);
+    announce(selectedFips ? `${d.name}, ${fmt(d.spending)}, selected` : "Selection cleared");
+    render();
+    highlightTableRow();
+  });
+}
+
+function handleSort(col) {
+  if (sortKey === col.key) sortDir *= -1;
+  else { sortKey = col.key; sortDir = 1; }
+  renderTable();
+  announce(`Sorted by ${col.label}, ${sortDir === 1 ? "ascending" : "descending"}`);
+}
+
+function highlightTableRow() {
+  d3.select("#data-table tbody").selectAll("tr")
+    .classed("highlighted", d => d.fips === selectedFips);
+  if (selectedFips) {
+    const row = d3.select("#data-table tbody").selectAll("tr")
+      .filter(d => d.fips === selectedFips).node();
+    if (row) row.scrollIntoView({ block: "nearest" });
+  }
+}
+
+// Toggle map / table
+const btnMap = document.getElementById("btn-map");
+const btnTable = document.getElementById("btn-table");
+const mapWrap = document.getElementById("map-wrap");
+const legendW = document.getElementById("legend-wrap");
+const tableContainer = document.getElementById("table-container");
+const kbdHint = document.getElementById("kbd-hint");
+
+function showMap() {
+  btnMap.setAttribute("aria-pressed", "true");
+  btnTable.setAttribute("aria-pressed", "false");
+  mapWrap.style.display = "block";
+  legendW.style.display = "block";
+  tableContainer.style.display = "none";
+  tableContainer.setAttribute("aria-hidden", "true");
+  kbdHint.textContent = "Arrow keys: navigate \u00b7 Enter: select \u00b7 Esc: deselect";
+  announce("Map view");
+}
+
+function showTable() {
+  btnMap.setAttribute("aria-pressed", "false");
+  btnTable.setAttribute("aria-pressed", "true");
+  mapWrap.style.display = "none";
+  legendW.style.display = "none";
+  tableContainer.style.display = "block";
+  tableContainer.removeAttribute("aria-hidden");
+  kbdHint.textContent = "Click headers to sort";
+  renderTable();
+  announce("Table view");
+}
+
+btnMap.addEventListener("click", showMap);
+btnTable.addEventListener("click", showTable);
+
+// Auto-switch to table in forced-colors mode
+if (useForcedColors) {
+  showTable();
+} else {
+  render();
+}
+
+renderTable();
+</script>
+</body>
+</html>

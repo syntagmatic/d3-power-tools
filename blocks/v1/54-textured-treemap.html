@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bivariate Treemap — Color, Pattern, Density</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa; display: flex; justify-content: center; padding: 20px;
+  }
+  .outer { width: 1200px; max-width: 100%; }
+  h1 { font-size: 20px; font-weight: 600; color: #1a1a1a; margin-bottom: 2px; }
+  .subtitle { font-size: 13px; color: #666; margin-bottom: 14px; line-height: 1.4; }
+  .container { display: flex; gap: 20px; }
+  .treemap-wrap { position: relative; flex: 1; }
+  .legend-panel {
+    width: 220px; flex-shrink: 0; font-size: 12px; color: #333;
+  }
+  .legend-panel h3 { font-size: 13px; font-weight: 600; margin: 0 0 6px; color: #222; }
+  .legend-section { margin-bottom: 16px; }
+  .legend-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+  .legend-swatch { width: 18px; height: 18px; border-radius: 2px; flex-shrink: 0; }
+  .legend-pattern-swatch {
+    width: 40px; height: 18px; border: 1px solid #ccc; border-radius: 2px; flex-shrink: 0;
+  }
+  .density-bar { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+  .density-gradient { height: 14px; flex: 1; border: 1px solid #ccc; border-radius: 2px; }
+  .density-labels { display: flex; justify-content: space-between; font-size: 10px; color: #888; }
+  .tooltip {
+    position: absolute; pointer-events: none; background: rgba(255,255,255,0.97);
+    border: 1px solid #bbb; border-radius: 5px; padding: 10px 14px; font-size: 12px;
+    box-shadow: 0 3px 10px rgba(0,0,0,0.13); display: none; z-index: 10;
+    line-height: 1.6; max-width: 260px;
+  }
+  .tooltip .label { font-weight: 600; font-size: 13px; }
+  .tooltip .dim { color: #777; }
+  .mono { font-family: "SF Mono", Monaco, "Cascadia Code", monospace; }
+</style>
+</head>
+<body>
+<div class="outer">
+  <h1>Bivariate Treemap — Color, Pattern, Density</h1>
+  <p class="subtitle">
+    Area = revenue ($M) &middot; Color = category (6) &middot; Pattern shape = subcategory &middot;
+    Pattern spacing = growth rate (dense = negative, sparse = positive)
+  </p>
+  <div class="container">
+    <div class="treemap-wrap" id="treemap"></div>
+    <div class="legend-panel" id="legend"></div>
+  </div>
+</div>
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+(() => {
+  // --- Seeded PRNG ---
+  const seed = s => () => { s = (s * 1664525 + 1013904223) & 0x7fffffff; return s / 0x7fffffff; };
+  const rng = seed(42);
+  const rand = (lo, hi) => lo + rng() * (hi - lo);
+
+  // --- Tol bright palette (6 categories) ---
+  const catColors = ["#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE", "#AA3377"];
+
+  // --- Pattern types mapped to subcategories (texton-diverse set) ---
+  const patternDefs = [
+    { key: "diag",   label: "Diagonal hatch",  angle: 45 },
+    { key: "horiz",  label: "Horizontal lines", angle: 0 },
+    { key: "dots",   label: "Dot grid",         angle: 0 },
+    { key: "cross",  label: "Cross-hatch",      angle: 0 },
+    { key: "vert",   label: "Vertical lines",   angle: 90 },
+    { key: "zigzag", label: "Zigzag",           angle: 0 },
+  ];
+
+  // --- Categories and subcategories ---
+  const categories = [
+    { name: "Technology", subs: ["Software", "Hardware", "Cloud", "AI/ML"] },
+    { name: "Healthcare", subs: ["Pharma", "Devices", "Biotech", "Services"] },
+    { name: "Energy", subs: ["Solar", "Wind", "Oil & Gas", "Nuclear"] },
+    { name: "Finance", subs: ["Banking", "Insurance", "Fintech", "Asset Mgmt"] },
+    { name: "Consumer", subs: ["Retail", "Food & Bev", "Apparel", "Electronics"] },
+    { name: "Industrial", subs: ["Aerospace", "Chemicals", "Machinery", "Transport"] },
+  ];
+
+  // Collect all unique subcategories for pattern assignment
+  const allSubs = [];
+  categories.forEach(c => c.subs.forEach(s => {
+    if (!allSubs.includes(s)) allSubs.push(s);
+  }));
+  // Assign pattern type per subcategory index within its category
+  const subPatternMap = new Map();
+  categories.forEach(cat => {
+    cat.subs.forEach((sub, i) => {
+      subPatternMap.set(`${cat.name}|${sub}`, patternDefs[i % patternDefs.length]);
+    });
+  });
+
+  // --- Generate synthetic data ---
+  const data = [];
+  categories.forEach((cat, ci) => {
+    cat.subs.forEach((sub, si) => {
+      const n = Math.round(rand(2, 5));
+      for (let j = 0; j < n; j++) {
+        const revenue = Math.round(rand(20, 400));
+        // Growth: some negative, some positive, interesting spread
+        const growth = rand(-0.35, 0.45);
+        data.push({
+          category: cat.name,
+          subcategory: sub,
+          product: `${sub} ${String.fromCharCode(65 + j)}`,
+          revenue,
+          growth,
+          catIndex: ci,
+        });
+      }
+    });
+  });
+
+  // --- Layout ---
+  const W = 940, H = 700;
+  const treemapLayout = d3.treemap()
+    .size([W, H])
+    .tile(d3.treemapSquarify)
+    .paddingOuter(3)
+    .paddingTop(20)
+    .paddingInner(2);
+
+  // Build hierarchy: root -> category -> subcategory -> product
+  const nested = { name: "root", children: categories.map(cat => ({
+    name: cat.name,
+    children: cat.subs.map(sub => ({
+      name: sub,
+      children: data.filter(d => d.category === cat.name && d.subcategory === sub)
+        .map(d => ({ name: d.product, revenue: d.revenue, growth: d.growth,
+                     category: d.category, subcategory: d.subcategory }))
+    })).filter(s => s.children.length > 0)
+  }))};
+
+  const root = d3.hierarchy(nested)
+    .sum(d => d.revenue || 0)
+    .sort((a, b) => b.value - a.value);
+
+  treemapLayout(root);
+
+  // --- Growth -> pattern spacing scale ---
+  // Dense (small spacing) = negative growth; sparse (large spacing) = positive growth
+  const growthExtent = d3.extent(data, d => d.growth);
+  const spacingScale = d3.scaleLinear()
+    .domain([growthExtent[0], 0, growthExtent[1]])
+    .range([3, 7, 14]);
+
+  const colorScale = d3.scaleOrdinal()
+    .domain(categories.map(c => c.name))
+    .range(catColors);
+
+  // --- SVG ---
+  const svg = d3.select("#treemap").append("svg")
+    .attr("width", W).attr("height", H)
+    .attr("viewBox", `0 0 ${W} ${H}`)
+    .style("display", "block");
+
+  const defs = svg.append("defs");
+
+  // --- Create patterns: one per leaf (unique spacing + pattern type + color) ---
+  const leaves = root.leaves();
+  const patternIds = new Map();
+
+  function drawPatternMarks(pattern, pDef, size, stroke) {
+    const key = pDef.key;
+    if (key === "diag") {
+      pattern.attr("patternTransform", `rotate(${pDef.angle})`);
+      pattern.append("line")
+        .attr("x1", 0).attr("y1", 0).attr("x2", 0).attr("y2", size)
+        .attr("stroke", stroke).attr("stroke-width", 1.5);
+    } else if (key === "horiz") {
+      pattern.append("line")
+        .attr("x1", 0).attr("y1", size / 2).attr("x2", size).attr("y2", size / 2)
+        .attr("stroke", stroke).attr("stroke-width", 1.5);
+    } else if (key === "vert") {
+      pattern.append("line")
+        .attr("x1", size / 2).attr("y1", 0).attr("x2", size / 2).attr("y2", size)
+        .attr("stroke", stroke).attr("stroke-width", 1.5);
+    } else if (key === "dots") {
+      pattern.append("circle")
+        .attr("cx", size / 2).attr("cy", size / 2).attr("r", Math.max(1, size * 0.15))
+        .attr("fill", stroke);
+    } else if (key === "cross") {
+      pattern.attr("patternTransform", "rotate(45)");
+      pattern.append("line")
+        .attr("x1", 0).attr("y1", 0).attr("x2", 0).attr("y2", size)
+        .attr("stroke", stroke).attr("stroke-width", 1.2);
+      pattern.append("line")
+        .attr("x1", 0).attr("y1", 0).attr("x2", size).attr("y2", 0)
+        .attr("stroke", stroke).attr("stroke-width", 1.2);
+    } else if (key === "zigzag") {
+      const mid = size / 2;
+      pattern.append("polyline")
+        .attr("points", `0,${mid} ${mid/2},0 ${mid},${mid} ${size-mid/2},0 ${size},${mid}`)
+        .attr("fill", "none").attr("stroke", stroke).attr("stroke-width", 1.3);
+    }
+  }
+
+  leaves.forEach((leaf, i) => {
+    const d = leaf.data;
+    const cat = d.category;
+    const sub = d.subcategory;
+    const pDef = subPatternMap.get(`${cat}|${sub}`) || patternDefs[0];
+    const spacing = spacingScale(d.growth);
+    const size = Math.round(spacing * 10) / 10;
+
+    // Determine pattern stroke color based on background lightness
+    const bgColor = d3.hsl(colorScale(cat));
+    const L = bgColor.l;
+    const stroke = L > 0.55 ? "rgba(0,0,0,0.25)" : "rgba(255,255,255,0.4)";
+
+    const pid = `pat-${i}`;
+    patternIds.set(leaf, pid);
+
+    const pattern = defs.append("pattern")
+      .attr("id", pid)
+      .attr("width", size).attr("height", size)
+      .attr("patternUnits", "userSpaceOnUse");
+
+    drawPatternMarks(pattern, pDef, size, stroke);
+  });
+
+  // --- Draw category groups (depth 1) with header labels ---
+  const catGroups = root.children || [];
+  svg.selectAll(".cat-header")
+    .data(catGroups)
+    .join("text")
+      .attr("class", "cat-header")
+      .attr("x", d => d.x0 + 4)
+      .attr("y", d => d.y0 + 14)
+      .attr("font-size", 11)
+      .attr("font-weight", 600)
+      .attr("fill", d => {
+        const c = d3.hsl(colorScale(d.data.name));
+        return c.darker(1.5).toString();
+      })
+      .text(d => d.data.name)
+      .each(function(d) {
+        const maxW = d.x1 - d.x0 - 8;
+        if (this.getComputedTextLength() > maxW) {
+          let t = d.data.name;
+          while (this.getComputedTextLength() > maxW && t.length > 1) {
+            t = t.slice(0, -1);
+            d3.select(this).text(t + "\u2026");
+          }
+        }
+      });
+
+  // --- Draw leaf cells ---
+  const cellGroup = svg.selectAll(".cell")
+    .data(leaves)
+    .join("g")
+      .attr("class", "cell")
+      .attr("transform", d => `translate(${d.x0},${d.y0})`);
+
+  // Background color rect
+  cellGroup.append("rect")
+    .attr("width", d => Math.max(0, d.x1 - d.x0))
+    .attr("height", d => Math.max(0, d.y1 - d.y0))
+    .attr("fill", d => colorScale(d.data.category))
+    .attr("rx", 1);
+
+  // Pattern overlay rect
+  cellGroup.append("rect")
+    .attr("width", d => Math.max(0, d.x1 - d.x0))
+    .attr("height", d => Math.max(0, d.y1 - d.y0))
+    .attr("fill", d => `url(#${patternIds.get(d)})`)
+    .attr("rx", 1);
+
+  // Cell border
+  cellGroup.append("rect")
+    .attr("width", d => Math.max(0, d.x1 - d.x0))
+    .attr("height", d => Math.max(0, d.y1 - d.y0))
+    .attr("fill", "none")
+    .attr("stroke", "rgba(0,0,0,0.12)")
+    .attr("stroke-width", 0.5)
+    .attr("rx", 1);
+
+  // Labels — product name and growth
+  cellGroup.each(function(d) {
+    const cw = d.x1 - d.x0, ch = d.y1 - d.y0;
+    if (ch < 22 || cw < 36) return;
+    const g = d3.select(this);
+
+    // Product name
+    const txt = g.append("text")
+      .attr("x", 4).attr("y", 14)
+      .attr("font-size", 10)
+      .attr("fill", () => {
+        const bg = d3.hsl(colorScale(d.data.category));
+        return bg.l > 0.55 ? "#1a1a1a" : "#fff";
+      })
+      .attr("font-weight", 500)
+      .text(d.data.name);
+
+    // Truncate if needed
+    let label = d.data.name;
+    const maxW = cw - 8;
+    while (txt.node().getComputedTextLength() > maxW && label.length > 1) {
+      label = label.slice(0, -1);
+      txt.text(label + "\u2026");
+    }
+    if (label.length <= 1 && txt.node().getComputedTextLength() > maxW) txt.remove();
+
+    // Growth percentage if room
+    if (ch >= 34 && cw >= 50) {
+      const growth = d.data.growth;
+      const sign = growth >= 0 ? "+" : "";
+      g.append("text")
+        .attr("x", 4).attr("y", 26)
+        .attr("font-size", 9)
+        .attr("font-family", '"SF Mono", Monaco, "Cascadia Code", monospace')
+        .attr("fill", () => {
+          const bg = d3.hsl(colorScale(d.data.category));
+          return bg.l > 0.55 ? "rgba(0,0,0,0.55)" : "rgba(255,255,255,0.75)";
+        })
+        .text(`${sign}${(growth * 100).toFixed(1)}%`);
+    }
+  });
+
+  // --- Tooltip ---
+  const tooltip = d3.select("#tooltip");
+
+  cellGroup
+    .style("cursor", "pointer")
+    .on("pointerenter", function(event, d) {
+      d3.select(this).select("rect").attr("stroke", "#333").attr("stroke-width", 1.5);
+      const growth = d.data.growth;
+      const sign = growth >= 0 ? "+" : "";
+      tooltip.style("display", "block").html(`
+        <div class="label">${d.data.name}</div>
+        <div class="dim">${d.data.category} / ${d.data.subcategory}</div>
+        <div>Revenue: <span class="mono">$${d.data.revenue}M</span></div>
+        <div>Growth: <span class="mono" style="color:${growth >= 0 ? '#228833' : '#EE6677'}">${sign}${(growth * 100).toFixed(1)}%</span></div>
+        <div class="dim">Pattern spacing encodes growth rate</div>
+      `);
+    })
+    .on("pointermove", function(event) {
+      const x = event.pageX + 14, y = event.pageY - 10;
+      tooltip.style("left", x + "px").style("top", y + "px");
+    })
+    .on("pointerleave", function() {
+      d3.select(this).select("rect").attr("stroke", "rgba(0,0,0,0.12)").attr("stroke-width", 0.5);
+      tooltip.style("display", "none");
+    });
+
+  // --- Legend ---
+  const legend = d3.select("#legend");
+
+  // Category colors
+  const catSec = legend.append("div").attr("class", "legend-section");
+  catSec.append("h3").text("Category (color)");
+  categories.forEach((cat, i) => {
+    const row = catSec.append("div").attr("class", "legend-row");
+    row.append("div").attr("class", "legend-swatch")
+      .style("background", catColors[i]);
+    row.append("span").text(cat.name);
+  });
+
+  // Pattern types
+  const patSec = legend.append("div").attr("class", "legend-section");
+  patSec.append("h3").text("Subcategory (pattern shape)");
+
+  // Show one example per pattern type with representative subcategories
+  const shownPatterns = new Set();
+  categories.forEach(cat => {
+    cat.subs.forEach((sub, si) => {
+      const pDef = patternDefs[si % patternDefs.length];
+      if (shownPatterns.has(pDef.key)) return;
+      shownPatterns.add(pDef.key);
+
+      const row = patSec.append("div").attr("class", "legend-row");
+      const sw = row.append("svg")
+        .attr("class", "legend-pattern-swatch")
+        .attr("width", 40).attr("height", 18);
+      const pid = `leg-${pDef.key}`;
+
+      // Check if pattern already exists in legend defs
+      let legDefs = sw.select("defs");
+      if (legDefs.empty()) legDefs = sw.append("defs");
+
+      const pat = legDefs.append("pattern")
+        .attr("id", pid).attr("width", 6).attr("height", 6)
+        .attr("patternUnits", "userSpaceOnUse");
+      drawPatternMarks(pat, pDef, 6, "rgba(0,0,0,0.5)");
+
+      sw.append("rect").attr("width", 40).attr("height", 18)
+        .attr("fill", "#ddd");
+      sw.append("rect").attr("width", 40).attr("height", 18)
+        .attr("fill", `url(#${pid})`);
+      row.append("span").text(pDef.label);
+    });
+  });
+
+  // Density / spacing gradient
+  const denSec = legend.append("div").attr("class", "legend-section");
+  denSec.append("h3").text("Growth rate (pattern density)");
+
+  const gradSvg = denSec.append("svg").attr("width", 200).attr("height", 30);
+  const gradDefs = gradSvg.append("defs");
+
+  // Draw a series of hatched rects from dense to sparse
+  const nSteps = 20;
+  const stepW = 200 / nSteps;
+  for (let i = 0; i < nSteps; i++) {
+    const t = i / (nSteps - 1);
+    const spacing = 3 + t * 11; // 3 (dense) to 14 (sparse)
+    const gpid = `grad-pat-${i}`;
+    const gp = gradDefs.append("pattern")
+      .attr("id", gpid).attr("width", spacing).attr("height", spacing)
+      .attr("patternUnits", "userSpaceOnUse")
+      .attr("patternTransform", "rotate(45)");
+    gp.append("line")
+      .attr("x1", 0).attr("y1", 0).attr("x2", 0).attr("y2", spacing)
+      .attr("stroke", "rgba(0,0,0,0.35)").attr("stroke-width", 1.2);
+
+    gradSvg.append("rect")
+      .attr("x", i * stepW).attr("y", 0)
+      .attr("width", stepW + 0.5).attr("height", 18)
+      .attr("fill", "#ccc");
+    gradSvg.append("rect")
+      .attr("x", i * stepW).attr("y", 0)
+      .attr("width", stepW + 0.5).attr("height", 18)
+      .attr("fill", `url(#${gpid})`);
+  }
+  gradSvg.append("rect")
+    .attr("width", 200).attr("height", 18)
+    .attr("fill", "none").attr("stroke", "#bbb").attr("rx", 2);
+
+  const labels = denSec.append("div").attr("class", "density-labels").style("width", "200px");
+  labels.append("span").text(`${(growthExtent[0] * 100).toFixed(0)}% (dense)`);
+  labels.append("span").text(`${(growthExtent[1] * 100).toFixed(0)}% (sparse)`);
+
+  // Encoding note
+  legend.append("div").style("margin-top", "16px")
+    .style("font-size", "11px").style("color", "#888").style("line-height", "1.5")
+    .html("Three variables encoded in two visual channels.<br>Hover cells for details.");
+
+})();
+</script>
+</body>
+</html>

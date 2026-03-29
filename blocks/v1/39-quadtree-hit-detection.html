@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Quadtree Nearest-Neighbor Detection</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #fafafa;
+    font-family: system-ui, -apple-system, sans-serif;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    overflow: hidden;
+  }
+  #container {
+    position: relative;
+    width: 1200px;
+    height: 800px;
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  canvas, svg {
+    position: absolute;
+    top: 0;
+    left: 0;
+  }
+  .controls {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    display: flex;
+    gap: 8px;
+    z-index: 10;
+  }
+  .controls button {
+    padding: 6px 14px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    background: #fff;
+    font: 13px system-ui, sans-serif;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .controls button:hover { background: #f0f0f0; }
+  .controls button.active {
+    background: #4477AA;
+    color: #fff;
+    border-color: #4477AA;
+  }
+  .info {
+    position: absolute;
+    bottom: 12px;
+    left: 12px;
+    font: 12px "SF Mono", Monaco, "Cascadia Code", monospace;
+    color: #888;
+    z-index: 10;
+  }
+  .legend {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    z-index: 10;
+    font: 12px system-ui, sans-serif;
+    color: #555;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .legend-swatch {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+  }
+  .title-bar {
+    position: absolute;
+    top: 40px;
+    left: 12px;
+    z-index: 10;
+  }
+  .title-bar h2 {
+    font: 600 16px system-ui, sans-serif;
+    color: #333;
+    margin: 0;
+  }
+  .title-bar p {
+    font: 12px system-ui, sans-serif;
+    color: #888;
+    margin: 2px 0 0;
+  }
+</style>
+</head>
+<body>
+<div id="container">
+  <div class="legend" id="legend"></div>
+  <div class="title-bar">
+    <h2>Quadtree Nearest-Neighbor Detection</h2>
+    <p>Move cursor to find 10 nearest particles. Scroll to zoom. Toggle Voronoi overlay.</p>
+  </div>
+  <div class="controls">
+    <button id="voronoiToggle">Voronoi</button>
+    <button id="resetZoom">Reset Zoom</button>
+  </div>
+  <div class="info" id="info">5000 particles &middot; 8 categories &middot; zoom: 1.0x</div>
+</div>
+
+<script>
+(() => {
+  const W = 1200, H = 800;
+  const dpr = devicePixelRatio;
+
+  // Tol palette extended to 8 categories (bright qualitative + extra)
+  const categories = ["Alkali", "Halogen", "Noble", "Actinide", "Lanthanide", "Metalloid", "Chalcogen", "Pnictogen"];
+  const colors = ["#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE", "#AA3377", "#BBBBBB", "#EE8866"];
+  const colorScale = d3.scaleOrdinal().domain(categories).range(colors);
+
+  // -- Synthetic data: 8 clusters with internal structure --
+  const N = 5000;
+  const rng = d3.randomLcg(42);
+  const randNorm = d3.randomNormal.source(rng);
+
+  const clusterCenters = [
+    [300, 200], [900, 180], [200, 550], [750, 600],
+    [500, 400], [1050, 400], [150, 350], [850, 350]
+  ];
+
+  const data = [];
+  for (let i = 0; i < N; i++) {
+    const catIdx = Math.floor(rng() * 8);
+    const [cx, cy] = clusterCenters[catIdx];
+    const spread = 60 + rng() * 60;
+    const norm = randNorm(0, spread);
+    data.push({
+      x: cx + norm(),
+      y: cy + norm(),
+      category: categories[catIdx],
+      catIdx,
+      r: 2 + rng() * 2.5,
+      id: i
+    });
+  }
+
+  // -- Canvas setup --
+  const container = d3.select("#container");
+
+  function makeCanvas(w, h) {
+    const canvas = container.append("canvas")
+      .attr("width", w * dpr).attr("height", h * dpr)
+      .style("width", `${w}px`).style("height", `${h}px`)
+      .node();
+    const ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+    return { canvas, ctx };
+  }
+
+  const { ctx: bgCtx, canvas: bgCanvas } = makeCanvas(W, H);
+  const { ctx: hlCtx, canvas: hlCanvas } = makeCanvas(W, H);
+
+  // SVG overlay for Voronoi, axes, pointer events
+  const svg = container.append("svg")
+    .attr("width", W).attr("height", H)
+    .style("pointer-events", "all");
+
+  // Transparent rect for pointer capture
+  svg.append("rect").attr("width", W).attr("height", H)
+    .attr("fill", "none").attr("pointer-events", "all");
+
+  const voronoiGroup = svg.append("g").attr("class", "voronoi").style("display", "none");
+
+  // -- Quadtree --
+  let quadtree = d3.quadtree()
+    .x(d => d.x).y(d => d.y)
+    .addAll(data);
+
+  // -- State --
+  let currentTransform = d3.zoomIdentity;
+  let showVoronoi = false;
+  let mousePos = null;
+  let nearest = [];
+  let dirty = false;
+
+  // -- Legend --
+  const legend = d3.select("#legend");
+  categories.forEach((cat, i) => {
+    const item = legend.append("div").attr("class", "legend-item");
+    item.append("div").attr("class", "legend-swatch")
+      .style("background", colors[i]);
+    item.append("span").text(cat);
+  });
+
+  // -- K nearest neighbors via quadtree visit --
+  function kNearest(qt, qx, qy, k) {
+    // Maintain a max-heap of k nearest
+    const result = [];
+    let maxDist = Infinity;
+
+    qt.visit((node, x0, y0, x1, y1) => {
+      // Prune: if closest possible point in this quad is farther than current kth
+      const closestX = Math.max(x0, Math.min(qx, x1));
+      const closestY = Math.max(y0, Math.min(qy, y1));
+      const quadDist = (closestX - qx) ** 2 + (closestY - qy) ** 2;
+      if (result.length >= k && quadDist > maxDist) return true;
+
+      if (!node.length) {
+        let d = node;
+        do {
+          const dx = d.data.x - qx, dy = d.data.y - qy;
+          const dist2 = dx * dx + dy * dy;
+          if (result.length < k) {
+            result.push({ data: d.data, dist2 });
+            if (result.length === k) {
+              result.sort((a, b) => b.dist2 - a.dist2);
+              maxDist = result[0].dist2;
+            }
+          } else if (dist2 < maxDist) {
+            result[0] = { data: d.data, dist2 };
+            result.sort((a, b) => b.dist2 - a.dist2);
+            maxDist = result[0].dist2;
+          }
+        } while (d = d.next);
+      }
+    });
+    return result.map(r => r.data);
+  }
+
+  // -- Drawing --
+  function drawBackground() {
+    const t = currentTransform;
+    bgCtx.save();
+    bgCtx.clearRect(0, 0, W, H);
+    bgCtx.translate(t.x, t.y);
+    bgCtx.scale(t.k, t.k);
+
+    // Batch by category for fewer state changes
+    const groups = d3.group(data, d => d.catIdx);
+    for (const [catIdx, points] of groups) {
+      bgCtx.fillStyle = colors[catIdx];
+      bgCtx.globalAlpha = 0.65;
+      bgCtx.beginPath();
+      for (const d of points) {
+        bgCtx.moveTo(d.x + d.r, d.y);
+        bgCtx.arc(d.x, d.y, d.r, 0, Math.PI * 2);
+      }
+      bgCtx.fill();
+    }
+    bgCtx.restore();
+  }
+
+  function drawHighlights() {
+    hlCtx.clearRect(0, 0, W, H);
+    if (!mousePos || nearest.length === 0) return;
+
+    const t = currentTransform;
+    const [mx, my] = mousePos;
+
+    // Draw connector lines
+    hlCtx.save();
+    hlCtx.strokeStyle = "rgba(80, 80, 80, 0.3)";
+    hlCtx.lineWidth = 1;
+    hlCtx.setLineDash([4, 3]);
+    hlCtx.beginPath();
+    for (const d of nearest) {
+      const sx = t.applyX(d.x), sy = t.applyY(d.y);
+      hlCtx.moveTo(mx, my);
+      hlCtx.lineTo(sx, sy);
+    }
+    hlCtx.stroke();
+    hlCtx.setLineDash([]);
+    hlCtx.restore();
+
+    // Draw glow + highlighted points
+    for (const d of nearest) {
+      const sx = t.applyX(d.x), sy = t.applyY(d.y);
+      const r = d.r * t.k;
+
+      // Glow ring (faked with concentric circles, not shadowBlur)
+      hlCtx.save();
+      const glowColor = colors[d.catIdx];
+      for (let g = 3; g >= 1; g--) {
+        hlCtx.globalAlpha = 0.12;
+        hlCtx.fillStyle = glowColor;
+        hlCtx.beginPath();
+        hlCtx.arc(sx, sy, r + g * 3, 0, Math.PI * 2);
+        hlCtx.fill();
+      }
+
+      // Bright center
+      hlCtx.globalAlpha = 1;
+      hlCtx.fillStyle = glowColor;
+      hlCtx.beginPath();
+      hlCtx.arc(sx, sy, r + 1, 0, Math.PI * 2);
+      hlCtx.fill();
+
+      // White outline
+      hlCtx.strokeStyle = "#fff";
+      hlCtx.lineWidth = 1.5;
+      hlCtx.beginPath();
+      hlCtx.arc(sx, sy, r + 1, 0, Math.PI * 2);
+      hlCtx.stroke();
+      hlCtx.restore();
+    }
+
+    // Crosshair at mouse
+    hlCtx.save();
+    hlCtx.strokeStyle = "rgba(0,0,0,0.2)";
+    hlCtx.lineWidth = 1;
+    hlCtx.setLineDash([2, 4]);
+    hlCtx.beginPath();
+    hlCtx.moveTo(mx, 0); hlCtx.lineTo(mx, H);
+    hlCtx.moveTo(0, my); hlCtx.lineTo(W, my);
+    hlCtx.stroke();
+    hlCtx.restore();
+  }
+
+  function updateVoronoi() {
+    if (!showVoronoi) {
+      voronoiGroup.style("display", "none");
+      return;
+    }
+    voronoiGroup.style("display", null);
+
+    const t = currentTransform;
+    const transformed = data.map(d => [t.applyX(d.x), t.applyY(d.y)]);
+    const delaunay = d3.Delaunay.from(transformed);
+    const voronoi = delaunay.voronoi([0, 0, W, H]);
+
+    voronoiGroup.selectAll("path").data(data)
+      .join("path")
+        .attr("d", (_, i) => voronoi.renderCell(i))
+        .attr("fill", "none")
+        .attr("stroke", d => colorScale(d.category))
+        .attr("stroke-opacity", 0.15)
+        .attr("stroke-width", 0.5);
+  }
+
+  function markDirty() {
+    if (!dirty) {
+      dirty = true;
+      requestAnimationFrame(render);
+    }
+  }
+
+  function render() {
+    dirty = false;
+    drawBackground();
+    drawHighlights();
+  }
+
+  // -- Zoom --
+  const zoom = d3.zoom()
+    .scaleExtent([0.5, 20])
+    .on("zoom", ({ transform }) => {
+      currentTransform = transform;
+      d3.select("#info").text(
+        `5000 particles \u00b7 8 categories \u00b7 zoom: ${transform.k.toFixed(1)}x`
+      );
+      if (mousePos) {
+        const [mx, my] = mousePos;
+        const dataX = transform.invertX(mx);
+        const dataY = transform.invertY(my);
+        nearest = kNearest(quadtree, dataX, dataY, 10);
+      }
+      if (showVoronoi) updateVoronoi();
+      markDirty();
+    });
+
+  svg.call(zoom);
+
+  // -- Pointer interaction --
+  svg.on("pointermove", (event) => {
+    mousePos = d3.pointer(event);
+    const [mx, my] = mousePos;
+    const dataX = currentTransform.invertX(mx);
+    const dataY = currentTransform.invertY(my);
+    nearest = kNearest(quadtree, dataX, dataY, 10);
+    markDirty();
+  });
+
+  svg.on("pointerleave", () => {
+    mousePos = null;
+    nearest = [];
+    markDirty();
+  });
+
+  // -- Controls --
+  d3.select("#voronoiToggle").on("click", function () {
+    showVoronoi = !showVoronoi;
+    d3.select(this).classed("active", showVoronoi);
+    updateVoronoi();
+  });
+
+  d3.select("#resetZoom").on("click", () => {
+    svg.transition().duration(750).call(zoom.transform, d3.zoomIdentity);
+  });
+
+  // -- Initial render --
+  drawBackground();
+  updateVoronoi();
+})();
+</script>
+</body>
+</html>

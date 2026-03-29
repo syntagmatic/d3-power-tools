@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebGL Force Galaxy — 50K Nodes</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body {
+    background: #0a0a1a;
+    font-family: system-ui, -apple-system, sans-serif;
+    color: #ccc;
+    overflow: hidden;
+  }
+  #container {
+    position: relative;
+    width: 1200px; height: 800px;
+    margin: 0 auto;
+  }
+  canvas, svg {
+    position: absolute;
+    top: 0; left: 0;
+  }
+  canvas { pointer-events: none; }
+  svg { width: 100%; height: 100%; }
+  #controls {
+    position: absolute;
+    top: 14px; right: 16px;
+    z-index: 10;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+  }
+  button {
+    padding: 5px 16px;
+    border: 1px solid #555;
+    border-radius: 4px;
+    background: #1a1a2e;
+    color: #ccc;
+    cursor: pointer;
+    font-size: 13px;
+    font-family: inherit;
+    transition: background 0.15s;
+  }
+  button:hover { background: #2a2a4e; border-color: #77a; }
+  #stats {
+    position: absolute;
+    top: 14px; left: 16px;
+    z-index: 10;
+    font-size: 12px;
+    color: #888;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+  }
+  #alpha-meter {
+    position: absolute;
+    bottom: 16px; left: 16px;
+    z-index: 10;
+    font-size: 12px;
+    color: #888;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+  }
+  #alpha-meter .track {
+    width: 140px; height: 5px;
+    background: #222;
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  #alpha-meter .fill {
+    height: 100%;
+    background: #4477AA;
+    border-radius: 3px;
+    transition: width 0.12s;
+  }
+  #tooltip {
+    position: absolute;
+    display: none;
+    background: rgba(15,15,30,0.93);
+    color: #ddd;
+    padding: 7px 12px;
+    border-radius: 5px;
+    font-size: 12px;
+    pointer-events: none;
+    z-index: 20;
+    border: 1px solid #445;
+    line-height: 1.5;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+  }
+  h1 {
+    position: absolute;
+    bottom: 14px; right: 16px;
+    z-index: 10;
+    font-size: 14px;
+    font-weight: 600;
+    color: #556;
+    margin: 0;
+  }
+  .legend {
+    position: absolute;
+    top: 44px; right: 16px;
+    z-index: 10;
+    font-size: 11px;
+    color: #999;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 3px;
+  }
+  .legend-swatch {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="glCanvas"></canvas>
+  <svg id="overlay"></svg>
+  <div id="controls">
+    <button id="btnReheat">Reheat</button>
+  </div>
+  <div id="stats"></div>
+  <div id="alpha-meter">
+    alpha <span id="alphaVal">1.000</span>
+    <div class="track"><div class="fill" id="alphaFill" style="width:100%"></div></div>
+  </div>
+  <div id="tooltip"></div>
+  <h1>WebGL Force Galaxy</h1>
+  <div class="legend" id="legend"></div>
+</div>
+
+<script>
+(() => {
+  const W = 1200, H = 800;
+  const DPR = devicePixelRatio || 1;
+  const N = 50000;
+  const COMMUNITIES = 8;
+  const EDGE_COUNT = 80000;
+
+  // Tol muted qualitative palette — 8 communities
+  const tolHex = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377","#BBBBBB","#EE8866"];
+  const tolRGB = tolHex.map(h => {
+    const c = d3.rgb(h);
+    return [c.r / 255, c.g / 255, c.b / 255];
+  });
+  const communityNames = [
+    "Core Systems","Frontier","Science","Commerce",
+    "Defense","Arts","Logistics","Exploration"
+  ];
+
+  // Legend
+  const legendEl = document.getElementById("legend");
+  communityNames.forEach((name, i) => {
+    const item = document.createElement("div");
+    item.className = "legend-item";
+    item.innerHTML = `<span class="legend-swatch" style="background:${tolHex[i]}"></span>${name}`;
+    legendEl.appendChild(item);
+  });
+
+  // Seeded PRNG for reproducibility
+  let _s = 42;
+  const rng = () => { _s = (_s * 1664525 + 1013904223) & 0x7fffffff; return _s / 0x7fffffff; };
+
+  // Generate nodes with community structure
+  const communityAngles = d3.range(COMMUNITIES).map(i => (i / COMMUNITIES) * Math.PI * 2);
+  const spread = Math.min(W, H) * 0.3;
+  const cx = W / 2, cy = H / 2;
+  const commCenters = communityAngles.map(a => [
+    cx + Math.cos(a) * spread,
+    cy + Math.sin(a) * spread
+  ]);
+
+  const nodes = new Array(N);
+  const communityOf = new Uint8Array(N);
+  for (let i = 0; i < N; i++) {
+    const c = Math.floor(rng() * COMMUNITIES);
+    communityOf[i] = c;
+    // Gaussian-ish initialization around community center
+    const r = (rng() + rng() + rng()) / 3 * 160;
+    const a = rng() * Math.PI * 2;
+    nodes[i] = {
+      index: i,
+      community: c,
+      x: commCenters[c][0] + Math.cos(a) * r,
+      y: commCenters[c][1] + Math.sin(a) * r,
+      vx: 0, vy: 0,
+      degree: 0
+    };
+  }
+
+  // Generate edges: ~85% intra-community, ~15% inter-community
+  const links = new Array(EDGE_COUNT);
+  // Build community indices for fast intra-community sampling
+  const commIndices = d3.range(COMMUNITIES).map(() => []);
+  for (let i = 0; i < N; i++) commIndices[communityOf[i]].push(i);
+
+  for (let e = 0; e < EDGE_COUNT; e++) {
+    const src = Math.floor(rng() * N);
+    let tgt;
+    if (rng() < 0.85) {
+      const pool = commIndices[communityOf[src]];
+      do { tgt = pool[Math.floor(rng() * pool.length)]; } while (tgt === src);
+    } else {
+      do { tgt = Math.floor(rng() * N); } while (tgt === src);
+    }
+    links[e] = { source: src, target: tgt };
+    nodes[src].degree++;
+    nodes[tgt].degree++;
+  }
+
+  // Node sizes by degree
+  const maxDeg = d3.max(nodes, d => d.degree);
+  const sizeScale = d3.scaleSqrt().domain([0, maxDeg]).range([1.5, 6]);
+
+  // ─── WebGL setup ───
+  const canvas = document.getElementById("glCanvas");
+  canvas.width = W * DPR;
+  canvas.height = H * DPR;
+  canvas.style.width = W + "px";
+  canvas.style.height = H + "px";
+
+  const gl = canvas.getContext("webgl2", {
+    antialias: true,
+    premultipliedAlpha: false,
+    alpha: true
+  });
+  gl.viewport(0, 0, W * DPR, H * DPR);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+  // Shaders — instanced quads for circles (avoids gl.POINTS size caps)
+  const vsSource = `#version 300 es
+    // Unit quad: 6 vertices making 2 triangles
+    in vec2 a_quad;
+    // Per-instance
+    in vec2 a_offset;
+    in float a_size;
+    in vec3 a_color;
+
+    uniform vec2 u_resolution;
+    uniform float u_dpr;
+
+    out vec3 v_color;
+    out vec2 v_uv;
+
+    void main() {
+      float r = a_size * u_dpr;
+      vec2 pos = a_quad * r * 2.0 + a_offset * u_dpr;
+      vec2 clip = (pos / (u_resolution * u_dpr)) * 2.0 - 1.0;
+      clip.y = -clip.y;
+      gl_Position = vec4(clip, 0.0, 1.0);
+      v_color = a_color;
+      v_uv = a_quad; // [-0.5, 0.5]
+    }
+  `;
+
+  const fsSource = `#version 300 es
+    precision mediump float;
+    in vec3 v_color;
+    in vec2 v_uv;
+    out vec4 fragColor;
+
+    void main() {
+      float dist = length(v_uv);
+      if (dist > 0.5) discard;
+      float alpha = 1.0 - smoothstep(0.38, 0.5, dist);
+      // Slight glow: boost alpha near center
+      alpha *= 0.55 + 0.45 * (1.0 - dist * 2.0);
+      fragColor = vec4(v_color * (0.8 + 0.4 * (1.0 - dist * 2.0)), alpha);
+    }
+  `;
+
+  function compileShader(src, type) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      console.error(gl.getShaderInfoLog(s));
+      return null;
+    }
+    return s;
+  }
+
+  const vs = compileShader(vsSource, gl.VERTEX_SHADER);
+  const fs = compileShader(fsSource, gl.FRAGMENT_SHADER);
+  const program = gl.createProgram();
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.linkProgram(program);
+  gl.useProgram(program);
+
+  // Uniform locations
+  const uRes = gl.getUniformLocation(program, "u_resolution");
+  const uDpr = gl.getUniformLocation(program, "u_dpr");
+  gl.uniform2f(uRes, W, H);
+  gl.uniform1f(uDpr, DPR);
+
+  // VAO
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+
+  // Template quad (unit square as 2 triangles, centered at origin)
+  const quadVerts = new Float32Array([
+    -0.5,-0.5, 0.5,-0.5, 0.5,0.5,
+    -0.5,-0.5, 0.5,0.5, -0.5,0.5
+  ]);
+  const quadBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, quadVerts, gl.STATIC_DRAW);
+  const aQuad = gl.getAttribLocation(program, "a_quad");
+  gl.enableVertexAttribArray(aQuad);
+  gl.vertexAttribPointer(aQuad, 2, gl.FLOAT, false, 0, 0);
+  // aQuad advances per vertex (divisor 0, the default)
+
+  // Per-instance: offset (x,y)
+  const offsets = new Float32Array(N * 2);
+  const offsetBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, offsetBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, offsets, gl.DYNAMIC_DRAW);
+  const aOff = gl.getAttribLocation(program, "a_offset");
+  gl.enableVertexAttribArray(aOff);
+  gl.vertexAttribPointer(aOff, 2, gl.FLOAT, false, 0, 0);
+  gl.vertexAttribDivisor(aOff, 1);
+
+  // Per-instance: size
+  const sizes = new Float32Array(N);
+  for (let i = 0; i < N; i++) sizes[i] = sizeScale(nodes[i].degree);
+  const sizeBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, sizeBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, sizes, gl.STATIC_DRAW);
+  const aSize = gl.getAttribLocation(program, "a_size");
+  gl.enableVertexAttribArray(aSize);
+  gl.vertexAttribPointer(aSize, 1, gl.FLOAT, false, 0, 0);
+  gl.vertexAttribDivisor(aSize, 1);
+
+  // Per-instance: color (rgb)
+  const colors = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    const c = tolRGB[communityOf[i]];
+    colors[i * 3] = c[0];
+    colors[i * 3 + 1] = c[1];
+    colors[i * 3 + 2] = c[2];
+  }
+  const colorBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, colorBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, colors, gl.STATIC_DRAW);
+  const aCol = gl.getAttribLocation(program, "a_color");
+  gl.enableVertexAttribArray(aCol);
+  gl.vertexAttribPointer(aCol, 3, gl.FLOAT, false, 0, 0);
+  gl.vertexAttribDivisor(aCol, 1);
+
+  // ─── Edge rendering on a separate Canvas 2D layer (under WebGL) ───
+  // For 80K edges, a thin-line Canvas 2D pass once the layout is warm
+  // is cheaper than instanced quads — we only redraw edges periodically.
+  const edgeCanvas = document.createElement("canvas");
+  edgeCanvas.width = W * DPR;
+  edgeCanvas.height = H * DPR;
+  edgeCanvas.style.width = W + "px";
+  edgeCanvas.style.height = H + "px";
+  edgeCanvas.style.position = "absolute";
+  edgeCanvas.style.top = "0";
+  edgeCanvas.style.left = "0";
+  edgeCanvas.style.pointerEvents = "none";
+  // Insert edge canvas behind the WebGL canvas
+  const container = document.getElementById("container");
+  container.insertBefore(edgeCanvas, canvas);
+  const ectx = edgeCanvas.getContext("2d");
+  ectx.scale(DPR, DPR);
+
+  let edgeTickCounter = 0;
+  function drawEdges() {
+    ectx.clearRect(0, 0, W, H);
+    ectx.strokeStyle = "rgba(60,70,100,0.08)";
+    ectx.lineWidth = 0.5;
+    ectx.beginPath();
+    for (let e = 0; e < EDGE_COUNT; e++) {
+      // After forceLink initializes, source/target are node objects
+      const s = links[e].source;
+      const t = links[e].target;
+      ectx.moveTo(s.x, s.y);
+      ectx.lineTo(t.x, t.y);
+    }
+    ectx.stroke();
+  }
+
+  // ─── Draw WebGL ───
+  function drawNodes() {
+    for (let i = 0; i < N; i++) {
+      offsets[i * 2] = nodes[i].x;
+      offsets[i * 2 + 1] = nodes[i].y;
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, offsetBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, offsets);
+
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(program);
+    gl.bindVertexArray(vao);
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, N);
+  }
+
+  // ─── SVG overlay for hover ───
+  const svg = d3.select("#overlay")
+    .attr("width", W).attr("height", H);
+  const hoverCircle = svg.append("circle")
+    .attr("r", 0)
+    .attr("fill", "none")
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 1.5)
+    .attr("stroke-opacity", 0.8)
+    .style("display", "none");
+
+  // ─── Quadtree for hover hit detection ───
+  let quadtree = d3.quadtree()
+    .x(d => d.x).y(d => d.y)
+    .addAll(nodes);
+
+  const tooltip = document.getElementById("tooltip");
+  let hoveredNode = null;
+
+  svg.on("pointermove", function(event) {
+    const [mx, my] = d3.pointer(event);
+    const found = quadtree.find(mx, my, 20);
+    if (found && found !== hoveredNode) {
+      hoveredNode = found;
+      hoverCircle
+        .attr("cx", found.x)
+        .attr("cy", found.y)
+        .attr("r", sizeScale(found.degree) + 4)
+        .attr("stroke", tolHex[found.community])
+        .style("display", null);
+      tooltip.style.display = "block";
+      tooltip.innerHTML = `<strong>${communityNames[found.community]}</strong><br>` +
+        `Node ${found.index}<br>` +
+        `Degree: ${found.degree}`;
+      tooltip.style.left = Math.min(found.x + 14, W - 130) + "px";
+      tooltip.style.top = (found.y - 50) + "px";
+    } else if (!found) {
+      hoveredNode = null;
+      hoverCircle.style("display", "none");
+      tooltip.style.display = "none";
+    }
+  });
+
+  svg.on("pointerleave", () => {
+    hoveredNode = null;
+    hoverCircle.style("display", "none");
+    tooltip.style.display = "none";
+  });
+
+  // ─── Force simulation ───
+  // 50K nodes: use distanceMax, high theta, batched ticks
+  const simulation = d3.forceSimulation(nodes)
+    .force("link", d3.forceLink(links).distance(20).strength(0.03).iterations(1))
+    .force("charge", d3.forceManyBody().strength(-8).distanceMax(250).theta(1.5))
+    .force("center", d3.forceCenter(cx, cy))
+    .force("collide", d3.forceCollide().radius(d => sizeScale(d.degree) + 0.5).iterations(1).strength(0.3))
+    .force("x", d3.forceX(d => commCenters[d.community][0]).strength(0.02))
+    .force("y", d3.forceY(d => commCenters[d.community][1]).strength(0.02))
+    .velocityDecay(0.5)
+    .alphaDecay(0.015)
+    .on("tick", null)
+    .stop();
+
+  // Stats display
+  const statsEl = document.getElementById("stats");
+  const alphaVal = document.getElementById("alphaVal");
+  const alphaFill = document.getElementById("alphaFill");
+  statsEl.textContent = `${(N / 1000).toFixed(0)}K nodes · ${(EDGE_COUNT / 1000).toFixed(0)}K edges · ${COMMUNITIES} communities`;
+
+  // ─── Animation loop: batched ticks ───
+  let running = true;
+  let frameCount = 0;
+
+  function animate() {
+    if (!running) return;
+
+    // Batch 3 ticks per frame for faster convergence
+    const ticksPerFrame = simulation.alpha() > 0.1 ? 3 : 1;
+    for (let i = 0; i < ticksPerFrame; i++) simulation.tick();
+
+    drawNodes();
+
+    // Draw edges every 4 frames during settling, every frame when slow
+    edgeTickCounter++;
+    if (edgeTickCounter % (simulation.alpha() > 0.2 ? 4 : 2) === 0) {
+      drawEdges();
+    }
+
+    // Rebuild quadtree periodically (every 8 frames)
+    if (edgeTickCounter % 8 === 0) {
+      quadtree = d3.quadtree().x(d => d.x).y(d => d.y).addAll(nodes);
+      // Update hover circle position if tracking a node
+      if (hoveredNode) {
+        hoverCircle
+          .attr("cx", hoveredNode.x)
+          .attr("cy", hoveredNode.y);
+      }
+    }
+
+    // Update alpha meter
+    const alpha = simulation.alpha();
+    alphaVal.textContent = alpha.toFixed(3);
+    alphaFill.style.width = (alpha * 100) + "%";
+
+    frameCount++;
+
+    if (alpha > simulation.alphaMin()) {
+      requestAnimationFrame(animate);
+    } else {
+      // Final clean draw
+      drawEdges();
+      quadtree = d3.quadtree().x(d => d.x).y(d => d.y).addAll(nodes);
+      running = false;
+    }
+  }
+
+  // Start
+  simulation.restart();
+  running = true;
+  requestAnimationFrame(animate);
+
+  // ─── Reheat button ───
+  document.getElementById("btnReheat").addEventListener("click", () => {
+    simulation.alpha(1).restart();
+    if (!running) {
+      running = true;
+      requestAnimationFrame(animate);
+    }
+  });
+
+  // Context loss handling
+  canvas.addEventListener("webglcontextlost", e => e.preventDefault());
+  canvas.addEventListener("webglcontextrestored", () => location.reload());
+})();
+</script>
+</body>
+</html>

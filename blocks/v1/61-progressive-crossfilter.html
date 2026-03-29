@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Progressive Crossfilter — 100K Records</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #fafafa; color: #333; }
+  .header { padding: 10px 20px; display: flex; align-items: center; gap: 14px; border-bottom: 1px solid #e0e0e0; background: #fff; }
+  .header h1 { font-size: 17px; font-weight: 600; letter-spacing: -0.3px; }
+  .badge { background: #4477AA; color: #fff; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-family: "SF Mono", Monaco, "Cascadia Code", monospace; }
+  .badge.approx { background: #CCBB44; color: #333; }
+  .latency { font-size: 11px; color: #888; margin-left: auto; font-family: "SF Mono", Monaco, "Cascadia Code", monospace; }
+  button.reset { background: #EE6677; color: #fff; border: none; padding: 4px 14px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 500; }
+  button.reset:hover { opacity: 0.85; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 6px; padding: 6px 12px 12px; height: calc(100vh - 46px); }
+  .panel { position: relative; background: #fff; border: 1px solid #e0e0e0; border-radius: 4px; overflow: hidden; }
+  .panel-label { position: absolute; top: 6px; left: 12px; font-size: 11px; font-weight: 600; color: #666; z-index: 5; text-transform: uppercase; letter-spacing: 0.5px; }
+  canvas { position: absolute; top: 0; left: 0; }
+  svg.overlay { position: absolute; top: 0; left: 0; }
+  .brush .selection { fill: #4477AA; fill-opacity: 0.12; stroke: #4477AA; stroke-width: 1; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Progressive Crossfilter</h1>
+  <span class="badge" id="counter">100,000 / 100,000</span>
+  <span class="latency" id="latency"></span>
+  <button class="reset" id="resetBtn">Reset All</button>
+</div>
+<div class="grid">
+  <div class="panel" id="scatter"><span class="panel-label">Amount vs Quantity (scatter)</span></div>
+  <div class="panel" id="histogram"><span class="panel-label">Amount Distribution</span></div>
+  <div class="panel" id="bars"><span class="panel-label">Category Breakdown</span></div>
+  <div class="panel" id="timeline"><span class="panel-label">Orders Over Time</span></div>
+</div>
+
+<script>
+// ── Constants ──
+const N = 100000;
+const SAMPLE_N = 10000;
+const TOL = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377","#BBBBBB"];
+const CATEGORIES = ["Electronics","Food & Bev","Clothing","Furniture","Books","Sports","Other"];
+const margin = { top: 32, right: 14, bottom: 34, left: 52 };
+
+// ── Synthetic Data with Structure ──
+// Clusters, correlations, seasonality — not flat noise
+const data = new Array(N);
+const rng = d3.randomLcg(42);
+const rnorm = () => { let u = 0, v = 0; while (!u) u = rng(); v = rng(); return Math.sqrt(-2*Math.log(u)) * Math.cos(2*Math.PI*v); };
+
+for (let i = 0; i < N; i++) {
+  const cat = rng() < 0.25 ? 0 : rng() < 0.22 ? 1 : rng() < 0.2 ? 2 : rng() < 0.25 ? 3 : rng() < 0.35 ? 4 : rng() < 0.5 ? 5 : 6;
+  // Amounts: log-normal with category-specific means — creates visible clusters
+  const baseMu = [6.5, 4.2, 5.0, 7.2, 3.8, 5.5, 4.8][cat];
+  const baseSigma = [0.8, 0.6, 0.9, 0.7, 0.5, 1.0, 0.7][cat];
+  const amount = Math.max(1, Math.min(8000, Math.exp(baseMu + rnorm() * baseSigma)));
+  // Quantity: correlated with amount for some categories
+  const qBase = cat < 3 ? 3 + amount / 800 : 6 + rnorm() * 2.5;
+  const quantity = Math.max(1, Math.min(25, Math.round(qBase + rnorm() * 2)));
+  // Date: seasonal — electronics spike in Q4, food steady, clothing spring/fall
+  const seasonBias = [0.7, 0.0, 0.4, 0.3, 0.1, 0.5, 0.0][cat];
+  const dayBase = rng() * 365;
+  const seasonShift = Math.sin((dayBase / 365) * Math.PI * 2 - Math.PI/2) * seasonBias * 60;
+  const day = Math.max(0, Math.min(364, Math.round(dayBase + seasonShift + rnorm() * 10)));
+  data[i] = { id: i, amount, quantity, category: cat, day };
+}
+
+// Pre-shuffle indices for progressive sampling
+const sampleIndices = d3.shuffle(d3.range(N));
+
+// ── Bitmap Crossfilter ──
+// Each dimension gets a Uint32Array bitmask; AND them for intersection
+const WORDS = Math.ceil(N / 32);
+const dimMasks = {
+  scatter: new Uint32Array(WORDS).fill(0xFFFFFFFF),
+  histogram: new Uint32Array(WORDS).fill(0xFFFFFFFF),
+  bars: new Uint32Array(WORDS).fill(0xFFFFFFFF),
+  timeline: new Uint32Array(WORDS).fill(0xFFFFFFFF),
+};
+
+function setMask(name, predicate) {
+  const mask = dimMasks[name];
+  mask.fill(0);
+  for (let i = 0; i < N; i++) {
+    if (predicate(data[i])) mask[i >> 5] |= 1 << (i & 31);
+  }
+}
+function clearMask(name) { dimMasks[name].fill(0xFFFFFFFF); }
+
+function isFiltered(i) {
+  const w = i >> 5, b = 1 << (i & 31);
+  return (dimMasks.scatter[w] & dimMasks.histogram[w] & dimMasks.bars[w] & dimMasks.timeline[w] & b) !== 0;
+}
+
+// Count filtered rows excluding one dimension (for that panel's ghost pattern)
+function countExcluding(exclude) {
+  let total = 0;
+  for (let w = 0; w < WORDS; w++) {
+    let bits = 0xFFFFFFFF;
+    for (const [name, mask] of Object.entries(dimMasks)) {
+      if (name !== exclude) bits &= mask[w];
+    }
+    // popcount
+    let v = bits;
+    v = v - ((v >> 1) & 0x55555555);
+    v = (v & 0x33333333) + ((v >> 2) & 0x33333333);
+    total += (((v + (v >> 4)) & 0x0F0F0F0F) * 0x01010101) >> 24;
+  }
+  return total;
+}
+
+// ── Falcon-Inspired Precomputed Histogram Snapshots ──
+// For each brushable dimension, precompute bin counts for passive dimensions
+// so brush updates just slice the precomputed array — O(bins) not O(N)
+
+// Histogram bins (for amount distribution panel)
+const HIST_BINS = 40;
+const amountExtent = [1, 8000];
+const logMin = Math.log(amountExtent[0]), logMax = Math.log(amountExtent[1]);
+const histThresholds = d3.range(HIST_BINS + 1).map(i => Math.exp(logMin + (logMax - logMin) * i / HIST_BINS));
+
+// Timeline bins
+const TIMELINE_BINS = 52; // weekly
+const timeThresholds = d3.range(TIMELINE_BINS + 1).map(i => Math.round(i * 365 / TIMELINE_BINS));
+
+// Category counts are already low-cardinality
+
+// Precompute: for each record, which histogram bin and timeline bin it falls in
+const histBinIndex = new Uint8Array(N);
+const timeBinIndex = new Uint8Array(N);
+for (let i = 0; i < N; i++) {
+  const lv = Math.log(data[i].amount);
+  histBinIndex[i] = Math.min(HIST_BINS - 1, Math.max(0, Math.floor((lv - logMin) / (logMax - logMin) * HIST_BINS)));
+  timeBinIndex[i] = Math.min(TIMELINE_BINS - 1, Math.max(0, Math.floor(data[i].day / 365 * TIMELINE_BINS)));
+}
+
+// Falcon snapshot: given a set of active dimension masks (excluding the active dimension),
+// compute aggregated counts for passive views in one pass
+function computePassiveCounts(activeDim) {
+  const histCounts = new Float64Array(HIST_BINS);
+  const histGhost = new Float64Array(HIST_BINS);
+  const timeCounts = new Float64Array(TIMELINE_BINS);
+  const timeGhost = new Float64Array(TIMELINE_BINS);
+  const catCounts = new Float64Array(7);
+  const catGhost = new Float64Array(7);
+
+  for (let w = 0; w < WORDS; w++) {
+    // Mask excluding active dimension (ghost = what passes other filters)
+    let ghostBits = 0xFFFFFFFF;
+    let fullBits = 0xFFFFFFFF;
+    for (const [name, mask] of Object.entries(dimMasks)) {
+      if (name !== activeDim) ghostBits &= mask[w];
+      fullBits &= mask[w];
+    }
+
+    // Iterate set bits
+    const base = w << 5;
+    let gb = ghostBits, fb = fullBits;
+    while (gb) {
+      const bit = gb & -gb;
+      const idx = base + (31 - Math.clz32(bit));
+      if (idx < N) {
+        const d = data[idx];
+        if (activeDim !== "histogram") histGhost[histBinIndex[idx]]++;
+        if (activeDim !== "timeline") timeGhost[timeBinIndex[idx]]++;
+        if (activeDim !== "bars") catGhost[d.category]++;
+      }
+      gb ^= bit;
+    }
+    while (fb) {
+      const bit = fb & -fb;
+      const idx = base + (31 - Math.clz32(bit));
+      if (idx < N) {
+        const d = data[idx];
+        if (activeDim !== "histogram") histCounts[histBinIndex[idx]]++;
+        if (activeDim !== "timeline") timeCounts[timeBinIndex[idx]]++;
+        if (activeDim !== "bars") catCounts[d.category]++;
+      }
+      fb ^= bit;
+    }
+  }
+
+  return { histCounts, histGhost, timeCounts, timeGhost, catCounts, catGhost };
+}
+
+// ── Panel Setup ──
+const panels = {};
+
+function initPanel(id) {
+  const el = document.getElementById(id);
+  const rect = el.getBoundingClientRect();
+  const w = rect.width, h = rect.height;
+  const iw = w - margin.left - margin.right, ih = h - margin.top - margin.bottom;
+  const dpr = devicePixelRatio;
+
+  // Background canvas (ghost layer)
+  const bgCanvas = document.createElement("canvas");
+  bgCanvas.width = w * dpr; bgCanvas.height = h * dpr;
+  bgCanvas.style.cssText = `width:${w}px;height:${h}px;position:absolute;top:0;left:0`;
+  el.appendChild(bgCanvas);
+  const bgCtx = bgCanvas.getContext("2d");
+  bgCtx.scale(dpr, dpr);
+
+  // Foreground canvas
+  const fgCanvas = document.createElement("canvas");
+  fgCanvas.width = w * dpr; fgCanvas.height = h * dpr;
+  fgCanvas.style.cssText = `width:${w}px;height:${h}px;position:absolute;top:0;left:0`;
+  el.appendChild(fgCanvas);
+  const fgCtx = fgCanvas.getContext("2d");
+  fgCtx.scale(dpr, dpr);
+
+  // SVG overlay for axes and brushes
+  const svg = d3.select(el).append("svg")
+    .attr("class", "overlay")
+    .attr("width", w).attr("height", h)
+    .style("pointer-events", "all");
+
+  return { el, w, h, iw, ih, bgCtx, fgCtx, svg };
+}
+
+// ── Scatter Panel (Canvas) ──
+function setupScatter() {
+  const p = initPanel("scatter");
+  const xScale = d3.scaleLog().domain([1, 8000]).range([0, p.iw]).clamp(true);
+  const yScale = d3.scaleLinear().domain([0, 26]).range([p.ih, 0]);
+
+  const g = p.svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+  g.append("g").attr("transform", `translate(0,${p.ih})`)
+    .call(d3.axisBottom(xScale).ticks(6, "~s"))
+    .selectAll("text").style("font-size", "10px");
+  g.append("g")
+    .call(d3.axisLeft(yScale).ticks(6))
+    .selectAll("text").style("font-size", "10px");
+
+  // Axis labels
+  g.append("text").attr("x", p.iw / 2).attr("y", p.ih + 28).attr("text-anchor", "middle")
+    .style("font-size", "10px").style("fill", "#888").text("Amount ($)");
+  g.append("text").attr("transform", "rotate(-90)").attr("x", -p.ih / 2).attr("y", -38)
+    .attr("text-anchor", "middle").style("font-size", "10px").style("fill", "#888").text("Quantity");
+
+  // Quadtree for hover
+  const qt = d3.quadtree()
+    .x(d => xScale(d.amount))
+    .y(d => yScale(d.quantity))
+    .addAll(data);
+
+  // Brush
+  const brush = d3.brush().extent([[0, 0], [p.iw, p.ih]])
+    .on("brush end", ({ selection, sourceEvent }) => {
+      if (!sourceEvent) return;
+      if (!selection) { clearMask("scatter"); }
+      else {
+        const [[bx0, by0], [bx1, by1]] = selection;
+        const x0 = xScale.invert(bx0), x1 = xScale.invert(bx1);
+        const y0 = yScale.invert(by1), y1 = yScale.invert(by0);
+        setMask("scatter", d => d.amount >= x0 && d.amount <= x1 && d.quantity >= y0 && d.quantity <= y1);
+      }
+      scheduleUpdate("scatter");
+    });
+  const brushG = g.append("g").attr("class", "brush").call(brush);
+
+  // Tooltip
+  const tip = g.append("g").style("display", "none");
+  tip.append("circle").attr("r", 5).attr("fill", "none").attr("stroke", "#333").attr("stroke-width", 1.5);
+  const tipText = tip.append("text").attr("dy", -10).attr("text-anchor", "middle")
+    .style("font-size", "10px").style("font-family", '"SF Mono", Monaco, monospace').style("fill", "#333");
+
+  g.on("pointermove", (event) => {
+    const [mx, my] = d3.pointer(event);
+    const nearest = qt.find(mx, my, 15);
+    if (nearest && isFiltered(nearest.id)) {
+      tip.style("display", null)
+        .attr("transform", `translate(${xScale(nearest.amount)},${yScale(nearest.quantity)})`);
+      tipText.text(`$${nearest.amount.toFixed(0)} × ${nearest.quantity}`);
+    } else {
+      tip.style("display", "none");
+    }
+  }).on("pointerleave", () => tip.style("display", "none"));
+
+  panels.scatter = { p, xScale, yScale, brushG, brush };
+}
+
+function drawScatter() {
+  const { p, xScale, yScale } = panels.scatter;
+  const { bgCtx, fgCtx } = p;
+
+  // Background: all points, very dim
+  bgCtx.clearRect(0, 0, p.w, p.h);
+  bgCtx.save();
+  bgCtx.translate(margin.left, margin.top);
+  bgCtx.globalAlpha = 0.04;
+  // Batch by category
+  for (let cat = 0; cat < 7; cat++) {
+    bgCtx.fillStyle = TOL[cat];
+    bgCtx.beginPath();
+    for (let i = 0; i < N; i++) {
+      if (data[i].category !== cat) continue;
+      const x = xScale(data[i].amount), y = yScale(data[i].quantity);
+      bgCtx.moveTo(x + 1.5, y);
+      bgCtx.arc(x, y, 1.5, 0, Math.PI * 2);
+    }
+    bgCtx.fill();
+  }
+  bgCtx.restore();
+
+  // Foreground: filtered points, vivid
+  fgCtx.clearRect(0, 0, p.w, p.h);
+  fgCtx.save();
+  fgCtx.translate(margin.left, margin.top);
+  fgCtx.globalAlpha = 0.35;
+  for (let cat = 0; cat < 7; cat++) {
+    fgCtx.fillStyle = TOL[cat];
+    fgCtx.beginPath();
+    for (let i = 0; i < N; i++) {
+      if (data[i].category !== cat || !isFiltered(i)) continue;
+      const x = xScale(data[i].amount), y = yScale(data[i].quantity);
+      fgCtx.moveTo(x + 2, y);
+      fgCtx.arc(x, y, 2, 0, Math.PI * 2);
+    }
+    fgCtx.fill();
+  }
+  fgCtx.restore();
+}
+
+// Progressive scatter: draw sample first, then full on idle
+function drawScatterProgressive() {
+  const { p, xScale, yScale } = panels.scatter;
+  const { fgCtx } = p;
+
+  // Quick: draw 10K sample
+  fgCtx.clearRect(0, 0, p.w, p.h);
+  fgCtx.save();
+  fgCtx.translate(margin.left, margin.top);
+  fgCtx.globalAlpha = 0.35;
+  for (let cat = 0; cat < 7; cat++) {
+    fgCtx.fillStyle = TOL[cat];
+    fgCtx.beginPath();
+    for (let s = 0; s < SAMPLE_N; s++) {
+      const i = sampleIndices[s];
+      if (data[i].category !== cat || !isFiltered(i)) continue;
+      const x = xScale(data[i].amount), y = yScale(data[i].quantity);
+      fgCtx.moveTo(x + 2, y);
+      fgCtx.arc(x, y, 2, 0, Math.PI * 2);
+    }
+    fgCtx.fill();
+  }
+  fgCtx.restore();
+
+  // Refine on idle
+  requestIdleCallback(() => drawScatterFull());
+}
+
+function drawScatterFull() {
+  const { p, xScale, yScale } = panels.scatter;
+  const { fgCtx } = p;
+  fgCtx.clearRect(0, 0, p.w, p.h);
+  fgCtx.save();
+  fgCtx.translate(margin.left, margin.top);
+  fgCtx.globalAlpha = 0.35;
+  for (let cat = 0; cat < 7; cat++) {
+    fgCtx.fillStyle = TOL[cat];
+    fgCtx.beginPath();
+    for (let i = 0; i < N; i++) {
+      if (data[i].category !== cat || !isFiltered(i)) continue;
+      const x = xScale(data[i].amount), y = yScale(data[i].quantity);
+      fgCtx.moveTo(x + 2, y);
+      fgCtx.arc(x, y, 2, 0, Math.PI * 2);
+    }
+    fgCtx.fill();
+  }
+  fgCtx.restore();
+}
+
+// ── Histogram Panel ──
+function setupHistogram() {
+  const p = initPanel("histogram");
+  const xScale = d3.scaleLog().domain(amountExtent).range([0, p.iw]).clamp(true);
+  const yScale = d3.scaleLinear().range([p.ih, 0]);
+
+  const g = p.svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+  const xAxisG = g.append("g").attr("transform", `translate(0,${p.ih})`)
+    .call(d3.axisBottom(xScale).ticks(6, "~s"));
+  xAxisG.selectAll("text").style("font-size", "10px");
+  const yAxisG = g.append("g");
+  yAxisG.selectAll("text").style("font-size", "10px");
+
+  g.append("text").attr("x", p.iw / 2).attr("y", p.ih + 28).attr("text-anchor", "middle")
+    .style("font-size", "10px").style("fill", "#888").text("Amount ($)");
+
+  // Ghost bars group and active bars group
+  const ghostG = g.append("g");
+  const activeG = g.append("g");
+
+  const brush = d3.brushX().extent([[0, 0], [p.iw, p.ih]])
+    .on("brush end", ({ selection, sourceEvent }) => {
+      if (!sourceEvent) return;
+      if (!selection) { clearMask("histogram"); }
+      else {
+        const lo = xScale.invert(selection[0]), hi = xScale.invert(selection[1]);
+        setMask("histogram", d => d.amount >= lo && d.amount <= hi);
+      }
+      scheduleUpdate("histogram");
+    });
+  g.append("g").attr("class", "brush").call(brush);
+
+  panels.histogram = { p, xScale, yScale, yAxisG, ghostG, activeG, brush, brushG: g.select(".brush") };
+}
+
+function drawHistogram(ghostCounts, activeCounts) {
+  const { p, xScale, yScale, yAxisG, ghostG, activeG } = panels.histogram;
+  const maxGhost = d3.max(ghostCounts) || 1;
+  yScale.domain([0, maxGhost]).nice();
+  yAxisG.call(d3.axisLeft(yScale).ticks(5));
+  yAxisG.selectAll("text").style("font-size", "10px");
+
+  const barData = d3.range(HIST_BINS).map(i => ({
+    x0: histThresholds[i], x1: histThresholds[i + 1],
+    ghost: ghostCounts[i], active: activeCounts[i]
+  }));
+
+  // Ghost bars
+  ghostG.selectAll("rect").data(barData)
+    .join("rect")
+    .attr("x", d => xScale(d.x0))
+    .attr("width", d => Math.max(1, xScale(d.x1) - xScale(d.x0) - 1))
+    .attr("y", d => yScale(d.ghost))
+    .attr("height", d => p.ih - yScale(d.ghost))
+    .attr("fill", "#ddd");
+
+  // Active bars
+  activeG.selectAll("rect").data(barData)
+    .join("rect")
+    .attr("x", d => xScale(d.x0))
+    .attr("width", d => Math.max(1, xScale(d.x1) - xScale(d.x0) - 1))
+    .attr("y", d => yScale(d.active))
+    .attr("height", d => p.ih - yScale(d.active))
+    .attr("fill", "#4477AA")
+    .attr("opacity", 0.8);
+}
+
+// ── Bar Chart Panel ──
+function setupBars() {
+  const p = initPanel("bars");
+  const xScale = d3.scaleBand().domain(d3.range(7)).range([0, p.iw]).padding(0.15);
+  const yScale = d3.scaleLinear().range([p.ih, 0]);
+
+  const g = p.svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+  g.append("g").attr("transform", `translate(0,${p.ih})`)
+    .call(d3.axisBottom(xScale).tickFormat(i => CATEGORIES[i].slice(0, 5)))
+    .selectAll("text").style("font-size", "9px");
+  const yAxisG = g.append("g");
+
+  const ghostG = g.append("g");
+  const activeG = g.append("g");
+
+  let selectedCat = null;
+
+  // Click to filter by category
+  g.append("rect").attr("width", p.iw).attr("height", p.ih).attr("fill", "transparent")
+    .style("cursor", "pointer")
+    .on("pointerdown", (event) => {
+      const mx = d3.pointer(event)[0];
+      // Find which band was clicked
+      const bandWidth = xScale.bandwidth(), step = xScale.step();
+      for (let i = 0; i < 7; i++) {
+        const x0 = xScale(i), x1 = x0 + bandWidth;
+        if (mx >= x0 && mx <= x1) {
+          selectedCat = selectedCat === i ? null : i;
+          if (selectedCat === null) clearMask("bars");
+          else setMask("bars", d => d.category === selectedCat);
+          scheduleUpdate("bars");
+          return;
+        }
+      }
+    });
+
+  panels.bars = { p, xScale, yScale, yAxisG, ghostG, activeG, getSelected: () => selectedCat };
+}
+
+function drawBars(ghostCounts, activeCounts) {
+  const { p, xScale, yScale, yAxisG, ghostG, activeG, getSelected } = panels.bars;
+  const maxGhost = d3.max(ghostCounts) || 1;
+  yScale.domain([0, maxGhost]).nice();
+  yAxisG.call(d3.axisLeft(yScale).ticks(5));
+  yAxisG.selectAll("text").style("font-size", "10px");
+
+  const selected = getSelected();
+
+  ghostG.selectAll("rect").data(d3.range(7))
+    .join("rect")
+    .attr("x", i => xScale(i))
+    .attr("width", xScale.bandwidth())
+    .attr("y", i => yScale(ghostCounts[i]))
+    .attr("height", i => p.ih - yScale(ghostCounts[i]))
+    .attr("fill", "#e0e0e0");
+
+  activeG.selectAll("rect").data(d3.range(7))
+    .join("rect")
+    .attr("x", i => xScale(i))
+    .attr("width", xScale.bandwidth())
+    .attr("y", i => yScale(activeCounts[i]))
+    .attr("height", i => p.ih - yScale(activeCounts[i]))
+    .attr("fill", i => TOL[i])
+    .attr("opacity", i => selected !== null && selected !== i ? 0.25 : 0.85)
+    .style("cursor", "pointer");
+}
+
+// ── Timeline Panel ──
+function setupTimeline() {
+  const p = initPanel("timeline");
+  const xScale = d3.scaleLinear().domain([0, 365]).range([0, p.iw]);
+  const yScale = d3.scaleLinear().range([p.ih, 0]);
+
+  const g = p.svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const monthTicks = months.map((_, i) => Math.round(i * 365 / 12));
+  g.append("g").attr("transform", `translate(0,${p.ih})`)
+    .call(d3.axisBottom(xScale).tickValues(monthTicks).tickFormat((d, i) => months[i]))
+    .selectAll("text").style("font-size", "9px");
+  const yAxisG = g.append("g");
+
+  // Ghost area + active area
+  const ghostPath = g.append("path").attr("fill", "#e0e0e0").attr("stroke", "none");
+  const activePath = g.append("path").attr("fill", "#66CCEE").attr("fill-opacity", 0.7).attr("stroke", "#4477AA").attr("stroke-width", 1);
+
+  const brush = d3.brushX().extent([[0, 0], [p.iw, p.ih]])
+    .on("brush end", ({ selection, sourceEvent }) => {
+      if (!sourceEvent) return;
+      if (!selection) { clearMask("timeline"); }
+      else {
+        const lo = xScale.invert(selection[0]), hi = xScale.invert(selection[1]);
+        setMask("timeline", d => d.day >= lo && d.day <= hi);
+      }
+      scheduleUpdate("timeline");
+    });
+  g.append("g").attr("class", "brush").call(brush);
+
+  panels.timeline = { p, xScale, yScale, yAxisG, ghostPath, activePath, brush, brushG: g.select(".brush") };
+}
+
+function drawTimeline(ghostCounts, activeCounts) {
+  const { p, xScale, yScale, yAxisG, ghostPath, activePath } = panels.timeline;
+  const maxGhost = d3.max(ghostCounts) || 1;
+  yScale.domain([0, maxGhost * 1.05]).nice();
+  yAxisG.call(d3.axisLeft(yScale).ticks(4));
+  yAxisG.selectAll("text").style("font-size", "10px");
+
+  const area = d3.area()
+    .x((_, i) => xScale(timeThresholds[i]))
+    .y0(p.ih)
+    .y1(d => yScale(d))
+    .curve(d3.curveMonotoneX);
+
+  ghostPath.attr("d", area(Array.from(ghostCounts)));
+  activePath.attr("d", area(Array.from(activeCounts)));
+}
+
+// ── Update Orchestration ──
+// Progressive: immediate sample-based update, then refine on idle
+let updateRafId = 0;
+let idleCallbackId = 0;
+let isApproximate = false;
+
+function scheduleUpdate(source) {
+  cancelAnimationFrame(updateRafId);
+  if (idleCallbackId) { cancelIdleCallback(idleCallbackId); idleCallbackId = 0; }
+  updateRafId = requestAnimationFrame(() => runUpdate(source));
+}
+
+function runUpdate(source) {
+  const t0 = performance.now();
+
+  // Phase 1: Progressive — update masks using sample, compute passive counts
+  // The bitmap masks are already set by brush handlers above (full scan for the active dim).
+  // Compute aggregated counts for passive views using Falcon approach.
+  const counts = computePassiveCounts(source);
+
+  // Count total filtered
+  let samplePass = 0;
+  for (let s = 0; s < SAMPLE_N; s++) {
+    if (isFiltered(sampleIndices[s])) samplePass++;
+  }
+  const estimatedCount = Math.round(samplePass * (N / SAMPLE_N));
+
+  const t1 = performance.now();
+
+  // Update passive panels with precomputed counts
+  if (source !== "histogram") drawHistogram(counts.histGhost, counts.histCounts);
+  if (source !== "bars") drawBars(counts.catGhost, counts.catCounts);
+  if (source !== "timeline") drawTimeline(counts.timeGhost, counts.timeCounts);
+
+  // Scatter: progressive draw (sample first)
+  if (source !== "scatter") drawScatterProgressive();
+
+  // Update the source panel's own ghost/active (it needs counts excluding itself)
+  if (source === "histogram") {
+    const selfCounts = computePassiveCounts(null); // all dims active
+    drawHistogram(counts.histGhost, selfCounts.histCounts);
+  }
+  if (source === "bars") {
+    const selfCounts = computePassiveCounts(null);
+    drawBars(counts.catGhost, selfCounts.catCounts);
+  }
+  if (source === "timeline") {
+    const selfCounts = computePassiveCounts(null);
+    drawTimeline(counts.timeGhost, selfCounts.timeCounts);
+  }
+  if (source === "scatter") {
+    drawScatterProgressive();
+  }
+
+  isApproximate = true;
+  const badge = document.getElementById("counter");
+  badge.textContent = `~${estimatedCount.toLocaleString()} / ${N.toLocaleString()}`;
+  badge.classList.add("approx");
+
+  document.getElementById("latency").textContent = `${(t1 - t0).toFixed(1)}ms approx`;
+
+  // Phase 2: Full refinement on idle
+  idleCallbackId = requestIdleCallback(() => {
+    const t2 = performance.now();
+    let fullCount = 0;
+    for (let i = 0; i < N; i++) {
+      if (isFiltered(i)) fullCount++;
+    }
+    const t3 = performance.now();
+
+    // Full scatter render
+    drawScatterFull();
+
+    isApproximate = false;
+    badge.textContent = `${fullCount.toLocaleString()} / ${N.toLocaleString()}`;
+    badge.classList.remove("approx");
+    document.getElementById("latency").textContent =
+      `${(t1 - t0).toFixed(1)}ms approx · ${(t3 - t2).toFixed(1)}ms full`;
+  });
+}
+
+// ── Initialize ──
+setupScatter();
+setupHistogram();
+setupBars();
+setupTimeline();
+
+// Initial render with all data
+const initCounts = computePassiveCounts(null);
+drawScatter();
+drawHistogram(
+  d3.range(HIST_BINS).map(b => { let c = 0; for (let i = 0; i < N; i++) if (histBinIndex[i] === b) c++; return c; }),
+  initCounts.histCounts
+);
+drawBars(
+  d3.range(7).map(c => { let n = 0; for (let i = 0; i < N; i++) if (data[i].category === c) n++; return n; }),
+  initCounts.catCounts
+);
+drawTimeline(
+  d3.range(TIMELINE_BINS).map(b => { let c = 0; for (let i = 0; i < N; i++) if (timeBinIndex[i] === b) c++; return c; }),
+  initCounts.timeCounts
+);
+
+// ── Reset Button ──
+document.getElementById("resetBtn").addEventListener("click", () => {
+  clearMask("scatter");
+  clearMask("histogram");
+  clearMask("bars");
+  clearMask("timeline");
+
+  // Clear brushes
+  if (panels.scatter.brushG) panels.scatter.brushG.call(panels.scatter.brush.move, null);
+  if (panels.histogram.brushG) panels.histogram.brushG.call(panels.histogram.brush.move, null);
+  if (panels.timeline.brushG) panels.timeline.brushG.call(panels.timeline.brush.move, null);
+
+  // Reset bar selection
+  // Rebuild bars panel reference for selected state
+  const barsPanel = document.getElementById("bars");
+  // Re-init to clear selected cat
+  panels.bars.getSelected = () => null;
+
+  // Full redraw
+  drawScatter();
+  const allCounts = computePassiveCounts(null);
+  drawHistogram(allCounts.histGhost, allCounts.histCounts);
+  drawBars(allCounts.catGhost, allCounts.catCounts);
+  drawTimeline(allCounts.timeGhost, allCounts.timeCounts);
+
+  const badge = document.getElementById("counter");
+  badge.textContent = `${N.toLocaleString()} / ${N.toLocaleString()}`;
+  badge.classList.remove("approx");
+  document.getElementById("latency").textContent = "";
+});
+</script>
+</body>
+</html>
