@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Energy Flow Sankey</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0f1117; color: #e8eaf0; font-family: 'Inter', system-ui, sans-serif; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 24px; }
+  h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.04em; color: #c8ccd8; margin-bottom: 4px; text-transform: uppercase; }
+  .subtitle { font-size: 12px; color: #5a6070; margin-bottom: 20px; }
+  #chart { width: 100%; max-width: 1100px; }
+  svg { width: 100%; display: block; }
+  .node rect { stroke: none; cursor: ns-resize; rx: 3; }
+  .node text { font-size: 11px; fill: #c8ccd8; pointer-events: none; }
+  .link { fill: none; transition: opacity 0.2s; }
+  .link.dimmed { opacity: 0.06; }
+  .link.highlighted { opacity: 0.85; }
+  .link.loss { stroke-dasharray: none; }
+  .node rect.dimmed { opacity: 0.25; }
+  .node rect.highlighted { stroke: rgba(255,255,255,0.3); stroke-width: 1; }
+  .tooltip {
+    position: fixed;
+    background: rgba(15,17,23,0.95);
+    border: 1px solid #2a2e3d;
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-size: 12px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s;
+    z-index: 100;
+    min-width: 160px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+  }
+  .tooltip.visible { opacity: 1; }
+  .tooltip .t-title { font-weight: 600; color: #e8eaf0; margin-bottom: 6px; font-size: 13px; }
+  .tooltip .t-row { display: flex; justify-content: space-between; gap: 16px; color: #8a90a0; margin-top: 2px; }
+  .tooltip .t-val { color: #d0d4e0; font-variant-numeric: tabular-nums; }
+  .legend { display: flex; gap: 20px; margin-bottom: 12px; flex-wrap: wrap; justify-content: center; }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #7a8090; }
+  .legend-swatch { width: 16px; height: 8px; border-radius: 2px; }
+</style>
+</head>
+<body>
+<h1>Global Energy Flow</h1>
+<p class="subtitle">From primary sources through generation and grid to end uses — values in EJ (exajoules)</p>
+<div class="legend">
+  <div class="legend-item"><div class="legend-swatch" style="background:#e8784a"></div>Fossil Fuels</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#4ec9a0"></div>Renewables</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#7b9fe8"></div>Low-Carbon</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#f0c040"></div>Grid / Generation</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#e04060;opacity:0.6;background:repeating-linear-gradient(45deg,#c03050,#c03050 3px,#1a1e2a 3px,#1a1e2a 6px)"></div>Losses</div>
+</div>
+<div id="chart"></div>
+<div class="tooltip" id="tooltip"></div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+// ── DATA ─────────────────────────────────────────────────────────────────────
+const nodes = [
+  // Stage 0: Sources (6)
+  { id: 0,  name: "Coal",           stage: 0, color: "#8c7060" },
+  { id: 1,  name: "Oil & Gas",      stage: 0, color: "#c07840" },
+  { id: 2,  name: "Natural Gas",    stage: 0, color: "#d09060" },
+  { id: 3,  name: "Nuclear",        stage: 0, color: "#7b9fe8" },
+  { id: 4,  name: "Wind & Solar",   stage: 0, color: "#4ec9a0" },
+  { id: 5,  name: "Hydro & Geo",    stage: 0, color: "#5ab8d0" },
+
+  // Stage 1: Generation (3)
+  { id: 6,  name: "Thermal Gen.",   stage: 1, color: "#e8784a" },
+  { id: 7,  name: "Clean Gen.",     stage: 1, color: "#4ec9a0" },
+  { id: 8,  name: "Direct Use",     stage: 1, color: "#c8a060" },
+
+  // Stage 2: Grid (2)
+  { id: 9,  name: "Electricity Grid", stage: 2, color: "#f0c040" },
+  { id: 10, name: "Fuel Network",     stage: 2, color: "#d08030" },
+
+  // Stage 3: Sectors (4)
+  { id: 11, name: "Industry",       stage: 3, color: "#8080d0" },
+  { id: 12, name: "Transport",      stage: 3, color: "#d07080" },
+  { id: 13, name: "Buildings",      stage: 3, color: "#70a870" },
+  { id: 14, name: "Agriculture",    stage: 3, color: "#90b848" },
+
+  // Stage 4: End Uses (6)
+  { id: 15, name: "Heat & Process", stage: 4, color: "#e87840" },
+  { id: 16, name: "Mobility",       stage: 4, color: "#e05060" },
+  { id: 17, name: "Lighting",       stage: 4, color: "#f0d060" },
+  { id: 18, name: "Appliances",     stage: 4, color: "#60b0e0" },
+  { id: 19, name: "Food Systems",   stage: 4, color: "#80c870" },
+  { id: 20, name: "Other Services", stage: 4, color: "#a880c0" },
+
+  // Stage 5: Losses (special)
+  { id: 21, name: "Gen. Losses",    stage: 5, color: "#c03050", isLoss: true },
+  { id: 22, name: "Grid Losses",    stage: 5, color: "#c03050", isLoss: true },
+  { id: 23, name: "End-Use Losses", stage: 5, color: "#c03050", isLoss: true },
+];
+
+const links = [
+  // Sources → Generation
+  { source: 0,  target: 6,  value: 80  }, // Coal → Thermal
+  { source: 1,  target: 6,  value: 45  }, // Oil → Thermal
+  { source: 2,  target: 6,  value: 60  }, // Gas → Thermal
+  { source: 2,  target: 8,  value: 30  }, // Gas → Direct Use (heating)
+  { source: 3,  target: 7,  value: 28  }, // Nuclear → Clean Gen
+  { source: 4,  target: 7,  value: 55  }, // Wind/Solar → Clean Gen
+  { source: 5,  target: 7,  value: 22  }, // Hydro → Clean Gen
+  { source: 1,  target: 10, value: 60  }, // Oil → Fuel Network direct
+  { source: 0,  target: 10, value: 10  }, // Coal → Fuel Network (coal liquids)
+
+  // Generation → Grid + Losses
+  { source: 6,  target: 9,  value: 75  }, // Thermal → Grid
+  { source: 7,  target: 9,  value: 95  }, // Clean → Grid
+  { source: 6,  target: 21, value: 110 }, // Thermal → Gen Losses
+  { source: 7,  target: 21, value: 10  }, // Clean → Gen Losses (minor)
+
+  // Direct Use → sectors
+  { source: 8,  target: 11, value: 20  }, // Direct → Industry
+  { source: 8,  target: 13, value: 10  }, // Direct → Buildings
+
+  // Grid → Sectors + Grid Losses
+  { source: 9,  target: 11, value: 55  }, // Grid → Industry
+  { source: 9,  target: 12, value: 18  }, // Grid → Transport
+  { source: 9,  target: 13, value: 60  }, // Grid → Buildings
+  { source: 9,  target: 14, value: 15  }, // Grid → Agriculture
+  { source: 9,  target: 22, value: 22  }, // Grid → Grid Losses
+
+  // Fuel Network → Sectors
+  { source: 10, target: 11, value: 30  }, // Fuel → Industry
+  { source: 10, target: 12, value: 62  }, // Fuel → Transport
+  { source: 10, target: 13, value: 18  }, // Fuel → Buildings
+  { source: 10, target: 14, value: 10  }, // Fuel → Agriculture (machinery)
+  { source: 10, target: 22, value: 10  }, // Fuel network losses
+
+  // Sectors → End Uses + End Use Losses
+  { source: 11, target: 15, value: 70  }, // Industry → Heat/Process
+  { source: 11, target: 20, value: 25  }, // Industry → Other Services
+  { source: 11, target: 23, value: 10  }, // Industry → Losses
+  { source: 12, target: 16, value: 68  }, // Transport → Mobility
+  { source: 12, target: 23, value: 12  }, // Transport → Losses
+  { source: 13, target: 17, value: 30  }, // Buildings → Lighting
+  { source: 13, target: 18, value: 38  }, // Buildings → Appliances
+  { source: 13, target: 15, value: 10  }, // Buildings → Heat
+  { source: 13, target: 23, value: 10  }, // Buildings → Losses
+  { source: 14, target: 19, value: 22  }, // Agriculture → Food
+  { source: 14, target: 23, value: 3   }, // Agriculture → Losses
+];
+
+// ── LAYOUT ───────────────────────────────────────────────────────────────────
+const W = 1060, H = 560;
+const margin = { top: 20, right: 130, bottom: 20, left: 130 };
+const iW = W - margin.left - margin.right;
+const iH = H - margin.top - margin.bottom;
+
+// Stage x positions (0–5, but losses go to right side alongside end uses)
+const stageX = {
+  0: 0,
+  1: iW * 0.22,
+  2: iW * 0.42,
+  3: iW * 0.63,
+  4: iW * 0.84,
+  5: iW * 0.84, // losses at same x as end uses but positioned top/bottom
+};
+
+const NODE_W = 14;
+const NODE_PAD = 8;
+
+// Compute total flow per stage to size nodes
+const totalByNode = new Array(nodes.length).fill(0);
+links.forEach(l => {
+  totalByNode[l.source] += l.value;
+  totalByNode[l.target] += l.value;
+});
+// For source nodes only outflow counts; for sink nodes only inflow
+// Use max(in,out) per node as its "size"
+const inflow = new Array(nodes.length).fill(0);
+const outflow = new Array(nodes.length).fill(0);
+links.forEach(l => {
+  outflow[l.source] += l.value;
+  inflow[l.target] += l.value;
+});
+const nodeValue = nodes.map((n, i) => Math.max(inflow[i], outflow[i]));
+
+// Scale nodes to fill height
+function layoutStage(stageId) {
+  const ns = nodes.filter(n => n.stage === stageId);
+  const total = ns.reduce((s, n) => s + nodeValue[n.id], 0);
+  const totalPad = NODE_PAD * (ns.length - 1);
+  const availH = iH - totalPad;
+  let y = 0;
+  const scale = availH / total;
+  ns.forEach(n => {
+    const h = nodeValue[n.id] * scale;
+    n._h = h;
+    n._y = y;
+    n._x = stageX[stageId];
+    y += h + NODE_PAD;
+  });
+}
+
+// Handle stage 4 (end uses) and stage 5 (losses) sharing same x
+// Place losses at bottom separated
+function layoutStage4and5() {
+  const endUses = nodes.filter(n => n.stage === 4);
+  const losses = nodes.filter(n => n.stage === 5);
+
+  const totalEnd = endUses.reduce((s, n) => s + nodeValue[n.id], 0);
+  const totalLoss = losses.reduce((s, n) => s + nodeValue[n.id], 0);
+  const allPad = NODE_PAD * (endUses.length + losses.length);
+  const availH = iH - allPad - 20; // 20px separator gap
+  const total = totalEnd + totalLoss;
+  const scale = availH / total;
+
+  // End uses at top
+  let y = 0;
+  endUses.forEach(n => {
+    n._h = nodeValue[n.id] * scale;
+    n._y = y;
+    n._x = stageX[4];
+    y += n._h + NODE_PAD;
+  });
+
+  // Losses below with gap
+  y += 20;
+  losses.forEach(n => {
+    n._h = nodeValue[n.id] * scale;
+    n._y = y;
+    n._x = stageX[5];
+    y += n._h + NODE_PAD;
+  });
+}
+
+[0, 1, 2, 3].forEach(s => layoutStage(s));
+layoutStage4and5();
+
+// ── LINK PATH COMPUTATION ────────────────────────────────────────────────────
+// For each node, track how much link flow has been placed (top offsets)
+const nodeLinkOutY = new Array(nodes.length).fill(0);
+const nodeLinkInY = new Array(nodes.length).fill(0);
+
+// Sort links so they stack cleanly
+links.sort((a, b) => a.source - b.source || a.target - b.target);
+
+// Compute scale for links: same as node scale within stage
+// We need a universal pixel-per-unit scale
+const totalSource = nodes.filter(n => n.stage === 0).reduce((s, n) => s + nodeValue[n.id], 0);
+const sourceH = nodes.filter(n => n.stage === 0).reduce((s, n) => s + n._h, 0);
+const pxPerUnit = sourceH / totalSource;
+
+function computeLinkGeom(link) {
+  const src = nodes[link.source];
+  const tgt = nodes[link.target];
+  const lh = link.value * pxPerUnit;
+
+  const x0 = src._x + NODE_W;
+  const y0 = src._y + nodeLinkOutY[link.source];
+  const x1 = tgt._x;
+  const y1 = tgt._y + nodeLinkInY[link.target];
+
+  nodeLinkOutY[link.source] += lh;
+  nodeLinkInY[link.target] += lh;
+
+  link._lh = lh;
+  link._x0 = x0; link._y0 = y0;
+  link._x1 = x1; link._y1 = y1;
+
+  const cx = (x0 + x1) / 2;
+  link._path = `M${x0},${y0} C${cx},${y0} ${cx},${y1} ${x1},${y1} L${x1},${y1+lh} C${cx},${y1+lh} ${cx},${y0+lh} ${x0},${y0+lh} Z`;
+}
+
+links.forEach(l => computeLinkGeom(l));
+
+// ── SVG SETUP ────────────────────────────────────────────────────────────────
+const svg = d3.select("#chart")
+  .append("svg")
+  .attr("viewBox", `0 0 ${W} ${H}`)
+  .attr("preserveAspectRatio", "xMidYMid meet");
+
+const g = svg.append("g")
+  .attr("transform", `translate(${margin.left},${margin.top})`);
+
+// ── LINKS ────────────────────────────────────────────────────────────────────
+const linkSel = g.append("g").attr("class", "links")
+  .selectAll("path")
+  .data(links)
+  .join("path")
+  .attr("class", d => `link${nodes[d.target].isLoss ? " loss" : ""}`)
+  .attr("d", d => d._path)
+  .attr("fill", d => {
+    const src = nodes[d.source];
+    const tgt = nodes[d.target];
+    if (tgt.isLoss) return "#c03050";
+    return src.color;
+  })
+  .attr("opacity", 0.38)
+  .attr("stroke", "none");
+
+// ── NODES ────────────────────────────────────────────────────────────────────
+const nodeG = g.append("g").attr("class", "nodes")
+  .selectAll("g")
+  .data(nodes)
+  .join("g")
+  .attr("class", "node")
+  .attr("transform", d => `translate(${d._x},${d._y})`);
+
+nodeG.append("rect")
+  .attr("width", NODE_W)
+  .attr("height", d => Math.max(d._h, 2))
+  .attr("fill", d => d.isLoss ? "url(#lossPattern)" : d.color)
+  .attr("rx", 2);
+
+// Loss pattern
+const defs = svg.append("defs");
+const pat = defs.append("pattern")
+  .attr("id", "lossPattern")
+  .attr("width", 6).attr("height", 6)
+  .attr("patternUnits", "userSpaceOnUse")
+  .attr("patternTransform", "rotate(45)");
+pat.append("rect").attr("width", 6).attr("height", 6).attr("fill", "#c03050").attr("opacity", 0.35);
+pat.append("line").attr("x1", 0).attr("y1", 0).attr("x2", 0).attr("y2", 6)
+  .attr("stroke", "#c03050").attr("stroke-width", 3).attr("opacity", 0.7);
+
+// Labels
+nodeG.append("text")
+  .attr("x", d => d.stage === 0 ? -6 : NODE_W + 6)
+  .attr("y", d => d._h / 2)
+  .attr("dy", "0.35em")
+  .attr("text-anchor", d => d.stage === 0 ? "end" : "start")
+  .attr("font-size", d => d._h < 14 ? "9px" : "11px")
+  .attr("fill", d => d.isLoss ? "#e06070" : "#c8ccd8")
+  .text(d => d.name);
+
+// ── DRAG ────────────────────────────────────────────────────────────────────
+function recomputeLinks() {
+  // Reset offsets
+  nodeLinkOutY.fill(0);
+  nodeLinkInY.fill(0);
+  links.forEach(l => computeLinkGeom(l));
+  linkSel.attr("d", d => d._path);
+}
+
+const drag = d3.drag()
+  .on("start", function(event, d) { d3.select(this).raise(); })
+  .on("drag", function(event, d) {
+    d._y = Math.max(0, Math.min(iH - d._h, d._y + event.dy));
+    d3.select(this).attr("transform", `translate(${d._x},${d._y})`);
+    recomputeLinks();
+  });
+
+nodeG.call(drag);
+
+// ── HOVER INTERACTION ────────────────────────────────────────────────────────
+const tooltip = document.getElementById("tooltip");
+
+function setTooltip(html, x, y) {
+  tooltip.innerHTML = html;
+  const tw = tooltip.offsetWidth || 180;
+  const th = tooltip.offsetHeight || 80;
+  const px = Math.min(x + 14, window.innerWidth - tw - 10);
+  const py = Math.min(y - 10, window.innerHeight - th - 10);
+  tooltip.style.left = px + "px";
+  tooltip.style.top = py + "px";
+  tooltip.classList.add("visible");
+}
+
+function hideTooltip() {
+  tooltip.classList.remove("visible");
+}
+
+// Find all links connected to a node (directly or through paths)
+function getConnectedLinks(nodeId) {
+  const visited = new Set();
+  const connLinks = new Set();
+
+  function walkDown(nid) {
+    if (visited.has(nid)) return;
+    visited.add(nid);
+    links.forEach((l, i) => {
+      if (l.source === nid) { connLinks.add(i); walkDown(l.target); }
+    });
+  }
+  function walkUp(nid) {
+    if (visited.has(nid)) return;
+    visited.add(nid);
+    links.forEach((l, i) => {
+      if (l.target === nid) { connLinks.add(i); walkUp(l.source); }
+    });
+  }
+  walkDown(nodeId);
+  visited.clear();
+  walkUp(nodeId);
+  return connLinks;
+}
+
+nodeG.on("mouseenter", function(event, d) {
+  const connected = getConnectedLinks(d.id);
+  const totalIn = inflow[d.id];
+  const totalOut = outflow[d.id];
+
+  linkSel.classed("dimmed", (l, i) => !connected.has(i))
+         .classed("highlighted", (l, i) => connected.has(i))
+         .attr("opacity", (l, i) => connected.has(i) ? 0.72 : 0.05);
+
+  nodeG.selectAll("rect")
+    .attr("opacity", (n) => {
+      if (n.id === d.id) return 1;
+      // check if any connected link touches this node
+      let found = false;
+      connected.forEach(i => {
+        if (links[i].source === n.id || links[i].target === n.id) found = true;
+      });
+      return found ? 0.85 : 0.2;
+    });
+
+  const pct = totalIn > 0 ? ((totalIn / totalSource * 100).toFixed(1)) : "";
+  let html = `<div class="t-title">${d.name}</div>`;
+  if (totalIn > 0) html += `<div class="t-row"><span>In</span><span class="t-val">${totalIn.toFixed(1)} EJ</span></div>`;
+  if (totalOut > 0) html += `<div class="t-row"><span>Out</span><span class="t-val">${totalOut.toFixed(1)} EJ</span></div>`;
+  if (pct) html += `<div class="t-row"><span>% of primary</span><span class="t-val">${pct}%</span></div>`;
+
+  setTooltip(html, event.clientX, event.clientY);
+})
+.on("mousemove", function(event) {
+  const tw = tooltip.offsetWidth || 180;
+  const th = tooltip.offsetHeight || 80;
+  const px = Math.min(event.clientX + 14, window.innerWidth - tw - 10);
+  const py = Math.min(event.clientY - 10, window.innerHeight - th - 10);
+  tooltip.style.left = px + "px";
+  tooltip.style.top = py + "px";
+})
+.on("mouseleave", function() {
+  linkSel.classed("dimmed", false).classed("highlighted", false).attr("opacity", 0.38);
+  nodeG.selectAll("rect").attr("opacity", 1);
+  hideTooltip();
+});
+
+linkSel.on("mouseenter", function(event, d) {
+  const src = nodes[d.source];
+  const tgt = nodes[d.target];
+  const pct = (d.value / totalSource * 100).toFixed(1);
+  const srcTotal = outflow[d.source];
+  const pctOfSrc = (d.value / srcTotal * 100).toFixed(1);
+
+  linkSel.attr("opacity", (l) => l === d ? 0.82 : 0.06);
+
+  let html = `<div class="t-title">${src.name} → ${tgt.name}</div>`;
+  html += `<div class="t-row"><span>Flow</span><span class="t-val">${d.value.toFixed(1)} EJ</span></div>`;
+  html += `<div class="t-row"><span>% of primary</span><span class="t-val">${pct}%</span></div>`;
+  html += `<div class="t-row"><span>% of source</span><span class="t-val">${pctOfSrc}%</span></div>`;
+  if (tgt.isLoss) html += `<div class="t-row" style="color:#e06070;margin-top:4px"><span>⚡ Loss flow</span></div>`;
+
+  setTooltip(html, event.clientX, event.clientY);
+})
+.on("mousemove", function(event) {
+  const tw = tooltip.offsetWidth || 180;
+  const th = tooltip.offsetHeight || 80;
+  const px = Math.min(event.clientX + 14, window.innerWidth - tw - 10);
+  const py = Math.min(event.clientY - 10, window.innerHeight - th - 10);
+  tooltip.style.left = px + "px";
+  tooltip.style.top = py + "px";
+})
+.on("mouseleave", function() {
+  linkSel.attr("opacity", 0.38);
+  nodeG.selectAll("rect").attr("opacity", 1);
+  hideTooltip();
+});
+
+// ── STAGE LABELS ────────────────────────────────────────────────────────────
+const stages = [
+  { label: "Primary Sources", x: stageX[0] + NODE_W/2 },
+  { label: "Generation", x: stageX[1] + NODE_W/2 },
+  { label: "Networks", x: stageX[2] + NODE_W/2 },
+  { label: "Sectors", x: stageX[3] + NODE_W/2 },
+  { label: "End Uses / Losses", x: stageX[4] + NODE_W/2 },
+];
+
+g.append("g").attr("class", "stage-labels")
+  .selectAll("text")
+  .data(stages)
+  .join("text")
+  .attr("x", d => d.x)
+  .attr("y", -8)
+  .attr("text-anchor", "middle")
+  .attr("font-size", "10px")
+  .attr("fill", "#4a5060")
+  .attr("letter-spacing", "0.06em")
+  .attr("text-transform", "uppercase")
+  .text(d => d.label.toUpperCase());
+
+// Total flow annotation
+g.append("text")
+  .attr("x", iW / 2)
+  .attr("y", iH + 16)
+  .attr("text-anchor", "middle")
+  .attr("font-size", "10px")
+  .attr("fill", "#3a4050")
+  .text(`Total primary energy: ${totalSource.toFixed(0)} EJ  •  Drag nodes to rearrange  •  Hover for details`);
+</script>
+</body>
+</html>

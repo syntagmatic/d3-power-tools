@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>File System — Zoomable Treemap</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; overflow: hidden; }
+
+    body {
+      font-family: ui-monospace, "Cascadia Code", "JetBrains Mono", monospace;
+      background: #0f1117;
+      color: #cdd6f4;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Header ─────────────────────────────────────────────────────────────── */
+    #header {
+      flex-shrink: 0;
+      background: #181b22;
+      border-bottom: 1px solid #252836;
+      padding: 0 14px;
+      height: 42px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .logo {
+      font-size: 11px;
+      font-weight: 700;
+      color: #555a70;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      flex-shrink: 0;
+    }
+
+    #breadcrumb {
+      display: flex;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .crumb {
+      font-size: 13px;
+      color: #7c82a0;
+      padding: 3px 7px;
+      border-radius: 4px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.12s, color 0.12s;
+      user-select: none;
+    }
+    .crumb:hover { background: #252836; color: #cdd6f4; }
+    .crumb.active {
+      color: #e0e6ff;
+      font-weight: 600;
+      cursor: default;
+      pointer-events: none;
+    }
+    .sep { color: #3a3f52; font-size: 13px; padding: 0 2px; }
+
+    /* ── Chart ──────────────────────────────────────────────────────────────── */
+    #chart {
+      flex: 1;
+      position: relative;
+      min-height: 0;
+    }
+
+    svg { display: block; }
+
+    /* ── Tooltip ────────────────────────────────────────────────────────────── */
+    #tooltip {
+      position: absolute;
+      bottom: 14px;
+      right: 14px;
+      background: rgba(22, 25, 35, 0.94);
+      border: 1px solid #2c3045;
+      border-radius: 7px;
+      padding: 10px 13px;
+      font-size: 12px;
+      line-height: 1.6;
+      color: #9ba3c0;
+      max-width: 230px;
+      pointer-events: none;
+      opacity: 0;
+      transform: translateY(5px);
+      transition: opacity 0.15s ease, transform 0.15s ease;
+    }
+    #tooltip.show { opacity: 1; transform: translateY(0); }
+    #tooltip .tt-name { color: #dde4ff; font-weight: 600; margin-bottom: 1px; }
+    #tooltip .tt-meta { color: #555e7a; font-size: 11px; }
+  </style>
+</head>
+<body>
+  <div id="header">
+    <span class="logo">&#9632; fs</span>
+    <div id="breadcrumb"></div>
+  </div>
+  <div id="chart"></div>
+  <div id="tooltip"></div>
+
+  <script type="module">
+    import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // SYNTHETIC DATA — 3-level file system, ~400 files, log-distributed sizes
+    // ══════════════════════════════════════════════════════════════════════════
+
+    const rng = d3.randomLcg(0x4d3c2b1a);
+    // Log-normal file sizes: exp(U[7,14]) → range ~1 KB–1.2 MB, geomean ~36 KB
+    const fileSize = () => Math.round(Math.exp(rng() * 7 + 7));
+
+    const DIRS = [
+      {
+        name: "src",
+        subs: ["components", "pages", "hooks", "utils", "api", "store"],
+        stems: ["index","App","Router","store","api","auth","utils","types","hooks",
+                "context","layout","theme","config","logger","validators","i18n"],
+        exts: [".ts",".tsx",".js",".jsx",".css",".scss"],
+      },
+      {
+        name: "docs",
+        subs: ["guides", "api-reference", "tutorials", "architecture", "ops"],
+        stems: ["README","CHANGELOG","overview","quickstart","concepts","glossary",
+                "reference","guide","tutorial","FAQ","security","deployment","contributing"],
+        exts: [".md",".txt",".html",".rst",".adoc"],
+      },
+      {
+        name: "tests",
+        subs: ["unit", "integration", "e2e", "helpers", "fixtures"],
+        stems: ["setup","teardown","utils","helpers","mocks","fixtures","snapshots",
+                "factories","matchers","reporters","coverage","baseline","scenario"],
+        exts: [".test.ts",".spec.ts",".test.js",".snap",".json"],
+      },
+      {
+        name: "assets",
+        subs: ["images", "icons", "fonts", "videos", "data"],
+        stems: ["logo","icon","banner","hero","bg","sprite","avatar","placeholder",
+                "thumbnail","cover","watermark","badge","pattern","gradient","texture"],
+        exts: [".png",".jpg",".svg",".gif",".webp",".ico"],
+      },
+      {
+        name: "config",
+        subs: ["env", "webpack", "docker", "ci"],
+        stems: ["webpack.config","babel.config",".eslintrc",".prettierrc","jest.config",
+                "rollup.config","vite.config","tsconfig","package","Makefile"],
+        exts: [".json",".yaml",".toml",".js",".env"],
+      },
+      {
+        name: "scripts",
+        subs: ["build", "deploy", "dev", "data"],
+        stems: ["build","deploy","test","lint","format","generate","migrate",
+                "seed","backup","clean","watch","release","check","report"],
+        exts: [".sh",".py",".js",".ts",".rb"],
+      },
+      {
+        name: "lib",
+        subs: ["core", "utils", "adapters", "plugins", "types"],
+        stems: ["index","core","parser","validator","formatter","serializer",
+                "logger","cache","queue","event","emitter","stream","crypto","http"],
+        exts: [".ts",".js",".d.ts",".mjs",".cjs"],
+      },
+      {
+        name: "build",
+        subs: ["static", "chunks", "assets", "reports"],
+        stems: ["main","vendor","chunk","runtime","polyfill","worker","styles",
+                "fonts","manifest","report","stats","bundle","entry","lazy"],
+        exts: [".js",".js.map",".css",".gz",".html"],
+      },
+    ];
+
+    function buildTree() {
+      return {
+        name: "/",
+        children: DIRS.map(dir => ({
+          name: dir.name,
+          children: dir.subs.map(sub => {
+            const count = 6 + Math.floor(rng() * 12); // 6–17 files
+            const used = new Set();
+            const files = Array.from({ length: count }, (_, i) => {
+              const stem = dir.stems[i % dir.stems.length];
+              let nm = stem;
+              let k = 2;
+              while (used.has(nm)) nm = `${stem}${k++}`;
+              used.add(nm);
+              return {
+                name: nm + dir.exts[Math.floor(rng() * dir.exts.length)],
+                size: fileSize(),
+              };
+            });
+            return { name: sub, children: files };
+          }),
+        })),
+      };
+    }
+
+    const treeData = buildTree();
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // HIERARCHY + TREEMAP LAYOUT
+    // ══════════════════════════════════════════════════════════════════════════
+
+    const chartEl = document.getElementById("chart");
+    const W = chartEl.clientWidth  || window.innerWidth;
+    const H = chartEl.clientHeight || (window.innerHeight - 42);
+
+    const root = d3.hierarchy(treeData)
+      .sum(d => d.size || 0)
+      .sort((a, b) => b.value - a.value);
+
+    d3.treemap()
+      .tile(d3.treemapSquarify.ratio(1))
+      .size([W, H])
+      .paddingOuter(4)
+      .paddingTop(20)
+      .paddingInner(1)
+      (root);
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // COLOR
+    // ══════════════════════════════════════════════════════════════════════════
+
+    // One hue per top-level directory — hand-picked for dark backgrounds
+    const PALETTE = [
+      "#4f8ee8",  // src     — blue
+      "#52b46b",  // docs    — green
+      "#e07548",  // tests   — orange
+      "#9e6dd4",  // assets  — purple
+      "#d4a83e",  // config  — amber
+      "#3cb8cc",  // scripts — cyan
+      "#cc5490",  // lib     — pink
+      "#7ab040",  // build   — lime
+    ];
+
+    const color = d3.scaleOrdinal(
+      root.children.map(d => d.data.name),
+      PALETTE
+    );
+
+    // Nearest depth-1 ancestor determines the hue
+    function nodeColor(d) {
+      const top = d.ancestors().find(a => a.depth === 1);
+      return top ? color(top.data.name) : "#3a3f52";
+    }
+
+    // Depth-driven fill opacity: directories brighter, deep files dimmer
+    function fillOpacity(d) {
+      if (d.depth === 0) return 0.12;
+      if (d.depth === 1) return 0.88;
+      if (d.depth === 2) return 0.68;
+      return 0.46;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // SVG + SCALES
+    // ══════════════════════════════════════════════════════════════════════════
+
+    const svg = d3.select("#chart").append("svg")
+      .attr("width", W)
+      .attr("height", H)
+      .style("background", "#0f1117");
+
+    // Clip entire chart to viewport bounds
+    const defs = svg.append("defs");
+    defs.append("clipPath").attr("id", "viewport")
+      .append("rect").attr("width", W).attr("height", H);
+
+    const canvas = svg.append("g").attr("clip-path", "url(#viewport)");
+
+    // x/y scales: domain tracks the focused node's layout coords → screen range
+    const x = d3.scaleLinear().domain([0, W]).range([0, W]);
+    const y = d3.scaleLinear().domain([0, H]).range([0, H]);
+
+    let focus = root;
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // CELLS — one <g> per node, containing clip-path + rect + text(s)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    const allNodes = root.descendants();
+    allNodes.forEach((d, i) => { d._id = i; });
+
+    // Per-cell clip paths (coordinates in cell-local space: 0,0 → w,h)
+    const cpRects = defs.selectAll("clipPath.cc")
+      .data(allNodes)
+      .join("clipPath")
+        .attr("class", "cc")
+        .attr("id", d => `cp${d._id}`)
+      .append("rect")
+        .attr("width",  d => Math.max(0, x(d.x1) - x(d.x0)))
+        .attr("height", d => Math.max(0, y(d.y1) - y(d.y0)));
+
+    const cells = canvas.selectAll("g.cell")
+      .data(allNodes)
+      .join("g")
+        .attr("class", "cell")
+        .attr("transform", d => `translate(${x(d.x0)},${y(d.y0)})`);
+
+    // ── Rect ──────────────────────────────────────────────────────────────────
+    cells.append("rect")
+      .attr("width",  d => Math.max(0, x(d.x1) - x(d.x0)))
+      .attr("height", d => Math.max(0, y(d.y1) - y(d.y0)))
+      .attr("fill",         nodeColor)
+      .attr("fill-opacity", fillOpacity)
+      .attr("stroke",       "#0f1117")
+      .attr("stroke-width", 0.75)
+      .style("cursor", d => d.children && d.depth > 0 ? "pointer" : "default")
+      .on("click",      handleClick)
+      .on("mouseenter", handleEnter)
+      .on("mouseleave", handleLeave);
+
+    // ── Directory label (inside paddingTop band) ──────────────────────────────
+    cells.filter(d => d.children && d.depth > 0)
+      .append("text")
+        .attr("class", "lbl-dir")
+        .attr("clip-path", d => `url(#cp${d._id})`)
+        .attr("x", 5).attr("y", 13)
+        .attr("fill", "rgba(255,255,255,0.88)")
+        .attr("font-size", "11px")
+        .attr("font-weight", "700")
+        .attr("font-family", "ui-monospace, monospace")
+        .attr("pointer-events", "none")
+        .text(d => d.data.name + "/");
+
+    // ── File name label ───────────────────────────────────────────────────────
+    cells.filter(d => !d.children)
+      .append("text")
+        .attr("class", "lbl-file")
+        .attr("clip-path", d => `url(#cp${d._id})`)
+        .attr("x", 4).attr("y", 12)
+        .attr("fill", "rgba(255,255,255,0.82)")
+        .attr("font-size", "10px")
+        .attr("font-family", "ui-monospace, monospace")
+        .attr("pointer-events", "none")
+        .text(d => d.data.name);
+
+    // ── File size label ───────────────────────────────────────────────────────
+    cells.filter(d => !d.children)
+      .append("text")
+        .attr("class", "lbl-size")
+        .attr("clip-path", d => `url(#cp${d._id})`)
+        .attr("x", 4).attr("y", 24)
+        .attr("fill", "rgba(255,255,255,0.38)")
+        .attr("font-size", "9px")
+        .attr("font-family", "ui-monospace, monospace")
+        .attr("pointer-events", "none")
+        .text(d => fmtSize(d.data.size));
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // ZOOM — scale-domain swap: update x/y domains, animate all cells
+    // ══════════════════════════════════════════════════════════════════════════
+
+    function zoomTo(d) {
+      focus = d;
+
+      // Remap layout-space coords of focused node onto screen
+      x.domain([d.x0, d.x1]);
+      y.domain([d.y0, d.y1]);
+
+      const t = svg.transition().duration(720).ease(d3.easeCubicInOut);
+
+      // Translate all cell groups to new screen positions
+      cells.transition(t)
+        .attr("transform", n => `translate(${x(n.x0)},${y(n.y0)})`);
+
+      // Resize cell rects
+      cells.select("rect").transition(t)
+        .attr("width",  n => Math.max(0, x(n.x1) - x(n.x0)))
+        .attr("height", n => Math.max(0, y(n.y1) - y(n.y0)));
+
+      // Resize clip-path rects (so text doesn't escape during transition)
+      cpRects.transition(t)
+        .attr("width",  n => Math.max(0, x(n.x1) - x(n.x0)))
+        .attr("height", n => Math.max(0, y(n.y1) - y(n.y0)));
+
+      // After animation settles, recalculate label visibility
+      t.on("end.labels", () => updateLabels());
+
+      updateBreadcrumb(d);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // LABEL VISIBILITY — hide labels when cell is too small to read
+    // ══════════════════════════════════════════════════════════════════════════
+
+    function cellPx(d) {
+      return { w: x(d.x1) - x(d.x0), h: y(d.y1) - y(d.y0) };
+    }
+
+    function updateLabels() {
+      cells.select("text.lbl-dir").attr("opacity", d => {
+        const { w, h } = cellPx(d);
+        return w > 32 && h > 16 ? 1 : 0;
+      });
+      cells.select("text.lbl-file").attr("opacity", d => {
+        const { w, h } = cellPx(d);
+        return w > 26 && h > 13 ? 1 : 0;
+      });
+      cells.select("text.lbl-size").attr("opacity", d => {
+        const { w, h } = cellPx(d);
+        return w > 44 && h > 27 ? 1 : 0;
+      });
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // BREADCRUMB
+    // ══════════════════════════════════════════════════════════════════════════
+
+    function updateBreadcrumb(focusNode) {
+      const crumbs = focusNode.ancestors().reverse();
+      const bc = d3.select("#breadcrumb").html("");
+      crumbs.forEach((d, i) => {
+        if (i > 0) bc.append("span").attr("class", "sep").text("/");
+        bc.append("span")
+          .attr("class", i === crumbs.length - 1 ? "crumb active" : "crumb")
+          .text(d.depth === 0 ? "~" : d.data.name)
+          .on("click", () => {
+            if (i < crumbs.length - 1) zoomTo(d);
+          });
+      });
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // TOOLTIP
+    // ══════════════════════════════════════════════════════════════════════════
+
+    const ttEl = document.getElementById("tooltip");
+    let ttHide;
+
+    function handleEnter(event, d) {
+      clearTimeout(ttHide);
+      const isDir = !!d.children;
+      if (isDir && d.depth > 0) {
+        ttEl.innerHTML =
+          `<div class="tt-name">${d.data.name}/</div>` +
+          `<div class="tt-meta">${d.leaves().length} files · ${fmtSize(d.value)}</div>`;
+      } else if (!isDir) {
+        ttEl.innerHTML =
+          `<div class="tt-name">${d.data.name}</div>` +
+          `<div class="tt-meta">${fmtSize(d.data.size)}</div>`;
+      } else {
+        return; // root — no tooltip
+      }
+      ttEl.classList.add("show");
+    }
+
+    function handleLeave() {
+      ttHide = setTimeout(() => ttEl.classList.remove("show"), 250);
+    }
+
+    function handleClick(event, d) {
+      event.stopPropagation();
+      if (d.children && d.depth > 0) zoomTo(d);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // UTILITIES
+    // ══════════════════════════════════════════════════════════════════════════
+
+    function fmtSize(b) {
+      if (!b) return "—";
+      if (b < 1024)       return `${b} B`;
+      if (b < 1048576)    return `${(b / 1024).toFixed(1)} KB`;
+      if (b < 1073741824) return `${(b / 1048576).toFixed(1)} MB`;
+      return `${(b / 1073741824).toFixed(1)} GB`;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // INIT
+    // ══════════════════════════════════════════════════════════════════════════
+
+    updateBreadcrumb(root);
+    updateLabels();
+  </script>
+</body>
+</html>

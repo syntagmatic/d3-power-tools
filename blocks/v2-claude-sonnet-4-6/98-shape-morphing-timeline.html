@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Shape-Morphing Timeline</title>
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #0f1117;
+    color: #e2e8f0;
+    font-family: 'Inter', system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    padding: 24px 16px;
+  }
+
+  h1 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: #94a3b8;
+    margin-bottom: 6px;
+  }
+
+  .subtitle {
+    font-size: 0.78rem;
+    color: #475569;
+    margin-bottom: 28px;
+    letter-spacing: 0.03em;
+  }
+
+  #chart-wrap {
+    position: relative;
+    width: 100%;
+    max-width: 820px;
+  }
+
+  svg { display: block; width: 100%; }
+
+  /* Mode pills */
+  .mode-pills {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+  }
+
+  .pill {
+    padding: 5px 16px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    cursor: pointer;
+    border: 1.5px solid transparent;
+    transition: all 0.15s;
+    background: #1e2533;
+    color: #64748b;
+  }
+  .pill:hover { color: #94a3b8; border-color: #334155; }
+  .pill.active {
+    background: #1e3a5f;
+    color: #60a5fa;
+    border-color: #3b82f6;
+  }
+
+  /* Scrubber */
+  .scrubber-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 16px;
+    padding: 0 4px;
+  }
+
+  .scrubber-row input[type=range] {
+    flex: 1;
+    -webkit-appearance: none;
+    height: 4px;
+    border-radius: 2px;
+    background: #1e2533;
+    outline: none;
+    cursor: pointer;
+  }
+  .scrubber-row input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: #3b82f6;
+    border: 2px solid #1e40af;
+    cursor: pointer;
+  }
+
+  .play-btn {
+    width: 36px; height: 36px;
+    border-radius: 50%;
+    border: 1.5px solid #334155;
+    background: #1e2533;
+    color: #94a3b8;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px;
+    transition: all 0.15s;
+    flex-shrink: 0;
+  }
+  .play-btn:hover { border-color: #3b82f6; color: #60a5fa; }
+
+  .time-label {
+    font-size: 0.72rem;
+    color: #475569;
+    width: 56px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+  }
+
+  .morph-label {
+    font-size: 0.68rem;
+    color: #334155;
+    text-align: center;
+    margin-top: 8px;
+    letter-spacing: 0.04em;
+  }
+
+  /* Tooltip */
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: #1e2533ee;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 0.73rem;
+    color: #cbd5e1;
+    line-height: 1.5;
+    white-space: nowrap;
+    opacity: 0;
+    transition: opacity 0.12s;
+  }
+  .tooltip.visible { opacity: 1; }
+</style>
+</head>
+<body>
+
+<h1>Shape-Morphing Timeline</h1>
+<p class="subtitle">Monthly revenue 2023 — drag scrubber or press play</p>
+
+<div class="mode-pills">
+  <button class="pill active" data-mode="bar">Bar</button>
+  <button class="pill" data-mode="line">Line</button>
+  <button class="pill" data-mode="area">Area</button>
+  <button class="pill" data-mode="scatter">Scatter</button>
+</div>
+
+<div id="chart-wrap">
+  <svg id="svg"></svg>
+  <div class="tooltip" id="tooltip"></div>
+</div>
+
+<div class="scrubber-row">
+  <button class="play-btn" id="playBtn">▶</button>
+  <input type="range" id="scrubber" min="0" max="1" step="0.001" value="0">
+  <span class="time-label" id="timeLabel">Jan 2023</span>
+</div>
+<p class="morph-label" id="morphLabel">bar</p>
+
+<script type="module">
+// ── Data ─────────────────────────────────────────────────────────────────────
+const months = [
+  "Jan","Feb","Mar","Apr","May","Jun",
+  "Jul","Aug","Sep","Oct","Nov","Dec"
+];
+const rawData = [
+  { month: "Jan 2023", value: 42300, growth: 0.04,  category: "Q1" },
+  { month: "Feb 2023", value: 38900, growth: -0.08, category: "Q1" },
+  { month: "Mar 2023", value: 51200, growth: 0.32,  category: "Q1" },
+  { month: "Apr 2023", value: 48700, growth: -0.05, category: "Q2" },
+  { month: "May 2023", value: 55400, growth: 0.14,  category: "Q2" },
+  { month: "Jun 2023", value: 61800, growth: 0.12,  category: "Q2" },
+  { month: "Jul 2023", value: 57200, growth: -0.07, category: "Q3" },
+  { month: "Aug 2023", value: 63900, growth: 0.12,  category: "Q3" },
+  { month: "Sep 2023", value: 72100, growth: 0.13,  category: "Q3" },
+  { month: "Oct 2023", value: 68400, growth: -0.05, category: "Q4" },
+  { month: "Nov 2023", value: 79600, growth: 0.16,  category: "Q4" },
+  { month: "Dec 2023", value: 88200, growth: 0.11,  category: "Q4" },
+];
+
+// ── Layout ────────────────────────────────────────────────────────────────────
+const W = 820, H = 400;
+const margin = { top: 32, right: 28, bottom: 48, left: 64 };
+const innerW = W - margin.left - margin.right;
+const innerH = H - margin.top - margin.bottom;
+
+const svg = d3.select("#svg")
+  .attr("viewBox", `0 0 ${W} ${H}`)
+  .attr("preserveAspectRatio", "xMidYMid meet");
+
+const g = svg.append("g")
+  .attr("transform", `translate(${margin.left},${margin.top})`);
+
+// ── Scales ────────────────────────────────────────────────────────────────────
+const xBand = d3.scaleBand()
+  .domain(rawData.map(d => d.month))
+  .range([0, innerW])
+  .padding(0.25);
+
+const xPoint = d3.scalePoint()
+  .domain(rawData.map(d => d.month))
+  .range([0, innerW])
+  .padding(0.5);
+
+const yScale = d3.scaleLinear()
+  .domain([0, d3.max(rawData, d => d.value) * 1.1])
+  .range([innerH, 0])
+  .nice();
+
+const rScale = d3.scaleSqrt()
+  .domain([0, d3.max(rawData, d => d.value)])
+  .range([4, 22]);
+
+const colorScale = d3.scaleOrdinal()
+  .domain(["Q1","Q2","Q3","Q4"])
+  .range(["#60a5fa","#34d399","#fb923c","#f472b6"]);
+
+// ── Axes ──────────────────────────────────────────────────────────────────────
+const xAxisG = g.append("g")
+  .attr("class", "x-axis")
+  .attr("transform", `translate(0,${innerH})`);
+
+const yAxisG = g.append("g")
+  .attr("class", "y-axis");
+
+function styleAxis(sel) {
+  sel.selectAll("line, path").attr("stroke", "#1e2533");
+  sel.selectAll("text").attr("fill", "#475569").attr("font-size", "11px");
+}
+
+xAxisG.call(d3.axisBottom(xBand).tickSize(0).tickPadding(8))
+  .call(styleAxis)
+  .select(".domain").remove();
+
+yAxisG.call(d3.axisLeft(yScale)
+  .ticks(6)
+  .tickFormat(d => `$${d/1000}k`)
+  .tickSize(-innerW))
+  .call(sel => {
+    styleAxis(sel);
+    sel.selectAll(".tick line").attr("stroke", "#1e293b").attr("stroke-dasharray", "3,3");
+    sel.select(".domain").remove();
+  });
+
+// ── State ─────────────────────────────────────────────────────────────────────
+// modes in morph order: bar → line → area → scatter
+const MODE_ORDER = ["bar","line","area","scatter"];
+let currentMode = "bar";
+let scrubberT = 0; // 0..1 across the full scrubber
+let isPlaying = false;
+let playTimer = null;
+
+// ── Point-resampling helpers ──────────────────────────────────────────────────
+// For each data point, compute [x, y, r, opacity] per mode:
+
+function getTargetAttrs(mode, d, i) {
+  switch (mode) {
+    case "bar": return {
+      x: xBand(d.month),
+      y: yScale(d.value),
+      w: xBand.bandwidth(),
+      h: innerH - yScale(d.value),
+      cx: xBand(d.month) + xBand.bandwidth() / 2,
+      cy: yScale(d.value),
+      r: 0,
+      opacity: 1,
+    };
+    case "line": return {
+      cx: xPoint(d.month),
+      cy: yScale(d.value),
+      r: 5,
+      opacity: 1,
+    };
+    case "area": return {
+      cx: xPoint(d.month),
+      cy: yScale(d.value),
+      r: 4,
+      opacity: 0.9,
+    };
+    case "scatter": return {
+      cx: xPoint(d.month),
+      cy: yScale(d.value),
+      r: rScale(d.value),
+      opacity: 0.85,
+    };
+  }
+}
+
+// ── Path generators ───────────────────────────────────────────────────────────
+const lineGen = d3.line()
+  .x(d => xPoint(d.month))
+  .y(d => yScale(d.value))
+  .curve(d3.curveCatmullRom.alpha(0.5));
+
+const areaGen = d3.area()
+  .x(d => xPoint(d.month))
+  .y0(innerH)
+  .y1(d => yScale(d.value))
+  .curve(d3.curveCatmullRom.alpha(0.5));
+
+// ── Render layers ─────────────────────────────────────────────────────────────
+
+// Area fill layer
+const areaPath = g.append("path")
+  .datum(rawData)
+  .attr("fill", "#3b82f620")
+  .attr("stroke", "none")
+  .style("pointer-events", "none");
+
+// Line layer
+const linePath = g.append("path")
+  .datum(rawData)
+  .attr("fill", "none")
+  .attr("stroke", "#3b82f6")
+  .attr("stroke-width", 2.5)
+  .attr("stroke-linejoin", "round")
+  .attr("stroke-linecap", "round")
+  .style("pointer-events", "none");
+
+// Bar layer (rects)
+const barGroup = g.append("g").attr("class", "bars");
+const bars = barGroup.selectAll("rect")
+  .data(rawData, d => d.month)
+  .join("rect")
+  .attr("rx", 2)
+  .attr("fill", d => colorScale(d.category))
+  .attr("opacity", 0.85)
+  .attr("x", d => xBand(d.month))
+  .attr("y", d => yScale(d.value))
+  .attr("width", xBand.bandwidth())
+  .attr("height", d => innerH - yScale(d.value));
+
+// Dot layer (circles for line/scatter)
+const dotGroup = g.append("g").attr("class", "dots");
+const dots = dotGroup.selectAll("circle")
+  .data(rawData, d => d.month)
+  .join("circle")
+  .attr("fill", d => colorScale(d.category))
+  .attr("stroke", "#0f1117")
+  .attr("stroke-width", 1.5)
+  .attr("r", 0)
+  .attr("cx", d => xPoint(d.month))
+  .attr("cy", d => yScale(d.value));
+
+// ── Morph between two modes at t ──────────────────────────────────────────────
+// t: 0 = fully modeA, 1 = fully modeB
+function morphRender(modeA, modeB, t) {
+  const ease = d3.easeCubicInOut(t);
+
+  // -- Bars --
+  if (modeA === "bar" || modeB === "bar") {
+    const tBar = modeA === "bar" ? 1 - ease : ease;
+    bars.attr("opacity", d => {
+      const base = colorScale(d.category);
+      return tBar * 0.85;
+    });
+    bars.attr("x", (d, i) => {
+      const aX = getTargetAttrs("bar", d, i).x;
+      const bX = getTargetAttrs(modeA === "bar" ? modeB : modeA, d, i).cx - xBand.bandwidth() / 2;
+      return modeA === "bar"
+        ? aX + (bX - aX) * ease
+        : bX + (aX - bX) * ease;
+    });
+    bars.attr("y", (d, i) => {
+      const aY = getTargetAttrs("bar", d, i).y;
+      const bY = getTargetAttrs(modeA === "bar" ? modeB : modeA, d, i).cy;
+      return modeA === "bar"
+        ? aY + (bY - aY) * ease
+        : bY + (aY - bY) * ease;
+    });
+    bars.attr("width", (d, i) => {
+      const bMode = modeA === "bar" ? modeB : modeA;
+      return modeA === "bar"
+        ? xBand.bandwidth() * (1 - ease)
+        : xBand.bandwidth() * ease;
+    });
+    bars.attr("height", (d, i) => {
+      const barH = innerH - yScale(d.value);
+      return modeA === "bar"
+        ? barH * (1 - ease) + 0
+        : barH * ease;
+    });
+  } else {
+    // Neither side is bar — hide bars
+    bars.attr("opacity", 0).attr("height", 0);
+  }
+
+  // -- Dots --
+  const showDotA = modeA !== "bar";
+  const showDotB = modeB !== "bar";
+
+  if (showDotA || showDotB) {
+    dots.attr("opacity", showDotA && showDotB ? 1
+      : showDotA ? (1 - ease) : ease);
+
+    dots.attr("r", (d, i) => {
+      const rA = showDotA ? getTargetAttrs(modeA, d, i).r : 0;
+      const rB = showDotB ? getTargetAttrs(modeB, d, i).r : 0;
+      return rA + (rB - rA) * ease;
+    });
+    dots.attr("cx", (d, i) => {
+      const cxA = getTargetAttrs(modeA === "bar" ? modeB : modeA, d, i).cx;
+      const cxB = getTargetAttrs(modeA === "bar" ? modeA : modeB, d, i).cx || xPoint(d.month);
+      // both non-bar modes use xPoint, so cx is the same
+      return xPoint(d.month);
+    });
+    dots.attr("cy", (d, i) => yScale(d.value));
+  } else {
+    dots.attr("r", 0).attr("opacity", 0);
+  }
+
+  // -- Line --
+  const showLine = modeA === "line" || modeB === "line" ||
+                   modeA === "area" || modeB === "area";
+  if (showLine) {
+    const lineOpA = (modeA === "line" || modeA === "area") ? 1 : 0;
+    const lineOpB = (modeB === "line" || modeB === "area") ? 1 : 0;
+    linePath
+      .attr("opacity", lineOpA + (lineOpB - lineOpA) * ease)
+      .attr("d", lineGen(rawData));
+  } else {
+    linePath.attr("opacity", 0);
+  }
+
+  // -- Area fill --
+  const areaOpA = modeA === "area" ? 1 : 0;
+  const areaOpB = modeB === "area" ? 1 : 0;
+  const areaOp = areaOpA + (areaOpB - areaOpA) * ease;
+  if (areaOp > 0.001) {
+    areaPath.attr("opacity", areaOp).attr("d", areaGen(rawData));
+  } else {
+    areaPath.attr("opacity", 0);
+  }
+
+  // Update x-axis ticks to match active mode
+  const usePoint = !(modeA === "bar" && t < 0.5) && !(modeB === "bar" && t > 0.5);
+  const xAxisScale = usePoint ? xPoint : xBand;
+  xAxisG.call(d3.axisBottom(xAxisScale).tickSize(0).tickPadding(8))
+    .call(styleAxis)
+    .select(".domain").remove();
+}
+
+// ── Full-mode rendering (t=0 or t=1) ─────────────────────────────────────────
+function renderMode(mode) {
+  // Bars
+  if (mode === "bar") {
+    bars.attr("opacity", 0.85)
+      .attr("x", d => xBand(d.month))
+      .attr("y", d => yScale(d.value))
+      .attr("width", xBand.bandwidth())
+      .attr("height", d => innerH - yScale(d.value));
+    dots.attr("r", 0).attr("opacity", 0);
+    linePath.attr("opacity", 0);
+    areaPath.attr("opacity", 0);
+    xAxisG.call(d3.axisBottom(xBand).tickSize(0).tickPadding(8))
+      .call(styleAxis).select(".domain").remove();
+  } else if (mode === "line") {
+    bars.attr("opacity", 0).attr("height", 0);
+    dots.attr("opacity", 1).attr("r", 5).attr("cx", d => xPoint(d.month)).attr("cy", d => yScale(d.value));
+    linePath.attr("opacity", 1).attr("d", lineGen(rawData));
+    areaPath.attr("opacity", 0);
+    xAxisG.call(d3.axisBottom(xPoint).tickSize(0).tickPadding(8))
+      .call(styleAxis).select(".domain").remove();
+  } else if (mode === "area") {
+    bars.attr("opacity", 0).attr("height", 0);
+    dots.attr("opacity", 0.9).attr("r", 4).attr("cx", d => xPoint(d.month)).attr("cy", d => yScale(d.value));
+    linePath.attr("opacity", 1).attr("d", lineGen(rawData));
+    areaPath.attr("opacity", 1).attr("d", areaGen(rawData));
+    xAxisG.call(d3.axisBottom(xPoint).tickSize(0).tickPadding(8))
+      .call(styleAxis).select(".domain").remove();
+  } else if (mode === "scatter") {
+    bars.attr("opacity", 0).attr("height", 0);
+    dots.attr("opacity", 0.85).attr("r", d => rScale(d.value))
+      .attr("cx", d => xPoint(d.month)).attr("cy", d => yScale(d.value));
+    linePath.attr("opacity", 0);
+    areaPath.attr("opacity", 0);
+    xAxisG.call(d3.axisBottom(xPoint).tickSize(0).tickPadding(8))
+      .call(styleAxis).select(".domain").remove();
+  }
+}
+
+// ── Scrubber logic ────────────────────────────────────────────────────────────
+// scrubberT: 0..1 maps across the 3 transitions:
+//   [0..0.33] bar→line, [0.33..0.66] line→area, [0.66..1] area→scatter
+const TRANSITIONS = [
+  ["bar","line"],
+  ["line","area"],
+  ["area","scatter"],
+];
+
+function applyT(t) {
+  scrubberT = t;
+  document.getElementById("scrubber").value = t;
+
+  const seg = Math.min(2, Math.floor(t * 3));
+  const segT = (t * 3) - seg;
+  const [mA, mB] = TRANSITIONS[seg];
+
+  // Update active pill
+  let activeMode;
+  if (segT < 0.5) activeMode = mA; else activeMode = mB;
+  document.querySelectorAll(".pill").forEach(p => {
+    p.classList.toggle("active", p.dataset.mode === activeMode);
+  });
+  currentMode = activeMode;
+
+  // Update morph label
+  const pct = Math.round(segT * 100);
+  document.getElementById("morphLabel").textContent =
+    segT < 0.02 ? mA
+    : segT > 0.98 ? mB
+    : `morphing ${mA} → ${mB} (${pct}%)`;
+
+  // Update time label: map 0..1 across 12 months
+  const monthIdx = Math.min(11, Math.floor(t * 12));
+  document.getElementById("timeLabel").textContent = rawData[monthIdx].month;
+
+  morphRender(mA, mB, segT);
+}
+
+// Initial render
+renderMode("bar");
+applyT(0);
+
+// ── Scrubber input ────────────────────────────────────────────────────────────
+document.getElementById("scrubber").addEventListener("input", function() {
+  stopPlay();
+  applyT(+this.value);
+});
+
+// ── Pills ─────────────────────────────────────────────────────────────────────
+document.querySelectorAll(".pill").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const mode = btn.dataset.mode;
+    stopPlay();
+    const idx = MODE_ORDER.indexOf(mode);
+    const t = idx / 3;
+    // Smoothly animate scrubber to target t
+    animateScrubberTo(t);
+  });
+});
+
+function animateScrubberTo(targetT) {
+  const startT = scrubberT;
+  const dur = 700;
+  const start = performance.now();
+  function tick(now) {
+    const elapsed = now - start;
+    const t01 = Math.min(1, elapsed / dur);
+    const eased = d3.easeCubicInOut(t01);
+    applyT(startT + (targetT - startT) * eased);
+    if (t01 < 1) requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+}
+
+// ── Auto-play ─────────────────────────────────────────────────────────────────
+const playBtn = document.getElementById("playBtn");
+const PLAY_DURATION = 8000; // full sweep 0→1
+let playStart = null;
+let playStartT = 0;
+
+function startPlay() {
+  isPlaying = true;
+  playBtn.textContent = "⏸";
+  playStartT = scrubberT >= 0.999 ? 0 : scrubberT;
+  playStart = performance.now();
+
+  function tick(now) {
+    if (!isPlaying) return;
+    const elapsed = now - playStart;
+    const remaining = (1 - playStartT);
+    const t = playStartT + Math.min(remaining, (elapsed / PLAY_DURATION) * remaining * (1 / remaining));
+    // actually: advance proportionally to remaining distance
+    const progress = elapsed / (PLAY_DURATION * (1 - playStartT));
+    const newT = playStartT + (1 - playStartT) * Math.min(1, progress);
+    applyT(newT);
+    if (newT < 0.999) {
+      playTimer = requestAnimationFrame(tick);
+    } else {
+      applyT(1);
+      stopPlay();
+    }
+  }
+  playTimer = requestAnimationFrame(tick);
+}
+
+function stopPlay() {
+  isPlaying = false;
+  playBtn.textContent = "▶";
+  if (playTimer) { cancelAnimationFrame(playTimer); playTimer = null; }
+}
+
+playBtn.addEventListener("click", () => {
+  if (isPlaying) stopPlay(); else startPlay();
+});
+
+// ── Tooltip ───────────────────────────────────────────────────────────────────
+const tooltip = document.getElementById("tooltip");
+const chartWrap = document.getElementById("chart-wrap");
+
+function showTooltip(event, d) {
+  const rect = chartWrap.getBoundingClientRect();
+  const x = event.clientX - rect.left + 12;
+  const y = event.clientY - rect.top - 40;
+  tooltip.style.left = `${Math.min(x, rect.width - 160)}px`;
+  tooltip.style.top = `${y}px`;
+  const sign = d.growth >= 0 ? "+" : "";
+  tooltip.innerHTML = `<strong>${d.month}</strong><br>Revenue: $${d.value.toLocaleString()}<br>MoM: ${sign}${(d.growth * 100).toFixed(1)}%`;
+  tooltip.classList.add("visible");
+}
+
+function hideTooltip() {
+  tooltip.classList.remove("visible");
+}
+
+bars.on("mouseover", (e, d) => showTooltip(e, d))
+    .on("mousemove", (e, d) => showTooltip(e, d))
+    .on("mouseout", hideTooltip);
+
+dots.on("mouseover", (e, d) => showTooltip(e, d))
+    .on("mousemove", (e, d) => showTooltip(e, d))
+    .on("mouseout", hideTooltip);
+
+// ── Keyboard shortcuts ────────────────────────────────────────────────────────
+document.addEventListener("keydown", e => {
+  if (e.code === "Space") { e.preventDefault(); isPlaying ? stopPlay() : startPlay(); }
+  if (e.code === "ArrowRight") { stopPlay(); applyT(Math.min(1, scrubberT + 0.05)); }
+  if (e.code === "ArrowLeft")  { stopPlay(); applyT(Math.max(0, scrubberT - 0.05)); }
+});
+</script>
+</body>
+</html>

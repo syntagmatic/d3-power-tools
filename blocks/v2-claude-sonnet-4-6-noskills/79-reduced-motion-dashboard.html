@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Crossfilter Dashboard · Reduced Motion</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0d1117;
+  --surface: #161b27;
+  --border: #1f2937;
+  --text-1: #c9d1d9;
+  --text-2: #6e7d95;
+  --accent: #3b82f6;
+  --accent-bg: rgba(59,130,246,0.12);
+  --accent-dim: #1a3560;
+  --bar-bg: #1d2a3f;
+  --dot-active: #3b82f6;
+  --dot-dim: #1d2a3f;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--bg);
+  color: var(--text-1);
+  min-height: 100vh;
+}
+
+/* ── Header ── */
+header {
+  padding: .85rem 1.75rem;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.hd-title { font-size: .95rem; font-weight: 600; }
+.hd-sub   { font-size: .72rem; color: var(--text-2); margin-top: .1rem; }
+
+/* ── Motion control box ── */
+.motion-box {
+  display: flex; align-items: center; gap: .6rem;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: .45rem .8rem;
+  flex-shrink: 0;
+}
+
+.m-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+}
+.m-dot.on  { background: #22c55e; box-shadow: 0 0 6px rgba(34,197,94,.5); }
+.m-dot.off { background: #a855f7; }
+
+.m-label { font-size: .72rem; color: var(--text-2); min-width: 11rem; }
+
+.m-btn {
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 4px; color: var(--text-2); font-size: .7rem;
+  padding: .25rem .65rem; cursor: pointer; font-family: inherit;
+}
+.m-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ── Filter bar ── */
+.fbar {
+  padding: .45rem 1.75rem;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: .6rem;
+  min-height: 2.4rem; flex-wrap: wrap;
+}
+.fbar-count { font-size: .74rem; color: var(--text-2); }
+
+.fpill {
+  display: inline-flex; align-items: center; gap: .3rem;
+  padding: .18rem .55rem;
+  background: var(--accent-dim); border: 1px solid rgba(59,130,246,.4);
+  border-radius: 10px; color: #93c5fd; font-size: .69rem; cursor: pointer;
+}
+.fpill:hover { border-color: var(--accent); }
+.fpill-x { opacity: .5; }
+
+.clear-all {
+  margin-left: auto; background: none;
+  border: 1px solid var(--border); border-radius: 4px;
+  color: var(--text-2); font-size: .69rem; padding: .2rem .55rem;
+  cursor: pointer; font-family: inherit;
+}
+.clear-all:hover { border-color: #ef4444; color: #ef4444; }
+
+/* ── Dashboard grid ── */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.1rem;
+  padding: 1.1rem 1.75rem;
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: .9rem;
+  overflow: hidden;
+}
+
+.panel-title { font-size: .78rem; font-weight: 600; }
+.panel-hint  { font-size: .68rem; color: var(--text-2); margin-top: .1rem; margin-bottom: .7rem; }
+
+/* ── SVG / D3 ── */
+.axis text            { fill: var(--text-2); font-size: 10px; }
+.axis path,
+.axis line            { stroke: var(--border); }
+.axis .domain         { stroke: var(--border); }
+
+.brush .selection     { fill: var(--accent-bg); stroke: var(--accent); stroke-width: 1; }
+.brush .handle        { fill: var(--accent); }
+.brush .overlay       { cursor: crosshair; }
+
+/* ── Dept bar hover ── */
+.dept-row { cursor: pointer; }
+.dept-row rect.bg { fill: var(--bar-bg); }
+.dept-row rect.fg { fill: var(--accent); }
+.dept-row.selected rect.bg { fill: rgba(59,130,246,.15); }
+.dept-row text { fill: var(--text-2); font-size: 10.5px; }
+
+/* no CSS transitions when prefers-reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  .m-dot, .m-btn, .fpill, .clear-all { transition: none !important; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <div class="hd-title">Employee Analytics Dashboard</div>
+    <div class="hd-sub">400 synthetic employees · brush or click charts to crossfilter</div>
+  </div>
+  <div class="motion-box">
+    <div class="m-dot" id="mDot"></div>
+    <span class="m-label" id="mLabel"></span>
+    <button class="m-btn" id="mBtn"></button>
+  </div>
+</header>
+
+<div class="fbar" id="fbar">
+  <span class="fbar-count" id="fcount"></span>
+  <button class="clear-all" id="clearAll" style="display:none">Clear all</button>
+</div>
+
+<div class="grid">
+  <div class="panel" id="pAge">
+    <div class="panel-title">Age Distribution</div>
+    <div class="panel-hint">Drag to filter by age range</div>
+  </div>
+  <div class="panel" id="pDept">
+    <div class="panel-title">Department</div>
+    <div class="panel-hint">Click bars to toggle department filter</div>
+  </div>
+  <div class="panel" id="pScatter">
+    <div class="panel-title">Experience vs. Salary</div>
+    <div class="panel-hint">Drag to filter by experience &amp; salary</div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<script>
+'use strict';
+
+// ── Seeded RNG (LCG) ─────────────────────────────────────────────────────────
+function makeLCG(seed) {
+  let s = seed >>> 0;
+  return () => { s = (Math.imul(1664525, s) + 1013904223) >>> 0; return s / 4294967296; };
+}
+const rng = makeLCG(0xCAFEBABE);
+const randn = () => {
+  const u = Math.max(rng(), 1e-10), v = rng();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+};
+
+// ── Synthetic data ────────────────────────────────────────────────────────────
+const DEPTS = ['Engineering', 'Sales', 'Marketing', 'Product', 'HR'];
+const DEPT_BASE = { Engineering: 95, Sales: 78, Marketing: 68, Product: 88, HR: 62 };
+
+const allData = Array.from({ length: 400 }, (_, i) => {
+  const dept = DEPTS[Math.floor(rng() * 5)];
+  const age  = 22 + Math.round(rng() * 42);                            // 22–64
+  const exp  = Math.max(0, Math.min(age - 20, Math.round(rng() * 18 + (age - 30) * 0.35)));
+  const salary = Math.round(Math.max(30, DEPT_BASE[dept] + exp * 2.3 + randn() * 11 + rng() * 6)) * 1000;
+  return { i, dept, age, exp, salary };
+});
+
+// ── State ─────────────────────────────────────────────────────────────────────
+const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+const state = {
+  systemReduced: mq.matches,
+  override: null,          // null | true (reduced) | false (full motion)
+  ageFilter:     null,     // [lo, hi]
+  deptFilter:    null,     // Set<string> | null
+  scatterFilter: null,     // { x0, x1, y0, y1 }
+};
+
+function isReduced() {
+  return state.override !== null ? state.override : state.systemReduced;
+}
+
+function getT() {
+  return d3.transition().duration(isReduced() ? 0 : 300).ease(d3.easeCubicOut);
+}
+
+// ── Filter helpers ────────────────────────────────────────────────────────────
+// Each chart shows its own dimension filtered by ALL OTHER active filters.
+function passesOther(d, exclude) {
+  if (exclude !== 'age' && state.ageFilter) {
+    if (d.age < state.ageFilter[0] || d.age > state.ageFilter[1]) return false;
+  }
+  if (exclude !== 'dept' && state.deptFilter) {
+    if (!state.deptFilter.has(d.dept)) return false;
+  }
+  if (exclude !== 'scatter' && state.scatterFilter) {
+    const f = state.scatterFilter;
+    if (d.exp < f.x0 || d.exp > f.x1 || d.salary < f.y0 || d.salary > f.y1) return false;
+  }
+  return true;
+}
+
+function isActive(d) {
+  return passesOther(d, '__none__');
+}
+
+function activeCount() { return allData.filter(isActive).length; }
+
+// ── Motion UI ─────────────────────────────────────────────────────────────────
+const mDot   = document.getElementById('mDot');
+const mLabel = document.getElementById('mLabel');
+const mBtn   = document.getElementById('mBtn');
+
+function syncMotionUI() {
+  const reduced = isReduced();
+  mDot.className = 'm-dot ' + (reduced ? 'off' : 'on');
+  if (state.override !== null) {
+    mLabel.textContent = reduced ? 'Motion: OFF (manual override)' : 'Motion: ON (manual override)';
+    mBtn.textContent   = 'Reset to system';
+  } else {
+    mLabel.textContent = reduced ? 'Motion: OFF (system pref)' : 'Motion: ON (system pref)';
+    mBtn.textContent   = reduced ? 'Enable motion' : 'Disable motion';
+  }
+}
+
+mBtn.addEventListener('click', () => {
+  if (state.override !== null) {
+    state.override = null;
+  } else {
+    state.override = !isReduced(); // flip from current
+  }
+  syncMotionUI();
+});
+
+mq.addEventListener('change', e => {
+  state.systemReduced = e.matches;
+  syncMotionUI();
+});
+
+syncMotionUI();
+
+// ── Filter bar ────────────────────────────────────────────────────────────────
+const fbar     = document.getElementById('fbar');
+const fcountEl = document.getElementById('fcount');
+const clearAll = document.getElementById('clearAll');
+
+function syncFilterBar() {
+  const n = activeCount();
+  fcountEl.textContent = `${n.toLocaleString()} of ${allData.length} employees`;
+
+  fbar.querySelectorAll('.fpill').forEach(el => el.remove());
+  const hasFilter = state.ageFilter || state.deptFilter || state.scatterFilter;
+  clearAll.style.display = hasFilter ? '' : 'none';
+
+  if (state.ageFilter) {
+    addPill(
+      `Age: ${Math.round(state.ageFilter[0])}–${Math.round(state.ageFilter[1])}`,
+      () => { state.ageFilter = null; resetAgeBrush(); updateAll(); }
+    );
+  }
+  if (state.deptFilter) {
+    addPill(
+      `Dept: ${[...state.deptFilter].join(', ')}`,
+      () => { state.deptFilter = null; updateAll(); }
+    );
+  }
+  if (state.scatterFilter) {
+    const f = state.scatterFilter;
+    addPill(
+      `Exp ${f.x0}–${f.x1}yr · $${(f.y0/1000).toFixed(0)}k–$${(f.y1/1000).toFixed(0)}k`,
+      () => { state.scatterFilter = null; resetScatterBrush(); updateAll(); }
+    );
+  }
+}
+
+function addPill(text, onRemove) {
+  const el = document.createElement('span');
+  el.className = 'fpill';
+  el.innerHTML = `${text} <span class="fpill-x">✕</span>`;
+  el.addEventListener('click', onRemove);
+  fbar.insertBefore(el, clearAll);
+}
+
+clearAll.addEventListener('click', () => {
+  state.ageFilter = null;
+  state.deptFilter = null;
+  state.scatterFilter = null;
+  resetAgeBrush();
+  resetScatterBrush();
+  updateAll();
+});
+
+// ── Layout constants ──────────────────────────────────────────────────────────
+const mg  = { top: 10, right: 18, bottom: 34, left: 50 };
+const SVG_W = 370, SVG_H = 230;
+const W = SVG_W - mg.left - mg.right;
+const H = SVG_H - mg.top - mg.bottom;
+
+// ── Panel 1: Age Histogram ────────────────────────────────────────────────────
+let resetAgeBrush = () => {};
+
+(function buildAgeChart() {
+  const pane = d3.select('#pAge');
+  const svg  = pane.append('svg').attr('width', SVG_W).attr('height', SVG_H);
+  const g    = svg.append('g').attr('transform', `translate(${mg.left},${mg.top})`);
+
+  // Scales & bins
+  const xScale = d3.scaleLinear().domain([20, 67]).range([0, W]);
+  const binner  = d3.bin().domain(xScale.domain()).thresholds(xScale.ticks(18)).value(d => d.age);
+  const bins    = binner(allData);  // each bin = array of data objects + .x0/.x1
+
+  const maxTotal = d3.max(bins, b => b.length);
+  const yScale  = d3.scaleLinear().domain([0, maxTotal]).range([H, 0]).nice();
+
+  // Axes
+  g.append('g').attr('class', 'axis')
+    .attr('transform', `translate(0,${H})`)
+    .call(d3.axisBottom(xScale).ticks(8).tickSize(3).tickPadding(4))
+    .call(ax => ax.select('.domain').attr('stroke', 'var(--border)'));
+
+  g.append('g').attr('class', 'axis')
+    .call(d3.axisLeft(yScale).ticks(5).tickSize(3).tickPadding(4))
+    .call(ax => ax.select('.domain').remove());
+
+  g.append('text').attr('x', W / 2).attr('y', H + 30)
+    .attr('text-anchor', 'middle').attr('fill', 'var(--text-2)').attr('font-size', 10)
+    .text('Age (years)');
+
+  // Background bars (total per bin)
+  g.append('g').selectAll('rect').data(bins).join('rect')
+    .attr('x',      b => xScale(b.x0) + 1)
+    .attr('width',  b => Math.max(0, xScale(b.x1) - xScale(b.x0) - 2))
+    .attr('y',      b => yScale(b.length))
+    .attr('height', b => H - yScale(b.length))
+    .attr('fill',   'var(--bar-bg)')
+    .attr('rx', 2);
+
+  // Foreground bars (filtered)
+  const fgBars = g.append('g').selectAll('rect').data(bins).join('rect')
+    .attr('x',     b => xScale(b.x0) + 1)
+    .attr('width', b => Math.max(0, xScale(b.x1) - xScale(b.x0) - 2))
+    .attr('y',     H).attr('height', 0)
+    .attr('fill',  'var(--accent)').attr('rx', 2);
+
+  // Brush
+  const brush = d3.brushX()
+    .extent([[0, 0], [W, H]])
+    .on('brush end', ({ selection }) => {
+      if (!selection) {
+        state.ageFilter = null;
+      } else {
+        const [lo, hi] = selection.map(xScale.invert);
+        state.ageFilter = [lo, hi];
+      }
+      updateAll();
+    });
+
+  const brushG = g.append('g').attr('class', 'brush').call(brush);
+  resetAgeBrush = () => brushG.call(brush.move, null);
+
+  // Update function
+  window._updateAge = () => {
+    const t = getT();
+    fgBars.transition(t)
+      .attr('y', b => {
+        const n = b.filter(d => passesOther(d, 'age')).length;
+        return yScale(n);
+      })
+      .attr('height', b => {
+        const n = b.filter(d => passesOther(d, 'age')).length;
+        return H - yScale(n);
+      });
+  };
+})();
+
+// ── Panel 2: Department Bars ──────────────────────────────────────────────────
+(function buildDeptChart() {
+  const totalByDept = d3.rollup(allData, v => v.length, d => d.dept);
+  const deptOrder   = DEPTS; // consistent order
+
+  const mg2  = { top: 8, right: 60, bottom: 18, left: 80 };
+  const W2   = SVG_W - mg2.left - mg2.right;
+  const H2   = SVG_H - mg2.top  - mg2.bottom;
+
+  const maxCount = d3.max(deptOrder, dept => totalByDept.get(dept));
+
+  const xScale = d3.scaleLinear().domain([0, maxCount]).range([0, W2]);
+  const yScale = d3.scaleBand().domain(deptOrder).range([0, H2]).padding(0.28);
+
+  const pane = d3.select('#pDept');
+  const svg  = pane.append('svg').attr('width', SVG_W).attr('height', SVG_H);
+  const g    = svg.append('g').attr('transform', `translate(${mg2.left},${mg2.top})`);
+
+  // X axis
+  g.append('g').attr('class', 'axis')
+    .attr('transform', `translate(0,${H2})`)
+    .call(d3.axisBottom(xScale).ticks(4).tickSize(3).tickPadding(4))
+    .call(ax => ax.select('.domain').remove());
+
+  // Dept rows
+  const rows = g.selectAll('.dept-row')
+    .data(deptOrder)
+    .join('g')
+    .attr('class', 'dept-row')
+    .attr('transform', dept => `translate(0, ${yScale(dept)})`);
+
+  // Label
+  rows.append('text')
+    .attr('x', -6).attr('y', yScale.bandwidth() / 2)
+    .attr('dy', '.35em').attr('text-anchor', 'end')
+    .attr('fill', 'var(--text-2)').attr('font-size', 10.5)
+    .text(d => d);
+
+  // Background bar (total)
+  rows.append('rect').attr('class', 'bg')
+    .attr('x', 0)
+    .attr('y', 0)
+    .attr('width',  dept => xScale(totalByDept.get(dept)))
+    .attr('height', yScale.bandwidth())
+    .attr('rx', 3);
+
+  // Foreground bar (filtered)
+  const fgBars = rows.append('rect').attr('class', 'fg')
+    .attr('x', 0).attr('y', 0)
+    .attr('width', 0)
+    .attr('height', yScale.bandwidth())
+    .attr('rx', 3).attr('pointer-events', 'none');
+
+  // Count label
+  const countLabels = rows.append('text')
+    .attr('class', 'count-lbl')
+    .attr('x', dept => xScale(totalByDept.get(dept)) + 5)
+    .attr('y', yScale.bandwidth() / 2)
+    .attr('dy', '.35em')
+    .attr('fill', 'var(--text-2)').attr('font-size', 10)
+    .text(dept => totalByDept.get(dept));
+
+  // Click to toggle dept filter
+  rows.on('click', (_, dept) => {
+    if (!state.deptFilter) {
+      state.deptFilter = new Set([dept]);
+    } else {
+      if (state.deptFilter.has(dept)) {
+        state.deptFilter.delete(dept);
+        if (state.deptFilter.size === 0) state.deptFilter = null;
+      } else {
+        state.deptFilter.add(dept);
+      }
+    }
+    updateAll();
+  });
+
+  // Hover
+  rows.on('mouseenter', function() {
+    d3.select(this).select('rect.bg').attr('fill', 'rgba(59,130,246,.08)');
+  }).on('mouseleave', function(_, dept) {
+    const sel = state.deptFilter && state.deptFilter.has(dept);
+    d3.select(this).select('rect.bg').attr('fill', sel ? 'rgba(59,130,246,.15)' : 'var(--bar-bg)');
+  });
+
+  window._updateDept = () => {
+    const t = getT();
+    rows.each(function(dept) {
+      const row  = d3.select(this);
+      const n    = allData.filter(d => d.dept === dept && passesOther(d, 'dept')).length;
+      const sel  = state.deptFilter ? state.deptFilter.has(dept) : false;
+      const dimmed = state.deptFilter && !sel;
+
+      row.select('rect.bg')
+        .attr('fill', sel ? 'rgba(59,130,246,.18)' : 'var(--bar-bg)');
+
+      row.select('rect.fg')
+        .transition(t)
+        .attr('width', xScale(n))
+        .attr('fill-opacity', dimmed ? 0.25 : 1);
+
+      row.select('text.count-lbl')
+        .transition(t)
+        .attr('x', xScale(n) + 5)
+        .text(n)
+        .attr('fill', dimmed ? 'var(--text-3)' : 'var(--text-2)');
+    });
+  };
+})();
+
+// ── Panel 3: Scatter — Experience vs. Salary ──────────────────────────────────
+let resetScatterBrush = () => {};
+
+(function buildScatterChart() {
+  const mg3  = { top: 10, right: 18, bottom: 38, left: 56 };
+  const W3   = SVG_W - mg3.left - mg3.right;
+  const H3   = SVG_H - mg3.top  - mg3.bottom;
+
+  const xScale = d3.scaleLinear()
+    .domain([0, d3.max(allData, d => d.exp) + 1]).range([0, W3]).nice();
+  const yScale = d3.scaleLinear()
+    .domain([d3.min(allData, d => d.salary) * 0.97, d3.max(allData, d => d.salary) * 1.02])
+    .range([H3, 0]).nice();
+
+  const pane = d3.select('#pScatter');
+  const svg  = pane.append('svg').attr('width', SVG_W).attr('height', SVG_H);
+  const g    = svg.append('g').attr('transform', `translate(${mg3.left},${mg3.top})`);
+
+  // Axes
+  g.append('g').attr('class', 'axis')
+    .attr('transform', `translate(0,${H3})`)
+    .call(d3.axisBottom(xScale).ticks(7).tickSize(3).tickPadding(4))
+    .call(ax => ax.select('.domain').attr('stroke', 'var(--border)'));
+
+  g.append('g').attr('class', 'axis')
+    .call(d3.axisLeft(yScale).ticks(6).tickSize(3).tickPadding(4)
+      .tickFormat(d => `$${d/1000 | 0}k`))
+    .call(ax => ax.select('.domain').remove());
+
+  // Axis labels
+  g.append('text').attr('x', W3 / 2).attr('y', H3 + 32)
+    .attr('text-anchor', 'middle').attr('fill', 'var(--text-2)').attr('font-size', 10)
+    .text('Years of experience');
+
+  g.append('text')
+    .attr('transform', 'rotate(-90)')
+    .attr('x', -H3 / 2).attr('y', -46)
+    .attr('text-anchor', 'middle').attr('fill', 'var(--text-2)').attr('font-size', 10)
+    .text('Salary');
+
+  // Dots
+  const dots = g.append('g').selectAll('circle')
+    .data(allData)
+    .join('circle')
+    .attr('cx', d => xScale(d.exp))
+    .attr('cy', d => yScale(d.salary))
+    .attr('r', 3)
+    .attr('fill', 'var(--dot-active)')
+    .attr('fill-opacity', 0.65)
+    .attr('stroke', 'none');
+
+  // Brush
+  const brush = d3.brush()
+    .extent([[0, 0], [W3, H3]])
+    .on('brush end', ({ selection }) => {
+      if (!selection) {
+        state.scatterFilter = null;
+      } else {
+        const [[px0, py0], [px1, py1]] = selection;
+        state.scatterFilter = {
+          x0: xScale.invert(px0), x1: xScale.invert(px1),
+          y0: yScale.invert(py1), y1: yScale.invert(py0),
+        };
+      }
+      updateAll();
+    });
+
+  const brushG = g.append('g').attr('class', 'brush').call(brush);
+  resetScatterBrush = () => brushG.call(brush.move, null);
+
+  window._updateScatter = () => {
+    const t = getT();
+    dots.transition(t)
+      .attr('fill', d => passesOther(d, 'scatter') ? 'var(--dot-active)' : 'var(--dot-dim)')
+      .attr('fill-opacity', d => passesOther(d, 'scatter') ? 0.65 : 0.25);
+  };
+})();
+
+// ── Master update ─────────────────────────────────────────────────────────────
+function updateAll() {
+  window._updateAge();
+  window._updateDept();
+  window._updateScatter();
+  syncFilterBar();
+}
+
+// Initial render
+updateAll();
+</script>
+</body>
+</html>

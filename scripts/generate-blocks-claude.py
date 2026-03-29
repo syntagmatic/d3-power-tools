@@ -34,6 +34,7 @@ LOGFILE = PROJ / "temp" / f"generate-blocks-claude-{VERSION}.json"
 
 OUTDIR.mkdir(parents=True, exist_ok=True)
 FAILURES_DIR = OUTDIR / "failures"
+TIMEOUT_S = 600
 
 
 def _save_failure_report(bid, error, report, skills_requested):
@@ -47,6 +48,7 @@ def _save_failure_report(bid, error, report, skills_requested):
         "model": MODEL or "claude-opus-4-6",
         "skills_requested": skills_requested,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "timeout_s": TIMEOUT_S,
         **report,
     }
 
@@ -195,7 +197,7 @@ def run_block(idx, block, defaults):
                 cmd, stdout=sf, stderr=subprocess.PIPE, text=True,
                 cwd=str(staging))
             try:
-                _, stderr = proc.communicate(timeout=600)
+                _, stderr = proc.communicate(timeout=TIMEOUT_S)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
@@ -206,7 +208,7 @@ def run_block(idx, block, defaults):
                 return {"bid": bid, "status": "fail", "error": "timeout",
                         "skills_requested": block["skills"],
                         "skills_triggered": parse_skill_reads(stream),
-                        "skills_missed": block["skills"], "elapsed_s": 600}
+                        "skills_missed": block["skills"], "elapsed_s": TIMEOUT_S}
 
         class _Result:
             pass
