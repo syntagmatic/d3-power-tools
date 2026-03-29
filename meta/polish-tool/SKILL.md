@@ -1,5 +1,5 @@
 ---
-name: visual-critic
+name: polish-tool
 description: "Evaluate the visual design quality of D3.js visualizations through holistic judgment, not checklists. Screenshot the output and assess whether it looks crafted or generic. Scores reflect design intentionality: color harmony, typographic hierarchy, whitespace, data-ink ratio, and overall feel. Does NOT evaluate accessibility (ARIA, keyboard nav) — that belongs to separate agents."
 ---
 

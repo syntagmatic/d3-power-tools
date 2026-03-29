@@ -1,5 +1,5 @@
 ---
-name: encoding-integrity
+name: level-tool
 description: "Audit D3.js visualizations for honest and robust data encoding. Use this skill as an adversarial auditor that checks both static honesty (zero baselines, lie factor, area encoding, dual-axis risk, binning bias) and metamorphic robustness (do visual properties scale correctly when data changes? do data joins preserve identity?). Combines the deception detector and metamorphic tester into a single encoding integrity evaluation."
 ---
 

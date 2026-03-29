@@ -22,7 +22,7 @@ Deleted 3 redundant examples (966 lines): color-compositing (compositing-gallery
 
 ### ~~4. Consolidate meta skills~~ ✓ Partially done
 
-Merged check-skill into sharpen-tool (checking is part of sharpening). Auditing skills (visual-critic, encoding-integrity, interaction-stress-test, perceptual-red-team) kept separate — research confirms decomposed single-criterion evaluation outperforms combined prompts (lost-in-the-middle, attention dilution, instruction omission at scale).
+Renamed all meta skills for the power-tool theme. Auditing skills kept separate (research-backed): polish-tool (design), level-tool (honesty), stress-tool (robustness), scope-tool (clarity). Merged adversarial-eval + skill-eval → calibrate-tool. Code guides: square-tool (style), jig-tool (architecture). check-skill merged into sharpen-tool.
 
 ### 5. Clean up archive
 
@@ -32,7 +32,7 @@ Merged check-skill into sharpen-tool (checking is part of sharpening). Auditing 
 
 ## Infrastructure
 
-**Eval as CI.** Wire encoding-integrity metamorphic checks (scaling, permutation, subset, shift) as the first automated eval. Run on every skill commit. If scores drop, the commit is a regression.
+**Eval as CI.** Wire level-tool metamorphic checks (scaling, permutation, subset, shift) as the first automated eval. Run on every skill commit. If scores drop, the commit is a regression.
 
 **Asymmetric evaluation.** Claude generates, a symbolic checker or different model scores. The only way to break shared-bias evaluation.
 

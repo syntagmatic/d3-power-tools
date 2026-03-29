@@ -15,7 +15,7 @@ Read `notes/WHY.md` first. That's the philosophy this library is built on. The c
 ## Process
 
 1. Read `notes/WHY.md`
-2. Read `meta/skill-eval/sharpening-criteria.json` — the specific criteria (defaults + skill overrides)
+2. Read `meta/calibrate-tool/sharpening-criteria.json` — the specific criteria (defaults + skill overrides)
 3. Read the full SKILL.md for the skill you're evaluating
 4. Read every example HTML in `skills/<name>/examples/`
 5. Run the skill's tests: `python3 scripts/test-viz.py --config tests/test.config.json --skill <name>`

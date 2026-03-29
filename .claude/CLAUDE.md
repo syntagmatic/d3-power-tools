@@ -161,14 +161,16 @@ Each `SKILL.md` encodes domain knowledge, architecture patterns, interaction rec
 
 Skills for testing, evaluating, and improving other skills.
 
-- `meta/idiomatic-d3/` — D3 code style and review: method chaining indentation (2-space new selection, 4-space same), margin convention, .join() data joins with key functions, selection.call() composition, scales-as-functions, reusable chart closure pattern, naming conventions, event handling, import patterns, code review checklist, anti-patterns
-- `meta/cross-skill-composition/` — architectural patterns for combining skills: layer stack (Canvas+SVG+HTML), SVG vs Canvas decision framework, initialization sequence, state architecture (data/view/interaction), dirty-flag rendering, performance budgets, composition archetypes (explorer, narrative, dashboard, spatial, morpher), resize contract, Canvas↔SVG handoff
-- `meta/adversarial-eval/` — calibrate auditing skills: blind evaluation protocol, context contamination rules, inter-rater reliability
-- `meta/sharpen-tool/` — audit, compress, and simplify a SKILL.md: check for dangling references and broken code, then triage and compress for clarity and token efficiency
-- `meta/skill-eval/` — evaluate skill effectiveness with before/after comparisons and iterative improvement
+#### Code guides
+- `meta/square-tool/` — D3 code style: method chaining indentation, margin convention, .join() data joins, selection.call() composition, reusable chart closure pattern, naming conventions, anti-patterns
+- `meta/jig-tool/` — multi-skill assembly: layer stack (Canvas+SVG+HTML), SVG vs Canvas decision, state architecture, dirty-flag rendering, composition archetypes, resize contract
 
-#### Auditing skills
-- `meta/visual-critic/` — evaluate visual design quality: color harmony, typographic hierarchy, whitespace, data-ink ratio, overall feel (screenshot-based, not accessibility)
-- `meta/encoding-integrity/` — audit for honest and robust data encoding: lie factor, zero baselines, dual-axis risk, metamorphic relations (scaling, permutation, subset, shift), data join correctness
-- `meta/interaction-stress-test/` — hunt race conditions: update storms, stale closures, feedback loops, transition handoff conflicts
-- `meta/perceptual-red-team/` — audit cognitive load: working memory limits, animation congruence, spaghetti threshold, chart fatigue
+#### Inspection tools
+- `meta/polish-tool/` — design quality: color harmony, typographic hierarchy, whitespace, data-ink ratio, overall feel (screenshot-based)
+- `meta/level-tool/` — data honesty: lie factor, zero baselines, dual-axis risk, metamorphic relations (scaling, permutation, subset, shift), data join correctness
+- `meta/stress-tool/` — interaction robustness: update storms, stale closures, feedback loops, transition handoff conflicts
+- `meta/scope-tool/` — cognitive clarity: working memory limits, animation congruence, spaghetti threshold, color overload
+
+#### Workshop tools
+- `meta/calibrate-tool/` — measure skill effectiveness: with/without comparison for content skills, blind evaluation protocol for auditing skills
+- `meta/sharpen-tool/` — audit and compress SKILL.md files: check for errors, triage sections, compress for token efficiency

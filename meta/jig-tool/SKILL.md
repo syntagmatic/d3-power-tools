@@ -1,5 +1,5 @@
 ---
-name: cross-skill-composition
+name: jig-tool
 description: "Architectural patterns for combining multiple D3 visualization skills into a single application. Use this skill when building any non-trivial visualization that layers Canvas rendering with SVG interaction, coordinates multiple views, sequences initialization, manages shared state, or needs a performance budget across composed concerns. Also use when the user asks about SVG vs Canvas tradeoffs, layer stacking, resize handling across mixed renderers, or how to wire brushing/zoom/animation/accessibility together in one visualization."
 ---
 

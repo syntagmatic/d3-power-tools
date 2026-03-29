@@ -1,5 +1,5 @@
 ---
-name: perceptual-red-team
+name: scope-tool
 description: "Audit D3.js visualizations for cognitive overload and perceptual failure modes. Screenshot the output and assess whether the viewer can extract insights without being overwhelmed. Evaluates execution quality of complex charts — a 16-cell SPLOM can be readable or overwhelming depending on how it's done. Flags real perceptual failures, not chart type choices."
 ---
 

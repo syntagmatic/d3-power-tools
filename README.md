@@ -158,27 +158,29 @@ How to prepare data and choose the right container.
 
 ### Meta
 
-Skills for testing, evaluating, and improving other skills. The compound tool.
+The workshop. Each tool does one job.
 
-**[idiomatic-d3](meta/idiomatic-d3/SKILL.md)** — What good D3 code looks like. Chaining indentation, margin convention, `.join()` with key functions, `selection.call()`, reusable chart closures.
+**Code guides**
 
-**[cross-skill-composition](meta/cross-skill-composition/SKILL.md)** — How skills fit together. Layer stacks, state architecture, dirty-flag rendering, performance budgets, composition archetypes.
+**[square-tool](meta/square-tool/SKILL.md)** — D3 code style. Chaining indentation, margin convention, `.join()` with key functions, `selection.call()`, reusable chart closures.
 
-**[check-skill](meta/check-skill/SKILL.md)** — Audit a skill for dangling references and broken examples.
+**[jig-tool](meta/jig-tool/SKILL.md)** — Multi-skill assembly. Layer stacks, state architecture, dirty-flag rendering, performance budgets, composition archetypes.
 
-**[sharpen-tool](meta/sharpen-tool/SKILL.md)** — Compress a SKILL.md for clarity and token efficiency.
+**Inspection tools**
 
-**[skill-eval](meta/skill-eval/SKILL.md)** — Evaluate skill effectiveness with before/after comparisons.
+**[polish-tool](meta/polish-tool/SKILL.md)** — Design quality. Color harmony, typographic hierarchy, whitespace, data-ink ratio, overall feel.
 
-**[adversarial-eval](meta/adversarial-eval/SKILL.md)** — Calibrate auditing skills with blind evaluation protocol and inter-rater reliability checks.
+**[level-tool](meta/level-tool/SKILL.md)** — Data honesty. Lie factor, zero baselines, metamorphic relations, data join correctness.
 
-**[visual-critic](meta/visual-critic/SKILL.md)** — Audit design quality and "taste." Typographic hierarchy, 8px grid, WCAG accessibility, and visual logic.
+**[stress-tool](meta/stress-tool/SKILL.md)** — Interaction robustness. Update storms, stale closures, feedback loops, transition handoff conflicts.
 
-**[encoding-integrity](meta/encoding-integrity/SKILL.md)** — Audit for honest and robust data encoding. Lie factor, zero baselines, metamorphic relations, data join correctness.
+**[scope-tool](meta/scope-tool/SKILL.md)** — Cognitive clarity. Working memory limits, animation congruence, spaghetti threshold, color overload.
 
-**[perceptual-red-team](meta/perceptual-red-team/SKILL.md)** — Audit for cognitive overload. Working memory limits, "Chart Fatigue," hairball detection, and congruence in animation.
+**Workshop tools**
 
-**[interaction-stress-test](meta/interaction-stress-test/SKILL.md)** — Audit for race conditions and "update storms." Feedback loops, stale closures, RAF coalescing, and dirty-flag rendering.
+**[calibrate-tool](meta/calibrate-tool/SKILL.md)** — Measure skill effectiveness. With/without comparison for content skills, blind evaluation for auditing skills.
+
+**[sharpen-tool](meta/sharpen-tool/SKILL.md)** — Audit and compress SKILL.md files for clarity and token efficiency.
 
 ## Testing
 

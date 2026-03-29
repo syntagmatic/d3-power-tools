@@ -1,13 +1,13 @@
 ---
-name: idiomatic-d3
-description: "D3.js idiomatic style patterns and code review guidance. Use this skill when reviewing D3 code for style, refactoring D3 code toward community conventions, or writing new D3 code that follows Bostock's established patterns. Covers method chaining indentation (2-space for new selection, 4-space for same selection), the margin convention, selection.call() for reuse, modern .join() data joins with key functions, the reusable chart closure pattern, scales-as-functions composition, accessor conventions, event handling (this vs arrow functions), generator patterns (axes, brushes, zoom), naming conventions (d, i, x, y, color, svg, g), and anti-patterns to flag (jQuery-style DOM manipulation, missing key functions, d3.select(this) in arrow functions, manual for-loops, over-abstraction). Also use when the user asks about D3 best practices, D3 code style, D3 conventions, or wants to make D3 code more idiomatic. Related skills: `scales` (axis generators via .call()), `motion` (.join() with enter/update/exit), `data-gathering` (accessor patterns), `cross-skill-composition` (structural patterns for larger apps)."
+name: square-tool
+description: "D3.js idiomatic style patterns and code review guidance. Use this skill when reviewing D3 code for style, refactoring D3 code toward community conventions, or writing new D3 code that follows Bostock's established patterns. Covers method chaining indentation (2-space for new selection, 4-space for same selection), the margin convention, selection.call() for reuse, modern .join() data joins with key functions, the reusable chart closure pattern, scales-as-functions composition, accessor conventions, event handling (this vs arrow functions), generator patterns (axes, brushes, zoom), naming conventions (d, i, x, y, color, svg, g), and anti-patterns to flag (jQuery-style DOM manipulation, missing key functions, d3.select(this) in arrow functions, manual for-loops, over-abstraction). Also use when the user asks about D3 best practices, D3 code style, D3 conventions, or wants to make D3 code more idiomatic. Related skills: `scales` (axis generators via .call()), `motion` (.join() with enter/update/exit), `data-gathering` (accessor patterns), `jig-tool` (structural patterns for larger apps)."
 ---
 
 # Idiomatic D3
 
 D3 code that follows the library's conventions is code that other D3 developers can read, debug, and extend. Break these conventions and you lose the visual structure that makes chains parseable, the data binding that makes updates correct, and the composition patterns that keep charts maintainable. Every rule here explains what goes wrong when you ignore it — and when ignoring it is the right call.
 
-Related skills: `motion` (`.join()` with enter/update/exit callbacks), `data-gathering` (accessor patterns), `cross-skill-composition` (structural patterns for multi-layer apps).
+Related skills: `motion` (`.join()` with enter/update/exit callbacks), `data-gathering` (accessor patterns), `jig-tool` (structural patterns for multi-layer apps).
 
 ## Method Chaining & Indentation
 
