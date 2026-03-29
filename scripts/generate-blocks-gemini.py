@@ -35,18 +35,21 @@ LOGFILE = PROJ / "temp" / f"generate-blocks-gemini-{VERSION}.log"
 
 OUTDIR.mkdir(parents=True, exist_ok=True)
 
+TIMEOUT_S = 600
+
+
 def run_block(idx, block):
     bid = block["id"]
     outfile = OUTDIR / f"{bid}.html"
 
     if outfile.exists() and outfile.stat().st_size > 0:
         print(f"[{idx}] SKIP {bid} (exists)")
-        return ("skip", bid)
+        return None
 
     skills_list = [] if no_skills else block["skills"]
     staging = create_staging_dir(bid, skills_list, PROJ, all_skills=all_skills, prefix=VERSION)
 
-    # Write to staging dir, then copy out (Gemini sandbox blocks symlinks)
+    # Write to staging dir, then copy out
     staging_outfile = staging / f"{bid}.html"
     prompt = (
         f"Build this D3.js visualization and save it as {bid}.html\n\n"
@@ -63,13 +66,14 @@ def run_block(idx, block):
             cmd.extend(["--model", MODEL])
         result = subprocess.run(
             cmd,
-            capture_output=True, text=True, timeout=600,
+            capture_output=True, text=True, timeout=TIMEOUT_S,
             cwd=str(staging),
         )
     except subprocess.TimeoutExpired:
         cleanup_staging_dir(staging)
         print(f"[{idx}] TIMEOUT {bid}")
-        return ("fail", bid, "timeout")
+        return {"bid": bid, "status": "fail", "error": "timeout",
+                "elapsed_s": TIMEOUT_S}
 
     elapsed = time.time() - t0
 
@@ -77,30 +81,36 @@ def run_block(idx, block):
     if "429" in result.stderr or "RESOURCE_EXHAUSTED" in result.stderr:
         cleanup_staging_dir(staging)
         print(f"[{idx}] THROTTLED {bid} ({elapsed:.0f}s)")
-        return ("throttle", bid)
+        return {"bid": bid, "status": "fail", "error": "throttled",
+                "elapsed_s": round(elapsed, 1)}
 
     # Copy from staging dir to output dir, then clean up
     if staging_outfile.exists():
         shutil.copy2(staging_outfile, outfile)
     cleanup_staging_dir(staging)
 
+    record = {"bid": bid, "elapsed_s": round(elapsed, 1)}
+
     # Check output file
     if outfile.exists() and outfile.stat().st_size > 0:
         first_line = outfile.read_text().split("\n")[0].lower()
         if "<!doctype" in first_line or "<html" in first_line:
             lines = len(outfile.read_text().splitlines())
+            record["status"] = "pass"
+            record["lines"] = lines
             print(f"[{idx}] PASS {bid} ({lines} lines, {elapsed:.0f}s)")
-            return ("pass", bid)
+            return record
         else:
+            record["status"] = "fail"
+            record["error"] = "invalid html"
             print(f"[{idx}] FAIL {bid} (not valid HTML)")
             outfile.unlink()
-            return ("fail", bid, "invalid html")
+            return record
     else:
+        record["status"] = "fail"
+        record["error"] = "no output"
         print(f"[{idx}] FAIL {bid} (no output file)")
-        # Save stderr for debugging
-        errfile = OUTDIR / f".{bid}.stderr"
-        errfile.write_text(result.stderr)
-        return ("fail", bid, "no file")
+        return record
 
 
 def main():
@@ -110,38 +120,52 @@ def main():
     if ONLY_IDS:
         blocks = [b for b in blocks if b["id"] in ONLY_IDS]
 
+    # Filter to only missing blocks
+    missing = [b for b in blocks if not (OUTDIR / f"{b['id']}.html").exists()]
     mode = "no skills" if no_skills else "all skills" if all_skills else "manifest skills"
-    print(f"Generating {len(blocks)} blocks ({mode}) with up to {MAX_PARALLEL} parallel jobs\n")
+    print(f"{len(missing)} blocks to generate (of {len(blocks)} selected), {mode}, up to {MAX_PARALLEL} parallel\n")
 
-    results = {"pass": 0, "fail": 0, "skip": 0, "throttle": 0}
-    throttle_count = 0
-    log_lines = []
+    if not missing:
+        print("All blocks already exist. Done.")
+        return
+
+    records = []
 
     with ThreadPoolExecutor(max_workers=MAX_PARALLEL) as pool:
-        futures = {}
-        for i, block in enumerate(blocks):
-            f = pool.submit(run_block, i + 1, block)
-            futures[f] = block["id"]
-
+        futures = {pool.submit(run_block, i + 1, block): block["id"]
+                   for i, block in enumerate(missing)}
         for f in as_completed(futures):
             r = f.result()
-            status = r[0]
-            results[status] += 1
-            log_lines.append(f"{r[1]}: {status}")
+            if r is not None:
+                records.append(r)
 
-            if status == "throttle":
-                throttle_count += 1
-                if throttle_count >= 3:
-                    print("\n!!! Too many throttles, consider reducing parallelism")
+    records.sort(key=lambda r: r["bid"])
+    counts = {"pass": 0, "fail": 0}
+    for r in records:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
 
-    # Write log
-    LOGFILE.write_text("\n".join(sorted(log_lines)) + "\n")
+    # Update generation.json
+    gen_file = OUTDIR / "generation.json"
+    if gen_file.exists():
+        gen = json.loads(gen_file.read_text())
+    else:
+        model_id = MODEL or "gemini-3-flash-preview"
+        skill_mode = "none" if no_skills else "all" if all_skills else "manifest"
+        gen = {"model": model_id, "cli": "gemini", "version": VERSION,
+               "skill_mode": skill_mode, "block_count": 0, "blocks": {}}
+    for r in records:
+        entry = {"status": r["status"]}
+        for field in ("lines", "elapsed_s", "error"):
+            if r.get(field) is not None:
+                entry[field] = r[field]
+        gen["blocks"][r["bid"]] = entry
+    gen["block_count"] = sum(1 for b in gen["blocks"].values() if b.get("status") == "pass")
+    gen_file.write_text(json.dumps(gen, indent=2, ensure_ascii=False) + "\n")
 
     print(f"\n=== DONE ===")
-    print(f"Pass: {results['pass']}  Fail: {results['fail']}  "
-          f"Skip: {results['skip']}  Throttled: {results['throttle']}")
+    print(f"Pass: {counts.get('pass', 0)}  Fail: {counts.get('fail', 0)}")
     print(f"Output: {OUTDIR}")
-    print(f"Log: {LOGFILE}")
+    print(f"Report: {gen_file}")
 
 
 if __name__ == "__main__":
