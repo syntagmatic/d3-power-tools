@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Shape-Morphing Timeline</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #0a0a1a; color: #e0e0e0; font-family: 'Helvetica Neue', sans-serif; display: flex; flex-direction: column; align-items: center; height: 100vh; justify-content: center; }
+  h1 { font-size: 1.4rem; font-weight: 300; margin-bottom: 8px; letter-spacing: 0.05em; color: #aab; }
+  #chart { position: relative; }
+  .controls { display: flex; align-items: center; gap: 16px; margin-top: 12px; }
+  .controls button { background: none; border: 1px solid #556; color: #ccd; padding: 6px 16px; border-radius: 4px; cursor: pointer; font-size: 0.85rem; transition: all 0.2s; }
+  .controls button:hover { border-color: #88a; color: #fff; }
+  .controls button.active { border-color: #6cf; color: #6cf; }
+  .scrubber { position: relative; width: 400px; height: 36px; }
+  .scrubber-track { position: absolute; top: 16px; left: 0; right: 0; height: 3px; background: #334; border-radius: 2px; }
+  .scrubber-fill { position: absolute; top: 16px; left: 0; height: 3px; background: linear-gradient(90deg, #6cf, #c6f); border-radius: 2px; transition: width 0.1s; }
+  .scrubber-labels { display: flex; justify-content: space-between; position: absolute; top: 22px; left: 0; right: 0; font-size: 0.7rem; color: #667; }
+  .scrubber-labels span { cursor: pointer; padding: 2px 4px; transition: color 0.2s; }
+  .scrubber-labels span:hover { color: #aab; }
+  .scrubber-labels span.active { color: #6cf; font-weight: 600; }
+  .shape-label { font-size: 1.1rem; font-weight: 400; color: #6cf; min-width: 70px; text-align: center; }
+  input[type="range"] { -webkit-appearance: none; width: 400px; height: 36px; background: transparent; position: absolute; top: 0; left: 0; z-index: 2; }
+  input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: #6cf; cursor: pointer; margin-top: -5px; box-shadow: 0 0 8px rgba(102,204,255,0.5); }
+  input[type="range"]::-webkit-slider-runnable-track { height: 3px; background: transparent; }
+</style>
+</head>
+<body>
+<h1>Shape-Morphing Timeline</h1>
+<div id="chart"></div>
+<div class="controls">
+  <button id="playBtn" class="active">▶ Play</button>
+  <span class="shape-label" id="shapeLabel">Bar</span>
+  <div class="scrubber">
+    <div class="scrubber-track"></div>
+    <div class="scrubber-fill" id="scrubberFill"></div>
+    <input type="range" id="scrubber" min="0" max="1000" value="0">
+    <div class="scrubber-labels">
+      <span data-pos="0" class="active">Bar</span>
+      <span data-pos="333">Line</span>
+      <span data-pos="666">Area</span>
+      <span data-pos="1000">Scatter</span>
+    </div>
+  </div>
+</div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+const width = 720, height = 420;
+const margin = { top: 30, right: 30, bottom: 40, left: 50 };
+const w = width - margin.left - margin.right;
+const h = height - margin.top - margin.bottom;
+
+// Synthetic data: 12 monthly values
+const data = [
+  { label: 'Jan', value: 42 }, { label: 'Feb', value: 58 },
+  { label: 'Mar', value: 71 }, { label: 'Apr', value: 63 },
+  { label: 'May', value: 89 }, { label: 'Jun', value: 95 },
+  { label: 'Jul', value: 78 }, { label: 'Aug', value: 84 },
+  { label: 'Sep', value: 67 }, { label: 'Oct', value: 73 },
+  { label: 'Nov', value: 51 }, { label: 'Dec', value: 45 }
+];
+
+const N = data.length;
+const RESAMPLE = 80; // points per shape for smooth morphing
+
+const svg = d3.select('#chart').append('svg')
+  .attr('width', width).attr('height', height);
+
+const g = svg.append('g')
+  .attr('transform', `translate(${margin.left},${margin.top})`);
+
+const x = d3.scaleBand().domain(data.map(d => d.label)).range([0, w]).padding(0.15);
+const xLinear = d3.scaleLinear().domain([0, N - 1]).range([x.bandwidth() / 2, w - x.bandwidth() / 2]);
+const y = d3.scaleLinear().domain([0, 105]).range([h, 0]);
+
+// Axes
+const xAxis = g.append('g').attr('transform', `translate(0,${h})`).call(d3.axisBottom(x).tickSize(0)).attr('color', '#445');
+xAxis.selectAll('text').attr('fill', '#889').attr('font-size', '0.75rem');
+xAxis.select('.domain').attr('stroke', '#334');
+
+const yAxis = g.append('g').call(d3.axisLeft(y).ticks(5).tickSize(-w)).attr('color', '#445');
+yAxis.selectAll('text').attr('fill', '#667').attr('font-size', '0.7rem');
+yAxis.selectAll('line').attr('stroke', '#1a1a2e');
+yAxis.select('.domain').remove();
+
+// Resample a shape into N evenly-spaced points
+function resamplePoints(pts, n) {
+  if (pts.length < 2) return Array(n).fill(pts[0] || [0, 0]);
+  // Compute cumulative arc length
+  const lengths = [0];
+  for (let i = 1; i < pts.length; i++) {
+    const dx = pts[i][0] - pts[i-1][0], dy = pts[i][1] - pts[i-1][1];
+    lengths.push(lengths[i-1] + Math.sqrt(dx*dx + dy*dy));
+  }
+  const total = lengths[lengths.length - 1];
+  if (total === 0) return Array(n).fill(pts[0]);
+  const result = [];
+  for (let i = 0; i < n; i++) {
+    const t = (i / (n - 1)) * total;
+    let j = 1;
+    while (j < lengths.length - 1 && lengths[j] < t) j++;
+    const seg = (t - lengths[j-1]) / (lengths[j] - lengths[j-1] || 1);
+    result.push([
+      pts[j-1][0] + seg * (pts[j][0] - pts[j-1][0]),
+      pts[j-1][1] + seg * (pts[j][1] - pts[j-1][1])
+    ]);
+  }
+  return result;
+}
+
+// Generate bar shape as polygon points (perimeter walk)
+function barPoints() {
+  const pts = [];
+  const bw = x.bandwidth();
+  for (let i = 0; i < N; i++) {
+    const bx = x(data[i].label);
+    const by = y(data[i].value);
+    // Top-left, top-right of bar
+    pts.push([bx, by]);
+    pts.push([bx + bw, by]);
+  }
+  // Walk back along bottom
+  for (let i = N - 1; i >= 0; i--) {
+    const bx = x(data[i].label);
+    pts.push([bx + bw, h]);
+    pts.push([bx, h]);
+  }
+  pts.push(pts[0]); // close
+  return resamplePoints(pts, RESAMPLE);
+}
+
+// Line shape: line across tops, then back along bottom (thin area)
+function linePoints() {
+  const pts = [];
+  for (let i = 0; i < N; i++) {
+    pts.push([xLinear(i), y(data[i].value)]);
+  }
+  // Thin: offset by 1.5px
+  for (let i = N - 1; i >= 0; i--) {
+    pts.push([xLinear(i), y(data[i].value) + 3]);
+  }
+  pts.push(pts[0]);
+  return resamplePoints(pts, RESAMPLE);
+}
+
+// Area shape
+function areaPoints() {
+  const pts = [];
+  for (let i = 0; i < N; i++) {
+    pts.push([xLinear(i), y(data[i].value)]);
+  }
+  for (let i = N - 1; i >= 0; i--) {
+    pts.push([xLinear(i), h]);
+  }
+  pts.push(pts[0]);
+  return resamplePoints(pts, RESAMPLE);
+}
+
+// Scatter: each point becomes a small circle (polygon approximation)
+function scatterPoints() {
+  const pts = [];
+  const r = 7;
+  const segs = Math.floor(RESAMPLE / N);
+  for (let i = 0; i < N; i++) {
+    const cx = xLinear(i), cy = y(data[i].value);
+    const n = (i < N - 1) ? segs : RESAMPLE - segs * (N - 1);
+    for (let j = 0; j < n; j++) {
+      const a = (j / n) * Math.PI * 2;
+      pts.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]);
+    }
+  }
+  return pts;
+}
+
+const shapes = [barPoints, linePoints, areaPoints, scatterPoints];
+const shapeNames = ['Bar', 'Line', 'Area', 'Scatter'];
+const shapeColors = ['#6cf', '#c6f', '#6fc', '#fc6'];
+
+// Precompute
+const shapeData = shapes.map(fn => fn());
+
+// Interpolate between two point arrays
+function interpolateShapes(a, b, t) {
+  return a.map((p, i) => [
+    p[0] + t * (b[i][0] - p[0]),
+    p[1] + t * (b[i][1] - p[1])
+  ]);
+}
+
+// Draw path
+const path = g.append('path')
+  .attr('fill', shapeColors[0])
+  .attr('fill-opacity', 0.7)
+  .attr('stroke', shapeColors[0])
+  .attr('stroke-width', 1.5)
+  .attr('stroke-opacity', 0.9);
+
+// Dots overlay for scatter
+const dotsGroup = g.append('g');
+const dots = dotsGroup.selectAll('circle')
+  .data(data)
+  .join('circle')
+  .attr('cx', (d, i) => xLinear(i))
+  .attr('cy', d => y(d.value))
+  .attr('r', 0)
+  .attr('fill', '#fc6')
+  .attr('fill-opacity', 0.9);
+
+function pointsToPath(pts) {
+  if (!pts.length) return '';
+  return 'M' + pts.map(p => p[0].toFixed(2) + ',' + p[1].toFixed(2)).join('L') + 'Z';
+}
+
+function render(t) {
+  // t: 0-1000 mapped to shape transitions
+  // 0-333: bar→line, 333-666: line→area, 666-1000: area→scatter
+  const segment = t / 333.33;
+  const idx = Math.min(Math.floor(segment), 2);
+  const frac = segment - idx;
+
+  const fromIdx = idx;
+  const toIdx = idx + 1;
+  const clampedFrac = Math.min(Math.max(frac, 0), 1);
+
+  const pts = interpolateShapes(shapeData[fromIdx], shapeData[toIdx], clampedFrac);
+
+  // Color interpolation
+  const c = d3.interpolateRgb(shapeColors[fromIdx], shapeColors[toIdx])(clampedFrac);
+
+  path.attr('d', pointsToPath(pts))
+    .attr('fill', c)
+    .attr('stroke', c);
+
+  // Scatter dots fade in during last segment
+  const scatterT = idx === 2 ? clampedFrac : (idx === 3 ? 1 : 0);
+  dots.attr('r', scatterT * 7)
+    .attr('fill', c)
+    .attr('fill-opacity', 0.9 * scatterT);
+
+  // Reduce main shape opacity as dots appear
+  path.attr('fill-opacity', 0.7 * (1 - scatterT * 0.3));
+
+  // Update label
+  const closestShape = clampedFrac < 0.5 ? fromIdx : toIdx;
+  shapeLabel.textContent = shapeNames[closestShape];
+  shapeLabel.style.color = shapeColors[closestShape];
+
+  // Update scrubber fill
+  scrubberFill.style.width = (t / 1000 * 100) + '%';
+
+  // Active label
+  document.querySelectorAll('.scrubber-labels span').forEach(s => {
+    const pos = +s.dataset.pos;
+    s.classList.toggle('active', Math.abs(pos - t) < 167);
+  });
+}
+
+// Controls
+const scrubber = document.getElementById('scrubber');
+const scrubberFill = document.getElementById('scrubberFill');
+const shapeLabel = document.getElementById('shapeLabel');
+const playBtn = document.getElementById('playBtn');
+
+let playing = true;
+let autoT = 0;
+const speed = 0.4; // per frame
+let lastFrame = 0;
+let userDragging = false;
+
+scrubber.addEventListener('input', () => {
+  userDragging = true;
+  autoT = +scrubber.value;
+  render(autoT);
+});
+scrubber.addEventListener('pointerdown', () => { userDragging = true; });
+scrubber.addEventListener('pointerup', () => { userDragging = false; });
+
+playBtn.addEventListener('click', () => {
+  playing = !playing;
+  playBtn.textContent = playing ? '❚❚ Pause' : '▶ Play';
+  playBtn.classList.toggle('active', playing);
+  if (playing) lastFrame = performance.now();
+});
+
+// Click shape labels to jump
+document.querySelectorAll('.scrubber-labels span').forEach(s => {
+  s.addEventListener('click', () => {
+    autoT = +s.dataset.pos;
+    scrubber.value = autoT;
+    render(autoT);
+  });
+});
+
+function tick(now) {
+  if (playing && !userDragging) {
+    const dt = now - lastFrame;
+    autoT += speed * dt * 0.06;
+    if (autoT > 1000) autoT = 0;
+    scrubber.value = autoT;
+    render(autoT);
+  }
+  lastFrame = now;
+  requestAnimationFrame(tick);
+}
+
+render(0);
+playBtn.textContent = '❚❚ Pause';
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>

@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Daily Energy Consumption — Seasonal Patterns</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #0f1117;
+    color: #e0e0e8;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px 16px;
+  }
+  h1 {
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #c8c8d8;
+    margin-bottom: 4px;
+  }
+  .subtitle {
+    font-size: 13px;
+    color: #606070;
+    margin-bottom: 20px;
+  }
+  #chart-container {
+    width: 100%;
+    max-width: 960px;
+  }
+  .legend {
+    display: flex;
+    gap: 20px;
+    justify-content: center;
+    margin-bottom: 16px;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: #a0a0b0;
+  }
+  .legend-swatch {
+    width: 28px;
+    height: 3px;
+    border-radius: 2px;
+  }
+  .panel-label {
+    font-size: 11px;
+    font-weight: 600;
+    fill: #9090a0;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .axis line, .axis path { stroke: #2a2a3a; }
+  .axis text { fill: #606070; font-size: 10px; }
+  .grid line { stroke: #1e1e2e; stroke-dasharray: 2,3; }
+  .panel-bg { fill: #161820; rx: 4; }
+  .crosshair-line { stroke: #ffffff; stroke-width: 1; stroke-dasharray: 3,3; opacity: 0.5; pointer-events: none; }
+  .tooltip {
+    position: fixed;
+    background: rgba(20, 20, 32, 0.96);
+    border: 1px solid #3a3a50;
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-size: 12px;
+    color: #e0e0e8;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.1s;
+    z-index: 10;
+    line-height: 1.7;
+    min-width: 160px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  }
+  .tooltip.visible { opacity: 1; }
+  .tooltip .day { font-weight: 600; color: #c0c0d8; margin-bottom: 4px; }
+  .tooltip .row { display: flex; justify-content: space-between; gap: 16px; align-items: center; }
+  .tooltip .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 4px; }
+</style>
+</head>
+<body>
+<h1>Daily Energy Consumption</h1>
+<p class="subtitle">Residential kWh by month · 3-year overlay · synchronized crosshair</p>
+<div class="legend" id="legend"></div>
+<div id="chart-container"></div>
+<div class="tooltip" id="tooltip"></div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+// ── Data generation ──────────────────────────────────────────────────────────
+const YEARS = [2022, 2023, 2024];
+const YEAR_COLORS = ["#4e9af1", "#f1a44e", "#4ef18a"];
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const DAYS_IN_MONTH = [31,28,31,30,31,30,31,31,30,31,30,31];
+
+// Seasonal energy profile: base + heating (winter) + cooling (summer)
+function baseEnergy(dayOfYear) {
+  const t = dayOfYear / 365;
+  // heating peak ~day 15 (Jan), cooling peak ~day 196 (Jul)
+  const heating = 35 * Math.exp(-0.5 * Math.pow((t - 0.04) / 0.12, 2));
+  const cooling = 28 * Math.exp(-0.5 * Math.pow((t - 0.54) / 0.13, 2));
+  const shoulder = 5 * Math.sin(2 * Math.PI * (t - 0.25));
+  return 18 + heating + cooling + shoulder;
+}
+
+// Year-over-year trend: slight efficiency improvement
+function yearTrend(year) {
+  return { 2022: 1.06, 2023: 1.03, 2024: 1.00 }[year];
+}
+
+// Seeded random for reproducibility
+function mulberry32(a) {
+  return function() {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+const data = {};
+YEARS.forEach(year => {
+  data[year] = {};
+  const rng = mulberry32(year * 997 + 42);
+  let dayOfYear = 0;
+  MONTHS.forEach((month, mi) => {
+    const days = DAYS_IN_MONTH[mi];
+    data[year][mi] = [];
+    for (let d = 0; d < days; d++) {
+      dayOfYear++;
+      const base = baseEnergy(dayOfYear) * yearTrend(year);
+      // Weekday/weekend variation
+      const date = new Date(year, mi, d + 1);
+      const dow = date.getDay();
+      const weekendFactor = (dow === 0 || dow === 6) ? 0.88 : 1.0;
+      // Weather noise
+      const noise = 1 + (rng() - 0.5) * 0.25;
+      // Occasional cold/heat snap
+      const snap = rng() < 0.05 ? (rng() * 15 + 8) : 0;
+      const value = Math.max(8, base * weekendFactor * noise + snap);
+      data[year][mi].push({ day: d + 1, value });
+    }
+  });
+});
+
+// ── Layout ───────────────────────────────────────────────────────────────────
+const container = document.getElementById("chart-container");
+const W = Math.min(960, container.getBoundingClientRect().width || 960);
+const COLS = 4, ROWS = 3;
+const margin = { top: 28, right: 10, bottom: 28, left: 36 };
+const gap = { x: 10, y: 14 };
+const totalW = W;
+const panelW = (totalW - margin.left - margin.right - gap.x * (COLS - 1)) / COLS;
+const panelH = panelW * 0.55;
+const totalH = margin.top + margin.bottom + ROWS * panelH + (ROWS - 1) * gap.y;
+
+const svg = d3.select("#chart-container")
+  .append("svg")
+  .attr("width", totalW)
+  .attr("height", totalH)
+  .attr("viewBox", `0 0 ${totalW} ${totalH}`);
+
+// Legend
+const legendEl = document.getElementById("legend");
+YEARS.forEach((y, i) => {
+  const item = document.createElement("div");
+  item.className = "legend-item";
+  item.innerHTML = `<div class="legend-swatch" style="background:${YEAR_COLORS[i]}"></div>${y}`;
+  legendEl.appendChild(item);
+});
+
+// Global y scale for shared context
+const globalMax = d3.max(YEARS, year =>
+  d3.max(MONTHS.map((_, mi) => d3.max(data[year][mi], d => d.value)))
+);
+
+// Panel-level scales (shared y across all panels for comparability)
+const yDomain = [0, Math.ceil(globalMax / 10) * 10];
+
+// Per-month x scale (varies by number of days)
+function makeScales(mi) {
+  const days = DAYS_IN_MONTH[mi];
+  const x = d3.scaleLinear().domain([1, days]).range([0, panelW]);
+  const y = d3.scaleLinear().domain(yDomain).range([panelH, 0]);
+  return { x, y, days };
+}
+
+// Build areas for each year
+function makeArea(x, y) {
+  return d3.area()
+    .x(d => x(d.day))
+    .y0(y(0))
+    .y1(d => y(d.value))
+    .curve(d3.curveCatmullRom.alpha(0.5));
+}
+
+function makeLine(x, y) {
+  return d3.line()
+    .x(d => x(d.day))
+    .y(d => y(d.value))
+    .curve(d3.curveCatmullRom.alpha(0.5));
+}
+
+// Crosshair state
+let activePanelMi = null;
+let crosshairDay = null;
+
+const panels = [];
+
+MONTHS.forEach((month, mi) => {
+  const col = mi % COLS;
+  const row = Math.floor(mi / COLS);
+  const tx = margin.left + col * (panelW + gap.x);
+  const ty = margin.top + row * (panelH + gap.y);
+
+  const { x, y, days } = makeScales(mi);
+  const area = makeArea(x, y);
+  const line = makeLine(x, y);
+
+  const g = svg.append("g")
+    .attr("class", "panel")
+    .attr("transform", `translate(${tx},${ty})`);
+
+  // Background
+  g.append("rect")
+    .attr("width", panelW)
+    .attr("height", panelH)
+    .attr("fill", "#161820")
+    .attr("rx", 4);
+
+  // Grid lines
+  const yTicks = y.ticks(4);
+  g.append("g").attr("class", "grid")
+    .selectAll("line")
+    .data(yTicks)
+    .join("line")
+      .attr("x1", 0).attr("x2", panelW)
+      .attr("y1", d => y(d)).attr("y2", d => y(d))
+      .attr("stroke", "#1e1e2e")
+      .attr("stroke-dasharray", "2,3");
+
+  // Y axis
+  g.append("g")
+    .attr("class", "axis")
+    .call(d3.axisLeft(y).ticks(4).tickSize(0).tickFormat(d => d > 0 ? d : ""))
+    .call(ag => ag.select(".domain").remove())
+    .call(ag => ag.selectAll("text")
+      .attr("x", -4)
+      .attr("fill", "#505060")
+      .attr("font-size", "9px"));
+
+  // X axis (sparse ticks: 1, mid, last)
+  const xMid = Math.round(days / 2);
+  g.append("g")
+    .attr("class", "axis")
+    .attr("transform", `translate(0,${panelH})`)
+    .call(d3.axisBottom(x)
+      .tickValues([1, xMid, days])
+      .tickSize(3)
+      .tickFormat(d => d))
+    .call(ag => ag.select(".domain").remove())
+    .call(ag => ag.selectAll("text")
+      .attr("fill", "#404050")
+      .attr("font-size", "9px"));
+
+  // Areas (translucent fill, back to front by year index)
+  YEARS.forEach((year, yi) => {
+    g.append("path")
+      .datum(data[year][mi])
+      .attr("fill", YEAR_COLORS[yi])
+      .attr("fill-opacity", 0.06)
+      .attr("stroke", "none")
+      .attr("d", area);
+  });
+
+  // Lines
+  YEARS.forEach((year, yi) => {
+    g.append("path")
+      .datum(data[year][mi])
+      .attr("fill", "none")
+      .attr("stroke", YEAR_COLORS[yi])
+      .attr("stroke-width", 1.5)
+      .attr("stroke-opacity", 0.85)
+      .attr("d", line);
+  });
+
+  // Month label
+  g.append("text")
+    .attr("class", "panel-label")
+    .attr("x", panelW / 2)
+    .attr("y", -8)
+    .attr("text-anchor", "middle")
+    .attr("fill", "#8080a0")
+    .attr("font-size", "11px")
+    .attr("font-weight", "600")
+    .attr("letter-spacing", "0.08em")
+    .text(month.toUpperCase());
+
+  // Crosshair group (hidden by default)
+  const ch = g.append("line")
+    .attr("class", "crosshair-line")
+    .attr("y1", 0)
+    .attr("y2", panelH)
+    .attr("display", "none");
+
+  // Interaction overlay
+  const overlay = g.append("rect")
+    .attr("width", panelW)
+    .attr("height", panelH)
+    .attr("fill", "transparent")
+    .attr("cursor", "crosshair");
+
+  overlay.on("mousemove", function(event) {
+    const [mx] = d3.pointer(event);
+    const dayVal = Math.round(x.invert(mx));
+    const clampedDay = Math.max(1, Math.min(days, dayVal));
+    crosshairDay = clampedDay;
+    activePanelMi = mi;
+    updateCrosshairs();
+    showTooltip(event, mi, clampedDay);
+  });
+
+  overlay.on("mouseleave", function() {
+    crosshairDay = null;
+    activePanelMi = null;
+    updateCrosshairs();
+    hideTooltip();
+  });
+
+  panels.push({ mi, g, x, y, ch, days });
+});
+
+// ── Crosshair + Tooltip ───────────────────────────────────────────────────────
+function updateCrosshairs() {
+  panels.forEach(({ mi, x, ch, days }) => {
+    if (crosshairDay === null) {
+      ch.attr("display", "none");
+    } else {
+      // Map day proportionally across different month lengths
+      const thisDays = days;
+      // For the active panel, use exact day; for others, scale proportionally
+      let targetDay;
+      if (mi === activePanelMi) {
+        targetDay = crosshairDay;
+      } else {
+        // Proportional mapping
+        const activeDays = DAYS_IN_MONTH[activePanelMi];
+        const frac = (crosshairDay - 1) / (activeDays - 1);
+        targetDay = Math.round(1 + frac * (thisDays - 1));
+        targetDay = Math.max(1, Math.min(thisDays, targetDay));
+      }
+      ch.attr("display", null)
+        .attr("x1", x(targetDay))
+        .attr("x2", x(targetDay));
+    }
+  });
+}
+
+const tooltip = document.getElementById("tooltip");
+
+function showTooltip(event, mi, day) {
+  const month = MONTHS[mi];
+  const date = new Date(2024, mi, day);
+  const dayName = date.toLocaleDateString("en-US", { weekday: "short" });
+
+  let html = `<div class="day">${dayName}, ${month} ${day}</div>`;
+  YEARS.forEach((year, yi) => {
+    const vals = data[year][mi];
+    const entry = vals.find(d => d.day === day) || vals[Math.min(day - 1, vals.length - 1)];
+    html += `<div class="row"><span><span class="dot" style="background:${YEAR_COLORS[yi]}"></span>${year}</span><span><b>${entry.value.toFixed(1)}</b> kWh</span></div>`;
+  });
+
+  tooltip.innerHTML = html;
+  tooltip.classList.add("visible");
+  positionTooltip(event);
+}
+
+function hideTooltip() {
+  tooltip.classList.remove("visible");
+}
+
+function positionTooltip(event) {
+  const tw = 180, th = 90;
+  let left = event.clientX + 14;
+  let top = event.clientY - th / 2;
+  if (left + tw > window.innerWidth - 8) left = event.clientX - tw - 14;
+  if (top < 8) top = 8;
+  if (top + th > window.innerHeight - 8) top = window.innerHeight - th - 8;
+  tooltip.style.left = left + "px";
+  tooltip.style.top = top + "px";
+}
+
+// Update tooltip position on mousemove for all panels
+svg.on("mousemove", function(event) {
+  if (tooltip.classList.contains("visible")) {
+    positionTooltip(event);
+  }
+});
+</script>
+</body>
+</html>

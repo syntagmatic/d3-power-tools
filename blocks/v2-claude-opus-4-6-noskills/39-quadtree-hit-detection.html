@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Quadtree Nearest-Neighbor Detection</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a1a; color: #e0e0e0; font-family: system-ui, sans-serif; overflow: hidden; }
+  canvas { display: block; cursor: crosshair; }
+  #ui {
+    position: absolute; top: 16px; right: 16px;
+    background: rgba(10,10,26,0.85); border: 1px solid #334; border-radius: 8px;
+    padding: 12px 16px; font-size: 13px; line-height: 1.8; min-width: 180px;
+  }
+  #ui label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  #ui .stat { color: #889; font-size: 11px; }
+  #title {
+    position: absolute; top: 16px; left: 16px;
+    font-size: 18px; font-weight: 600; letter-spacing: 0.5px;
+  }
+  #title span { color: #667; font-weight: 400; font-size: 13px; display: block; margin-top: 2px; }
+</style>
+</head>
+<body>
+<div id="title">Quadtree Hit Detection<span>5 000 particles · mousemove nearest-neighbor · scroll to zoom</span></div>
+<div id="ui">
+  <label><input type="checkbox" id="voronoiToggle"> Voronoi overlay</label>
+  <div class="stat" id="stats"></div>
+</div>
+<canvas id="canvas"></canvas>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+const N = 5000;
+const K = 10;
+const categories = 8;
+
+const palette = [
+  "#f94144","#f3722c","#f8961e","#f9c74f",
+  "#90be6d","#43aa8b","#577590","#a78bfa"
+];
+
+// Generate clustered data in 8 categories
+const rng = d3.randomLcg(42);
+const rand = d3.randomNormal.source(rng);
+const randU = d3.randomUniform.source(rng);
+
+const clusterCenters = d3.range(categories).map(() => [randU(0.1, 0.9)(), randU(0.1, 0.9)()]);
+
+const data = d3.range(N).map(i => {
+  const cat = i % categories;
+  const cx = clusterCenters[cat][0], cy = clusterCenters[cat][1];
+  return {
+    x: cx + rand(0, 0.12)(),
+    y: cy + rand(0, 0.12)(),
+    cat,
+    r: 1.5 + randU(0, 1.5)()
+  };
+});
+
+// State
+let width, height, dpr;
+let transform = d3.zoomIdentity;
+let mouse = null;
+let nearest = [];
+let showVoronoi = false;
+let quadtree;
+
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const statsEl = document.getElementById("stats");
+
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  width = window.innerWidth;
+  height = window.innerHeight;
+  canvas.width = width * dpr;
+  canvas.height = height * dpr;
+  canvas.style.width = width + "px";
+  canvas.style.height = height + "px";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  rebuildQuadtree();
+  draw();
+}
+
+const xBase = d3.scaleLinear().domain([0, 1]);
+const yBase = d3.scaleLinear().domain([0, 1]);
+
+function scales() {
+  xBase.range([60, width - 20]);
+  yBase.range([20, height - 40]);
+  const xScale = transform.rescaleX(xBase);
+  const yScale = transform.rescaleY(yBase);
+  return { xScale, yScale };
+}
+
+function rebuildQuadtree() {
+  const { xScale, yScale } = scales();
+  quadtree = d3.quadtree()
+    .x(d => xScale(d.x))
+    .y(d => yScale(d.y))
+    .addAll(data);
+}
+
+function findNearest(px, py) {
+  if (!quadtree) return [];
+  const found = [];
+  // Use quadtree.visit for k-nearest
+  let maxDist = Infinity;
+  const { xScale, yScale } = scales();
+
+  // Simple approach: collect all with distances, sort, take K
+  // For 5000 points this is fast enough, but let's use a smarter approach
+  // We'll use an expanding radius search
+  const candidates = [];
+
+  quadtree.visit((node, x0, y0, x1, y1) => {
+    if (!node.length) {
+      let d = node;
+      do {
+        const dx = xScale(d.data.x) - px;
+        const dy = yScale(d.data.y) - py;
+        const dist = dx * dx + dy * dy;
+        candidates.push({ data: d.data, dist });
+      } while (d = d.next);
+    }
+    // Prune: if we have K candidates, skip nodes too far away
+    if (candidates.length >= K) {
+      candidates.sort((a, b) => a.dist - b.dist);
+      maxDist = candidates[K - 1].dist;
+      const cx = Math.max(x0, Math.min(px, x1));
+      const cy = Math.max(y0, Math.min(py, y1));
+      const cornerDist = (cx - px) ** 2 + (cy - py) ** 2;
+      if (cornerDist > maxDist) return true;
+    }
+    return false;
+  });
+
+  candidates.sort((a, b) => a.dist - b.dist);
+  return candidates.slice(0, K).map(c => c.data);
+}
+
+function draw() {
+  const { xScale, yScale } = scales();
+  ctx.clearRect(0, 0, width, height);
+
+  const nearestSet = new Set(nearest);
+
+  // Draw Voronoi if toggled
+  if (showVoronoi) {
+    const delaunay = d3.Delaunay.from(data, d => xScale(d.x), d => yScale(d.y));
+    const voronoi = delaunay.voronoi([0, 0, width, height]);
+    ctx.beginPath();
+    voronoi.render(ctx);
+    ctx.strokeStyle = "rgba(255,255,255,0.06)";
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+  }
+
+  // Draw all particles
+  for (let i = 0; i < N; i++) {
+    const d = data[i];
+    if (nearestSet.has(d)) continue; // draw highlighted ones on top
+    const px = xScale(d.x), py = yScale(d.y);
+    if (px < -10 || px > width + 10 || py < -10 || py > height + 10) continue;
+    ctx.beginPath();
+    ctx.arc(px, py, d.r, 0, Math.PI * 2);
+    ctx.fillStyle = palette[d.cat];
+    ctx.globalAlpha = 0.5;
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // Draw connector lines and highlighted particles
+  if (mouse && nearest.length) {
+    // Connector lines
+    for (const d of nearest) {
+      const px = xScale(d.x), py = yScale(d.y);
+      ctx.beginPath();
+      ctx.moveTo(mouse[0], mouse[1]);
+      ctx.lineTo(px, py);
+      ctx.strokeStyle = "rgba(255,255,255,0.25)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+
+    // Glow + highlighted particles
+    for (const d of nearest) {
+      const px = xScale(d.x), py = yScale(d.y);
+      const color = palette[d.cat];
+
+      // Glow
+      ctx.save();
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 18;
+      ctx.beginPath();
+      ctx.arc(px, py, d.r + 3, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.restore();
+
+      // Bright center
+      ctx.beginPath();
+      ctx.arc(px, py, d.r + 1, 0, Math.PI * 2);
+      ctx.fillStyle = "#fff";
+      ctx.globalAlpha = 0.9;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+
+      ctx.beginPath();
+      ctx.arc(px, py, d.r + 2.5, 0, Math.PI * 2);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+
+    // Mouse cursor ring
+    ctx.beginPath();
+    ctx.arc(mouse[0], mouse[1], 4, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(255,255,255,0.8)";
+    ctx.fill();
+  }
+}
+
+// Zoom
+const zoom = d3.zoom()
+  .scaleExtent([0.3, 20])
+  .on("zoom", (event) => {
+    transform = event.transform;
+    rebuildQuadtree();
+    if (mouse) nearest = findNearest(mouse[0], mouse[1]);
+    draw();
+  });
+
+d3.select(canvas).call(zoom);
+
+// Mousemove
+canvas.addEventListener("pointermove", (e) => {
+  mouse = [e.offsetX, e.offsetY];
+  const t0 = performance.now();
+  nearest = findNearest(mouse[0], mouse[1]);
+  const dt = performance.now() - t0;
+  statsEl.textContent = `Query: ${dt.toFixed(2)}ms · ${nearest.length} neighbors`;
+  draw();
+});
+
+canvas.addEventListener("pointerleave", () => {
+  mouse = null;
+  nearest = [];
+  draw();
+});
+
+// Voronoi toggle
+document.getElementById("voronoiToggle").addEventListener("change", (e) => {
+  showVoronoi = e.target.checked;
+  draw();
+});
+
+window.addEventListener("resize", resize);
+resize();
+</script>
+</body>
+</html>

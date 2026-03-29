@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Quadtree Nearest-Neighbor Detection</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #0a0a1a; color: #e0e0e0; font-family: system-ui, sans-serif; overflow: hidden; }
+  #container { position: relative; width: 100vw; height: 100vh; }
+  canvas, svg { position: absolute; top: 0; left: 0; }
+  svg { pointer-events: all; }
+  #controls {
+    position: absolute; top: 16px; right: 16px; z-index: 10;
+    display: flex; gap: 8px; align-items: center;
+  }
+  button {
+    background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15);
+    color: #e0e0e0; padding: 6px 14px; border-radius: 4px; cursor: pointer;
+    font-size: 13px; transition: background 0.15s;
+  }
+  button:hover { background: rgba(255,255,255,0.15); }
+  button.active { background: rgba(100,140,255,0.25); border-color: rgba(100,140,255,0.5); }
+  #info {
+    position: absolute; bottom: 16px; left: 16px; z-index: 10;
+    font-size: 12px; color: rgba(255,255,255,0.45);
+  }
+  #tooltip {
+    position: absolute; z-index: 10; pointer-events: none;
+    background: rgba(10,10,30,0.9); border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 4px; padding: 6px 10px; font-size: 12px;
+    display: none; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="bg-canvas"></canvas>
+  <canvas id="fg-canvas"></canvas>
+  <svg id="overlay"></svg>
+  <div id="controls">
+    <button id="voronoi-toggle">Voronoi Overlay</button>
+  </div>
+  <div id="tooltip"></div>
+  <div id="info">Scroll to zoom · Move mouse to find 10 nearest neighbors</div>
+</div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+const K = 10; // nearest neighbors to find
+const N = 5000;
+const categories = ["Stellar", "Nebular", "Quasar", "Pulsar", "Comet", "Asteroid", "Dwarf", "Giant"];
+
+const palette = ["#ff6b6b","#51cf66","#339af0","#fcc419","#cc5de8","#ff922b","#20c997","#f06595"];
+
+// Generate clustered synthetic data — 8 Gaussian clusters
+const width = window.innerWidth, height = window.innerHeight;
+const rng = d3.randomLcg(42);
+const randNorm = d3.randomNormal.source(rng);
+
+const data = [];
+const clusterCenters = categories.map((_, i) => {
+  const angle = (i / categories.length) * Math.PI * 2;
+  const r = Math.min(width, height) * 0.28;
+  return [width / 2 + Math.cos(angle) * r, height / 2 + Math.sin(angle) * r];
+});
+
+for (let i = 0; i < N; i++) {
+  const cat = i % categories.length;
+  const [cx, cy] = clusterCenters[cat];
+  const spread = Math.min(width, height) * 0.12;
+  const nx = randNorm(cx, spread);
+  const ny = randNorm(cy, spread);
+  data.push({ x: nx(), y: ny(), cat, id: i });
+}
+
+// Scales (identity for initial view, used for zoom rescaling)
+const xScale = d3.scaleLinear().domain([0, width]).range([0, width]);
+const yScale = d3.scaleLinear().domain([0, height]).range([0, height]);
+
+// Canvas setup
+const dpr = devicePixelRatio;
+function setupCanvas(id) {
+  const canvas = document.getElementById(id);
+  canvas.width = width * dpr;
+  canvas.height = height * dpr;
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  return ctx;
+}
+
+const bgCtx = setupCanvas("bg-canvas");
+const fgCtx = setupCanvas("fg-canvas");
+
+// SVG overlay
+const svg = d3.select("#overlay")
+  .attr("width", width).attr("height", height);
+
+// Quadtree — built on pixel coords
+let zx = xScale, zy = yScale;
+let quadtree = d3.quadtree()
+  .x(d => zx(d.x)).y(d => zy(d.y))
+  .addAll(data);
+
+// State
+let showVoronoi = false;
+let nearest = [];
+let mousePos = null;
+let currentTransform = d3.zoomIdentity;
+
+// --- Drawing ---
+function drawBackground() {
+  bgCtx.clearRect(0, 0, width, height);
+  const groups = d3.group(data, d => d.cat);
+  for (const [cat, points] of groups) {
+    bgCtx.fillStyle = palette[cat];
+    bgCtx.globalAlpha = 0.55;
+    bgCtx.beginPath();
+    for (const d of points) {
+      const px = zx(d.x), py = zy(d.y);
+      if (px < -10 || px > width + 10 || py < -10 || py > height + 10) continue;
+      bgCtx.moveTo(px + 2.5, py);
+      bgCtx.arc(px, py, 2.5, 0, Math.PI * 2);
+    }
+    bgCtx.fill();
+  }
+  bgCtx.globalAlpha = 1;
+}
+
+function drawForeground() {
+  fgCtx.clearRect(0, 0, width, height);
+  if (!mousePos || nearest.length === 0) return;
+
+  const [mx, my] = mousePos;
+
+  // Connector lines
+  fgCtx.strokeStyle = "rgba(255,255,255,0.25)";
+  fgCtx.lineWidth = 1;
+  fgCtx.beginPath();
+  for (const d of nearest) {
+    fgCtx.moveTo(mx, my);
+    fgCtx.lineTo(zx(d.x), zy(d.y));
+  }
+  fgCtx.stroke();
+
+  // Glow highlights
+  for (const d of nearest) {
+    const px = zx(d.x), py = zy(d.y);
+    const color = palette[d.cat];
+
+    // Outer glow
+    const grad = fgCtx.createRadialGradient(px, py, 0, px, py, 14);
+    grad.addColorStop(0, color + "aa");
+    grad.addColorStop(1, color + "00");
+    fgCtx.fillStyle = grad;
+    fgCtx.beginPath();
+    fgCtx.arc(px, py, 14, 0, Math.PI * 2);
+    fgCtx.fill();
+
+    // Solid center
+    fgCtx.fillStyle = color;
+    fgCtx.beginPath();
+    fgCtx.arc(px, py, 4.5, 0, Math.PI * 2);
+    fgCtx.fill();
+
+    // White ring
+    fgCtx.strokeStyle = "#fff";
+    fgCtx.lineWidth = 1.2;
+    fgCtx.beginPath();
+    fgCtx.arc(px, py, 6, 0, Math.PI * 2);
+    fgCtx.stroke();
+  }
+
+  // Crosshair at mouse
+  fgCtx.strokeStyle = "rgba(255,255,255,0.35)";
+  fgCtx.lineWidth = 0.5;
+  fgCtx.setLineDash([4, 4]);
+  fgCtx.beginPath();
+  fgCtx.moveTo(mx, 0); fgCtx.lineTo(mx, height);
+  fgCtx.moveTo(0, my); fgCtx.lineTo(width, my);
+  fgCtx.stroke();
+  fgCtx.setLineDash([]);
+}
+
+// Voronoi overlay via SVG
+const voronoiGroup = svg.append("g").attr("class", "voronoi");
+
+function drawVoronoi() {
+  voronoiGroup.selectAll("path").remove();
+  if (!showVoronoi) return;
+
+  const delaunay = d3.Delaunay.from(data, d => zx(d.x), d => zy(d.y));
+  const voronoi = delaunay.voronoi([0, 0, width, height]);
+
+  voronoiGroup.selectAll("path")
+    .data(data)
+    .join("path")
+    .attr("d", (_, i) => voronoi.renderCell(i))
+    .attr("fill", "none")
+    .attr("stroke", "rgba(255,255,255,0.07)")
+    .attr("stroke-width", 0.5)
+    .attr("pointer-events", "none");
+}
+
+// --- K nearest neighbors via quadtree ---
+function findKNearest(qt, mx, my, k) {
+  const results = [];
+  let maxDist = Infinity;
+
+  qt.visit((node, x0, y0, x1, y1) => {
+    if (!node.length) {
+      // Leaf — check points
+      let d = node;
+      do {
+        const dx = zx(d.data.x) - mx, dy = zy(d.data.y) - my;
+        const dist = dx * dx + dy * dy;
+        if (results.length < k) {
+          results.push({ point: d.data, dist });
+          if (results.length === k) {
+            results.sort((a, b) => a.dist - b.dist);
+            maxDist = results[k - 1].dist;
+          }
+        } else if (dist < maxDist) {
+          results[k - 1] = { point: d.data, dist };
+          results.sort((a, b) => a.dist - b.dist);
+          maxDist = results[k - 1].dist;
+        }
+      } while (d = d.next);
+      return false;
+    }
+    // Internal node — check if quad could contain closer points
+    const cx = Math.max(x0, Math.min(mx, x1));
+    const cy = Math.max(y0, Math.min(my, y1));
+    const qdist = (cx - mx) ** 2 + (cy - my) ** 2;
+    return results.length === k && qdist > maxDist;
+  });
+
+  return results.sort((a, b) => a.dist - b.dist).map(r => r.point);
+}
+
+// --- Tooltip ---
+const tooltip = document.getElementById("tooltip");
+
+function updateTooltip() {
+  if (!mousePos || nearest.length === 0) {
+    tooltip.style.display = "none";
+    return;
+  }
+  const [mx, my] = mousePos;
+  const n0 = nearest[0];
+  const dist = Math.sqrt((zx(n0.x) - mx) ** 2 + (zy(n0.y) - my) ** 2);
+  tooltip.innerHTML = `<strong>${categories[n0.cat]}</strong> #${n0.id}<br>` +
+    `Distance: ${dist.toFixed(1)}px · Showing ${nearest.length} nearest`;
+  tooltip.style.display = "block";
+  tooltip.style.left = `${mx + 16}px`;
+  tooltip.style.top = `${my - 10}px`;
+}
+
+// --- Interaction ---
+let dirty = false;
+function markDirty() {
+  if (!dirty) { dirty = true; requestAnimationFrame(render); }
+}
+
+function render() {
+  dirty = false;
+  drawBackground();
+  drawForeground();
+  updateTooltip();
+}
+
+// Pointer events on SVG overlay
+const zoomRect = svg.append("rect")
+  .attr("width", width).attr("height", height)
+  .attr("fill", "none").attr("pointer-events", "all");
+
+zoomRect.on("pointermove", (event) => {
+  mousePos = d3.pointer(event);
+  nearest = findKNearest(quadtree, mousePos[0], mousePos[1], K);
+  // Only redraw foreground for hover (cheap)
+  fgCtx.clearRect(0, 0, width, height);
+  drawForeground();
+  updateTooltip();
+});
+
+zoomRect.on("pointerleave", () => {
+  mousePos = null;
+  nearest = [];
+  fgCtx.clearRect(0, 0, width, height);
+  tooltip.style.display = "none";
+});
+
+// Zoom
+const zoom = d3.zoom()
+  .scaleExtent([0.3, 20])
+  .on("zoom", ({ transform }) => {
+    currentTransform = transform;
+    zx = transform.rescaleX(xScale);
+    zy = transform.rescaleY(yScale);
+    // Rebuild quadtree on zoomed coords
+    quadtree = d3.quadtree()
+      .x(d => zx(d.x)).y(d => zy(d.y))
+      .addAll(data);
+
+    if (mousePos) {
+      nearest = findKNearest(quadtree, mousePos[0], mousePos[1], K);
+    }
+    if (showVoronoi) drawVoronoi();
+    markDirty();
+  });
+
+svg.call(zoom);
+
+// Voronoi toggle
+const voronoiBtn = document.getElementById("voronoi-toggle");
+voronoiBtn.addEventListener("click", () => {
+  showVoronoi = !showVoronoi;
+  voronoiBtn.classList.toggle("active", showVoronoi);
+  drawVoronoi();
+});
+
+// Initial draw
+drawBackground();
+</script>
+</body>
+</html>

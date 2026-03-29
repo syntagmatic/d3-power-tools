@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sunburst with Breadcrumb Trail & Radial Brush</title>
+<style>
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+body{background:#1a1a2e;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-serif;display:flex;flex-direction:column;align-items:center;min-height:100vh;overflow-x:hidden}
+h1{font-size:1.3rem;font-weight:500;margin:18px 0 4px;color:#c4c4da}
+#breadcrumb{height:32px;display:flex;align-items:center;gap:4px;font-size:0.82rem;margin-bottom:6px;min-width:200px;justify-content:center}
+#breadcrumb .crumb{background:#2a2a4a;padding:3px 10px;border-radius:3px;cursor:pointer;transition:background .2s}
+#breadcrumb .crumb:hover{background:#3a3a6a}
+#breadcrumb .sep{color:#555;font-size:0.7rem}
+#chart{position:relative}
+svg{display:block}
+#tooltip{position:absolute;pointer-events:none;background:rgba(10,10,30,0.92);border:1px solid #444;border-radius:5px;padding:6px 10px;font-size:0.78rem;white-space:nowrap;opacity:0;transition:opacity .15s}
+#info{font-size:0.75rem;color:#777;margin-top:8px;text-align:center}
+</style>
+</head>
+<body>
+<h1>Product Taxonomy Sunburst</h1>
+<div id="breadcrumb"><span class="crumb" style="color:#888">Root</span></div>
+<div id="chart"><div id="tooltip"></div></div>
+<div id="info">Click inner rings to zoom · Drag outer ring to brush angular range · Shift+click to reset brush</div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// ── Synthetic 4-level product taxonomy ──
+const taxonomy = {
+  "Electronics": {
+    "Computers": {"Laptops": ["Gaming","Ultrabook","Workstation","Budget","Convertible"],
+                   "Desktops": ["Tower","Mini PC","All-in-One","Gaming Rig"],
+                   "Tablets": ["Standard","Pro","Kids","E-Reader"]},
+    "Audio": {"Headphones": ["Over-Ear","In-Ear","Wireless","Studio"],
+              "Speakers": ["Bluetooth","Soundbar","Bookshelf","Portable"],
+              "Microphones": ["Condenser","Dynamic","USB","Lavalier"]},
+    "Cameras": {"DSLR": ["Entry","Mid-Range","Pro"],
+                "Mirrorless": ["Crop","Full-Frame","Medium Format"],
+                "Action": ["Standard","360°","Underwater"]}
+  },
+  "Clothing": {
+    "Men": {"Tops": ["T-Shirts","Shirts","Sweaters","Jackets","Hoodies"],
+            "Bottoms": ["Jeans","Chinos","Shorts","Joggers"],
+            "Footwear": ["Sneakers","Boots","Sandals","Dress Shoes"]},
+    "Women": {"Tops": ["Blouses","T-Shirts","Sweaters","Cardigans","Tank Tops"],
+              "Bottoms": ["Jeans","Skirts","Leggings","Trousers"],
+              "Dresses": ["Casual","Formal","Maxi","Mini"]},
+    "Kids": {"Boys": ["T-Shirts","Shorts","Jackets","Shoes"],
+             "Girls": ["Dresses","T-Shirts","Skirts","Shoes"],
+             "Baby": ["Onesies","Bibs","Booties"]}
+  },
+  "Home & Garden": {
+    "Furniture": {"Living Room": ["Sofas","Coffee Tables","TV Stands","Bookshelves"],
+                  "Bedroom": ["Beds","Nightstands","Dressers","Wardrobes"],
+                  "Office": ["Desks","Chairs","Filing Cabinets"]},
+    "Kitchen": {"Appliances": ["Blenders","Toasters","Coffee Makers","Mixers","Air Fryers"],
+                "Cookware": ["Pans","Pots","Baking Sheets","Dutch Ovens"],
+                "Utensils": ["Knives","Spatulas","Tongs","Peelers"]},
+    "Garden": {"Tools": ["Shovels","Rakes","Pruners","Wheelbarrows"],
+               "Plants": ["Flowers","Herbs","Shrubs","Trees"],
+               "Furniture": ["Chairs","Tables","Umbrellas","Swings"]}
+  },
+  "Sports": {
+    "Team Sports": {"Football": ["Balls","Cleats","Pads","Jerseys"],
+                    "Basketball": ["Balls","Shoes","Hoops","Apparel"],
+                    "Baseball": ["Bats","Gloves","Helmets","Balls"]},
+    "Individual": {"Running": ["Shoes","Watches","Apparel","Accessories"],
+                   "Cycling": ["Bikes","Helmets","Lights","Locks"],
+                   "Swimming": ["Goggles","Suits","Caps","Fins"]},
+    "Outdoor": {"Camping": ["Tents","Sleeping Bags","Stoves","Lanterns"],
+                "Hiking": ["Boots","Backpacks","Poles","Water Bottles"],
+                "Fishing": ["Rods","Reels","Tackle","Waders"]}
+  }
+};
+
+function buildHierarchy(obj, name = "Products") {
+  if (Array.isArray(obj)) {
+    return { name, children: obj.map(d => ({ name: d, value: 5 + Math.floor(Math.random() * 45) })) };
+  }
+  return { name, children: Object.entries(obj).map(([k, v]) => buildHierarchy(v, k)) };
+}
+
+const data = buildHierarchy(taxonomy);
+
+// ── Layout ──
+const width = 700, height = 700, radius = width / 2;
+const svg = d3.select("#chart").append("svg")
+  .attr("width", width).attr("height", height)
+  .attr("viewBox", [-width/2, -height/2, width, height]);
+
+const root = d3.hierarchy(data).sum(d => d.value).sort((a, b) => b.value - a.value);
+const partition = d3.partition().size([2 * Math.PI, radius]);
+partition(root);
+
+// Color
+const topNames = root.children.map(d => d.data.name);
+const colorScale = d3.scaleOrdinal()
+  .domain(topNames)
+  .range(["#4fc3f7","#ff8a65","#81c784","#ba68c8"]);
+
+function nodeColor(d) {
+  let ancestor = d;
+  while (ancestor.depth > 1) ancestor = ancestor.parent;
+  if (ancestor.depth === 0) return "#333";
+  return d3.color(colorScale(ancestor.data.name)).brighter(d.depth * 0.25).formatHex();
+}
+
+const arc = d3.arc()
+  .startAngle(d => d.x0).endAngle(d => d.x1)
+  .innerRadius(d => d.y0).outerRadius(d => d.y1)
+  .padAngle(0.005).padRadius(radius / 2);
+
+// ── State ──
+let currentRoot = root;
+let brushRange = null; // [startAngle, endAngle] or null
+
+// ── Rendering ──
+const g = svg.append("g");
+
+const paths = g.selectAll("path")
+  .data(root.descendants().filter(d => d.depth > 0))
+  .join("path")
+  .attr("d", arc)
+  .attr("fill", nodeColor)
+  .attr("stroke", "#1a1a2e")
+  .attr("stroke-width", 0.8)
+  .style("cursor", "pointer");
+
+// ── Deselection (desaturation) ──
+function isInBrush(d) {
+  if (!brushRange) return true;
+  const [bStart, bEnd] = brushRange;
+  // Arc overlaps brush if not entirely outside
+  return !(d.x1 <= bStart || d.x0 >= bEnd);
+}
+
+function updateAppearance(transition = false) {
+  const sel = transition ? paths.transition().duration(300) : paths;
+  sel.attr("fill", d => {
+    const c = nodeColor(d);
+    if (!isInBrush(d)) {
+      const hsl = d3.hsl(c);
+      hsl.s *= 0.15;
+      hsl.l = hsl.l * 0.5 + 0.15;
+      return hsl.formatHex();
+    }
+    return c;
+  }).attr("opacity", d => isInBrush(d) ? 1 : 0.45);
+}
+
+// ── Tooltip ──
+const tooltip = d3.select("#tooltip");
+
+paths.on("pointerenter", (e, d) => {
+  const chain = d.ancestors().reverse().slice(1).map(a => a.data.name).join(" → ");
+  tooltip.html(`<strong>${chain}</strong><br>Value: ${d.value}`)
+    .style("opacity", 1);
+}).on("pointermove", e => {
+  const [cx, cy] = d3.pointer(e, document.getElementById("chart"));
+  tooltip.style("left", (cx + 14) + "px").style("top", (cy - 10) + "px");
+}).on("pointerleave", () => tooltip.style("opacity", 0));
+
+// ── Click to zoom ──
+function zoomTo(target) {
+  currentRoot = target;
+  brushRange = null;
+
+  const t = svg.transition().duration(650);
+  const targetX0 = target.x0, targetX1 = target.x1;
+  const targetY0 = target.y0;
+  const xScale = d3.scaleLinear().domain([targetX0, targetX1]).range([0, 2 * Math.PI]);
+  const yScale = d3.scaleLinear().domain([targetY0, radius]).range([0, radius]);
+
+  paths.transition(t)
+    .tween("data", d => {
+      const xi0 = d3.interpolate(d._x0 ?? d.x0, xScale(d.x0));
+      const xi1 = d3.interpolate(d._x1 ?? d.x1, xScale(d.x1));
+      const yi0 = d3.interpolate(d._y0 ?? d.y0, yScale(d.y0));
+      const yi1 = d3.interpolate(d._y1 ?? d.y1, yScale(d.y1));
+      return t => {
+        d._x0 = xi0(t); d._x1 = xi1(t);
+        d._y0 = yi0(t); d._y1 = yi1(t);
+      };
+    })
+    .attrTween("d", d => () => arc({ x0: d._x0, x1: d._x1, y0: d._y0, y1: d._y1 }))
+    .attr("fill", d => nodeColor(d))
+    .attr("opacity", d => {
+      const a0 = xScale(d.x0), a1 = xScale(d.x1);
+      return (a0 >= 0 && a1 <= 2 * Math.PI && a1 > a0 && d.y0 >= targetY0) ? 1 : 0;
+    })
+    .on("end", function(d) {
+      d._x0 = undefined; d._x1 = undefined;
+      d._y0 = undefined; d._y1 = undefined;
+    });
+
+  updateBreadcrumb(target);
+}
+
+paths.on("click", (e, d) => {
+  if (e.shiftKey) { brushRange = null; updateAppearance(true); return; }
+  // Only zoom on non-leaf, non-outermost ring clicks
+  if (d.children && d.depth < root.height) {
+    zoomTo(d);
+  }
+});
+
+// ── Breadcrumb ──
+const breadcrumbDiv = d3.select("#breadcrumb");
+
+function updateBreadcrumb(target) {
+  const chain = target.ancestors().reverse();
+  breadcrumbDiv.selectAll("*").remove();
+  chain.forEach((node, i) => {
+    if (i > 0) breadcrumbDiv.append("span").attr("class", "sep").text("›");
+    breadcrumbDiv.append("span")
+      .attr("class", "crumb")
+      .style("color", node.depth > 0 ? nodeColor(node) : "#888")
+      .text(node.data.name)
+      .on("click", () => zoomTo(node));
+  });
+}
+updateBreadcrumb(root);
+
+// ── Radial brush on outer ring ──
+const outerRadius = root.leaves()[0].y1;
+const innerBrushRadius = root.leaves()[0].y0;
+const brushG = svg.append("g").attr("class", "brush-layer");
+
+// Brush overlay arc
+const brushArc = d3.arc()
+  .innerRadius(innerBrushRadius).outerRadius(outerRadius);
+
+const brushOverlay = brushG.append("path")
+  .attr("fill", "transparent")
+  .attr("stroke", "none")
+  .style("pointer-events", "all")
+  .style("cursor", "crosshair");
+
+// Make the overlay cover the full outer ring
+brushOverlay.attr("d", brushArc({ startAngle: 0, endAngle: 2 * Math.PI }));
+
+// Brush selection indicator
+const brushSelection = brushG.append("path")
+  .attr("fill", "rgba(255,255,255,0.08)")
+  .attr("stroke", "#fff")
+  .attr("stroke-width", 1.5)
+  .attr("stroke-dasharray", "4,3")
+  .style("pointer-events", "none")
+  .attr("opacity", 0);
+
+// Handle indicators
+function makeHandle() {
+  return brushG.append("line")
+    .attr("stroke", "#fff").attr("stroke-width", 2)
+    .style("pointer-events", "none").attr("opacity", 0);
+}
+const handleStart = makeHandle(), handleEnd = makeHandle();
+
+function drawBrush() {
+  if (!brushRange) {
+    brushSelection.attr("opacity", 0);
+    handleStart.attr("opacity", 0);
+    handleEnd.attr("opacity", 0);
+    return;
+  }
+  const [a0, a1] = brushRange;
+  brushSelection.attr("d", brushArc({ startAngle: a0, endAngle: a1 })).attr("opacity", 1);
+
+  const rInner = innerBrushRadius, rOuter = outerRadius;
+  for (const [handle, angle] of [[handleStart, a0], [handleEnd, a1]]) {
+    handle.attr("x1", rInner * Math.sin(angle)).attr("y1", -rInner * Math.cos(angle))
+      .attr("x2", rOuter * Math.sin(angle)).attr("y2", -rOuter * Math.cos(angle))
+      .attr("opacity", 1);
+  }
+}
+
+// Drag to brush
+let brushDragStart = null;
+
+function angleFromEvent(e) {
+  const [x, y] = d3.pointer(e, g.node());
+  let a = Math.atan2(x, -y); // angle from 12 o'clock
+  if (a < 0) a += 2 * Math.PI;
+  return a;
+}
+
+function isOnOuterRing(e) {
+  const [x, y] = d3.pointer(e, g.node());
+  const r = Math.sqrt(x * x + y * y);
+  return r >= innerBrushRadius * 0.85 && r <= outerRadius * 1.1;
+}
+
+brushOverlay.call(d3.drag()
+  .on("start", function(e) {
+    brushDragStart = angleFromEvent(e.sourceEvent);
+  })
+  .on("drag", function(e) {
+    if (brushDragStart === null) return;
+    const current = angleFromEvent(e.sourceEvent);
+    const a0 = Math.min(brushDragStart, current);
+    const a1 = Math.max(brushDragStart, current);
+    if (a1 - a0 > 0.02) {
+      brushRange = [a0, a1];
+      drawBrush();
+      updateAppearance(false);
+    }
+  })
+  .on("end", function() {
+    brushDragStart = null;
+  })
+);
+
+// Shift+click anywhere to clear brush
+svg.on("click", function(e) {
+  if (e.shiftKey) {
+    brushRange = null;
+    drawBrush();
+    updateAppearance(true);
+  }
+});
+
+updateAppearance();
+</script>
+</body>
+</html>

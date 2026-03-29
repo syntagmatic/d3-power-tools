@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>1M-Point WebGL Scatterplot</title>
+<style>
+* { margin: 0; box-sizing: border-box; }
+body { background: #0a0a0f; color: #ccc; font-family: system-ui, sans-serif; overflow: hidden; }
+#main { position: relative; width: 100vw; height: 100vh; }
+canvas, svg { position: absolute; top: 0; left: 0; }
+#webgl-canvas, #canvas2d { width: 100%; height: 100%; }
+svg { pointer-events: all; }
+.axis text { fill: #888; font-size: 11px; }
+.axis path, .axis line { stroke: #444; }
+#controls {
+  position: absolute; top: 12px; right: 12px; z-index: 10;
+  display: flex; gap: 8px; align-items: center;
+}
+#controls button {
+  background: #222; border: 1px solid #555; color: #ccc; padding: 5px 14px;
+  border-radius: 4px; cursor: pointer; font-size: 13px;
+}
+#controls button.active { background: #446; border-color: #88a; color: #fff; }
+#fps {
+  position: absolute; top: 12px; left: 12px; z-index: 10;
+  background: rgba(0,0,0,0.7); padding: 6px 12px; border-radius: 4px;
+  font-size: 13px; font-variant-numeric: tabular-nums;
+}
+#histogram {
+  position: absolute; bottom: 20px; right: 20px; z-index: 10;
+  background: rgba(10,10,20,0.85); border: 1px solid #333; border-radius: 6px;
+  padding: 8px;
+}
+#histogram canvas { display: block; }
+#hist-label {
+  text-align: center; font-size: 11px; color: #999; margin-top: 4px;
+}
+.brush .selection { fill: rgba(100,160,255,0.15); stroke: #68a; stroke-width: 1.5; }
+</style>
+</head>
+<body>
+<div id="main">
+  <canvas id="webgl-canvas"></canvas>
+  <canvas id="canvas2d" style="display:none"></canvas>
+  <svg id="overlay"></svg>
+  <div id="fps">FPS: --</div>
+  <div id="controls">
+    <button id="btn-webgl" class="active">WebGL</button>
+    <button id="btn-canvas">Canvas 2D</button>
+  </div>
+  <div id="histogram">
+    <canvas id="hist-canvas" width="200" height="200"></canvas>
+    <div id="hist-label">Brushed: 0 pts</div>
+  </div>
+</div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script type="module">
+
+// --- Config ---
+const N = 1_000_000;
+const margin = { top: 40, right: 40, bottom: 50, left: 60 };
+
+// --- Generate data: 5 Gaussian clusters ---
+function mulberry32(a) {
+  return () => { a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+const rng = mulberry32(42);
+function randn() { let u, v; do { u = rng(); } while (u === 0); v = rng(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
+
+const clusters = [
+  { cx: 0.2, cy: 0.3, sx: 0.08, sy: 0.06, w: 0.3 },
+  { cx: 0.7, cy: 0.7, sx: 0.1,  sy: 0.1,  w: 0.25 },
+  { cx: 0.5, cy: 0.2, sx: 0.05, sy: 0.12, w: 0.2 },
+  { cx: 0.3, cy: 0.8, sx: 0.07, sy: 0.04, w: 0.15 },
+  { cx: 0.85,cy: 0.4, sx: 0.06, sy: 0.09, w: 0.1 },
+];
+const cumW = []; let s = 0;
+for (const c of clusters) { s += c.w; cumW.push(s); }
+
+const xs = new Float32Array(N);
+const ys = new Float32Array(N);
+const clusterIds = new Uint8Array(N);
+
+for (let i = 0; i < N; i++) {
+  const r = rng();
+  let ci = 0;
+  while (ci < cumW.length - 1 && r > cumW[ci]) ci++;
+  const c = clusters[ci];
+  xs[i] = c.cx + randn() * c.sx;
+  ys[i] = c.cy + randn() * c.sy;
+  clusterIds[i] = ci;
+}
+
+// --- Layout ---
+const width = window.innerWidth;
+const height = window.innerHeight;
+const dpr = window.devicePixelRatio || 1;
+const plotW = width - margin.left - margin.right;
+const plotH = height - margin.top - margin.bottom;
+
+const xScale = d3.scaleLinear().domain([-0.1, 1.1]).range([margin.left, margin.left + plotW]);
+const yScale = d3.scaleLinear().domain([-0.1, 1.1]).range([margin.top + plotH, margin.top]);
+
+// --- SVG overlay (axes + brush) ---
+const svg = d3.select("#overlay").attr("width", width).attr("height", height);
+const gX = svg.append("g").attr("class", "axis").attr("transform", `translate(0,${margin.top + plotH})`).call(d3.axisBottom(xScale).ticks(10));
+const gY = svg.append("g").attr("class", "axis").attr("transform", `translate(${margin.left},0)`).call(d3.axisLeft(yScale).ticks(10));
+
+// --- Cluster colors ---
+const palette = ["#ff6b6b","#4ecdc4","#ffe66d","#a06cd5","#ff9f43"];
+const colorsRGB = palette.map(c => { const d = d3.color(c); return [d.r/255, d.g/255, d.b/255]; });
+
+// --- Visibility (for brush) ---
+const visible = new Uint8Array(N).fill(1);
+
+// ===================== WebGL Renderer =====================
+const glCanvas = document.getElementById("webgl-canvas");
+glCanvas.width = width * dpr;
+glCanvas.height = height * dpr;
+glCanvas.style.width = width + "px";
+glCanvas.style.height = height + "px";
+
+const gl = glCanvas.getContext("webgl2", { antialias: false, alpha: false });
+if (!gl) { alert("WebGL2 not supported"); }
+
+// Vertex shader: instanced SDF circles
+const vsSource = `#version 300 es
+precision highp float;
+// Per-vertex quad corners
+layout(location=0) in vec2 a_quad;
+// Per-instance
+layout(location=1) in vec2 a_pos;
+layout(location=2) in vec3 a_color;
+layout(location=3) in float a_visible;
+
+uniform vec2 u_scale;
+uniform vec2 u_translate;
+uniform float u_pointSize;
+
+out vec2 v_uv;
+out vec3 v_color;
+out float v_visible;
+
+void main() {
+  v_uv = a_quad;
+  v_color = a_color;
+  v_visible = a_visible;
+  // Map data coords to clip space
+  vec2 ndc = (a_pos * u_scale + u_translate) * 2.0 - 1.0;
+  ndc.y = -ndc.y; // flip y for screen coords... wait we handle this via scale
+  // Actually let's map properly
+  vec2 screenPos = a_pos * u_scale + u_translate;
+  vec2 clip = screenPos * 2.0 - 1.0;
+  clip.y *= -1.0;
+  vec2 offset = a_quad * u_pointSize / vec2(${width * dpr}.0, ${height * dpr}.0) * 2.0;
+  gl_Position = vec4(clip + offset, 0.0, 1.0);
+}`;
+
+const fsSource = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+in vec3 v_color;
+in float v_visible;
+out vec4 fragColor;
+void main() {
+  if (v_visible < 0.5) discard;
+  float d = length(v_uv);
+  if (d > 1.0) discard;
+  float alpha = 1.0 - smoothstep(0.7, 1.0, d);
+  fragColor = vec4(v_color, alpha * 0.6);
+}`;
+
+function compileShader(gl, type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+    console.error(gl.getShaderInfoLog(sh));
+    gl.deleteShader(sh);
+    return null;
+  }
+  return sh;
+}
+
+const vs = compileShader(gl, gl.VERTEX_SHADER, vsSource);
+const fs = compileShader(gl, gl.FRAGMENT_SHADER, fsSource);
+const prog = gl.createProgram();
+gl.attachShader(prog, vs);
+gl.attachShader(prog, fs);
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+  console.error(gl.getProgramInfoLog(prog));
+}
+gl.useProgram(prog);
+
+const u_scale = gl.getUniformLocation(prog, "u_scale");
+const u_translate = gl.getUniformLocation(prog, "u_translate");
+const u_pointSize = gl.getUniformLocation(prog, "u_pointSize");
+
+// Build instance data: pack x,y,r,g,b into float array
+const instanceData = new Float32Array(N * 5);
+for (let i = 0; i < N; i++) {
+  const px = (xs[i] - (-0.1)) / 1.2; // normalize to [0,1] in domain
+  const py = 1.0 - (ys[i] - (-0.1)) / 1.2; // flip y
+  const col = colorsRGB[clusterIds[i]];
+  instanceData[i * 5]     = px;
+  instanceData[i * 5 + 1] = py;
+  instanceData[i * 5 + 2] = col[0];
+  instanceData[i * 5 + 3] = col[1];
+  instanceData[i * 5 + 4] = col[2];
+}
+
+// Quad vertices (unit square for SDF)
+const quadVerts = new Float32Array([-1,-1, 1,-1, -1,1, 1,1]);
+const quadBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+gl.bufferData(gl.ARRAY_BUFFER, quadVerts, gl.STATIC_DRAW);
+
+// Instance buffer
+const instBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
+gl.bufferData(gl.ARRAY_BUFFER, instanceData, gl.STATIC_DRAW);
+
+// Visibility buffer
+const visBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, visBuf);
+gl.bufferData(gl.ARRAY_BUFFER, visible, gl.DYNAMIC_DRAW);
+
+// VAO
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+
+// a_quad (location 0) - per vertex
+gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+// Per-instance attributes
+gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
+// a_pos (location 1)
+gl.enableVertexAttribArray(1);
+gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 20, 0);
+gl.vertexAttribDivisor(1, 1);
+// a_color (location 2)
+gl.enableVertexAttribArray(2);
+gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 20, 8);
+gl.vertexAttribDivisor(2, 1);
+
+// a_visible (location 3)
+gl.bindBuffer(gl.ARRAY_BUFFER, visBuf);
+gl.enableVertexAttribArray(3);
+gl.vertexAttribPointer(3, 1, gl.UNSIGNED_BYTE, true, 0, 0);
+gl.vertexAttribDivisor(3, 1);
+
+gl.bindVertexArray(null);
+
+// Compute scale/translate to map [0,1]² to the plot area in clip-ready coords [0,1]
+const sxGL = plotW / width;
+const syGL = plotH / height;
+const txGL = margin.left / width;
+const tyGL = margin.top / height;
+
+function renderWebGL() {
+  gl.viewport(0, 0, glCanvas.width, glCanvas.height);
+  gl.clearColor(0.04, 0.04, 0.06, 1.0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+  gl.useProgram(prog);
+  gl.uniform2f(u_scale, sxGL, syGL);
+  gl.uniform2f(u_translate, txGL, tyGL);
+  gl.uniform1f(u_pointSize, Math.max(2, 3 * dpr));
+
+  gl.bindVertexArray(vao);
+  gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, N);
+  gl.bindVertexArray(null);
+}
+
+function updateVisibility() {
+  gl.bindBuffer(gl.ARRAY_BUFFER, visBuf);
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, visible);
+}
+
+// ===================== Canvas 2D Renderer =====================
+const c2d = document.getElementById("canvas2d");
+c2d.width = width * dpr;
+c2d.height = height * dpr;
+c2d.style.width = width + "px";
+c2d.style.height = height + "px";
+const ctx = c2d.getContext("2d");
+
+function renderCanvas2D() {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = "#0a0a0f";
+  ctx.fillRect(0, 0, width, height);
+  ctx.globalAlpha = 0.3;
+  const r = 1.5;
+  for (let i = 0; i < N; i++) {
+    if (!visible[i]) continue;
+    const sx = xScale(xs[i]);
+    const sy = yScale(ys[i]);
+    ctx.fillStyle = palette[clusterIds[i]];
+    ctx.fillRect(sx - r, sy - r, r * 2, r * 2);
+  }
+  ctx.globalAlpha = 1.0;
+}
+
+// ===================== Mode toggle =====================
+let mode = "webgl";
+const btnWebgl = document.getElementById("btn-webgl");
+const btnCanvas = document.getElementById("btn-canvas");
+
+btnWebgl.addEventListener("click", () => {
+  mode = "webgl";
+  btnWebgl.classList.add("active");
+  btnCanvas.classList.remove("active");
+  glCanvas.style.display = "block";
+  c2d.style.display = "none";
+});
+
+btnCanvas.addEventListener("click", () => {
+  mode = "canvas";
+  btnCanvas.classList.add("active");
+  btnWebgl.classList.remove("active");
+  c2d.style.display = "block";
+  glCanvas.style.display = "none";
+  needsRender = true;
+});
+
+// ===================== Brush =====================
+let brushExtent = null;
+const brush = d3.brush()
+  .extent([[margin.left, margin.top], [margin.left + plotW, margin.top + plotH]])
+  .on("brush end", brushed);
+
+svg.append("g").attr("class", "brush").call(brush);
+
+function brushed(event) {
+  brushExtent = event.selection;
+  if (!brushExtent) {
+    visible.fill(1);
+  } else {
+    const [[x0, y0], [x1, y1]] = brushExtent;
+    const dx0 = xScale.invert(x0), dx1 = xScale.invert(x1);
+    const dy0 = yScale.invert(y1), dy1 = yScale.invert(y0); // inverted y
+    for (let i = 0; i < N; i++) {
+      visible[i] = (xs[i] >= dx0 && xs[i] <= dx1 && ys[i] >= dy0 && ys[i] <= dy1) ? 1 : 0;
+    }
+  }
+  updateVisibility();
+  updateHistogram();
+  needsRender = true;
+}
+
+// ===================== 2D Histogram =====================
+const histSize = 200;
+const histBins = 40;
+const histCanvas = document.getElementById("hist-canvas");
+const histCtx = histCanvas.getContext("2d");
+histCanvas.width = histSize * dpr;
+histCanvas.height = histSize * dpr;
+histCanvas.style.width = histSize + "px";
+histCanvas.style.height = histSize + "px";
+
+function updateHistogram() {
+  const counts = new Float32Array(histBins * histBins);
+  let total = 0;
+
+  // Determine data range of brushed points
+  let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+  for (let i = 0; i < N; i++) {
+    if (!visible[i]) continue;
+    total++;
+    if (xs[i] < xMin) xMin = xs[i];
+    if (xs[i] > xMax) xMax = xs[i];
+    if (ys[i] < yMin) yMin = ys[i];
+    if (ys[i] > yMax) yMax = ys[i];
+  }
+
+  document.getElementById("hist-label").textContent =
+    `Brushed: ${total.toLocaleString()} pts`;
+
+  if (total === 0) {
+    histCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    histCtx.fillStyle = "#111";
+    histCtx.fillRect(0, 0, histSize, histSize);
+    return;
+  }
+
+  const xRange = xMax - xMin || 1;
+  const yRange = yMax - yMin || 1;
+
+  for (let i = 0; i < N; i++) {
+    if (!visible[i]) continue;
+    let bx = Math.floor((xs[i] - xMin) / xRange * (histBins - 1));
+    let by = Math.floor((ys[i] - yMin) / yRange * (histBins - 1));
+    bx = Math.max(0, Math.min(histBins - 1, bx));
+    by = Math.max(0, Math.min(histBins - 1, by));
+    counts[by * histBins + bx]++;
+  }
+
+  let maxCount = 0;
+  for (let i = 0; i < counts.length; i++) if (counts[i] > maxCount) maxCount = counts[i];
+
+  const colorScale = d3.scaleSequential(d3.interpolateViridis).domain([0, Math.log1p(maxCount)]);
+  const cellW = histSize / histBins;
+  const cellH = histSize / histBins;
+
+  histCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  histCtx.fillStyle = "#111";
+  histCtx.fillRect(0, 0, histSize, histSize);
+
+  for (let by = 0; by < histBins; by++) {
+    for (let bx = 0; bx < histBins; bx++) {
+      const v = counts[by * histBins + bx];
+      if (v === 0) continue;
+      histCtx.fillStyle = colorScale(Math.log1p(v));
+      histCtx.fillRect(bx * cellW, (histBins - 1 - by) * cellH, cellW + 0.5, cellH + 0.5);
+    }
+  }
+}
+
+// ===================== Render Loop =====================
+let needsRender = true;
+let lastTime = performance.now();
+let frameCount = 0;
+let fpsDisplay = 0;
+const fpsEl = document.getElementById("fps");
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  frameCount++;
+  if (now - lastTime >= 1000) {
+    fpsDisplay = frameCount;
+    frameCount = 0;
+    lastTime = now;
+    fpsEl.textContent = `FPS: ${fpsDisplay} [${mode === "webgl" ? "WebGL" : "Canvas 2D"}]`;
+  }
+
+  if (mode === "webgl") {
+    renderWebGL();
+  } else if (needsRender) {
+    renderCanvas2D();
+    needsRender = false;
+  }
+}
+
+// Initial render
+updateHistogram();
+requestAnimationFrame(frame);
+
+</script>
+</body>
+</html>

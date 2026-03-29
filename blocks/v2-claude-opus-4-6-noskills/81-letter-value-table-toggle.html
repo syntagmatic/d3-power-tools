@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Letter-Value Plot with Table Toggle</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,sans-serif;background:#fafafa;color:#222;display:flex;flex-direction:column;align-items:center;padding:20px}
+  h1{font-size:1.3rem;margin:0 0 4px}
+  .subtitle{font-size:.85rem;color:#666;margin-bottom:12px}
+  .toggle-bar{margin-bottom:10px;display:flex;gap:8px;align-items:center}
+  .toggle-bar button{padding:5px 14px;border:1.5px solid #555;border-radius:4px;background:#fff;cursor:pointer;font-size:.82rem;transition:all .15s}
+  .toggle-bar button.active{background:#333;color:#fff;border-color:#333}
+  .toggle-bar button:focus-visible{outline:2px solid #005fcc;outline-offset:2px}
+  svg text{font-family:system-ui,-apple-system,sans-serif}
+  .chart-container,.table-container{width:100%;max-width:900px}
+  .table-container{display:none}
+  table{width:100%;border-collapse:collapse;font-size:.82rem}
+  th,td{padding:5px 10px;text-align:right;border-bottom:1px solid #ddd}
+  th{background:#eee;position:sticky;top:0;text-align:right}
+  th:first-child,td:first-child{text-align:left}
+  tr:hover td{background:#f0f4ff}
+
+  /* Forced-colors mode */
+  @media(forced-colors:active){
+    svg rect.lv-box{fill:Canvas!important;stroke:CanvasText!important;stroke-width:1.5px}
+    .hatch-1{fill:url(#hatch-sparse)!important}
+    .hatch-2{fill:url(#hatch-medium)!important}
+    .hatch-3{fill:url(#hatch-dense)!important}
+    .hatch-4{fill:url(#hatch-solid)!important}
+    svg line.median-line{stroke:CanvasText!important;stroke-width:2.5px}
+    svg text{fill:CanvasText!important}
+    svg line,svg .axis line,svg .axis path{stroke:CanvasText!important}
+  }
+</style>
+</head>
+<body>
+<h1>Letter-Value Plot</h1>
+<p class="subtitle">5 groups × 1000 values — nested rectangles at median, fourths, eighths, sixteenths</p>
+<div class="toggle-bar">
+  <button id="btn-chart" class="active" aria-pressed="true">Chart</button>
+  <button id="btn-table" aria-pressed="false">Table</button>
+</div>
+<div class="chart-container" id="chart"></div>
+<div class="table-container" id="table"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Seeded PRNG (mulberry32) ---
+function mulberry32(a){return()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t^=t+Math.imul(t^t>>>7,61|t);return((t^t>>>14)>>>0)/4294967296}}
+
+// --- Generate synthetic data ---
+const groups = ["Alpha","Beta","Gamma","Delta","Epsilon"];
+const distributions = [
+  {loc:50,scale:12,skew:0},
+  {loc:65,scale:20,skew:0.6},
+  {loc:40,scale:8,skew:-0.3},
+  {loc:55,scale:15,skew:0.2},
+  {loc:70,scale:25,skew:-0.5}
+];
+
+function skewNormal(rng,loc,scale,skew){
+  const u1=rng(),u2=rng();
+  const z0=Math.sqrt(-2*Math.log(u1||1e-10))*Math.cos(2*Math.PI*u2);
+  const z1=Math.sqrt(-2*Math.log(u1||1e-10))*Math.sin(2*Math.PI*u2);
+  const d=skew/Math.sqrt(1+skew*skew);
+  const x=d*z0+Math.sqrt(1-d*d)*z1;
+  return loc+scale*x;
+}
+
+const rng=mulberry32(42);
+const data=[];
+groups.forEach((g,i)=>{
+  const d=distributions[i];
+  const vals=Array.from({length:1000},()=>skewNormal(rng,d.loc,d.scale,d.skew));
+  vals.sort((a,b)=>a-b);
+  data.push({group:g,values:vals});
+});
+
+// --- Compute letter-value statistics ---
+function letterValues(sorted){
+  const n=sorted.length;
+  const median=d3.median(sorted);
+  const levels=[];
+  // Level 0: full range (whiskers)
+  // Level 1: fourths (quartiles)
+  // Level 2: eighths
+  // Level 3: sixteenths
+  const names=["Sixteenths","Eighths","Fourths","Median"];
+  const fractions=[16,8,4,2];
+  for(let li=0;li<fractions.length;li++){
+    const k=fractions[li];
+    const lo=d3.quantileSorted(sorted,1/k);
+    const hi=d3.quantileSorted(sorted,1-1/k);
+    levels.push({name:names[li],lo,hi,depth:li});
+  }
+  // Whiskers: min/max trimmed to 1.5 IQR from quartiles
+  const q1=d3.quantileSorted(sorted,0.25);
+  const q3=d3.quantileSorted(sorted,0.75);
+  const iqr=q3-q1;
+  const wlo=d3.min(sorted.filter(v=>v>=q1-1.5*iqr));
+  const whi=d3.max(sorted.filter(v=>v<=q3+1.5*iqr));
+  return {median,levels,whiskers:[wlo,whi],q1,q3,iqr};
+}
+
+const stats=data.map(d=>({group:d.group,values:d.values,...letterValues(d.values)}));
+
+// --- Dimensions ---
+const margin={top:30,right:30,bottom:50,left:70};
+const width=880,height=420;
+const innerW=width-margin.left-margin.right;
+const innerH=height-margin.top-margin.bottom;
+
+// --- Scales ---
+const xScale=d3.scaleBand().domain(groups).range([0,innerW]).padding(0.25);
+const allVals=data.flatMap(d=>d.values);
+const yScale=d3.scaleLinear().domain(d3.extent(allVals)).nice().range([innerH,0]);
+
+const colorScale=d3.scaleOrdinal()
+  .domain([0,1,2,3])
+  .range(["#c6dbef","#6baed6","#2171b5","#08306b"]);
+
+const bandW=xScale.bandwidth();
+const boxWidths=[0.35,0.55,0.75,0.95]; // fraction of bandwidth per depth
+
+// --- SVG ---
+const svg=d3.select("#chart").append("svg")
+  .attr("viewBox",`0 0 ${width} ${height}`)
+  .attr("width","100%")
+  .attr("role","img")
+  .attr("aria-label","Letter-value plot showing distributions for 5 groups");
+
+// Hatching patterns for forced-colors
+const defs=svg.append("defs");
+[["hatch-sparse",12],["hatch-medium",6],["hatch-dense",3],["hatch-solid",1.5]].forEach(([id,gap])=>{
+  const p=defs.append("pattern").attr("id",id).attr("patternUnits","userSpaceOnUse").attr("width",gap).attr("height",gap);
+  p.append("rect").attr("width",gap).attr("height",gap).attr("fill","Canvas");
+  p.append("line").attr("x1",0).attr("y1",gap).attr("x2",gap).attr("y2",0).attr("stroke","CanvasText").attr("stroke-width",gap<4?1.5:1);
+});
+
+const g=svg.append("g").attr("transform",`translate(${margin.left},${margin.top})`);
+
+// Axes
+g.append("g").attr("class","axis").attr("transform",`translate(0,${innerH})`).call(d3.axisBottom(xScale)).selectAll("text").style("font-size","12px");
+g.append("g").attr("class","axis").call(d3.axisLeft(yScale).ticks(8)).selectAll("text").style("font-size","11px");
+g.append("text").attr("transform","rotate(-90)").attr("x",-innerH/2).attr("y",-50).attr("text-anchor","middle").attr("font-size","12px").attr("fill","#444").text("Value");
+
+// --- Draw letter-value boxes ---
+const hatchClasses=["hatch-4","hatch-3","hatch-2","hatch-1"];
+
+stats.forEach(s=>{
+  const cx=xScale(s.group)+bandW/2;
+
+  // Whisker line
+  g.append("line")
+    .attr("x1",cx).attr("x2",cx)
+    .attr("y1",yScale(s.whiskers[1])).attr("y2",yScale(s.whiskers[0]))
+    .attr("stroke","#666").attr("stroke-width",1);
+
+  // Whisker caps
+  [s.whiskers[0],s.whiskers[1]].forEach(w=>{
+    g.append("line")
+      .attr("x1",cx-8).attr("x2",cx+8)
+      .attr("y1",yScale(w)).attr("y2",yScale(w))
+      .attr("stroke","#666").attr("stroke-width",1);
+  });
+
+  // Nested boxes (draw outermost first)
+  s.levels.forEach((lv,i)=>{
+    const bw=bandW*boxWidths[i];
+    g.append("rect")
+      .attr("class",`lv-box ${hatchClasses[i]}`)
+      .attr("x",cx-bw/2)
+      .attr("y",yScale(lv.hi))
+      .attr("width",bw)
+      .attr("height",yScale(lv.lo)-yScale(lv.hi))
+      .attr("fill",colorScale(i))
+      .attr("stroke","#fff")
+      .attr("stroke-width",0.5)
+      .attr("opacity",0.9)
+      .append("title").text(`${s.group} ${lv.name}: ${lv.lo.toFixed(1)} – ${lv.hi.toFixed(1)}`);
+  });
+
+  // Median line
+  g.append("line")
+    .attr("class","median-line")
+    .attr("x1",cx-bandW*boxWidths[3]/2)
+    .attr("x2",cx+bandW*boxWidths[3]/2)
+    .attr("y1",yScale(s.median))
+    .attr("y2",yScale(s.median))
+    .attr("stroke","#fff")
+    .attr("stroke-width",2.5);
+});
+
+// Legend
+const legend=svg.append("g").attr("transform",`translate(${width-margin.right-150},${margin.top})`);
+const lnames=["Sixteenths","Eighths","Fourths","Median"];
+lnames.forEach((name,i)=>{
+  const ly=i*20;
+  legend.append("rect").attr("x",0).attr("y",ly).attr("width",14).attr("height",14).attr("fill",colorScale(i)).attr("rx",2);
+  legend.append("text").attr("x",20).attr("y",ly+11).text(name).attr("font-size","11px").attr("fill","#444");
+});
+
+// --- Table ---
+const tableDiv=d3.select("#table");
+const table=tableDiv.append("table");
+const thead=table.append("thead").append("tr");
+["Group","Median","Q1","Q3","IQR","Eighth Lo","Eighth Hi","16th Lo","16th Hi","Whisker Lo","Whisker Hi"].forEach(h=>thead.append("th").text(h));
+const tbody=table.append("tbody");
+stats.forEach(s=>{
+  const row=tbody.append("tr");
+  const eights=s.levels[1], sixteenths=s.levels[0];
+  [s.group,s.median,s.q1,s.q3,s.iqr,eights.lo,eights.hi,sixteenths.lo,sixteenths.hi,s.whiskers[0],s.whiskers[1]]
+    .forEach((v,i)=>row.append("td").text(i===0?v:typeof v==="number"?v.toFixed(2):v));
+});
+
+// --- Toggle ---
+const btnChart=document.getElementById("btn-chart");
+const btnTable=document.getElementById("btn-table");
+const chartEl=document.getElementById("chart");
+const tableEl=document.getElementById("table");
+
+function toggle(showTable){
+  chartEl.style.display=showTable?"none":"block";
+  tableEl.style.display=showTable?"block":"none";
+  btnChart.classList.toggle("active",!showTable);
+  btnTable.classList.toggle("active",showTable);
+  btnChart.setAttribute("aria-pressed",!showTable);
+  btnTable.setAttribute("aria-pressed",showTable);
+}
+btnChart.addEventListener("click",()=>toggle(false));
+btnTable.addEventListener("click",()=>toggle(true));
+</script>
+</body>
+</html>

@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Split Violin Grid: Decadal Temperature Shift</title>
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif;
+    background: #fafafa;
+    display: flex;
+    justify-content: center;
+    padding: 24px 12px;
+  }
+  #chart { max-width: 1200px; }
+  .month-label { font-size: 11px; font-weight: 600; fill: #333; }
+  .city-label { font-size: 11px; font-weight: 600; fill: #333; }
+  .axis text { font-size: 9px; fill: #666; }
+  .axis line, .axis path { stroke: #ccc; }
+  .title { font-size: 16px; font-weight: 700; fill: #222; }
+  .subtitle { font-size: 12px; fill: #666; }
+  .legend-label { font-size: 10px; fill: #555; }
+</style>
+</head>
+<body>
+<div id="chart"></div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Cities with latitude-based temperature profiles ---
+const cities = [
+  { name: "Oslo",      baseMean: -2, amplitude: 14, noise: 4.5 },
+  { name: "London",    baseMean: 6,  amplitude: 8,  noise: 3.5 },
+  { name: "New York",  baseMean: 5,  amplitude: 15, noise: 5.0 },
+  { name: "Tokyo",     baseMean: 10, amplitude: 13, noise: 4.0 },
+  { name: "Mumbai",    baseMean: 26, amplitude: 4,  noise: 2.5 },
+  { name: "Singapore", baseMean: 27, amplitude: 1.5, noise: 1.8 },
+];
+
+const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const nPerGroup = 120; // daily-ish samples per month per decade
+
+// Seeded PRNG for reproducibility
+const rng = d3.randomLcg(2024);
+const normal = d3.randomNormal.source(rng);
+
+// Generate synthetic temperature data
+// 2020s are ~0.8–1.2°C warmer (realistic decadal warming signal)
+const data = [];
+for (const city of cities) {
+  for (let mi = 0; mi < 12; mi++) {
+    const seasonalOffset = city.amplitude * Math.cos((mi - 6) * Math.PI / 6);
+    for (const decade of ["2010s", "2020s"]) {
+      const warmingShift = decade === "2020s" ? 0.8 + rng() * 0.4 : 0;
+      const gen = normal(city.baseMean + seasonalOffset + warmingShift, city.noise);
+      for (let i = 0; i < nPerGroup; i++) {
+        data.push({ city: city.name, month: mi, decade, value: gen() });
+      }
+    }
+  }
+}
+
+// --- Layout ---
+const margin = { top: 60, right: 30, bottom: 30, left: 80 };
+const cellW = 72, cellH = 90;
+const gapX = 6, gapY = 8;
+const gridW = months.length * (cellW + gapX) - gapX;
+const gridH = cities.length * (cellH + gapY) - gapY;
+const width = margin.left + gridW + margin.right;
+const height = margin.top + gridH + margin.bottom;
+
+const svg = d3.select("#chart").append("svg")
+  .attr("viewBox", `0 0 ${width} ${height}`)
+  .attr("width", width)
+  .attr("height", height);
+
+// Title
+svg.append("text").attr("class", "title")
+  .attr("x", margin.left + gridW / 2).attr("y", 22)
+  .attr("text-anchor", "middle")
+  .text("Monthly Temperature Distributions: 2010s vs 2020s");
+
+svg.append("text").attr("class", "subtitle")
+  .attr("x", margin.left + gridW / 2).attr("y", 40)
+  .attr("text-anchor", "middle")
+  .text("Split violins — left (blue) = 2010s, right (orange) = 2020s. Shared y-scale reveals latitude gradient and warming shift.");
+
+// Legend
+const legendG = svg.append("g").attr("transform", `translate(${margin.left + gridW - 120}, 12)`);
+legendG.append("rect").attr("width", 10).attr("height", 10).attr("fill", "#4575b4").attr("opacity", 0.75);
+legendG.append("text").attr("class", "legend-label").attr("x", 14).attr("y", 9).text("2010s");
+legendG.append("rect").attr("x", 60).attr("width", 10).attr("height", 10).attr("fill", "#e85d26").attr("opacity", 0.75);
+legendG.append("text").attr("class", "legend-label").attr("x", 74).attr("y", 9).text("2020s");
+
+// Shared y-scale across all cells
+const yExtent = d3.extent(data, d => d.value);
+const yScale = d3.scaleLinear()
+  .domain([yExtent[0] - 2, yExtent[1] + 2])
+  .range([cellH, 0]);
+
+// KDE setup
+const gaussian = x => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+
+function kde(kernel, bandwidth, values) {
+  return points => points.map(x => [
+    x,
+    d3.mean(values, v => kernel((x - v) / bandwidth)) / bandwidth
+  ]);
+}
+
+function silvermanBandwidth(values) {
+  const sorted = Float64Array.from(values).sort();
+  const std = d3.deviation(values);
+  const iqr = d3.quantile(sorted, 0.75) - d3.quantile(sorted, 0.25);
+  return 0.9 * Math.min(std, iqr / 1.34) * Math.pow(values.length, -0.2);
+}
+
+// Compute density ticks spanning shared y domain
+const densityTicks = d3.ticks(yScale.domain()[0], yScale.domain()[1], 80);
+
+// Group data by city, month, decade
+const grouped = d3.group(data, d => d.city, d => d.month, d => d.decade);
+
+// Compute all densities to find global max for consistent violin widths
+let maxDensity = 0;
+const densities = new Map();
+
+for (const city of cities) {
+  for (let mi = 0; mi < 12; mi++) {
+    for (const decade of ["2010s", "2020s"]) {
+      const vals = grouped.get(city.name)?.get(mi)?.get(decade)?.map(d => d.value) ?? [];
+      const bw = silvermanBandwidth(vals);
+      const density = kde(gaussian, bw, vals)(densityTicks);
+      const key = `${city.name}-${mi}-${decade}`;
+      densities.set(key, density);
+      const localMax = d3.max(density, d => d[1]);
+      if (localMax > maxDensity) maxDensity = localMax;
+    }
+  }
+}
+
+// Violin width scale: density → half-cell width
+const halfW = cellW / 2 - 2;
+const violinScale = d3.scaleLinear([0, maxDensity], [0, halfW]);
+
+// Colors
+const colorLeft = "#4575b4";   // cool blue for 2010s
+const colorRight = "#e85d26";  // warm orange for 2020s
+
+const g = svg.append("g").attr("transform", `translate(${margin.left}, ${margin.top})`);
+
+// Month labels (top)
+for (let mi = 0; mi < 12; mi++) {
+  g.append("text").attr("class", "month-label")
+    .attr("x", mi * (cellW + gapX) + cellW / 2)
+    .attr("y", -8)
+    .attr("text-anchor", "middle")
+    .text(months[mi]);
+}
+
+// City labels (left)
+for (let ci = 0; ci < cities.length; ci++) {
+  g.append("text").attr("class", "city-label")
+    .attr("x", -10)
+    .attr("y", ci * (cellH + gapY) + cellH / 2)
+    .attr("text-anchor", "end")
+    .attr("dominant-baseline", "middle")
+    .text(cities[ci].name);
+}
+
+// Draw grid cells
+for (let ci = 0; ci < cities.length; ci++) {
+  for (let mi = 0; mi < 12; mi++) {
+    const cx = mi * (cellW + gapX);
+    const cy = ci * (cellH + gapY);
+    const cell = g.append("g").attr("transform", `translate(${cx}, ${cy})`);
+
+    // Light background
+    cell.append("rect")
+      .attr("width", cellW).attr("height", cellH)
+      .attr("fill", "#fff").attr("stroke", "#e0e0e0").attr("stroke-width", 0.5)
+      .attr("rx", 2);
+
+    // Center line
+    cell.append("line")
+      .attr("x1", cellW / 2).attr("x2", cellW / 2)
+      .attr("y1", 0).attr("y2", cellH)
+      .attr("stroke", "#ddd").attr("stroke-width", 0.5);
+
+    const centerX = cellW / 2;
+
+    // Left half: 2010s — area extends left from center
+    const densityL = densities.get(`${cities[ci].name}-${mi}-2010s`);
+    const areaLeft = d3.area()
+      .x0(centerX)
+      .x1(d => centerX - violinScale(d[1]))
+      .y(d => yScale(d[0]))
+      .curve(d3.curveBasis);
+
+    cell.append("path")
+      .datum(densityL)
+      .attr("d", areaLeft)
+      .attr("fill", colorLeft)
+      .attr("opacity", 0.75);
+
+    // Right half: 2020s — area extends right from center
+    const densityR = densities.get(`${cities[ci].name}-${mi}-2020s`);
+    const areaRight = d3.area()
+      .x0(centerX)
+      .x1(d => centerX + violinScale(d[1]))
+      .y(d => yScale(d[0]))
+      .curve(d3.curveBasis);
+
+    cell.append("path")
+      .datum(densityR)
+      .attr("d", areaRight)
+      .attr("fill", colorRight)
+      .attr("opacity", 0.75);
+
+    // Median lines for both decades
+    for (const [decade, color] of [["2010s", colorLeft], ["2020s", colorRight]]) {
+      const vals = grouped.get(cities[ci].name)?.get(mi)?.get(decade)?.map(d => d.value) ?? [];
+      const sorted = Float64Array.from(vals).sort();
+      const median = d3.quantile(sorted, 0.5);
+      const my = yScale(median);
+      const density = densities.get(`${cities[ci].name}-${mi}-${decade}`);
+      // Find density at median for line width
+      const closest = density.reduce((best, d) =>
+        Math.abs(d[0] - median) < Math.abs(best[0] - median) ? d : best
+      );
+      const w = violinScale(closest[1]);
+
+      if (decade === "2010s") {
+        cell.append("line")
+          .attr("x1", centerX - w).attr("x2", centerX)
+          .attr("y1", my).attr("y2", my)
+          .attr("stroke", "#fff").attr("stroke-width", 1.2).attr("opacity", 0.9);
+      } else {
+        cell.append("line")
+          .attr("x1", centerX).attr("x2", centerX + w)
+          .attr("y1", my).attr("y2", my)
+          .attr("stroke", "#fff").attr("stroke-width", 1.2).attr("opacity", 0.9);
+      }
+    }
+
+    // Y-axis tick marks for leftmost column only
+    if (mi === 0) {
+      const ticks = yScale.ticks(4);
+      for (const t of ticks) {
+        cell.append("line")
+          .attr("x1", -3).attr("x2", 0)
+          .attr("y1", yScale(t)).attr("y2", yScale(t))
+          .attr("stroke", "#999").attr("stroke-width", 0.5);
+        cell.append("text")
+          .attr("class", "axis")
+          .attr("x", -5).attr("y", yScale(t))
+          .attr("text-anchor", "end")
+          .attr("dominant-baseline", "middle")
+          .style("font-size", "8px")
+          .text(`${t}°`);
+      }
+    }
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Radial Dendrogram — Hierarchical Edge Bundling</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: #0d1117;
+  color: #8b949e;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-height: 100vh;
+  padding-bottom: 40px;
+}
+h1 {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: #58a6ff;
+  margin: 24px 0 4px;
+}
+#subtitle {
+  font-size: 11px;
+  color: #444;
+  margin-bottom: 16px;
+  letter-spacing: .04em;
+}
+#controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 12px;
+  font-size: 11px;
+}
+#controls label { color: #666; letter-spacing: .05em; }
+#tension-sl {
+  width: 160px;
+  accent-color: #58a6ff;
+  cursor: pointer;
+}
+#tval { color: #58a6ff; font-weight: 700; min-width: 34px; }
+#legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px 20px;
+  margin-bottom: 8px;
+  font-size: 10px;
+  max-width: 680px;
+}
+.leg-item { display: flex; align-items: center; gap: 5px; color: #555; }
+.leg-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.link {
+  fill: none;
+  stroke: #1e3a5f;
+  stroke-width: 1.2;
+  stroke-opacity: 0.55;
+}
+.link.faded { stroke-opacity: 0.04; }
+.link.outgoing { stroke: #58a6ff; stroke-width: 2; stroke-opacity: 1; }
+.link.incoming { stroke: #ff7b72; stroke-width: 2; stroke-opacity: 1; }
+.node circle {
+  stroke-width: 1.5;
+  cursor: pointer;
+  transition: r 0.1s;
+}
+.node text { font-size: 9.5px; fill: #8b949e; }
+.node.active text { font-weight: 700; }
+.node.faded circle { opacity: 0.15; }
+.node.faded text { opacity: 0.1; }
+#tip {
+  position: fixed;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 11px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.1s;
+  z-index: 99;
+  line-height: 1.8;
+  white-space: nowrap;
+}
+</style>
+</head>
+<body>
+<h1>Software Module Dependency Graph</h1>
+<div id="subtitle">Hierarchical Edge Bundling · 125 modules · 86 dependency edges</div>
+<div id="controls">
+  <label for="tension-sl">Bundle tension</label>
+  <input type="range" id="tension-sl" min="0" max="1" step="0.01" value="0.85">
+  <span id="tval">0.85</span>
+</div>
+<div id="legend"></div>
+<svg id="chart"></svg>
+<div id="tip"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// ── Data ─────────────────────────────────────────────────────────────────────
+
+const GROUPS = [
+  { name: "core",     color: "#58a6ff", children: [
+    { name: "utils",  children: ["array-utils","string-utils","date-utils","math-utils","type-utils"] },
+    { name: "events", children: ["event-bus","event-emitter","event-queue","event-filter"] },
+    { name: "config", children: ["config-loader","config-validator","env-parser","feature-flags","settings-store"] }
+  ]},
+  { name: "ui",       color: "#bc8cff", children: [
+    { name: "components", children: ["button","input","modal","dropdown","table","chart-wrapper","toast"] },
+    { name: "layouts",    children: ["grid-layout","flex-layout","sidebar-layout","responsive-layout","overlay-layout","panel-layout"] },
+    { name: "themes",     children: ["dark-theme","light-theme","color-tokens","typography","spacing","icons"] },
+    { name: "forms",      children: ["form-builder","validation","field-registry","auto-complete","file-upload"] }
+  ]},
+  { name: "data",     color: "#3fb950", children: [
+    { name: "models",  children: ["user-model","session-model","project-model","task-model","event-model","log-model"] },
+    { name: "storage", children: ["local-storage","indexed-db","memory-store","sqlite-adapter","schema-registry"] },
+    { name: "sync",    children: ["sync-engine","conflict-resolver","diff-patch","change-log","merge-strategy"] },
+    { name: "query",   children: ["query-builder","filter-engine","sort-pipeline","paginator","aggregator"] }
+  ]},
+  { name: "network",  color: "#f0883e", children: [
+    { name: "http", children: ["http-client","request-queue","response-cache","interceptors","retry-logic"] },
+    { name: "ws",   children: ["ws-client","ws-server","ws-protocol","heartbeat","reconnect"] },
+    { name: "auth", children: ["oauth-client","jwt-handler","session-manager","permission-check","token-refresh"] }
+  ]},
+  { name: "services", color: "#ff7b72", children: [
+    { name: "api",   children: ["rest-client","graphql-client","api-gateway","rate-limiter","api-mock","schema-gen"] },
+    { name: "cache", children: ["lru-cache","ttl-cache","distributed-cache","cache-invalidate","prefetch"] },
+    { name: "queue", children: ["task-queue","priority-queue","dead-letter","job-scheduler","worker-pool"] }
+  ]},
+  { name: "platform", color: "#39d353", children: [
+    { name: "native", children: ["fs-adapter","process-runner","ipc-bridge","native-dialog","clipboard"] },
+    { name: "web",    children: ["service-worker","web-push","browser-storage","web-crypto","perf-observer"] },
+    { name: "cli",    children: ["arg-parser","cli-output","progress-bar","cli-prompts","shell-runner"] }
+  ]},
+  { name: "testing",  color: "#a8b8c8", children: [
+    { name: "unit",        children: ["test-runner","assertion-lib","mock-factory","spy-utils","snapshot"] },
+    { name: "integration", children: ["test-db","api-tester","e2e-runner","fixture-loader","coverage"] }
+  ]},
+  { name: "build",    color: "#e3b341", children: [
+    { name: "bundler", children: ["module-resolver","tree-shaker","code-splitter","asset-pipeline","source-maps"] },
+    { name: "tools",   children: ["linter","formatter","type-checker","doc-gen","changelog"] }
+  ]}
+];
+
+// Convert string leaf arrays to object form
+function normalise(node) {
+  return {
+    name: node.name,
+    color: node.color,
+    children: node.children
+      ? node.children.map(c => typeof c === "string" ? { name: c } : normalise(c))
+      : undefined
+  };
+}
+
+const treeData = { name: "root", children: GROUPS.map(normalise) };
+
+const DEPS = [
+  // core internal
+  ["event-emitter","event-bus"],  ["event-queue","event-emitter"],
+  ["event-filter","event-bus"],   ["config-validator","config-loader"],
+  ["env-parser","config-loader"], ["feature-flags","config-loader"],
+  ["settings-store","config-validator"],
+  // ui → core
+  ["button","event-emitter"],     ["modal","event-bus"],
+  ["dropdown","array-utils"],     ["table","array-utils"],
+  ["table","sort-pipeline"],      ["toast","event-bus"],
+  ["toast","dark-theme"],         ["auto-complete","array-utils"],
+  ["auto-complete","http-client"],["form-builder","validation"],
+  ["validation","type-utils"],    ["color-tokens","config-loader"],
+  ["dark-theme","color-tokens"],  ["light-theme","color-tokens"],
+  ["typography","color-tokens"],
+  // data → core
+  ["user-model","type-utils"],    ["session-model","user-model"],
+  ["project-model","user-model"], ["task-model","project-model"],
+  ["event-model","event-bus"],    ["sync-engine","diff-patch"],
+  ["sync-engine","change-log"],   ["conflict-resolver","diff-patch"],
+  ["merge-strategy","conflict-resolver"],
+  ["query-builder","filter-engine"],["sort-pipeline","array-utils"],
+  ["schema-registry","type-utils"],["aggregator","query-builder"],
+  // network → core/data
+  ["http-client","config-loader"],["http-client","event-bus"],
+  ["request-queue","http-client"],["retry-logic","http-client"],
+  ["response-cache","lru-cache"], ["interceptors","http-client"],
+  ["ws-client","event-emitter"],  ["ws-protocol","type-utils"],
+  ["heartbeat","ws-client"],      ["reconnect","ws-client"],
+  ["oauth-client","http-client"], ["jwt-handler","session-model"],
+  ["session-manager","jwt-handler"],["token-refresh","oauth-client"],
+  ["permission-check","session-manager"],
+  // services → network/data
+  ["rest-client","http-client"],  ["graphql-client","http-client"],
+  ["api-gateway","rest-client"],  ["api-gateway","graphql-client"],
+  ["rate-limiter","config-loader"],["lru-cache","config-loader"],
+  ["ttl-cache","lru-cache"],      ["distributed-cache","sync-engine"],
+  ["cache-invalidate","event-bus"],["prefetch","lru-cache"],
+  ["task-queue","event-emitter"], ["priority-queue","task-queue"],
+  ["job-scheduler","task-queue"], ["worker-pool","task-queue"],
+  // platform → various
+  ["fs-adapter","config-loader"], ["ipc-bridge","event-bus"],
+  ["service-worker","cache-invalidate"],["web-push","ws-client"],
+  ["browser-storage","local-storage"],  ["web-crypto","jwt-handler"],
+  ["arg-parser","type-utils"],    ["shell-runner","process-runner"],
+  ["cli-output","color-tokens"],
+  // testing → various
+  ["test-runner","event-bus"],    ["mock-factory","type-utils"],
+  ["api-tester","rest-client"],   ["test-db","sqlite-adapter"],
+  ["fixture-loader","schema-registry"],["coverage","test-runner"],
+  // build → platform/core
+  ["module-resolver","fs-adapter"],["tree-shaker","module-resolver"],
+  ["code-splitter","tree-shaker"], ["linter","type-checker"],
+  ["doc-gen","string-utils"],      ["source-maps","code-splitter"],
+  ["changelog","change-log"],
+];
+
+// ── Layout ───────────────────────────────────────────────────────────────────
+
+const W = 860, H = 860, R = 310;
+
+const svg = d3.select("#chart")
+  .attr("width", W).attr("height", H)
+  .attr("viewBox", `${-W/2} ${-H/2} ${W} ${H}`);
+
+const root = d3.hierarchy(treeData);
+d3.cluster().size([2 * Math.PI, R])(root);
+
+// Leaf name → hierarchy node
+const leafMap = new Map(root.leaves().map(d => [d.data.name, d]));
+
+// Edge objects
+const links = DEPS
+  .filter(([s, t]) => leafMap.has(s) && leafMap.has(t))
+  .map(([s, t]) => ({ source: leafMap.get(s), target: leafMap.get(t) }));
+
+// Leaf name → group color
+const nodeColor = new Map();
+root.children.forEach(g => g.leaves().forEach(l => nodeColor.set(l.data.name, g.data.color)));
+
+// ── Render ───────────────────────────────────────────────────────────────────
+
+let beta = 0.85;
+const makeLine = b => d3.lineRadial()
+  .curve(d3.curveBundle.beta(b))
+  .angle(d => d.x)
+  .radius(d => d.y);
+
+// Links (bottom layer)
+const linkLayer = svg.append("g");
+const linkSel = linkLayer.selectAll("path")
+  .data(links)
+  .join("path")
+  .attr("class", "link")
+  .attr("d", d => makeLine(beta)(d.source.path(d.target)));
+
+// Group arc rings + labels (middle layer)
+const arcLayer = svg.append("g");
+root.children.forEach(g => {
+  const lvs   = g.leaves();
+  const angs  = lvs.map(l => l.x);
+  const a0    = Math.min(...angs);
+  const a1    = Math.max(...angs);
+  const mid   = (a0 + a1) / 2;
+  const arcR  = R + 14;
+
+  // Colored arc band
+  arcLayer.append("path")
+    .attr("fill", g.data.color)
+    .attr("opacity", 0.45)
+    .attr("d", d3.arc()({
+      innerRadius: arcR, outerRadius: arcR + 4,
+      startAngle: a0 - 0.02, endAngle: a1 + 0.02
+    }));
+
+  // Group label, radially placed outside arc
+  const lr    = arcR + 22;
+  const flip  = mid > Math.PI;
+  const deg   = mid * 180 / Math.PI - 90;
+  arcLayer.append("text")
+    .attr("transform",
+      `rotate(${deg}) translate(${lr},0)${flip ? " rotate(180)" : ""}`)
+    .attr("text-anchor", flip ? "end" : "start")
+    .attr("dominant-baseline", "middle")
+    .style("font-size", "10px")
+    .style("font-weight", "700")
+    .style("letter-spacing", ".1em")
+    .style("fill", g.data.color)
+    .style("opacity", ".85")
+    .text(g.data.name.toUpperCase());
+});
+
+// Nodes (top layer)
+const nodeLayer = svg.append("g");
+const nodeSel = nodeLayer.selectAll("g.node")
+  .data(root.leaves())
+  .join("g")
+  .attr("class", "node")
+  .attr("transform", d =>
+    `rotate(${d.x * 180 / Math.PI - 90}) translate(${d.y},0)`);
+
+nodeSel.append("circle")
+  .attr("r", 3.5)
+  .style("fill", d => nodeColor.get(d.data.name) || "#444")
+  .style("stroke", d => d3.color(nodeColor.get(d.data.name) || "#444").darker(0.9).formatHex());
+
+nodeSel.append("text")
+  .attr("dy", "0.31em")
+  .attr("x", d => d.x < Math.PI ? 8 : -8)
+  .attr("text-anchor", d => d.x < Math.PI ? "start" : "end")
+  .attr("transform", d => d.x >= Math.PI ? "rotate(180)" : null)
+  .style("fill", d => nodeColor.get(d.data.name) || "#8b949e")
+  .text(d => d.data.name);
+
+// ── Interaction ──────────────────────────────────────────────────────────────
+
+const tip = d3.select("#tip");
+
+nodeSel
+  .on("mouseover", (event, d) => {
+    const name = d.data.name;
+    const out = new Set(), inc = new Set();
+    links.forEach(e => {
+      if (e.source.data.name === name) out.add(e.target.data.name);
+      if (e.target.data.name === name) inc.add(e.source.data.name);
+    });
+    const connected = new Set([...out, ...inc, name]);
+
+    linkSel
+      .classed("faded",    e => e.source.data.name !== name && e.target.data.name !== name)
+      .classed("outgoing", e => e.source.data.name === name)
+      .classed("incoming", e => e.target.data.name === name);
+
+    nodeSel
+      .classed("active", n => n.data.name === name)
+      .classed("faded",  n => !connected.has(n.data.name));
+
+    const col = nodeColor.get(name) || "#8b949e";
+    tip.style("opacity", 1).html(
+      `<strong style="color:${col}">${name}</strong><br>` +
+      `<span style="color:#58a6ff">→ depends on: <strong style="color:#58a6ff">${out.size}</strong></span><br>` +
+      `<span style="color:#ff7b72">← depended on by: <strong style="color:#ff7b72">${inc.size}</strong></span>`
+    );
+  })
+  .on("mousemove", event => {
+    tip.style("left", (event.clientX + 16) + "px")
+       .style("top",  (event.clientY - 12) + "px");
+  })
+  .on("mouseout", () => {
+    linkSel.classed("faded outgoing incoming", false);
+    nodeSel.classed("active faded", false);
+    tip.style("opacity", 0);
+  });
+
+// ── Tension slider ────────────────────────────────────────────────────────────
+
+d3.select("#tension-sl").on("input", function () {
+  beta = +this.value;
+  d3.select("#tval").text(beta.toFixed(2));
+  const line = makeLine(beta);
+  linkSel.attr("d", d => line(d.source.path(d.target)));
+});
+
+// ── Legend ───────────────────────────────────────────────────────────────────
+
+const legend = d3.select("#legend");
+GROUPS.forEach(g => {
+  const item = legend.append("div").attr("class", "leg-item");
+  item.append("div").attr("class", "leg-dot").style("background", g.color);
+  item.append("span").text(g.name);
+});
+
+</script>
+</body>
+</html>

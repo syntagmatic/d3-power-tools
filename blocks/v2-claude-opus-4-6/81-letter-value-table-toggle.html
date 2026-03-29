@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Letter-Value Plot with Table Toggle</title>
+<style>
+  :root {
+    --bg: #fff;
+    --fg: #1a1a2e;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --highlight: #3b82f6;
+  }
+  * { margin: 0; box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    padding: 1.5rem;
+  }
+  h1 { font-size: 1.25rem; font-weight: 600; margin-bottom: 0.25rem; }
+  .subtitle { font-size: 0.85rem; color: var(--muted); margin-bottom: 1rem; }
+  .toggle-bar {
+    display: flex; gap: 0.5rem; margin-bottom: 1rem;
+  }
+  .toggle-bar button {
+    padding: 0.4rem 1rem; border: 1px solid var(--border);
+    border-radius: 4px; background: var(--bg); color: var(--fg);
+    cursor: pointer; font-size: 0.85rem;
+  }
+  .toggle-bar button[aria-pressed="true"] {
+    background: var(--highlight); color: #fff; border-color: var(--highlight);
+  }
+  #chart-container, #table-container { width: 100%; }
+  #table-container { display: none; max-height: 500px; overflow: auto; }
+  table {
+    width: 100%; border-collapse: collapse; font-size: 0.85rem;
+  }
+  th, td {
+    padding: 0.35rem 0.75rem; border-bottom: 1px solid var(--border);
+    text-align: left;
+  }
+  th { position: sticky; top: 0; background: var(--bg); font-weight: 600; cursor: pointer; }
+  th[aria-sort="ascending"]::after { content: " ▲"; }
+  th[aria-sort="descending"]::after { content: " ▼"; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  th.num { text-align: right; }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px;
+    overflow: hidden; clip: rect(0,0,0,0);
+  }
+
+  /* Forced-colors: replace fills with hatching patterns */
+  @media (forced-colors: active) {
+    svg rect.lv-box { fill: none !important; stroke: CanvasText; stroke-width: 1px; }
+    svg .lv-median { stroke: CanvasText; stroke-width: 2px; }
+    svg .lv-hatch-1 { fill: url(#hatch-sparse) !important; }
+    svg .lv-hatch-2 { fill: url(#hatch-medium) !important; }
+    svg .lv-hatch-3 { fill: url(#hatch-dense) !important; }
+    svg .lv-hatch-4 { fill: url(#hatch-cross) !important; }
+    .toggle-bar button { forced-color-adjust: none; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Letter-Value Plot</h1>
+<p class="subtitle">5 groups × 1,000 values — nested quantile boxes at median, fourths, eighths, sixteenths</p>
+
+<div class="toggle-bar" role="toolbar" aria-label="View toggle">
+  <button id="btn-chart" aria-pressed="true">Chart</button>
+  <button id="btn-table" aria-pressed="false">Table</button>
+</div>
+
+<div id="chart-container"></div>
+<div id="table-container" aria-hidden="true"></div>
+<div id="live-region" class="sr-only" aria-live="polite"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data ---
+const rng = d3.randomLcg(42);
+const groups = [
+  { name: "Normal",    gen: () => d3.randomNormal.source(rng)(50, 12)() },
+  { name: "Skewed",    gen: () => Math.exp(d3.randomNormal.source(rng)(3.5, 0.6)()) },
+  { name: "Bimodal",   gen: () => rng() < 0.5 ? d3.randomNormal.source(rng)(30, 8)() : d3.randomNormal.source(rng)(70, 8)() },
+  { name: "Heavy-tail", gen: () => d3.randomNormal.source(rng)(50, 8)() / (0.1 + Math.abs(d3.randomNormal.source(rng)(0, 0.3)())) },
+  { name: "Uniform",   gen: () => rng() * 100 },
+];
+
+const N = 1000;
+const data = groups.map(g => {
+  const values = Float64Array.from({ length: N }, g.gen).sort();
+  return { name: g.name, values, stats: computeLetterValues(values) };
+});
+
+// --- Letter-value computation ---
+function computeLetterValues(sorted) {
+  const n = sorted.length;
+  const levels = [];
+  let depth = (1 + n) / 2;
+  const med = atDepth(sorted, depth);
+  levels.push({ letter: "M", lower: med, upper: med, label: "Median" });
+
+  const letters = [
+    { letter: "F", label: "Fourths" },
+    { letter: "E", label: "Eighths" },
+    { letter: "D", label: "Sixteenths" },
+    { letter: "C", label: "32nds" },
+    { letter: "B", label: "64ths" },
+    { letter: "A", label: "128ths" },
+  ];
+  const maxLevels = Math.max(0, Math.floor(Math.log2(n)) - 2);
+
+  for (let k = 0; k < Math.min(maxLevels, letters.length); k++) {
+    depth = (1 + Math.floor(depth)) / 2;
+    if (depth < 1) break;
+    levels.push({
+      letter: letters[k].letter,
+      label: letters[k].label,
+      lower: atDepth(sorted, depth),
+      upper: atDepth(sorted, n + 1 - depth),
+    });
+  }
+  return levels;
+}
+
+function atDepth(sorted, depth) {
+  const i = Math.floor(depth) - 1;
+  return depth === Math.floor(depth) ? sorted[i] : (sorted[i] + sorted[i + 1]) / 2;
+}
+
+// --- Chart ---
+const margin = { top: 30, right: 30, bottom: 40, left: 80 };
+const width = 800, height = 420;
+const innerW = width - margin.left - margin.right;
+const innerH = height - margin.top - margin.bottom;
+
+const allValues = data.flatMap(d => [d.values[0], d.values[d.values.length - 1]]);
+const yExtent = d3.extent(allValues);
+const yPad = (yExtent[1] - yExtent[0]) * 0.05;
+
+const x = d3.scaleBand().domain(data.map(d => d.name)).range([0, innerW]).padding(0.25);
+const y = d3.scaleLinear().domain([yExtent[0] - yPad, yExtent[1] + yPad]).range([innerH, 0]);
+
+// Color: sequential by depth level
+const maxDepth = d3.max(data, d => d.stats.length);
+const color = d3.scaleSequential(d3.interpolateBlues).domain([-1, maxDepth]);
+
+const svg = d3.select("#chart-container").append("svg")
+  .attr("viewBox", `0 0 ${width} ${height}`)
+  .attr("width", "100%")
+  .attr("role", "img")
+  .attr("aria-label", "Letter-value plot showing distribution of 5 groups");
+
+// Hatching patterns for forced-colors
+const defs = svg.append("defs");
+
+const hatches = [
+  { id: "hatch-sparse",  angle: 45, gap: 8, width: 1 },
+  { id: "hatch-medium",  angle: 45, gap: 5, width: 1 },
+  { id: "hatch-dense",   angle: 45, gap: 3, width: 1 },
+  { id: "hatch-cross",   angle: 0,  gap: 4, width: 1, cross: true },
+];
+
+for (const h of hatches) {
+  const p = defs.append("pattern")
+    .attr("id", h.id)
+    .attr("patternUnits", "userSpaceOnUse")
+    .attr("width", h.gap).attr("height", h.gap)
+    .attr("patternTransform", `rotate(${h.angle})`);
+  p.append("line")
+    .attr("x1", 0).attr("y1", 0).attr("x2", 0).attr("y2", h.gap)
+    .attr("stroke", "CanvasText").attr("stroke-width", h.width);
+  if (h.cross) {
+    p.append("line")
+      .attr("x1", 0).attr("y1", 0).attr("x2", h.gap).attr("y2", 0)
+      .attr("stroke", "CanvasText").attr("stroke-width", h.width);
+  }
+}
+
+const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+// Axes
+g.append("g")
+  .attr("transform", `translate(0,${innerH})`)
+  .call(d3.axisBottom(x))
+  .selectAll("text").style("font-size", "0.8rem");
+
+g.append("g")
+  .call(d3.axisLeft(y).ticks(8))
+  .selectAll("text").style("font-size", "0.75rem");
+
+// Draw letter-value boxes per group
+const hatchClasses = ["lv-hatch-1", "lv-hatch-2", "lv-hatch-3", "lv-hatch-4"];
+
+for (const group of data) {
+  const gGroup = g.append("g");
+  const bandW = x.bandwidth();
+  const cx = x(group.name) + bandW / 2;
+
+  // Draw from outermost level inward so inner boxes render on top
+  const levels = group.stats.slice().reverse();
+
+  for (let ri = 0; ri < levels.length; ri++) {
+    const lv = levels[ri];
+    const origIdx = levels.length - 1 - ri; // original depth index
+
+    if (lv.letter === "M") {
+      // Median line
+      gGroup.append("line")
+        .attr("class", "lv-median")
+        .attr("x1", cx - bandW * 0.4)
+        .attr("x2", cx + bandW * 0.4)
+        .attr("y1", y(lv.lower))
+        .attr("y2", y(lv.lower))
+        .attr("stroke", "#1a1a2e")
+        .attr("stroke-width", 2.5);
+    } else {
+      // Width decreases for inner (more precise) levels — but outer rendered first
+      const widthFrac = d3.scaleLinear()
+        .domain([1, group.stats.length - 1])
+        .range([0.85, 0.25])(origIdx);
+      const boxW = bandW * widthFrac;
+
+      const rectY = y(lv.upper);
+      const rectH = y(lv.lower) - y(lv.upper);
+
+      // Hatch class assignment: deepest levels get denser hatch
+      const hatchIdx = Math.min(origIdx - 1, hatchClasses.length - 1);
+
+      gGroup.append("rect")
+        .attr("class", `lv-box ${hatchClasses[hatchIdx]}`)
+        .attr("x", cx - boxW / 2)
+        .attr("y", rectY)
+        .attr("width", boxW)
+        .attr("height", Math.max(0, rectH))
+        .attr("fill", color(origIdx))
+        .attr("stroke", d3.lab(color(origIdx)).darker(0.5))
+        .attr("stroke-width", 0.75)
+        .attr("rx", 1);
+    }
+  }
+
+  // Whisker lines (min to outermost box, max to outermost box)
+  const outermost = group.stats[group.stats.length - 1];
+  const minVal = group.values[0];
+  const maxVal = group.values[group.values.length - 1];
+
+  gGroup.append("line")
+    .attr("x1", cx).attr("x2", cx)
+    .attr("y1", y(outermost.lower)).attr("y2", y(minVal))
+    .attr("stroke", var(--fg, "#1a1a2e")).attr("stroke", "#888")
+    .attr("stroke-width", 1).attr("stroke-dasharray", "2,2");
+
+  gGroup.append("line")
+    .attr("x1", cx).attr("x2", cx)
+    .attr("y1", y(outermost.upper)).attr("y2", y(maxVal))
+    .attr("stroke", "#888")
+    .attr("stroke-width", 1).attr("stroke-dasharray", "2,2");
+}
+
+// Legend
+const legendG = g.append("g").attr("transform", `translate(${innerW - 140}, -10)`);
+const legendItems = [
+  { label: "Fourths (F)", depth: 1 },
+  { label: "Eighths (E)", depth: 2 },
+  { label: "Sixteenths (D)", depth: 3 },
+  { label: "Median (M)", depth: -1 },
+];
+
+legendItems.forEach((item, i) => {
+  const ly = i * 18;
+  if (item.depth === -1) {
+    legendG.append("line")
+      .attr("x1", 0).attr("x2", 14).attr("y1", ly + 7).attr("y2", ly + 7)
+      .attr("stroke", "#1a1a2e").attr("stroke-width", 2.5);
+  } else {
+    legendG.append("rect")
+      .attr("x", 0).attr("y", ly).attr("width", 14).attr("height", 14)
+      .attr("fill", color(item.depth)).attr("stroke", d3.lab(color(item.depth)).darker(0.5))
+      .attr("stroke-width", 0.5).attr("rx", 1)
+      .attr("class", `lv-box ${hatchClasses[Math.min(item.depth - 1, hatchClasses.length - 1)]}`);
+  }
+  legendG.append("text")
+    .attr("x", 20).attr("y", ly + 11)
+    .text(item.label).style("font-size", "0.7rem").attr("fill", "#555");
+});
+
+// --- Table ---
+const fmt = d3.format(",.2f");
+const columns = [
+  { key: "group", label: "Group", type: "string" },
+  { key: "letter", label: "Level", type: "string" },
+  { key: "label", label: "Name", type: "string" },
+  { key: "lower", label: "Lower", type: "number", format: fmt },
+  { key: "upper", label: "Upper", type: "number", format: fmt },
+  { key: "spread", label: "Spread", type: "number", format: fmt },
+];
+
+const tableData = data.flatMap(d =>
+  d.stats.map(lv => ({
+    group: d.name,
+    letter: lv.letter,
+    label: lv.label,
+    lower: lv.lower,
+    upper: lv.upper,
+    spread: lv.upper - lv.lower,
+  }))
+);
+
+const tableContainer = d3.select("#table-container");
+const table = tableContainer.append("table").attr("role", "grid");
+const thead = table.append("thead").append("tr");
+const tbody = table.append("tbody");
+
+let sortKey = null, sortDir = 1;
+
+thead.selectAll("th").data(columns).join("th")
+  .attr("class", d => d.type === "number" ? "num" : null)
+  .attr("tabindex", 0)
+  .attr("aria-sort", "none")
+  .text(d => d.label)
+  .on("click", (e, col) => {
+    if (sortKey === col.key) sortDir *= -1;
+    else { sortKey = col.key; sortDir = 1; }
+    thead.selectAll("th").attr("aria-sort", "none");
+    d3.select(e.currentTarget).attr("aria-sort", sortDir === 1 ? "ascending" : "descending");
+    renderTable();
+  })
+  .on("keydown", (e, col) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      e.currentTarget.click();
+    }
+  });
+
+function renderTable() {
+  const sorted = [...tableData];
+  if (sortKey) {
+    const col = columns.find(c => c.key === sortKey);
+    sorted.sort((a, b) => {
+      const va = a[sortKey], vb = b[sortKey];
+      return (col.type === "number" ? d3.ascending(va, vb) : d3.ascending(String(va), String(vb))) * sortDir;
+    });
+  }
+
+  const rows = tbody.selectAll("tr")
+    .data(sorted, (d, i) => `${d.group}-${d.letter}`)
+    .join("tr");
+
+  rows.selectAll("td")
+    .data(d => columns.map(col => ({
+      value: col.format ? col.format(d[col.key]) : d[col.key],
+      type: col.type,
+    })))
+    .join("td")
+      .attr("class", d => d.type === "number" ? "num" : null)
+      .text(d => d.value);
+}
+
+renderTable();
+
+// --- Toggle ---
+const btnChart = document.getElementById("btn-chart");
+const btnTable = document.getElementById("btn-table");
+const chartDiv = document.getElementById("chart-container");
+const tableDiv = document.getElementById("table-container");
+const liveRegion = document.getElementById("live-region");
+
+btnChart.addEventListener("click", () => {
+  btnChart.setAttribute("aria-pressed", "true");
+  btnTable.setAttribute("aria-pressed", "false");
+  chartDiv.style.display = "";
+  tableDiv.style.display = "none";
+  tableDiv.setAttribute("aria-hidden", "true");
+  chartDiv.removeAttribute("aria-hidden");
+  liveRegion.textContent = "Showing chart view";
+});
+
+btnTable.addEventListener("click", () => {
+  btnTable.setAttribute("aria-pressed", "true");
+  btnChart.setAttribute("aria-pressed", "false");
+  tableDiv.style.display = "";
+  chartDiv.style.display = "none";
+  chartDiv.setAttribute("aria-hidden", "true");
+  tableDiv.removeAttribute("aria-hidden");
+  liveRegion.textContent = "Showing table view";
+});
+</script>
+</body>
+</html>

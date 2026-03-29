@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Energy Flow Sankey Diagram</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0a0f;
+    color: #c8c8d0;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    padding: 24px;
+  }
+  h1 {
+    font-size: 22px;
+    font-weight: 600;
+    color: #e8e8f0;
+    margin-bottom: 4px;
+    letter-spacing: -0.3px;
+  }
+  .subtitle {
+    font-size: 13px;
+    color: #888;
+    margin-bottom: 20px;
+  }
+  #chart { width: 100%; max-width: 1200px; }
+  svg { overflow: visible; }
+  .node rect {
+    cursor: grab;
+    stroke: none;
+    rx: 2;
+    ry: 2;
+  }
+  .node rect:hover { stroke: #fff; stroke-width: 1; }
+  .node text {
+    font-size: 11px;
+    fill: #b0b0b8;
+    pointer-events: none;
+  }
+  .link { fill: none; stroke-opacity: 0.25; }
+  .link.loss { stroke-opacity: 0.35; }
+  .link.dimmed { stroke-opacity: 0.04; }
+  .link.highlighted { stroke-opacity: 0.7; }
+  .link.loss.highlighted { stroke-opacity: 0.8; }
+  .tooltip {
+    position: absolute;
+    background: rgba(20, 20, 30, 0.95);
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-size: 12px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s;
+    max-width: 280px;
+    line-height: 1.6;
+    backdrop-filter: blur(8px);
+  }
+  .tooltip .label { color: #e8e8f0; font-weight: 600; margin-bottom: 4px; }
+  .tooltip .value { color: #aaa; }
+  .tooltip .pct { color: #6cf; font-weight: 500; }
+  .stage-label {
+    font-size: 11px;
+    fill: #555;
+    text-anchor: middle;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+  }
+  .legend {
+    display: flex;
+    gap: 20px;
+    margin-bottom: 16px;
+    font-size: 12px;
+    color: #888;
+  }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .legend-swatch {
+    width: 24px;
+    height: 4px;
+    border-radius: 2px;
+  }
+</style>
+</head>
+<body>
+
+<h1>Energy Flow: Sources to End Uses</h1>
+<p class="subtitle">510 TWh total primary energy across 5 stages — drag nodes to rearrange</p>
+<div class="legend">
+  <div class="legend-item">
+    <div class="legend-swatch" style="background: #e05050;"></div>
+    <span>Energy losses</span>
+  </div>
+  <div class="legend-item">
+    <div class="legend-swatch" style="background: #4a9eff;"></div>
+    <span>Useful energy flow</span>
+  </div>
+</div>
+<div id="chart"></div>
+<div class="tooltip" id="tooltip"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+import {sankey, sankeyLinkHorizontal, sankeyLeft} from "https://cdn.jsdelivr.net/npm/d3-sankey@0.12/+esm";
+
+// --- Synthetic energy flow data ---
+// 6 sources → 3 generation types → 2 grid stages → 4 sectors → 6 end uses
+// Loss nodes at generation, transmission, distribution stages
+
+const nodes = [
+  // Stage 0: Primary sources (6)
+  {name: "Coal", stage: 0},
+  {name: "Natural Gas", stage: 0},
+  {name: "Nuclear", stage: 0},
+  {name: "Solar", stage: 0},
+  {name: "Wind", stage: 0},
+  {name: "Hydropower", stage: 0},
+  // Stage 1: Generation (3 + 1 loss)
+  {name: "Thermal Generation", stage: 1},
+  {name: "Nuclear Generation", stage: 1},
+  {name: "Renewable Generation", stage: 1},
+  {name: "Generation Losses", stage: 1, loss: true},
+  // Stage 2: Grid (2 + 1 loss)
+  {name: "Transmission Grid", stage: 2},
+  {name: "Transmission Losses", stage: 2, loss: true},
+  {name: "Distribution Grid", stage: 2},
+  // Stage 3: Sectors (4 + 1 loss)
+  {name: "Residential", stage: 3},
+  {name: "Commercial", stage: 3},
+  {name: "Industrial", stage: 3},
+  {name: "Transport", stage: 3},
+  {name: "Distribution Losses", stage: 3, loss: true},
+  // Stage 4: End uses (6)
+  {name: "Heating", stage: 4},
+  {name: "Cooling", stage: 4},
+  {name: "Lighting", stage: 4},
+  {name: "Motors & Drives", stage: 4},
+  {name: "Electronics", stage: 4},
+  {name: "Vehicle Propulsion", stage: 4},
+];
+
+const nodeIndex = new Map(nodes.map((d, i) => [d.name, i]));
+const N = (name) => nodeIndex.get(name);
+
+const links = [
+  // Sources → Generation (6 links)
+  {source: N("Coal"), target: N("Thermal Generation"), value: 140},
+  {source: N("Natural Gas"), target: N("Thermal Generation"), value: 115},
+  {source: N("Nuclear"), target: N("Nuclear Generation"), value: 90},
+  {source: N("Solar"), target: N("Renewable Generation"), value: 62},
+  {source: N("Wind"), target: N("Renewable Generation"), value: 55},
+  {source: N("Hydropower"), target: N("Renewable Generation"), value: 48},
+
+  // Generation → Grid + Generation Losses (6 links)
+  {source: N("Thermal Generation"), target: N("Generation Losses"), value: 85},
+  {source: N("Thermal Generation"), target: N("Transmission Grid"), value: 170},
+  {source: N("Nuclear Generation"), target: N("Generation Losses"), value: 8},
+  {source: N("Nuclear Generation"), target: N("Transmission Grid"), value: 82},
+  {source: N("Renewable Generation"), target: N("Generation Losses"), value: 5},
+  {source: N("Renewable Generation"), target: N("Transmission Grid"), value: 160},
+
+  // Transmission Grid → Distribution + Transmission Losses (2 links)
+  {source: N("Transmission Grid"), target: N("Transmission Losses"), value: 18},
+  {source: N("Transmission Grid"), target: N("Distribution Grid"), value: 394},
+
+  // Distribution Grid → Sectors + Distribution Losses (5 links)
+  {source: N("Distribution Grid"), target: N("Residential"), value: 110},
+  {source: N("Distribution Grid"), target: N("Commercial"), value: 95},
+  {source: N("Distribution Grid"), target: N("Industrial"), value: 120},
+  {source: N("Distribution Grid"), target: N("Transport"), value: 55},
+  {source: N("Distribution Grid"), target: N("Distribution Losses"), value: 14},
+
+  // Sectors → End Uses (16 links)
+  {source: N("Residential"), target: N("Heating"), value: 42},
+  {source: N("Residential"), target: N("Cooling"), value: 22},
+  {source: N("Residential"), target: N("Lighting"), value: 18},
+  {source: N("Residential"), target: N("Electronics"), value: 28},
+
+  {source: N("Commercial"), target: N("Cooling"), value: 25},
+  {source: N("Commercial"), target: N("Lighting"), value: 32},
+  {source: N("Commercial"), target: N("Electronics"), value: 18},
+  {source: N("Commercial"), target: N("Motors & Drives"), value: 20},
+
+  {source: N("Industrial"), target: N("Motors & Drives"), value: 55},
+  {source: N("Industrial"), target: N("Heating"), value: 38},
+  {source: N("Industrial"), target: N("Lighting"), value: 12},
+  {source: N("Industrial"), target: N("Electronics"), value: 15},
+
+  {source: N("Transport"), target: N("Vehicle Propulsion"), value: 45},
+  {source: N("Transport"), target: N("Electronics"), value: 5},
+  {source: N("Transport"), target: N("Cooling"), value: 5},
+];
+
+// Total: 6 + 6 + 2 + 5 + 15 = 34 links
+
+const graph = {nodes: nodes.map(d => ({...d})), links: links.map(d => ({...d}))};
+
+// --- Layout ---
+const margin = {top: 32, right: 160, bottom: 40, left: 140};
+const width = 1200;
+const height = 620;
+const innerWidth = width - margin.left - margin.right;
+const innerHeight = height - margin.top - margin.bottom;
+
+const sankeyGen = sankey()
+  .nodeId(d => d.index)
+  .nodeAlign(sankeyLeft)
+  .nodeWidth(14)
+  .nodePadding(14)
+  .extent([[0, 0], [innerWidth, innerHeight]]);
+
+sankeyGen(graph);
+
+// --- Color scales ---
+const stageColors = ["#4a9eff", "#6cc4ff", "#58d68d", "#f0c040", "#e07040"];
+const lossColor = "#e05050";
+
+const nodeColor = d => d.loss ? lossColor : stageColors[d.stage];
+
+const linkColor = d => {
+  const targetNode = typeof d.target === "object" ? d.target : graph.nodes[d.target];
+  if (targetNode.loss) return lossColor;
+  const sourceNode = typeof d.source === "object" ? d.source : graph.nodes[d.source];
+  return stageColors[sourceNode.stage];
+};
+
+// --- Total energy for percentage calc ---
+const totalEnergy = d3.sum(graph.links.filter(l => l.source.stage === 0), d => d.value);
+
+// --- SVG ---
+const svg = d3.select("#chart")
+  .append("svg")
+  .attr("viewBox", `0 0 ${width} ${height}`)
+  .attr("width", "100%");
+
+const g = svg.append("g")
+  .attr("transform", `translate(${margin.left},${margin.top})`);
+
+// Stage labels
+const stageLabels = ["Sources", "Generation", "Grid", "Sectors", "End Uses"];
+const stageX = d3.groups(graph.nodes, d => d.stage).map(([stage, ns]) => {
+  const xs = ns.map(n => n.x0 + (n.x1 - n.x0) / 2);
+  return {stage, x: d3.mean(xs)};
+});
+
+g.selectAll(".stage-label")
+  .data(stageX)
+  .join("text")
+  .attr("class", "stage-label")
+  .attr("x", d => d.x)
+  .attr("y", -14)
+  .text(d => stageLabels[d.stage]);
+
+// --- Links ---
+const linkG = g.append("g").attr("fill", "none");
+
+const linkSel = linkG.selectAll(".link")
+  .data(graph.links)
+  .join("path")
+  .attr("class", d => {
+    const target = typeof d.target === "object" ? d.target : graph.nodes[d.target];
+    return `link${target.loss ? " loss" : ""}`;
+  })
+  .attr("d", sankeyLinkHorizontal())
+  .attr("stroke", linkColor)
+  .attr("stroke-width", d => Math.max(1, d.width));
+
+// --- Nodes ---
+const tooltip = d3.select("#tooltip");
+
+const nodeG = g.append("g");
+
+const nodeSel = nodeG.selectAll(".node")
+  .data(graph.nodes)
+  .join("g")
+  .attr("class", "node")
+  .attr("transform", d => `translate(${d.x0},${d.y0})`);
+
+nodeSel.append("rect")
+  .attr("width", d => d.x1 - d.x0)
+  .attr("height", d => d.y1 - d.y0)
+  .attr("fill", nodeColor)
+  .attr("opacity", 0.9);
+
+nodeSel.append("text")
+  .attr("x", d => d.x0 < innerWidth / 2 ? -6 : (d.x1 - d.x0) + 6)
+  .attr("y", d => (d.y1 - d.y0) / 2)
+  .attr("dy", "0.35em")
+  .attr("text-anchor", d => d.x0 < innerWidth / 2 ? "end" : "start")
+  .text(d => d.name)
+  .attr("font-weight", d => d.loss ? 500 : 400)
+  .attr("fill", d => d.loss ? "#e07070" : "#b0b0b8");
+
+// --- Drag nodes vertically ---
+const drag = d3.drag()
+  .on("start", function() { d3.select(this).select("rect").style("cursor", "grabbing"); })
+  .on("drag", function(event, d) {
+    const dy = event.dy;
+    const newY0 = Math.max(0, Math.min(innerHeight - (d.y1 - d.y0), d.y0 + dy));
+    const h = d.y1 - d.y0;
+    d.y0 = newY0;
+    d.y1 = newY0 + h;
+    d3.select(this).attr("transform", `translate(${d.x0},${d.y0})`);
+    sankeyGen.update(graph);
+    linkSel.attr("d", sankeyLinkHorizontal());
+  })
+  .on("end", function() { d3.select(this).select("rect").style("cursor", "grab"); });
+
+nodeSel.call(drag);
+
+// --- Hover: highlight connected paths ---
+function getConnectedLinks(node) {
+  const connected = new Set();
+  // Forward trace
+  function traceForward(n) {
+    graph.links.forEach(l => {
+      if (l.source === n && !connected.has(l)) {
+        connected.add(l);
+        traceForward(l.target);
+      }
+    });
+  }
+  // Backward trace
+  function traceBackward(n) {
+    graph.links.forEach(l => {
+      if (l.target === n && !connected.has(l)) {
+        connected.add(l);
+        traceBackward(l.source);
+      }
+    });
+  }
+  traceForward(node);
+  traceBackward(node);
+  return connected;
+}
+
+nodeSel.on("mouseenter", function(event, d) {
+  const connected = getConnectedLinks(d);
+  linkSel
+    .classed("dimmed", l => !connected.has(l))
+    .classed("highlighted", l => connected.has(l));
+
+  const nodeTotal = Math.max(d.value || d3.sum(d.sourceLinks, l => l.value), 1);
+  const pct = ((nodeTotal / totalEnergy) * 100).toFixed(1);
+  const inflows = d.targetLinks.map(l => `<span class="value">${l.source.name}: ${l.value} TWh</span>`).join("<br>");
+  const outflows = d.sourceLinks.map(l => `<span class="value">${l.target.name}: ${l.value} TWh</span>`).join("<br>");
+
+  tooltip.html(`
+    <div class="label">${d.name}${d.loss ? " (waste)" : ""}</div>
+    <div><span class="pct">${nodeTotal} TWh</span> · ${pct}% of total</div>
+    ${inflows ? `<div style="margin-top:6px"><b style="color:#6cf">In:</b><br>${inflows}</div>` : ""}
+    ${outflows ? `<div style="margin-top:6px"><b style="color:#f90">Out:</b><br>${outflows}</div>` : ""}
+  `);
+  tooltip.style("opacity", 1);
+})
+.on("mousemove", function(event) {
+  tooltip
+    .style("left", (event.pageX + 14) + "px")
+    .style("top", (event.pageY - 14) + "px");
+})
+.on("mouseleave", function() {
+  linkSel.classed("dimmed", false).classed("highlighted", false);
+  tooltip.style("opacity", 0);
+});
+
+// Link hover
+linkSel.on("mouseenter", function(event, d) {
+  linkSel
+    .classed("dimmed", l => l !== d)
+    .classed("highlighted", l => l === d);
+
+  const pct = ((d.value / totalEnergy) * 100).toFixed(1);
+  const target = typeof d.target === "object" ? d.target : graph.nodes[d.target];
+  const source = typeof d.source === "object" ? d.source : graph.nodes[d.source];
+  tooltip.html(`
+    <div class="label">${source.name} → ${target.name}</div>
+    <div><span class="pct">${d.value} TWh</span> · ${pct}% of total</div>
+  `);
+  tooltip.style("opacity", 1);
+})
+.on("mousemove", function(event) {
+  tooltip
+    .style("left", (event.pageX + 14) + "px")
+    .style("top", (event.pageY - 14) + "px");
+})
+.on("mouseleave", function() {
+  linkSel.classed("dimmed", false).classed("highlighted", false);
+  tooltip.style("opacity", 0);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Expandable Edge Bundle</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; display: flex; justify-content: center; align-items: center; height: 100vh; font-family: system-ui, sans-serif; }
+  svg { overflow: visible; }
+  .link { fill: none; stroke-linecap: round; }
+  .node circle { cursor: pointer; stroke: #1a1a2e; stroke-width: 1.5; }
+  .node text { font-size: 10px; fill: #c8c8d8; pointer-events: none; }
+  .internal circle { fill: #444466; }
+  .internal circle:hover { fill: #6666aa; }
+  .internal.collapsed circle { fill: #aa6644; }
+  .legend { position: fixed; bottom: 20px; left: 20px; color: #888; font: 12px system-ui; }
+  .legend span { color: #aa6644; }
+  .beta-control { position: fixed; top: 20px; right: 20px; color: #888; font: 12px system-ui; display: flex; align-items: center; gap: 8px; }
+  .beta-control input { width: 100px; }
+</style>
+</head>
+<body>
+<div class="legend">Click internal nodes to <span>collapse/expand</span> subtrees</div>
+<div class="beta-control">
+  <label for="beta">Tension</label>
+  <input type="range" id="beta" min="0" max="100" value="85">
+  <span id="beta-val">0.85</span>
+</div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data: 3-level hierarchy with cross-links ---
+const groups = ["Analysis", "Rendering", "Network", "Storage", "Auth", "UI"];
+const subgroups = ["core", "utils", "api", "io"];
+const flatNodes = [{ id: "root", parent: "" }];
+
+for (const g of groups) {
+  flatNodes.push({ id: g, parent: "root" });
+  const subs = subgroups.slice(0, 2 + Math.floor(Math.random() * 3));
+  for (const s of subs) {
+    const sgId = `${g}.${s}`;
+    flatNodes.push({ id: sgId, parent: g });
+    const leafCount = 3 + Math.floor(Math.random() * 5);
+    for (let i = 0; i < leafCount; i++) {
+      flatNodes.push({ id: `${sgId}.m${i}`, parent: sgId });
+    }
+  }
+}
+
+const leaves = flatNodes.filter(n => !flatNodes.some(c => c.parent === n.id));
+const connections = [];
+const rng = d3.randomLcg(42);
+for (let i = 0; i < 120; i++) {
+  const a = leaves[Math.floor(rng() * leaves.length)].id;
+  const b = leaves[Math.floor(rng() * leaves.length)].id;
+  if (a !== b) connections.push({ source: a, target: b });
+}
+
+// --- Layout ---
+const width = 960, height = 960;
+const radius = Math.min(width, height) / 2 - 120;
+
+const root = d3.stratify().id(d => d.id).parentId(d => d.parent || null)(flatNodes);
+
+const cluster = d3.cluster()
+  .size([2 * Math.PI, radius])
+  .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth);
+
+cluster(root);
+
+// Stash original positions for polar interpolation
+root.each(d => { d.x0 = d.x; d.y0 = d.y; });
+
+// Build node index — includes hidden _children for link remapping
+function buildIndex() {
+  const m = new Map();
+  function walk(n) {
+    m.set(n.data.id, n);
+    if (n.children) n.children.forEach(walk);
+    if (n._children) n._children.forEach(walk);
+  }
+  walk(root);
+  return m;
+}
+
+// Compute bundled link paths — for collapsed nodes, remap leaf endpoints to the collapsed ancestor
+function computeLinks(nodesById) {
+  const visibleLeafFor = new Map();
+
+  function deepestVisible(id) {
+    if (visibleLeafFor.has(id)) return visibleLeafFor.get(id);
+    const node = nodesById.get(id);
+    if (!node) return null;
+    let n = node;
+    while (n.parent) {
+      if (n.parent._children && n.parent._children.includes(n)) {
+        visibleLeafFor.set(id, n.parent);
+        return n.parent;
+      }
+      if (n.parent.children && n.parent.children.includes(n)) {
+        n = n.parent;
+        continue;
+      }
+      visibleLeafFor.set(id, n.parent);
+      return n.parent;
+    }
+    visibleLeafFor.set(id, node);
+    return node;
+  }
+
+  // Group connections by their visible endpoints
+  const edgeMap = new Map();
+  for (const c of connections) {
+    const s = deepestVisible(c.source);
+    const t = deepestVisible(c.target);
+    if (!s || !t || s === t) continue;
+    const key = s.data.id < t.data.id ? `${s.data.id}|${t.data.id}` : `${t.data.id}|${s.data.id}`;
+    edgeMap.set(key, (edgeMap.get(key) || 0) + 1);
+  }
+
+  const links = [];
+  for (const [key, count] of edgeMap) {
+    const [sid, tid] = key.split("|");
+    const s = nodesById.get(sid);
+    const t = nodesById.get(tid);
+    if (s && t) {
+      const path = s.path(t);
+      links.push({ path, count });
+    }
+  }
+  return links;
+}
+
+// --- SVG setup ---
+const svg = d3.select("body").append("svg")
+  .attr("width", width)
+  .attr("height", height)
+  .append("g")
+    .attr("transform", `translate(${width / 2},${height / 2})`);
+
+const linkGroup = svg.append("g");
+const nodeGroup = svg.append("g");
+
+let beta = 0.15;
+
+const line = d3.lineRadial()
+  .curve(d3.curveBundle.beta(beta))
+  .radius(d => d.y)
+  .angle(d => d.x);
+
+// --- Rendering ---
+function getVisibleNodes() {
+  const visible = [];
+  function walk(node) {
+    visible.push(node);
+    if (node.children) node.children.forEach(walk);
+  }
+  walk(root);
+  return visible;
+}
+
+function update(source) {
+  const allVisible = getVisibleNodes();
+
+  // Re-run cluster on the visible tree
+  cluster(root);
+
+  // Stash targets
+  root.each(d => { d.tx = d.x; d.ty = d.y; });
+
+  // Hidden nodes converge to parent's position
+  function assignHidden(node) {
+    if (node._children) {
+      for (const child of node._children) {
+        child.tx = node.tx;
+        child.ty = node.ty;
+        child.x = node.tx;
+        child.y = node.ty;
+        assignHidden(child);
+      }
+    }
+    if (node.children) node.children.forEach(assignHidden);
+  }
+  assignHidden(root);
+
+  const nodesById = buildIndex();
+  const links = computeLinks(nodesById);
+
+  const t = svg.transition().duration(650).ease(d3.easeCubicInOut);
+
+  // --- Links ---
+  const linkSel = linkGroup.selectAll("path.link")
+    .data(links, d => d.path.map(n => n.data.id).join(">"));
+
+  linkSel.exit().transition(t).attr("stroke-opacity", 0).remove();
+
+  const linkEnter = linkSel.enter().append("path")
+    .attr("class", "link")
+    .attr("stroke-opacity", 0);
+
+  linkEnter.merge(linkSel).transition(t)
+    .attr("stroke", d => d.count > 1 ? "#cc8855" : "#5577aa")
+    .attr("stroke-opacity", d => Math.min(0.6, 0.15 + d.count * 0.05))
+    .attr("stroke-width", d => 0.8 + Math.sqrt(d.count) * 1.2)
+    .attrTween("d", function(d) {
+      const prev = this.__prev || d.path.map(n => ({ x: n.x0 ?? n.tx, y: n.y0 ?? n.ty }));
+      const next = d.path.map(n => ({ x: n.tx, y: n.ty }));
+      this.__prev = next;
+      const interps = prev.length === next.length
+        ? next.map((_, i) => ({
+            x: d3.interpolate(prev[i]?.x ?? next[i].x, next[i].x),
+            y: d3.interpolate(prev[i]?.y ?? next[i].y, next[i].y),
+          }))
+        : next.map(n => ({ x: () => n.x, y: () => n.y }));
+      return t => {
+        const pts = interps.map(ip => ({ x: ip.x(t), y: ip.y(t) }));
+        return line(pts);
+      };
+    });
+
+  // --- Nodes ---
+  const visibleNodes = allVisible.filter(d => d.depth > 0);
+
+  const nodeSel = nodeGroup.selectAll("g.node")
+    .data(visibleNodes, d => d.data.id);
+
+  nodeSel.exit().transition(t)
+    .attr("transform", d => {
+      const p = d.parent || source;
+      return `rotate(${(p.tx || 0) * 180 / Math.PI - 90}) translate(${p.ty || 0},0)`;
+    })
+    .attr("opacity", 0)
+    .remove();
+
+  const nodeEnter = nodeSel.enter().append("g")
+    .attr("class", d => `node ${d.children || d._children ? "internal" : "leaf"}`)
+    .attr("opacity", 0)
+    .attr("transform", d => {
+      const sx = source.x0 ?? source.tx ?? 0;
+      const sy = source.y0 ?? source.ty ?? 0;
+      return `rotate(${sx * 180 / Math.PI - 90}) translate(${sy},0)`;
+    })
+    .on("click", (event, d) => {
+      if (d.children || d._children) {
+        toggle(d);
+        update(d);
+      }
+    });
+
+  nodeEnter.append("circle");
+  nodeEnter.append("text").attr("dy", "0.31em");
+
+  const nodeMerge = nodeEnter.merge(nodeSel);
+
+  nodeMerge
+    .classed("internal", d => d.children || d._children)
+    .classed("leaf", d => !(d.children || d._children))
+    .classed("collapsed", d => d._children != null);
+
+  nodeMerge.transition(t)
+    .attr("opacity", 1)
+    .attr("transform", d => `rotate(${d.tx * 180 / Math.PI - 90}) translate(${d.ty},0)`);
+
+  nodeMerge.select("circle")
+    .attr("r", d => {
+      if (d._children) return 3 + Math.sqrt(countDescendants(d._children)) * 1.5;
+      return d.children ? 4 : 2.5;
+    })
+    .attr("fill", d => {
+      if (d._children) return "#aa6644";
+      if (d.children) return "#444466";
+      return groupColor(d);
+    });
+
+  nodeMerge.select("text")
+    .attr("x", d => (d.tx < Math.PI) === !(d.children || d._children) ? 8 : -8)
+    .attr("text-anchor", d => (d.tx < Math.PI) === !(d.children || d._children) ? "start" : "end")
+    .attr("transform", d => d.tx >= Math.PI ? "rotate(180)" : null)
+    .text(d => {
+      const name = shortName(d);
+      if (d._children) return `${name} (${countDescendants(d._children)})`;
+      return name;
+    });
+
+  // Stash positions for next transition
+  root.each(d => { d.x0 = d.tx ?? d.x; d.y0 = d.ty ?? d.y; });
+}
+
+function shortName(d) {
+  const parts = d.data.id.split(".");
+  return parts[parts.length - 1];
+}
+
+function countDescendants(children) {
+  let count = 0;
+  for (const c of children) {
+    count++;
+    if (c.children) count += countDescendants(c.children);
+    if (c._children) count += countDescendants(c._children);
+  }
+  return count;
+}
+
+const groupColorScale = d3.scaleOrdinal(d3.schemeTableau10).domain(groups);
+function groupColor(d) {
+  let n = d;
+  while (n.depth > 1) n = n.parent;
+  return n ? groupColorScale(n.data.id) : "#888";
+}
+
+function toggle(d) {
+  if (d.children) {
+    d._children = d.children;
+    d.children = null;
+  } else if (d._children) {
+    d.children = d._children;
+    d._children = null;
+  }
+}
+
+// Tension slider
+const slider = document.getElementById("beta");
+const betaLabel = document.getElementById("beta-val");
+slider.addEventListener("input", () => {
+  const tension = +slider.value / 100;
+  beta = 1 - tension;
+  betaLabel.textContent = tension.toFixed(2);
+  line.curve(d3.curveBundle.beta(beta));
+  const nodesById = buildIndex();
+  const links = computeLinks(nodesById);
+  linkGroup.selectAll("path.link")
+    .data(links, d => d.path.map(n => n.data.id).join(">"))
+    .join("path")
+      .attr("class", "link")
+      .attr("stroke", d => d.count > 1 ? "#cc8855" : "#5577aa")
+      .attr("stroke-opacity", d => Math.min(0.6, 0.15 + d.count * 0.05))
+      .attr("stroke-width", d => 0.8 + Math.sqrt(d.count) * 1.2)
+      .attr("d", d => line(d.path));
+});
+
+// Initial render
+update(root);
+</script>
+</body>
+</html>

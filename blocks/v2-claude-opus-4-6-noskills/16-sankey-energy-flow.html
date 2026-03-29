@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Energy Flow Sankey Diagram</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a12; font-family: 'Helvetica Neue', sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+  svg { display: block; }
+  .node rect { cursor: grab; stroke: #000; stroke-width: 0.5; }
+  .node rect:hover { stroke: #fff; stroke-width: 1.5; }
+  .node text { fill: #ccc; font-size: 11px; pointer-events: none; }
+  .link { fill: none; stroke-opacity: 0.25; transition: stroke-opacity 0.15s; }
+  .link.loss { stroke-dasharray: 4 2; }
+  .link.highlighted { stroke-opacity: 0.7; }
+  .link.dimmed { stroke-opacity: 0.05; }
+  .tooltip { position: absolute; background: rgba(10,10,18,0.92); border: 1px solid #444; border-radius: 4px; padding: 8px 12px; color: #eee; font-size: 12px; pointer-events: none; white-space: nowrap; line-height: 1.5; }
+  .tooltip .label { color: #aaa; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .tooltip .value { font-weight: 600; font-size: 14px; }
+  h1 { position: absolute; top: 18px; left: 50%; transform: translateX(-50%); color: #ddd; font-size: 18px; font-weight: 400; letter-spacing: 1px; }
+  .stage-labels { fill: #555; font-size: 12px; text-transform: uppercase; letter-spacing: 1.5px; }
+</style>
+</head>
+<body>
+<h1>U.S. Energy Flow — Sources to End Uses</h1>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+import {sankey as d3Sankey, sankeyLinkHorizontal} from "https://cdn.jsdelivr.net/npm/d3-sankey@0.12/+esm";
+
+const width = 1100, height = 620;
+const margin = {top: 50, right: 20, bottom: 20, left: 20};
+
+// --- Synthetic energy data (quad BTU-ish) ---
+const nodes = [
+  // Stage 0: Sources
+  {name: "Coal", stage: 0},
+  {name: "Natural Gas", stage: 0},
+  {name: "Nuclear", stage: 0},
+  {name: "Petroleum", stage: 0},
+  {name: "Renewables", stage: 0},
+  {name: "Imports", stage: 0},
+  // Stage 1: Generation / Refining
+  {name: "Electricity Gen.", stage: 1},
+  {name: "Refining", stage: 1},
+  {name: "Direct Use", stage: 1},
+  // Stage 2: Grid / Distribution
+  {name: "Electric Grid", stage: 2},
+  {name: "Fuel Dist.", stage: 2},
+  {name: "Gen. Losses", stage: 2, loss: true},
+  // Stage 3: Sectors
+  {name: "Residential", stage: 3},
+  {name: "Commercial", stage: 3},
+  {name: "Industrial", stage: 3},
+  {name: "Transportation", stage: 3},
+  // Stage 4: End Uses
+  {name: "Heating", stage: 4},
+  {name: "Cooling", stage: 4},
+  {name: "Lighting", stage: 4},
+  {name: "Motors", stage: 4},
+  {name: "Transport Use", stage: 4},
+  {name: "End-Use Losses", stage: 4, loss: true},
+];
+
+const links = [
+  // Sources → Generation/Refining
+  {source: "Coal", target: "Electricity Gen.", value: 10},
+  {source: "Natural Gas", target: "Electricity Gen.", value: 12},
+  {source: "Natural Gas", target: "Direct Use", value: 10},
+  {source: "Nuclear", target: "Electricity Gen.", value: 8},
+  {source: "Petroleum", target: "Refining", value: 22},
+  {source: "Petroleum", target: "Electricity Gen.", value: 1},
+  {source: "Renewables", target: "Electricity Gen.", value: 7},
+  {source: "Renewables", target: "Direct Use", value: 2},
+  {source: "Imports", target: "Electricity Gen.", value: 1},
+  {source: "Imports", target: "Refining", value: 3},
+  // Generation → Grid / Losses
+  {source: "Electricity Gen.", target: "Electric Grid", value: 25},
+  {source: "Electricity Gen.", target: "Gen. Losses", value: 14, loss: true},
+  {source: "Refining", target: "Fuel Dist.", value: 22},
+  {source: "Refining", target: "Gen. Losses", value: 3, loss: true},
+  {source: "Direct Use", target: "Fuel Dist.", value: 12},
+  // Grid → Sectors
+  {source: "Electric Grid", target: "Residential", value: 7},
+  {source: "Electric Grid", target: "Commercial", value: 7},
+  {source: "Electric Grid", target: "Industrial", value: 8},
+  {source: "Electric Grid", target: "Transportation", value: 3},
+  {source: "Fuel Dist.", target: "Residential", value: 6},
+  {source: "Fuel Dist.", target: "Commercial", value: 4},
+  {source: "Fuel Dist.", target: "Industrial", value: 8},
+  {source: "Fuel Dist.", target: "Transportation", value: 16},
+  // Sectors → End Uses
+  {source: "Residential", target: "Heating", value: 6},
+  {source: "Residential", target: "Cooling", value: 3},
+  {source: "Residential", target: "Lighting", value: 2},
+  {source: "Residential", target: "End-Use Losses", value: 2, loss: true},
+  {source: "Commercial", target: "Heating", value: 3},
+  {source: "Commercial", target: "Cooling", value: 3},
+  {source: "Commercial", target: "Lighting", value: 3},
+  {source: "Commercial", target: "End-Use Losses", value: 2, loss: true},
+  {source: "Industrial", target: "Motors", value: 8},
+  {source: "Industrial", target: "Heating", value: 4},
+  {source: "Industrial", target: "End-Use Losses", value: 4, loss: true},
+  {source: "Transportation", target: "Transport Use", value: 12},
+  {source: "Transportation", target: "End-Use Losses", value: 7, loss: true},
+];
+
+// Build index map
+const nameIndex = new Map(nodes.map((n, i) => [n.name, i]));
+const graphLinks = links.map(l => ({
+  source: nameIndex.get(l.source),
+  target: nameIndex.get(l.target),
+  value: l.value,
+  loss: !!l.loss
+}));
+const graphNodes = nodes.map(d => ({...d}));
+
+// Sankey layout
+const sankeyGen = d3Sankey()
+  .nodeId(d => d.index)
+  .nodeWidth(14)
+  .nodePadding(14)
+  .nodeAlign((node, n) => node.stage / 4)
+  .extent([[margin.left, margin.top], [width - margin.right, height - margin.bottom]]);
+
+const graph = sankeyGen({
+  nodes: graphNodes.map((d, i) => ({...d, index: i})),
+  links: graphLinks.map(d => ({...d}))
+});
+
+const totalInput = d3.sum(graph.nodes.filter(n => n.stage === 0), n => n.value);
+
+// Colors
+const stageColors = ["#4e79a7", "#59a14f", "#e15759", "#f28e2b", "#76b7b2", "#888"];
+const lossColor = "#e15759";
+
+const nodeColor = d => d.loss ? lossColor : stageColors[d.stage % stageColors.length];
+const linkColor = d => d.loss ? lossColor : d3.interpolateRgb(nodeColor(d.source), nodeColor(d.target))(0.5);
+
+// SVG
+const svg = d3.select("body").append("svg")
+  .attr("width", width)
+  .attr("height", height)
+  .attr("viewBox", [0, 0, width, height]);
+
+// Tooltip
+const tooltip = d3.select("body").append("div").attr("class", "tooltip").style("display", "none");
+
+// Stage labels
+const stageNames = ["Sources", "Conversion", "Distribution", "Sectors", "End Uses"];
+const stageXs = d3.groups(graph.nodes, d => d.stage).map(([stage, ns]) => ({
+  stage, x: d3.mean(ns, n => (n.x0 + n.x1) / 2)
+}));
+svg.append("g").attr("class", "stage-labels")
+  .selectAll("text").data(stageXs).join("text")
+  .attr("x", d => d.x).attr("y", 18).attr("text-anchor", "middle")
+  .text(d => stageNames[d.stage]);
+
+// Gradient defs
+const defs = svg.append("defs");
+graph.links.forEach((l, i) => {
+  const grad = defs.append("linearGradient")
+    .attr("id", `lg-${i}`)
+    .attr("gradientUnits", "userSpaceOnUse")
+    .attr("x1", l.source.x1).attr("x2", l.target.x0);
+  grad.append("stop").attr("offset", "0%").attr("stop-color", nodeColor(l.source));
+  grad.append("stop").attr("offset", "100%").attr("stop-color", l.loss ? lossColor : nodeColor(l.target));
+});
+
+// Links
+const linkG = svg.append("g").attr("class", "links")
+  .selectAll("path").data(graph.links).join("path")
+  .attr("class", d => `link${d.loss ? " loss" : ""}`)
+  .attr("d", sankeyLinkHorizontal())
+  .attr("stroke", (d, i) => `url(#lg-${i})`)
+  .attr("stroke-width", d => Math.max(1, d.width))
+  .sort((a, b) => b.width - a.width);
+
+// Nodes
+const nodeG = svg.append("g").attr("class", "nodes")
+  .selectAll("g").data(graph.nodes).join("g")
+  .attr("class", "node")
+  .attr("transform", d => `translate(${d.x0},${d.y0})`);
+
+nodeG.append("rect")
+  .attr("width", d => d.x1 - d.x0)
+  .attr("height", d => d.y1 - d.y0)
+  .attr("fill", nodeColor)
+  .attr("rx", 2);
+
+nodeG.append("text")
+  .attr("x", d => d.stage < 3 ? (d.x1 - d.x0) + 6 : -6)
+  .attr("y", d => (d.y1 - d.y0) / 2)
+  .attr("dy", "0.35em")
+  .attr("text-anchor", d => d.stage < 3 ? "start" : "end")
+  .text(d => d.name);
+
+// --- Interaction: hover highlights ---
+function getConnected(node) {
+  const linkSet = new Set();
+  const nodeSet = new Set([node.index]);
+  function walkUp(n) {
+    for (const l of n.targetLinks) {
+      if (linkSet.has(l)) continue;
+      linkSet.add(l);
+      nodeSet.add(l.source.index);
+      walkUp(l.source);
+    }
+  }
+  function walkDown(n) {
+    for (const l of n.sourceLinks) {
+      if (linkSet.has(l)) continue;
+      linkSet.add(l);
+      nodeSet.add(l.target.index);
+      walkDown(l.target);
+    }
+  }
+  walkUp(node); walkDown(node);
+  return {linkSet, nodeSet};
+}
+
+nodeG.on("pointerenter", (event, d) => {
+  const {linkSet, nodeSet} = getConnected(d);
+  linkG.classed("highlighted", l => linkSet.has(l)).classed("dimmed", l => !linkSet.has(l));
+  nodeG.select("rect").style("opacity", n => nodeSet.has(n.index) ? 1 : 0.2);
+  nodeG.select("text").style("opacity", n => nodeSet.has(n.index) ? 1 : 0.2);
+  const pct = (d.value / totalInput * 100).toFixed(1);
+  tooltip.style("display", "block").html(
+    `<div class="label">${stageNames[d.stage]}</div>` +
+    `<div class="value">${d.name}: ${d.value.toFixed(1)} quads</div>` +
+    `<div>${pct}% of total input</div>`
+  );
+}).on("pointermove", event => {
+  tooltip.style("left", (event.pageX + 14) + "px").style("top", (event.pageY - 14) + "px");
+}).on("pointerleave", () => {
+  linkG.classed("highlighted", false).classed("dimmed", false);
+  nodeG.select("rect").style("opacity", 1);
+  nodeG.select("text").style("opacity", 1);
+  tooltip.style("display", "none");
+});
+
+linkG.on("pointerenter", (event, d) => {
+  linkG.classed("highlighted", l => l === d).classed("dimmed", l => l !== d);
+  const pct = (d.value / totalInput * 100).toFixed(1);
+  tooltip.style("display", "block").html(
+    `<div class="label">Flow</div>` +
+    `<div class="value">${d.source.name} → ${d.target.name}</div>` +
+    `<div>${d.value.toFixed(1)} quads (${pct}%)${d.loss ? " — Loss" : ""}</div>`
+  );
+}).on("pointermove", event => {
+  tooltip.style("left", (event.pageX + 14) + "px").style("top", (event.pageY - 14) + "px");
+}).on("pointerleave", () => {
+  linkG.classed("highlighted", false).classed("dimmed", false);
+  tooltip.style("display", "none");
+});
+
+// --- Drag nodes vertically ---
+nodeG.call(d3.drag()
+  .on("start", function() { d3.select(this).select("rect").style("cursor", "grabbing"); })
+  .on("drag", function(event, d) {
+    const dy = event.dy;
+    const newY0 = Math.max(margin.top, Math.min(height - margin.bottom - (d.y1 - d.y0), d.y0 + dy));
+    const h = d.y1 - d.y0;
+    d.y0 = newY0;
+    d.y1 = newY0 + h;
+    d3.select(this).attr("transform", `translate(${d.x0},${d.y0})`);
+    sankeyGen.update(graph);
+    linkG.attr("d", sankeyLinkHorizontal());
+    // Update gradients
+    graph.links.forEach((l, i) => {
+      defs.select(`#lg-${i}`)
+        .attr("x1", l.source.x1).attr("x2", l.target.x0);
+    });
+  })
+  .on("end", function() { d3.select(this).select("rect").style("cursor", "grab"); })
+);
+</script>
+</body>
+</html>

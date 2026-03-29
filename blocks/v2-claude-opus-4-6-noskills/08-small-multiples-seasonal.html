@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Daily Energy Consumption by Month — 3-Year Overlay</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; color: #e0e0e0; font-family: 'Helvetica Neue', sans-serif; }
+  h1 { text-align: center; font-size: 20px; font-weight: 500; padding: 24px 0 4px; color: #f0f0f0; }
+  .subtitle { text-align: center; font-size: 13px; color: #888; margin-bottom: 16px; }
+  #chart { width: 100%; max-width: 1200px; margin: 0 auto; }
+  .panel-title { font-size: 11px; font-weight: 600; fill: #ccc; }
+  .axis text { font-size: 9px; fill: #777; }
+  .axis line, .axis path { stroke: #333; }
+  .legend { text-anchor: start; font-size: 11px; }
+  .crosshair { stroke: #fff; stroke-opacity: 0.4; stroke-width: 1; stroke-dasharray: 2,2; pointer-events: none; }
+  .tooltip-box { position: absolute; background: rgba(20,20,40,0.92); border: 1px solid #555; border-radius: 4px; padding: 6px 10px; font-size: 11px; pointer-events: none; color: #ddd; line-height: 1.5; }
+  .tooltip-box .year-row { display: flex; align-items: center; gap: 6px; }
+  .tooltip-box .swatch { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+</style>
+</head>
+<body>
+<h1>Daily Energy Consumption by Month</h1>
+<p class="subtitle">3 years overlaid — winter heating peaks, summer AC surges, mild shoulder seasons</p>
+<div id="chart"></div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data ---
+const years = [2022, 2023, 2024];
+const monthNames = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+function daysInMonth(m, y) { return new Date(y, m + 1, 0).getDate(); }
+
+// Seasonal baseline: high in winter (heating), dip in spring/fall, high in summer (AC)
+function seasonalBaseline(month) {
+  const curve = [82, 78, 58, 42, 38, 55, 72, 75, 50, 40, 55, 80];
+  return curve[month];
+}
+
+// Generate daily kWh with noise, weekday effect, year trend
+const rng = d3.randomLcg(42);
+const noise = d3.randomNormal.source(rng)(0, 6);
+const data = []; // { year, month, day, kwh }
+
+for (const y of years) {
+  const yearOffset = (y - 2022) * 3; // slight upward trend
+  for (let m = 0; m < 12; m++) {
+    const nDays = daysInMonth(m, y);
+    const base = seasonalBaseline(m) + yearOffset;
+    for (let d = 1; d <= nDays; d++) {
+      const dow = new Date(y, m, d).getDay();
+      const weekendBoost = (dow === 0 || dow === 6) ? 5 : 0;
+      const kwh = Math.max(10, base + weekendBoost + noise());
+      data.push({ year: y, month: m, day: d, kwh });
+    }
+  }
+}
+
+// --- Layout ---
+const cols = 4, rows = 3;
+const margin = { top: 52, right: 20, bottom: 40, left: 44 };
+const cellPad = { top: 22, right: 8, bottom: 28, left: 36 };
+const totalW = Math.min(1200, window.innerWidth - 16);
+const cellW = (totalW - margin.left - margin.right) / cols;
+const cellH = 130;
+const totalH = margin.top + rows * cellH + margin.bottom;
+
+const yearColors = { 2022: "#4fc3f7", 2023: "#ff8a65", 2024: "#aed581" };
+
+// Scales (shared y across all panels)
+const yMax = d3.max(data, d => d.kwh);
+const yScale = d3.scaleLinear().domain([0, yMax * 1.05]).range([cellH - cellPad.bottom, cellPad.top]);
+
+const svg = d3.select("#chart").append("svg")
+  .attr("width", totalW)
+  .attr("height", totalH);
+
+// Legend
+const legendG = svg.append("g").attr("transform", `translate(${totalW / 2 - 120}, 14)`);
+years.forEach((y, i) => {
+  const g = legendG.append("g").attr("transform", `translate(${i * 80}, 0)`);
+  g.append("line").attr("x1", 0).attr("x2", 18).attr("y1", 6).attr("y2", 6)
+    .attr("stroke", yearColors[y]).attr("stroke-width", 1.8);
+  g.append("text").attr("x", 22).attr("y", 10).text(y)
+    .attr("fill", yearColors[y]).attr("class", "legend");
+});
+
+const panelsG = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+// Tooltip
+const tooltip = d3.select("body").append("div").attr("class", "tooltip-box").style("display", "none");
+
+// Crosshair lines (one per panel)
+const crosshairs = [];
+
+// Build panels
+const panels = [];
+for (let m = 0; m < 12; m++) {
+  const col = m % cols, row = Math.floor(m / cols);
+  const x0 = col * cellW, y0 = row * cellH;
+
+  const g = panelsG.append("g").attr("transform", `translate(${x0},${y0})`);
+
+  // Background
+  g.append("rect")
+    .attr("x", cellPad.left).attr("y", cellPad.top)
+    .attr("width", cellW - cellPad.left - cellPad.right)
+    .attr("height", cellH - cellPad.top - cellPad.bottom)
+    .attr("fill", "#16213e").attr("rx", 2);
+
+  // Title
+  g.append("text").attr("class", "panel-title")
+    .attr("x", cellPad.left).attr("y", 14)
+    .text(monthNames[m]);
+
+  const maxDays = d3.max(years, y => daysInMonth(m, y));
+  const xScale = d3.scaleLinear().domain([1, maxDays]).range([cellPad.left, cellW - cellPad.right]);
+
+  // X axis
+  const xAxis = d3.axisBottom(xScale).ticks(5).tickSize(3).tickFormat(d3.format("d"));
+  g.append("g").attr("class", "axis")
+    .attr("transform", `translate(0,${cellH - cellPad.bottom})`)
+    .call(xAxis);
+
+  // Y axis (only leftmost column)
+  if (col === 0) {
+    const yAxis = d3.axisLeft(yScale).ticks(4).tickSize(3).tickFormat(d => d + "");
+    g.append("g").attr("class", "axis")
+      .attr("transform", `translate(${cellPad.left},0)`)
+      .call(yAxis);
+  }
+
+  // Lines per year
+  const yearLines = {};
+  for (const y of years) {
+    const monthData = data.filter(d => d.year === y && d.month === m).sort((a, b) => a.day - b.day);
+    const line = d3.line()
+      .x(d => xScale(d.day))
+      .y(d => yScale(d.kwh))
+      .curve(d3.curveMonotoneX);
+    g.append("path")
+      .datum(monthData)
+      .attr("d", line)
+      .attr("fill", "none")
+      .attr("stroke", yearColors[y])
+      .attr("stroke-width", 1.3)
+      .attr("stroke-opacity", 0.85);
+    yearLines[y] = monthData;
+  }
+
+  // Crosshair
+  const ch = g.append("line").attr("class", "crosshair")
+    .attr("y1", cellPad.top).attr("y2", cellH - cellPad.bottom)
+    .style("display", "none");
+  crosshairs.push(ch);
+
+  // Interaction rect
+  const rect = g.append("rect")
+    .attr("x", cellPad.left).attr("y", cellPad.top)
+    .attr("width", cellW - cellPad.left - cellPad.right)
+    .attr("height", cellH - cellPad.top - cellPad.bottom)
+    .attr("fill", "transparent")
+    .style("cursor", "crosshair");
+
+  panels.push({ g, xScale, yearLines, rect, x0, y0, maxDays });
+}
+
+// --- Synchronized crosshair ---
+function showCrosshair(dayFrac) {
+  // dayFrac is 0..1 fraction across the panel width
+  let html = "";
+  panels.forEach((p, m) => {
+    const day = Math.round(1 + dayFrac * (p.maxDays - 1));
+    const xPx = p.xScale(day);
+    crosshairs[m].attr("x1", xPx).attr("x2", xPx).style("display", null);
+
+    if (m === hoveredMonth) {
+      html = `<strong>${monthNames[m]} ${day}</strong><br>`;
+      for (const y of years) {
+        const rec = p.yearLines[y].find(d => d.day === day);
+        const val = rec ? rec.kwh.toFixed(1) : "—";
+        html += `<div class="year-row"><span class="swatch" style="background:${yearColors[y]}"></span>${y}: ${val} kWh</div>`;
+      }
+    }
+  });
+  tooltip.html(html).style("display", null);
+}
+
+function hideCrosshair() {
+  crosshairs.forEach(ch => ch.style("display", "none"));
+  tooltip.style("display", "none");
+}
+
+let hoveredMonth = 0;
+
+panels.forEach((p, m) => {
+  p.rect
+    .on("mouseenter", () => { hoveredMonth = m; })
+    .on("mousemove", (event) => {
+      hoveredMonth = m;
+      const [mx] = d3.pointer(event, p.g.node());
+      const frac = Math.max(0, Math.min(1, (mx - cellPad.left) / (cellW - cellPad.left - cellPad.right)));
+      showCrosshair(frac);
+
+      // Position tooltip near cursor
+      const [px, py] = d3.pointer(event, document.body);
+      tooltip.style("left", (px + 14) + "px").style("top", (py - 10) + "px");
+    })
+    .on("mouseleave", hideCrosshair);
+});
+
+// Y-axis label
+svg.append("text")
+  .attr("transform", `translate(14,${margin.top + totalH / 2 - 40}) rotate(-90)`)
+  .attr("text-anchor", "middle")
+  .attr("fill", "#777").attr("font-size", 11)
+  .text("kWh");
+</script>
+</body>
+</html>

@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Community Detection with Synced Data Table</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #0a0a0f; color: #c8c8d0; display: flex; height: 100vh; overflow: hidden; }
+  #graph { flex: 1; min-width: 0; }
+  #table-panel { width: 420px; border-left: 1px solid #2a2a35; display: flex; flex-direction: column; overflow: hidden; }
+  #table-panel h2 { padding: 12px 16px 8px; font-size: 14px; font-weight: 600; color: #9090a0; text-transform: uppercase; letter-spacing: 0.5px; }
+  #table-container { flex: 1; overflow-y: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead { position: sticky; top: 0; z-index: 1; }
+  thead th { background: #16161e; padding: 8px 10px; text-align: left; font-weight: 600; color: #9090a0; cursor: pointer; user-select: none; border-bottom: 1px solid #2a2a35; white-space: nowrap; }
+  thead th:hover { color: #e0e0e8; }
+  thead th .sort-arrow { font-size: 10px; margin-left: 3px; opacity: 0.5; }
+  thead th.sorted .sort-arrow { opacity: 1; }
+  .community-header { background: #1a1a24; cursor: pointer; user-select: none; }
+  .community-header td { padding: 6px 10px; font-weight: 700; font-size: 13px; border-bottom: 1px solid #2a2a35; }
+  .community-header:hover td { background: #22222e; }
+  .community-header.highlighted td { background: #2a2a3a; }
+  tbody tr:not(.community-header) { cursor: pointer; transition: background 0.1s; }
+  tbody tr:not(.community-header):hover { background: #1e1e28; }
+  tbody tr:not(.community-header).highlighted { background: #2a2a3a; }
+  tbody td { padding: 5px 10px; border-bottom: 1px solid #18181f; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .color-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  svg text { fill: #c8c8d0; }
+  .hull { stroke-width: 1.5; stroke-opacity: 0.6; fill-opacity: 0.08; }
+  .hull.highlighted { stroke-opacity: 1; fill-opacity: 0.18; }
+  .node { cursor: pointer; }
+  .node.dimmed { opacity: 0.15; }
+  .link { stroke: #3a3a48; stroke-opacity: 0.3; }
+  .link.highlighted { stroke-opacity: 0.8; }
+  .link.dimmed { stroke-opacity: 0.05; }
+  .node-label { font-size: 10px; fill: #e0e0e8; pointer-events: none; text-anchor: middle; opacity: 0; transition: opacity 0.2s; }
+  .node-label.visible { opacity: 1; }
+  .tooltip { position: absolute; background: #1e1e28; border: 1px solid #3a3a48; border-radius: 6px; padding: 8px 12px; font-size: 12px; pointer-events: none; opacity: 0; transition: opacity 0.15s; z-index: 10; }
+</style>
+</head>
+<body>
+<div id="graph"></div>
+<div id="table-panel">
+  <h2>Network Nodes</h2>
+  <div id="table-container">
+    <table>
+      <thead><tr>
+        <th data-key="id">Node <span class="sort-arrow">▲</span></th>
+        <th data-key="community">Comm <span class="sort-arrow">▲</span></th>
+        <th data-key="degree">Degree <span class="sort-arrow">▲</span></th>
+        <th data-key="betweenness">Betweenness <span class="sort-arrow">▲</span></th>
+      </tr></thead>
+      <tbody id="table-body"></tbody>
+    </table>
+  </div>
+</div>
+<div class="tooltip" id="tooltip"></div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script type="module">
+
+// --- Generate synthetic network ---
+const N = 100, K = 5;
+const communityColors = ["#4e79a7", "#e15759", "#76b7b2", "#f28e2c", "#af7aa1"];
+const communityNames = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"];
+const rng = d3.randomLcg(42);
+const rand = d3.randomUniform.source(rng)(0, 1);
+
+const nodes = d3.range(N).map(i => ({
+  id: i,
+  label: `N${i}`,
+  community: i % K,
+  degree: 0,
+  betweenness: 0
+}));
+
+const links = [];
+const linkSet = new Set();
+function addLink(s, t) {
+  if (s === t) return;
+  const key = s < t ? `${s}-${t}` : `${t}-${s}`;
+  if (linkSet.has(key)) return;
+  linkSet.add(key);
+  links.push({ source: s, target: t });
+  nodes[s].degree++;
+  nodes[t].degree++;
+}
+
+// Intra-community edges (dense)
+for (let c = 0; c < K; c++) {
+  const members = nodes.filter(n => n.community === c).map(n => n.id);
+  for (let i = 0; i < members.length; i++) {
+    for (let j = i + 1; j < members.length; j++) {
+      if (rand() < 0.35) addLink(members[i], members[j]);
+    }
+  }
+}
+
+// Inter-community edges (sparse)
+for (let i = 0; i < N; i++) {
+  for (let j = i + 1; j < N; j++) {
+    if (nodes[i].community !== nodes[j].community && rand() < 0.015) {
+      addLink(i, j);
+    }
+  }
+}
+
+// Approximate betweenness centrality (sample BFS from subset of nodes)
+function approxBetweenness(nodes, links, samples = 30) {
+  const adj = new Map();
+  nodes.forEach(n => adj.set(n.id, []));
+  links.forEach(l => {
+    const s = typeof l.source === "object" ? l.source.id : l.source;
+    const t = typeof l.target === "object" ? l.target.id : l.target;
+    adj.get(s).push(t);
+    adj.get(t).push(s);
+  });
+  const bc = new Float64Array(N);
+  const sampleNodes = d3.shuffle(nodes.map(n => n.id).slice()).slice(0, samples);
+
+  for (const s of sampleNodes) {
+    const stack = [];
+    const pred = new Map(); nodes.forEach(n => pred.set(n.id, []));
+    const sigma = new Float64Array(N); sigma[s] = 1;
+    const dist = new Int32Array(N).fill(-1); dist[s] = 0;
+    const queue = [s];
+    let qi = 0;
+    while (qi < queue.length) {
+      const v = queue[qi++];
+      stack.push(v);
+      for (const w of adj.get(v)) {
+        if (dist[w] < 0) { dist[w] = dist[v] + 1; queue.push(w); }
+        if (dist[w] === dist[v] + 1) { sigma[w] += sigma[v]; pred.get(w).push(v); }
+      }
+    }
+    const delta = new Float64Array(N);
+    while (stack.length) {
+      const w = stack.pop();
+      for (const v of pred.get(w)) {
+        delta[v] += (sigma[v] / sigma[w]) * (1 + delta[w]);
+      }
+      if (w !== s) bc[w] += delta[w];
+    }
+  }
+  const scale = samples < N ? N / samples : 1;
+  const maxBc = d3.max(bc) * scale || 1;
+  nodes.forEach(n => { n.betweenness = +(bc[n.id] * scale / maxBc).toFixed(4); });
+}
+
+approxBetweenness(nodes, links);
+
+// --- Force layout ---
+const graphEl = document.getElementById("graph");
+const width = graphEl.clientWidth;
+const height = graphEl.clientHeight;
+
+const svg = d3.select("#graph").append("svg")
+  .attr("width", width).attr("height", height);
+
+const g = svg.append("g");
+
+const zoom = d3.zoom()
+  .scaleExtent([0.3, 5])
+  .on("zoom", e => g.attr("transform", e.transform));
+svg.call(zoom);
+
+const simulation = d3.forceSimulation(nodes)
+  .force("link", d3.forceLink(links).id(d => d.id).distance(40))
+  .force("charge", d3.forceManyBody().strength(-120))
+  .force("center", d3.forceCenter(width / 2, height / 2))
+  .force("x", d3.forceX(width / 2).strength(0.04))
+  .force("y", d3.forceY(height / 2).strength(0.04))
+  .force("collision", d3.forceCollide(8));
+
+// Community grouping force
+simulation.force("community", () => {
+  const cx = width / 2, cy = height / 2, r = Math.min(width, height) * 0.25;
+  nodes.forEach(n => {
+    const angle = (n.community / K) * 2 * Math.PI - Math.PI / 2;
+    const tx = cx + r * Math.cos(angle);
+    const ty = cy + r * Math.sin(angle);
+    n.vx += (tx - n.x) * 0.003;
+    n.vy += (ty - n.y) * 0.003;
+  });
+});
+
+const hullG = g.append("g").attr("class", "hulls");
+const linkG = g.append("g").attr("class", "links");
+const nodeG = g.append("g").attr("class", "nodes");
+const labelG = g.append("g").attr("class", "labels");
+
+const linkEls = linkG.selectAll("line").data(links).join("line")
+  .attr("class", "link");
+
+const sizeScale = d3.scaleSqrt()
+  .domain([0, d3.max(nodes, d => d.degree)])
+  .range([4, 14]);
+
+const nodeEls = nodeG.selectAll("circle").data(nodes).join("circle")
+  .attr("class", "node")
+  .attr("r", d => sizeScale(d.degree))
+  .attr("fill", d => communityColors[d.community])
+  .attr("stroke", "#0a0a0f")
+  .attr("stroke-width", 1.5);
+
+const labelEls = labelG.selectAll("text").data(nodes).join("text")
+  .attr("class", "node-label")
+  .text(d => d.label)
+  .attr("dy", d => -sizeScale(d.degree) - 4);
+
+// Drag
+nodeEls.call(d3.drag()
+  .on("start", (e, d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+  .on("drag", (e, d) => { d.fx = e.x; d.fy = e.y; })
+  .on("end", (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; })
+);
+
+// Hulls
+function updateHulls() {
+  const hullData = d3.range(K).map(c => {
+    const pts = nodes.filter(n => n.community === c).map(n => [n.x, n.y]);
+    if (pts.length < 3) return { community: c, path: null };
+    const hull = d3.polygonHull(pts);
+    return { community: c, path: hull };
+  }).filter(d => d.path);
+
+  const hulls = hullG.selectAll("path").data(hullData, d => d.community);
+  hulls.enter().append("path")
+    .attr("class", "hull")
+    .attr("data-community", d => d.community)
+    .attr("fill", d => communityColors[d.community])
+    .attr("stroke", d => communityColors[d.community])
+    .merge(hulls)
+    .attr("d", d => {
+      // Expand hull slightly with padding
+      const centroid = d3.polygonCentroid(d.path);
+      const expanded = d.path.map(p => {
+        const dx = p[0] - centroid[0], dy = p[1] - centroid[1];
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const pad = 18;
+        return [p[0] + (dx / dist) * pad, p[1] + (dy / dist) * pad];
+      });
+      return `M${expanded.join("L")}Z`;
+    });
+  hulls.exit().remove();
+}
+
+simulation.on("tick", () => {
+  linkEls
+    .attr("x1", d => d.source.x).attr("y1", d => d.source.y)
+    .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
+  nodeEls.attr("cx", d => d.x).attr("cy", d => d.y);
+  labelEls.attr("x", d => d.x).attr("y", d => d.y);
+  updateHulls();
+});
+
+// --- Table ---
+let sortKey = "community", sortAsc = true;
+const tooltip = document.getElementById("tooltip");
+
+function renderTable() {
+  const sorted = [...nodes].sort((a, b) => {
+    const va = a[sortKey], vb = b[sortKey];
+    return sortAsc ? d3.ascending(va, vb) : d3.descending(va, vb);
+  });
+
+  const tbody = d3.select("#table-body");
+  tbody.selectAll("*").remove();
+
+  if (sortKey === "community") {
+    // Group by community
+    const groups = d3.groups(sorted, d => d.community);
+    groups.forEach(([comm, members]) => {
+      tbody.append("tr")
+        .attr("class", "community-header")
+        .attr("data-community", comm)
+        .on("click", () => highlightCommunity(comm))
+        .append("td")
+        .attr("colspan", 4)
+        .html(`<span class="color-dot" style="background:${communityColors[comm]}"></span>${communityNames[comm]} — ${members.length} nodes`);
+      members.forEach(d => appendRow(tbody, d));
+    });
+  } else {
+    sorted.forEach(d => appendRow(tbody, d));
+  }
+}
+
+function appendRow(tbody, d) {
+  const tr = tbody.append("tr")
+    .attr("data-node", d.id)
+    .on("click", () => highlightNode(d.id))
+    .on("mouseenter", () => hoverNode(d.id, true))
+    .on("mouseleave", () => hoverNode(d.id, false));
+  tr.append("td").html(`<span class="color-dot" style="background:${communityColors[d.community]}"></span>${d.label}`);
+  tr.append("td").attr("class", "num").text(d.community);
+  tr.append("td").attr("class", "num").text(d.degree);
+  tr.append("td").attr("class", "num").text(d.betweenness.toFixed(3));
+}
+
+// Sort headers
+d3.selectAll("thead th").on("click", function () {
+  const key = this.dataset.key;
+  if (sortKey === key) sortAsc = !sortAsc;
+  else { sortKey = key; sortAsc = true; }
+  d3.selectAll("thead th").classed("sorted", false);
+  d3.select(this).classed("sorted", true);
+  d3.select(this).select(".sort-arrow").text(sortAsc ? "▲" : "▼");
+  renderTable();
+});
+
+renderTable();
+d3.select('th[data-key="community"]').classed("sorted", true);
+
+// --- Interaction ---
+let selectedNode = null, selectedCommunity = null;
+
+function clearHighlights() {
+  selectedNode = null;
+  selectedCommunity = null;
+  nodeEls.classed("dimmed", false).attr("stroke", "#0a0a0f").attr("stroke-width", 1.5);
+  linkEls.classed("highlighted", false).classed("dimmed", false);
+  labelEls.classed("visible", false);
+  hullG.selectAll("path").classed("highlighted", false);
+  d3.selectAll("#table-body tr").classed("highlighted", false);
+}
+
+function highlightNode(id) {
+  if (selectedNode === id) { clearHighlights(); return; }
+  clearHighlights();
+  selectedNode = id;
+
+  const neighbors = new Set();
+  links.forEach(l => {
+    const s = l.source.id ?? l.source, t = l.target.id ?? l.target;
+    if (s === id) neighbors.add(t);
+    if (t === id) neighbors.add(s);
+  });
+
+  nodeEls
+    .classed("dimmed", d => d.id !== id && !neighbors.has(d.id))
+    .attr("stroke", d => d.id === id ? "#fff" : "#0a0a0f")
+    .attr("stroke-width", d => d.id === id ? 3 : 1.5);
+
+  linkEls
+    .classed("highlighted", l => (l.source.id ?? l.source) === id || (l.target.id ?? l.target) === id)
+    .classed("dimmed", l => (l.source.id ?? l.source) !== id && (l.target.id ?? l.target) !== id);
+
+  labelEls.classed("visible", d => d.id === id || neighbors.has(d.id));
+
+  d3.selectAll(`#table-body tr[data-node="${id}"]`).classed("highlighted", true)
+    .node()?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+function highlightCommunity(c) {
+  if (selectedCommunity === c) { clearHighlights(); return; }
+  clearHighlights();
+  selectedCommunity = c;
+
+  const members = new Set(nodes.filter(n => n.community === c).map(n => n.id));
+
+  nodeEls.classed("dimmed", d => !members.has(d.id));
+  linkEls
+    .classed("highlighted", l => members.has(l.source.id) && members.has(l.target.id))
+    .classed("dimmed", l => !members.has(l.source.id) || !members.has(l.target.id));
+  labelEls.classed("visible", d => members.has(d.id));
+  hullG.selectAll(`path[data-community="${c}"]`).classed("highlighted", true);
+
+  d3.selectAll(`.community-header[data-community="${c}"]`).classed("highlighted", true);
+}
+
+function hoverNode(id, entering) {
+  if (selectedNode !== null || selectedCommunity !== null) return;
+  if (entering) {
+    const d = nodes[id];
+    labelEls.classed("visible", n => n.id === id);
+    nodeEls.attr("stroke", n => n.id === id ? "#fff" : "#0a0a0f")
+      .attr("stroke-width", n => n.id === id ? 2.5 : 1.5);
+  } else {
+    labelEls.classed("visible", false);
+    nodeEls.attr("stroke", "#0a0a0f").attr("stroke-width", 1.5);
+  }
+}
+
+// Graph node clicks
+nodeEls.on("click", (e, d) => { e.stopPropagation(); highlightNode(d.id); });
+hullG.on("click", (e) => {
+  const c = +e.target.dataset.community;
+  if (!isNaN(c)) { e.stopPropagation(); highlightCommunity(c); }
+});
+svg.on("click", clearHighlights);
+
+// Tooltip on graph hover
+nodeEls
+  .on("mouseenter", (e, d) => {
+    tooltip.innerHTML = `<strong>${d.label}</strong><br>Community: ${communityNames[d.community]}<br>Degree: ${d.degree}<br>Betweenness: ${d.betweenness.toFixed(3)}`;
+    tooltip.style.opacity = 1;
+    hoverNode(d.id, true);
+  })
+  .on("mousemove", (e) => {
+    tooltip.style.left = (e.pageX + 12) + "px";
+    tooltip.style.top = (e.pageY - 10) + "px";
+  })
+  .on("mouseleave", (e, d) => {
+    tooltip.style.opacity = 0;
+    hoverNode(d.id, false);
+  });
+
+</script>
+</body>
+</html>

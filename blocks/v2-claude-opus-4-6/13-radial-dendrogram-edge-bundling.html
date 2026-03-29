@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Radial Dendrogram with Hierarchical Edge Bundling</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0a0f;
+    color: #c8c8d0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+  }
+  h1 {
+    font-size: 18px;
+    font-weight: 500;
+    margin: 20px 0 4px;
+    color: #e0e0e8;
+  }
+  .subtitle {
+    font-size: 12px;
+    color: #707080;
+    margin-bottom: 12px;
+  }
+  #controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 8px;
+    font-size: 13px;
+  }
+  #controls label { color: #909098; }
+  #tension-slider {
+    width: 180px;
+    accent-color: #6688cc;
+  }
+  #tension-val {
+    min-width: 32px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  svg { display: block; }
+  .link {
+    fill: none;
+    stroke: #445566;
+    stroke-opacity: 0.25;
+    stroke-width: 1;
+  }
+  .link--highlight {
+    stroke-opacity: 0.9;
+    stroke-width: 1.8;
+  }
+  .link--source { stroke: #55aaff; }
+  .link--target { stroke: #ff7744; }
+  .node circle {
+    fill: #334455;
+    stroke: none;
+  }
+  .node text {
+    font-size: 10px;
+    fill: #8899aa;
+  }
+  .node--hover circle { fill: #55aaff; }
+  .node--hover text { fill: #ddeeff; font-weight: 600; }
+  .node--connected circle { fill: #55aaff; }
+  .node--target circle { fill: #ff7744; }
+  .link--faded { stroke-opacity: 0.04; }
+  .node--faded text { fill-opacity: 0.15; }
+  .node--faded circle { fill-opacity: 0.2; }
+</style>
+</head>
+<body>
+<h1>Software Module Dependencies</h1>
+<p class="subtitle">Radial dendrogram with hierarchical edge bundling — hover a node to trace its dependencies</p>
+<div id="controls">
+  <label for="tension-slider">Tension</label>
+  <input type="range" id="tension-slider" min="0" max="100" value="85">
+  <span id="tension-val">0.85</span>
+</div>
+<div id="chart"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data: software module hierarchy ---
+const packages = {
+  "app": ["main", "config", "bootstrap", "cli", "init"],
+  "app.plugins": ["loader", "registry", "hooks", "lifecycle"],
+  "ui": ["shell", "theme", "layout", "router", "events"],
+  "ui.components": ["button", "input", "modal", "dropdown", "tooltip", "table", "tabs", "tree"],
+  "ui.charts": ["bindAxis", "bindScale", "bindLegend", "bindTooltip", "bindBrush"],
+  "data": ["store", "cache", "query", "migration", "schema", "validate"],
+  "data.orm": ["model", "relation", "transaction", "adapter", "pool"],
+  "api": ["server", "middleware", "cors", "auth", "rateLimit", "compress"],
+  "api.routes": ["users", "projects", "tasks", "files", "search", "webhooks"],
+  "auth": ["session", "token", "oauth", "permissions", "roles", "mfa"],
+  "util": ["logger", "crypto", "fs", "path", "env", "format", "hash"],
+  "net": ["http", "ws", "grpc", "retry", "dns"],
+  "net.protocols": ["rest", "graphql", "jsonrpc", "sse"],
+  "test": ["runner", "assert", "mock", "fixture", "coverage", "snapshot"],
+  "build": ["bundler", "minify", "sourcemap", "watcher", "loader"],
+  "docs": ["parser", "renderer", "search", "sitemap"]
+};
+
+// Build hierarchy nodes
+const nodes = [{ id: "root", parent: "" }];
+const leafIds = [];
+
+for (const [pkg, modules] of Object.entries(packages)) {
+  const parts = pkg.split(".");
+  for (let i = 0; i < parts.length; i++) {
+    const id = parts.slice(0, i + 1).join(".");
+    const parentId = i === 0 ? "root" : parts.slice(0, i).join(".");
+    if (!nodes.find(n => n.id === id)) {
+      nodes.push({ id, parent: parentId });
+    }
+  }
+  for (const mod of modules) {
+    const fullId = `${pkg}.${mod}`;
+    nodes.push({ id: fullId, parent: pkg });
+    leafIds.push(fullId);
+  }
+}
+
+// Generate ~80 cross-module dependency edges
+const rng = d3.randomLcg(42);
+const rand = d3.randomUniform.source(rng)(0, 1);
+const dependencies = [];
+const depPairs = new Set();
+
+// Weighted: prefer edges between related packages
+const affinities = [
+  ["app", "ui"], ["app", "data"], ["app", "api"], ["app", "auth"],
+  ["ui.components", "ui"], ["ui.charts", "data"], ["ui", "util"],
+  ["api", "auth"], ["api", "data"], ["api.routes", "data.orm"],
+  ["data", "util"], ["data.orm", "data"], ["net", "api"],
+  ["net.protocols", "api.routes"], ["auth", "util"], ["auth", "data"],
+  ["build", "util"], ["test", "app"], ["test", "data"],
+  ["docs", "api.routes"], ["docs", "util"], ["app.plugins", "ui"],
+  ["net", "util"], ["build", "net"], ["test", "util"]
+];
+
+function pickLeaf(pkg) {
+  const prefix = pkg + ".";
+  const candidates = leafIds.filter(id => id.startsWith(prefix) && !id.slice(prefix.length).includes("."));
+  return candidates[Math.floor(rand() * candidates.length)];
+}
+
+for (const [srcPkg, tgtPkg] of affinities) {
+  const count = Math.floor(rand() * 3) + 1;
+  for (let i = 0; i < count; i++) {
+    const s = pickLeaf(srcPkg);
+    const t = pickLeaf(tgtPkg);
+    if (s && t && s !== t) {
+      const key = s < t ? `${s}|${t}` : `${t}|${s}`;
+      if (!depPairs.has(key)) {
+        depPairs.add(key);
+        dependencies.push({ source: s, target: t });
+      }
+    }
+  }
+}
+
+// Add a few random long-range edges
+while (dependencies.length < 80) {
+  const s = leafIds[Math.floor(rand() * leafIds.length)];
+  const t = leafIds[Math.floor(rand() * leafIds.length)];
+  if (s !== t) {
+    const key = s < t ? `${s}|${t}` : `${t}|${s}`;
+    if (!depPairs.has(key)) {
+      depPairs.add(key);
+      dependencies.push({ source: s, target: t });
+    }
+  }
+}
+
+// --- Layout ---
+const width = 860, height = 860;
+const radius = width / 2 - 120;
+
+const root = d3.stratify()
+  .id(d => d.id)
+  .parentId(d => d.parent || null)(nodes);
+
+const cluster = d3.cluster()
+  .size([2 * Math.PI, radius])
+  .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth);
+
+cluster(root);
+
+// Build node map and LCA paths
+const nodesById = new Map(root.descendants().map(d => [d.data.id, d]));
+
+const links = dependencies.map(c => {
+  const source = nodesById.get(c.source);
+  const target = nodesById.get(c.target);
+  return source && target ? source.path(target) : null;
+}).filter(Boolean);
+
+// Build adjacency for highlight
+const connectedTo = new Map(); // leafId -> Set of leafIds
+for (const dep of dependencies) {
+  if (!connectedTo.has(dep.source)) connectedTo.set(dep.source, new Set());
+  if (!connectedTo.has(dep.target)) connectedTo.set(dep.target, new Set());
+  connectedTo.get(dep.source).add(dep.target);
+  connectedTo.get(dep.target).add(dep.source);
+}
+
+// --- SVG ---
+const svg = d3.select("#chart").append("svg")
+  .attr("width", width)
+  .attr("height", height)
+  .attr("viewBox", [-width / 2, -height / 2, width, height]);
+
+let beta = 0.15; // default tension 0.85
+
+const line = d3.lineRadial()
+  .curve(d3.curveBundle.beta(beta))
+  .radius(d => d.y)
+  .angle(d => d.x);
+
+const linkGroup = svg.append("g");
+const nodeGroup = svg.append("g");
+
+const linkSelection = linkGroup.selectAll("path")
+  .data(links)
+  .join("path")
+    .attr("class", "link")
+    .attr("d", line);
+
+const leaves = root.leaves();
+
+const nodeSelection = nodeGroup.selectAll("g")
+  .data(leaves)
+  .join("g")
+    .attr("class", "node")
+    .attr("transform", d =>
+      `rotate(${d.x * 180 / Math.PI - 90}) translate(${d.y},0)`);
+
+nodeSelection.append("circle").attr("r", 2.5);
+
+nodeSelection.append("text")
+  .attr("dy", "0.32em")
+  .attr("x", d => d.x < Math.PI ? 6 : -6)
+  .attr("text-anchor", d => d.x < Math.PI ? "start" : "end")
+  .attr("transform", d => d.x >= Math.PI ? "rotate(180)" : null)
+  .text(d => {
+    const id = d.data.id;
+    return id.slice(id.lastIndexOf(".") + 1);
+  });
+
+// --- Interaction: hover highlight ---
+nodeSelection
+  .on("mouseenter", (event, d) => {
+    const id = d.data.id;
+    const targets = connectedTo.get(id) || new Set();
+
+    linkSelection
+      .classed("link--faded", true)
+      .classed("link--highlight", false)
+      .classed("link--source", false)
+      .classed("link--target", false)
+      .filter(link => {
+        const src = link[0].data.id;
+        const tgt = link[link.length - 1].data.id;
+        return src === id || tgt === id;
+      })
+      .classed("link--faded", false)
+      .classed("link--highlight", true)
+      .classed("link--source", link => link[0].data.id === id)
+      .classed("link--target", link => link[link.length - 1].data.id === id)
+      .raise();
+
+    nodeSelection
+      .classed("node--faded", true)
+      .classed("node--hover", false)
+      .classed("node--connected", false)
+      .classed("node--target", false);
+
+    nodeSelection
+      .filter(n => n.data.id === id)
+      .classed("node--faded", false)
+      .classed("node--hover", true);
+
+    nodeSelection
+      .filter(n => targets.has(n.data.id))
+      .classed("node--faded", false)
+      .classed("node--connected", true);
+  })
+  .on("mouseleave", () => {
+    linkSelection
+      .classed("link--faded", false)
+      .classed("link--highlight", false)
+      .classed("link--source", false)
+      .classed("link--target", false);
+
+    nodeSelection
+      .classed("node--faded", false)
+      .classed("node--hover", false)
+      .classed("node--connected", false)
+      .classed("node--target", false);
+  });
+
+// --- Tension slider ---
+const slider = document.getElementById("tension-slider");
+const tensionVal = document.getElementById("tension-val");
+
+slider.addEventListener("input", () => {
+  const tension = +slider.value / 100;
+  beta = 1 - tension;
+  tensionVal.textContent = tension.toFixed(2);
+
+  line.curve(d3.curveBundle.beta(beta));
+  linkSelection.attr("d", line);
+});
+</script>
+</body>
+</html>

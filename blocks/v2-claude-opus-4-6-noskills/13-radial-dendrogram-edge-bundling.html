@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Radial Dendrogram with Hierarchical Edge Bundling</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; color: #e0e0e0; font-family: system-ui, sans-serif; display: flex; flex-direction: column; align-items: center; height: 100vh; overflow: hidden; }
+  h1 { font-size: 1.1rem; font-weight: 500; margin-top: 12px; color: #aaa; letter-spacing: 0.05em; }
+  #controls { display: flex; align-items: center; gap: 14px; margin: 8px 0 4px; font-size: 0.85rem; color: #888; }
+  #controls label { display: flex; align-items: center; gap: 6px; }
+  #tension { width: 160px; accent-color: #6c8ebf; }
+  #chart { flex: 1; width: 100%; }
+  svg text { font-size: 10px; fill: #bbb; }
+  svg text.highlighted { fill: #fff; font-weight: 600; }
+  .node circle { fill: #2a2a4a; stroke: #555; stroke-width: 1; }
+  .node circle.highlighted { fill: #6c8ebf; stroke: #9bb8e0; stroke-width: 2; }
+  .link { fill: none; stroke: #3a3a5a; stroke-opacity: 0.35; stroke-width: 1; mix-blend-mode: screen; }
+  .link.source { stroke: #e07a5f; stroke-opacity: 0.8; stroke-width: 1.5; }
+  .link.target { stroke: #81b29a; stroke-opacity: 0.8; stroke-width: 1.5; }
+  .link.faded { stroke-opacity: 0.06; }
+</style>
+</head>
+<body>
+<h1>Hierarchical Edge Bundling — Software Dependencies</h1>
+<div id="controls">
+  <label>Bundle tension <input type="range" id="tension" min="0" max="1" step="0.01" value="0.85"> <span id="tension-val">0.85</span></label>
+</div>
+<div id="chart"></div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data: hierarchical software modules with cross-deps ---
+const packages = {
+  "app": ["main", "config", "bootstrap", "cli", "env"],
+  "app.auth": ["login", "logout", "session", "token", "oauth", "permissions", "roles", "middleware"],
+  "app.api": ["router", "handler", "middleware", "validator", "serializer", "rate-limiter", "cors", "versioning"],
+  "app.api.endpoints": ["users", "products", "orders", "payments", "search", "analytics", "webhooks"],
+  "app.core": ["engine", "scheduler", "pipeline", "registry", "dispatcher", "bus", "cache"],
+  "app.core.models": ["user", "product", "order", "payment", "invoice", "notification", "audit-log"],
+  "app.data": ["repository", "connection", "migration", "seeder", "query-builder", "transaction"],
+  "app.data.adapters": ["postgres", "redis", "elasticsearch", "s3", "kafka"],
+  "app.services": ["email", "sms", "pdf", "image", "queue", "cron", "logger"],
+  "app.services.payments": ["stripe", "paypal", "braintree", "invoice-gen"],
+  "app.ui": ["layout", "theme", "router", "store", "i18n"],
+  "app.ui.components": ["button", "form", "table", "modal", "chart", "toast", "dropdown", "tabs"],
+  "app.ui.pages": ["dashboard", "profile", "settings", "admin", "reports"],
+  "app.utils": ["format", "validate", "crypto", "http", "retry", "debounce", "deep-merge"],
+  "app.test": ["fixtures", "mocks", "helpers", "runner", "coverage"]
+};
+
+// Build hierarchy data
+const hierarchyData = { name: "app", children: [] };
+const nodesByPath = new Map();
+nodesByPath.set("app", hierarchyData);
+
+function ensureParent(path) {
+  if (nodesByPath.has(path)) return nodesByPath.get(path);
+  const parts = path.split(".");
+  const parentPath = parts.slice(0, -1).join(".");
+  const parent = ensureParent(parentPath);
+  const node = { name: parts[parts.length - 1], children: [] };
+  if (!parent.children) parent.children = [];
+  parent.children.push(node);
+  nodesByPath.set(path, node);
+  return node;
+}
+
+const leafPaths = [];
+for (const [pkg, modules] of Object.entries(packages)) {
+  const parent = ensureParent(pkg);
+  for (const mod of modules) {
+    const leaf = { name: mod };
+    if (!parent.children) parent.children = [];
+    parent.children.push(leaf);
+    leafPaths.push(pkg + "." + mod);
+  }
+}
+
+// Generate ~80 cross-module dependency edges (between different top-level groups)
+const rng = d3.randomLcg(42);
+const random = () => rng();
+const deps = [];
+const depRules = [
+  // source pattern -> likely targets
+  [/app\.api\.endpoints/, ["app.core.models", "app.services", "app.data"]],
+  [/app\.api\.middleware/, ["app.auth"]],
+  [/app\.api/, ["app.core", "app.utils"]],
+  [/app\.auth/, ["app.data", "app.utils", "app.core.models"]],
+  [/app\.core/, ["app.data", "app.utils"]],
+  [/app\.services/, ["app.core", "app.data", "app.utils"]],
+  [/app\.services\.payments/, ["app.core.models", "app.data"]],
+  [/app\.ui\.pages/, ["app.api", "app.services", "app.ui.components"]],
+  [/app\.ui\.components/, ["app.utils", "app.ui"]],
+  [/app\.ui/, ["app.utils", "app.auth"]],
+  [/app\.test/, ["app.core", "app.services", "app.api", "app.data"]],
+  [/app\.data/, ["app.utils", "app.core"]],
+  [/app\./, ["app.utils"]]
+];
+
+const usedEdges = new Set();
+for (const src of leafPaths) {
+  for (const [pattern, targetGroups] of depRules) {
+    if (!pattern.test(src)) continue;
+    for (const tg of targetGroups) {
+      if (src.startsWith(tg)) continue; // skip same-group
+      const candidates = leafPaths.filter(p => p.startsWith(tg + ".") && p !== src);
+      if (candidates.length === 0) continue;
+      if (random() > 0.3) continue; // probabilistic
+      const target = candidates[Math.floor(random() * candidates.length)];
+      const key = src + "->" + target;
+      if (!usedEdges.has(key)) {
+        usedEdges.add(key);
+        deps.push({ source: src, target: target });
+      }
+    }
+    break; // first matching rule only
+  }
+}
+
+// --- Layout ---
+const width = Math.min(window.innerWidth, window.innerHeight) - 40;
+const diameter = Math.min(width, 860);
+const radius = diameter / 2;
+const innerRadius = radius - 140;
+
+const root = d3.hierarchy(hierarchyData);
+const cluster = d3.cluster().size([360, innerRadius]).separation((a, b) => 1);
+cluster(root);
+
+// Map leaf full-path -> node
+const leaves = root.leaves();
+const leafByPath = new Map();
+for (const leaf of leaves) {
+  const path = leaf.ancestors().reverse().map(d => d.data.name).join(".");
+  leafByPath.set(path, leaf);
+}
+
+// Build imports/exports maps for hover
+const nodeImports = new Map(); // node -> set of paths it depends on
+const nodeExports = new Map(); // node -> set of paths that depend on it
+for (const leaf of leaves) {
+  const path = leaf.ancestors().reverse().map(d => d.data.name).join(".");
+  nodeImports.set(path, new Set());
+  nodeExports.set(path, new Set());
+}
+for (const { source, target } of deps) {
+  if (nodeImports.has(source)) nodeImports.get(source).add(target);
+  if (nodeExports.has(target)) nodeExports.get(target).add(source);
+}
+
+// LCA path routing: for each edge, find path from source up to LCA then down to target
+function lcaPath(a, b) {
+  const aAnc = a.ancestors().reverse();
+  const bAnc = b.ancestors().reverse();
+  let i = 0;
+  while (i < aAnc.length && i < bAnc.length && aAnc[i] === bAnc[i]) i++;
+  // path: a -> ... -> LCA -> ... -> b
+  const up = a.ancestors().slice(0, a.depth - i + 1).reverse();
+  const down = b.ancestors().slice(0, b.depth - i + 1);
+  return up.concat(down.slice(1));
+}
+
+// Precompute edge paths
+const edgePaths = deps.map(({ source, target }) => {
+  const s = leafByPath.get(source);
+  const t = leafByPath.get(target);
+  if (!s || !t) return null;
+  return { source, target, path: lcaPath(s, t) };
+}).filter(Boolean);
+
+// --- Render ---
+const svg = d3.select("#chart").append("svg")
+  .attr("viewBox", [-radius, -radius, diameter, diameter].join(" "))
+  .attr("width", "100%")
+  .attr("height", "100%")
+  .style("max-width", diameter + "px")
+  .style("max-height", diameter + "px");
+
+const linkGroup = svg.append("g");
+const nodeGroup = svg.append("g");
+
+// Radial point helper
+function rad(angle, r) {
+  const a = (angle - 90) * Math.PI / 180;
+  return [r * Math.cos(a), r * Math.sin(a)];
+}
+
+// Line generator for edge paths using radial coordinates
+function buildLine(tension) {
+  return d3.lineRadial()
+    .curve(d3.curveBundle.beta(tension))
+    .radius(d => d.y)
+    .angle(d => d.x * Math.PI / 180);
+}
+
+let line = buildLine(0.85);
+
+// Draw edges
+const links = linkGroup.selectAll("path")
+  .data(edgePaths)
+  .join("path")
+  .attr("class", "link")
+  .attr("d", d => line(d.path));
+
+// Draw leaf nodes
+const nodes = nodeGroup.selectAll("g")
+  .data(leaves)
+  .join("g")
+  .attr("class", "node")
+  .attr("transform", d => `rotate(${d.x - 90}) translate(${d.y}, 0)`);
+
+nodes.append("circle").attr("r", 3);
+
+nodes.append("text")
+  .attr("dy", "0.31em")
+  .attr("x", d => d.x < 180 ? 8 : -8)
+  .attr("text-anchor", d => d.x < 180 ? "start" : "end")
+  .attr("transform", d => d.x >= 180 ? "rotate(180)" : null)
+  .text(d => d.data.name);
+
+// --- Hover interaction ---
+function getNodePath(d) {
+  return d.ancestors().reverse().map(n => n.data.name).join(".");
+}
+
+nodes.on("mouseenter", function(event, d) {
+  const path = getNodePath(d);
+  const imports = nodeImports.get(path) || new Set();
+  const exports = nodeExports.get(path) || new Set();
+  const connected = new Set([path, ...imports, ...exports]);
+
+  links.classed("faded", e => e.source !== path && e.target !== path)
+    .classed("source", e => e.source === path)
+    .classed("target", e => e.target === path);
+
+  nodes.select("circle").classed("highlighted", n => connected.has(getNodePath(n)));
+  nodes.select("text").classed("highlighted", n => connected.has(getNodePath(n)));
+});
+
+nodes.on("mouseleave", function() {
+  links.classed("faded", false).classed("source", false).classed("target", false);
+  nodes.select("circle").classed("highlighted", false);
+  nodes.select("text").classed("highlighted", false);
+});
+
+// --- Tension slider ---
+const tensionSlider = document.getElementById("tension");
+const tensionVal = document.getElementById("tension-val");
+tensionSlider.addEventListener("input", () => {
+  const t = +tensionSlider.value;
+  tensionVal.textContent = t.toFixed(2);
+  line = buildLine(t);
+  links.attr("d", d => line(d.path));
+});
+</script>
+</body>
+</html>

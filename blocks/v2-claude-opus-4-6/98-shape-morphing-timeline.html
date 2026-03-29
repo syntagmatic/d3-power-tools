@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Shape-Morphing Timeline</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #0a0a1a; color: #e0e0e0; font-family: system-ui, sans-serif; display: flex; flex-direction: column; align-items: center; min-height: 100vh; padding: 2rem 1rem; }
+  h1 { font-size: 1.4rem; font-weight: 400; margin-bottom: 0.5rem; letter-spacing: 0.02em; }
+  #chart { position: relative; }
+  #controls { display: flex; align-items: center; gap: 1rem; margin-top: 1.2rem; }
+  #scrubber { width: 320px; accent-color: #6cf; cursor: pointer; }
+  #play-btn { background: none; border: 1px solid #6cf; color: #6cf; padding: 0.3rem 1rem; border-radius: 4px; cursor: pointer; font-size: 0.9rem; min-width: 70px; }
+  #play-btn:hover { background: rgba(102,204,255,0.15); }
+  #shape-label { font-size: 0.95rem; color: #aaa; min-width: 60px; text-align: center; }
+  .axis text { fill: #888; font-size: 11px; }
+  .axis path, .axis line { stroke: #333; }
+  .tick-marker { fill: none; stroke: #555; stroke-width: 1; }
+</style>
+</head>
+<body>
+<h1>Shape-Morphing Timeline</h1>
+<div id="chart"></div>
+<div id="controls">
+  <button id="play-btn">Pause</button>
+  <input id="scrubber" type="range" min="0" max="3000" value="0" step="1">
+  <span id="shape-label">Bar</span>
+</div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data ---
+const N = 12;
+const data = d3.range(N).map(i => ({
+  id: i,
+  label: ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][i],
+  value: 20 + Math.round(Math.sin(i * 0.7 + 1) * 30 + Math.random() * 25)
+}));
+
+// --- Layout ---
+const margin = { top: 30, right: 30, bottom: 50, left: 50 };
+const width = 700, height = 420;
+const innerW = width - margin.left - margin.right;
+const innerH = height - margin.top - margin.bottom;
+
+const svg = d3.select("#chart").append("svg")
+  .attr("width", width).attr("height", height)
+  .attr("viewBox", `0 0 ${width} ${height}`);
+
+const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+// --- Scales ---
+const xScale = d3.scaleBand().domain(data.map(d => d.label)).range([0, innerW]).padding(0.2);
+const xPoint = d3.scalePoint().domain(data.map(d => d.label)).range([xScale.bandwidth() / 2, innerW - xScale.bandwidth() / 2]);
+const yScale = d3.scaleLinear().domain([0, d3.max(data, d => d.value) * 1.1]).nice().range([innerH, 0]);
+const colorScale = d3.scaleOrdinal(d3.schemeTableau10).domain(data.map(d => d.id));
+
+// --- Axes ---
+g.append("g").attr("class", "axis x-axis").attr("transform", `translate(0,${innerH})`)
+  .call(d3.axisBottom(xScale).tickSize(0).tickPadding(10));
+g.append("g").attr("class", "axis y-axis")
+  .call(d3.axisLeft(yScale).ticks(6).tickSize(-innerW).tickFormat(d3.format("d")))
+  .selectAll(".tick line").attr("stroke", "#222");
+
+// --- Shape states: compute target points for each shape ---
+// Each shape: array of {id, points: [[x,y]...]} per datum
+// We resample each shape to the same N_PTS so we can interpolate
+
+const N_PTS = 64; // points per shape for resampling
+
+function resamplePath(pathStr) {
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", pathStr);
+  const len = path.getTotalLength();
+  if (len === 0) return d3.range(N_PTS).map(() => [0, 0]);
+  return d3.range(N_PTS).map(i => {
+    const pt = path.getPointAtLength(i / (N_PTS - 1) * len);
+    return [pt.x, pt.y];
+  });
+}
+
+// Bar: each datum is a rect
+function barPoints(d) {
+  const x = xScale(d.label), w = xScale.bandwidth();
+  const y = yScale(d.value), h = innerH - y;
+  const pathStr = `M${x},${y} L${x + w},${y} L${x + w},${y + h} L${x},${y + h} Z`;
+  return resamplePath(pathStr);
+}
+
+// Scatter: each datum is a circle
+function scatterPoints(d) {
+  const cx = xPoint(d.label), cy = yScale(d.value), r = 12;
+  // Build circle path
+  const pathStr = `M${cx + r},${cy} A${r},${r} 0 1,1 ${cx - r},${cy} A${r},${r} 0 1,1 ${cx + r},${cy} Z`;
+  return resamplePath(pathStr);
+}
+
+// For line & area, we draw the full shape as one path, but we need per-datum shapes.
+// Approach: each datum gets a narrow vertical "sliver" of the line/area shape.
+// This keeps correspondences correct during morph.
+
+// Line: each datum is a small diamond at its line position
+function linePoints(d, i) {
+  const cx = xPoint(d.label), cy = yScale(d.value);
+  const rw = 6, rh = 6;
+  const pathStr = `M${cx},${cy - rh} L${cx + rw},${cy} L${cx},${cy + rh} L${cx - rw},${cy} Z`;
+  return resamplePath(pathStr);
+}
+
+// Area: each datum is a vertical sliver from baseline to value
+function areaPoints(d, i) {
+  const cx = xPoint(d.label);
+  const halfW = (innerW / (N - 1)) * 0.45;
+  const y0 = innerH, y1 = yScale(d.value);
+  const pathStr = `M${cx - halfW},${y1} L${cx + halfW},${y1} L${cx + halfW},${y0} L${cx - halfW},${y0} Z`;
+  return resamplePath(pathStr);
+}
+
+// Best rotation alignment to minimize total squared distance
+function bestRotation(source, target) {
+  const n = source.length;
+  let bestDist = Infinity, bestK = 0;
+  // Check every 4th rotation for speed, then refine
+  const step = Math.max(1, Math.floor(n / 16));
+  for (let k = 0; k < n; k += step) {
+    let dist = 0;
+    for (let i = 0; i < n; i++) {
+      const si = (i + k) % n;
+      const dx = source[si][0] - target[i][0];
+      const dy = source[si][1] - target[i][1];
+      dist += dx * dx + dy * dy;
+    }
+    if (dist < bestDist) { bestDist = dist; bestK = k; }
+  }
+  // Refine around best
+  const lo = Math.max(0, bestK - step), hi = Math.min(n - 1, bestK + step);
+  for (let k = lo; k <= hi; k++) {
+    let dist = 0;
+    for (let i = 0; i < n; i++) {
+      const si = (i + k) % n;
+      const dx = source[si][0] - target[i][0];
+      const dy = source[si][1] - target[i][1];
+      dist += dx * dx + dy * dy;
+    }
+    if (dist < bestDist) { bestDist = dist; bestK = k; }
+  }
+  return bestK;
+}
+
+function rotateArray(arr, k) {
+  if (k === 0) return arr;
+  return arr.slice(k).concat(arr.slice(0, k));
+}
+
+// Precompute all shape states
+const shapes = {
+  bar: data.map(d => barPoints(d)),
+  line: data.map((d, i) => linePoints(d, i)),
+  area: data.map((d, i) => areaPoints(d, i)),
+  scatter: data.map(d => scatterPoints(d)),
+};
+
+const shapeOrder = ["bar", "line", "area", "scatter"];
+const shapeLabels = { bar: "Bar", line: "Line", area: "Area", scatter: "Scatter" };
+
+// --- Background connectors for line and area ---
+const linePath = g.append("path")
+  .attr("fill", "none")
+  .attr("stroke", "#6cf")
+  .attr("stroke-width", 2)
+  .attr("opacity", 0);
+
+const areaPath = g.append("path")
+  .attr("fill", "rgba(102,204,255,0.15)")
+  .attr("stroke", "none")
+  .attr("opacity", 0);
+
+const lineGen = d3.line().x(d => xPoint(d.label)).y(d => yScale(d.value)).curve(d3.curveCatmullRom);
+const areaGen = d3.area().x(d => xPoint(d.label)).y0(innerH).y1(d => yScale(d.value)).curve(d3.curveCatmullRom);
+
+linePath.attr("d", lineGen(data));
+areaPath.attr("d", areaGen(data));
+
+// --- Create shape elements ---
+const pointsToPath = pts => "M" + pts.map(p => p.join(",")).join("L") + "Z";
+
+const elements = g.selectAll(".morph-shape")
+  .data(data, d => d.id)
+  .join("path")
+    .attr("class", "morph-shape")
+    .attr("d", (d, i) => pointsToPath(shapes.bar[i]))
+    .attr("fill", d => colorScale(d.id))
+    .attr("stroke", "none")
+    .attr("opacity", 0.85);
+
+// Stash current points on each element
+elements.each(function(d, i) {
+  this.__currentPts = shapes.bar[i].map(p => [...p]);
+});
+
+// --- Timeline: 4 shapes, 750 ticks each = 3000 total ---
+const TICKS_PER_SHAPE = 750;
+const TOTAL_TICKS = shapeOrder.length * TICKS_PER_SHAPE;
+
+function getShapeAtTick(tick) {
+  const idx = Math.min(Math.floor(tick / TICKS_PER_SHAPE), shapeOrder.length - 1);
+  const localT = (tick - idx * TICKS_PER_SHAPE) / TICKS_PER_SHAPE;
+  return { fromIdx: idx, t: Math.min(localT, 1) };
+}
+
+function lerpPoints(a, b, t) {
+  return a.map((p, i) => [
+    p[0] + (b[i][0] - p[0]) * t,
+    p[1] + (b[i][1] - p[1]) * t
+  ]);
+}
+
+// Precompute aligned transitions between consecutive shapes
+const alignedTransitions = [];
+for (let s = 0; s < shapeOrder.length - 1; s++) {
+  const fromKey = shapeOrder[s], toKey = shapeOrder[s + 1];
+  const aligned = data.map((d, i) => {
+    const src = shapes[fromKey][i];
+    const tgt = shapes[toKey][i];
+    const k = bestRotation(src, tgt);
+    return { from: rotateArray(src, k), to: tgt };
+  });
+  alignedTransitions.push(aligned);
+}
+
+function easeInOutCubic(t) {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+function renderAtTick(tick) {
+  const { fromIdx, t } = getShapeAtTick(tick);
+
+  // Determine current shape name for label
+  let currentShape;
+  if (t < 0.05) {
+    currentShape = shapeOrder[fromIdx];
+  } else if (t > 0.95 && fromIdx < shapeOrder.length - 1) {
+    currentShape = shapeOrder[fromIdx + 1];
+  } else if (fromIdx < shapeOrder.length - 1) {
+    currentShape = `${shapeLabels[shapeOrder[fromIdx]]} → ${shapeLabels[shapeOrder[fromIdx + 1]]}`;
+  } else {
+    currentShape = shapeOrder[fromIdx];
+  }
+
+  // Show/hide background line and area
+  const easedT = easeInOutCubic(t);
+
+  // Line connector visibility: fade in during bar→line, stay for line→area, fade out during area→scatter
+  let lineOpacity = 0, areaOpacity = 0;
+  if (fromIdx === 0) { // bar → line
+    lineOpacity = easedT;
+  } else if (fromIdx === 1) { // line → area
+    lineOpacity = 1 - easedT * 0.5; // fade slightly
+    areaOpacity = easedT;
+  } else if (fromIdx === 2) { // area → scatter
+    lineOpacity = (1 - easedT) * 0.5;
+    areaOpacity = 1 - easedT;
+  }
+
+  linePath.attr("opacity", lineOpacity);
+  areaPath.attr("opacity", areaOpacity);
+
+  // Interpolate shapes
+  if (fromIdx >= shapeOrder.length - 1 || t === 0) {
+    // Static at a settled shape
+    const key = t === 0 ? shapeOrder[fromIdx] : shapeOrder[shapeOrder.length - 1];
+    elements.attr("d", (d, i) => pointsToPath(shapes[key][i]));
+  } else {
+    // Morphing between shapes
+    const trans = alignedTransitions[fromIdx];
+    elements.attr("d", (d, i) => {
+      const pts = lerpPoints(trans[i].from, trans[i].to, easedT);
+      return pointsToPath(pts);
+    });
+  }
+
+  // Update label
+  if (typeof currentShape === "string" && currentShape.includes("→")) {
+    shapeLabel.textContent = currentShape;
+  } else {
+    shapeLabel.textContent = shapeLabels[currentShape] || currentShape;
+  }
+}
+
+// --- Controls ---
+const scrubber = document.getElementById("scrubber");
+const playBtn = document.getElementById("play-btn");
+const shapeLabel = document.getElementById("shape-label");
+
+let playing = true;
+let currentTick = 0;
+const SPEED = 1.5; // ticks per frame
+
+// Draw tick markers on scrubber area
+const scrubberMarks = svg.append("g")
+  .attr("transform", `translate(${margin.left},${height - 8})`);
+
+for (let i = 1; i < shapeOrder.length; i++) {
+  const x = (i / shapeOrder.length) * innerW;
+  scrubberMarks.append("line")
+    .attr("class", "tick-marker")
+    .attr("x1", x).attr("x2", x).attr("y1", -4).attr("y2", 4);
+}
+
+scrubber.addEventListener("input", () => {
+  currentTick = +scrubber.value;
+  renderAtTick(currentTick);
+});
+
+playBtn.addEventListener("click", () => {
+  playing = !playing;
+  playBtn.textContent = playing ? "Pause" : "Play";
+});
+
+// Reduced motion support
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+
+// Animation loop
+function tick() {
+  if (playing && !reducedMotion.matches) {
+    currentTick += SPEED;
+    if (currentTick >= TOTAL_TICKS) currentTick = 0;
+    scrubber.value = currentTick;
+    renderAtTick(currentTick);
+  }
+  requestAnimationFrame(tick);
+}
+
+// Initial render
+renderAtTick(0);
+requestAnimationFrame(tick);
+
+</script>
+</body>
+</html>
