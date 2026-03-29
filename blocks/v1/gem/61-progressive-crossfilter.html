@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Progressive Falcon Crossfilter — 100K Records</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    :root {
+      --bg: #f8f9fa;
+      --panel-bg: #ffffff;
+      --border: #dee2e6;
+      --text: #212529;
+      --primary: #4361ee;
+      --secondary: #3f37c9;
+      --accent: #4cc9f0;
+      --muted: #6c757d;
+    }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+    header {
+      padding: 12px 20px;
+      background: #fff;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+    h1 { margin: 0; font-size: 1.2rem; font-weight: 700; }
+    .stats { font-size: 0.9rem; color: var(--muted); display: flex; gap: 15px; }
+    .badge {
+      background: var(--primary);
+      color: white;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-weight: 600;
+    }
+    .reset-btn {
+      margin-left: auto;
+      padding: 6px 12px;
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+    .reset-btn:hover { background: #f1f3f5; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: 1fr 1fr;
+      gap: 12px;
+      padding: 12px;
+      flex: 1;
+      min-height: 0;
+    }
+    .panel {
+      background: var(--panel-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .panel-header {
+      padding: 8px 12px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      border-bottom: 1px solid #f1f3f5;
+    }
+    .panel-content {
+      flex: 1;
+      position: relative;
+    }
+    canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+    svg {
+      position: absolute;
+      top: 0;
+      left: 0;
+      pointer-events: all;
+    }
+    .brush .selection {
+      fill: var(--primary);
+      fill-opacity: 0.15;
+      stroke: var(--primary);
+      stroke-width: 1px;
+    }
+    .bar { fill: var(--primary); fill-opacity: 0.8; }
+    .bar-bg { fill: #e9ecef; }
+    .axis text { font-size: 10px; fill: var(--muted); }
+    .axis line, .axis path { stroke: #e9ecef; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Falcon Crossfilter</h1>
+  <div class="stats">
+    <span>Records: <span id="count-total">0</span></span>
+    <span>Selected: <span id="count-selected" class="badge">0</span></span>
+    <span id="refinement-status" style="font-style: italic;"></span>
+  </div>
+  <button class="reset-btn" id="reset-btn">Reset Filters</button>
+</header>
+
+<div class="grid">
+  <div class="panel" id="panel-scatter">
+    <div class="panel-header">Price vs. Quantity</div>
+    <div class="panel-content"></div>
+  </div>
+  <div class="panel" id="panel-histogram">
+    <div class="panel-header">Price Distribution</div>
+    <div class="panel-content"></div>
+  </div>
+  <div class="panel" id="panel-bars">
+    <div class="panel-header">Category</div>
+    <div class="panel-content"></div>
+  </div>
+  <div class="panel" id="panel-timeline">
+    <div class="panel-header">Timeline</div>
+    <div class="panel-content"></div>
+  </div>
+</div>
+
+<script>
+/**
+ * PROGRESSIVE FALCON CROSSFILTER
+ * 100K Records
+ * 
+ * Architecture:
+ * - Data: 100K synthetic records with Price, Quantity, Category, Time.
+ * - Brushing: 
+ *   - Histogram (Price), Bars (Category), Timeline (Time) use 1D Falcon indexes.
+ *   - Scatter (Price vs Quantity) uses 2D filtering (sampled then full).
+ * - Rendering:
+ *   - Scatter: Canvas for performance, progressive refinement (10K -> 100K).
+ *   - Others: SVG with Falcon O(1) updates during interaction.
+ */
+
+const N = 100000;
+const SAMPLE_N = 10000;
+const BINS = 50;
+const CAT_NAMES = ["Electronics", "Apparel", "Home", "Grocery", "Garden", "Toys", "Books"];
+const COLORS = ["#4361ee", "#3a0ca3", "#7209b7", "#b5179e", "#f72585", "#4cc9f0", "#4895ef"];
+
+// --- Data Generation ---
+const generateData = () => {
+  const data = {
+    price: new Float32Array(N),
+    quantity: new Float32Array(N),
+    category: new Uint8Array(N),
+    time: new Float32Array(N),
+    ids: new Uint32Array(N)
+  };
+
+  const random = d3.randomLcg(42);
+  const normal = d3.randomNormal.source(random)(0, 1);
+
+  for (let i = 0; i < N; i++) {
+    data.ids[i] = i;
+    // Price: Log-normal distribution
+    data.price[i] = Math.exp(2.5 + normal() * 0.8);
+    // Quantity: Correlated with price somewhat
+    data.quantity[i] = Math.max(1, 10 + normal() * 5 + (data.price[i] < 20 ? 10 : 0));
+    // Category: Balanced
+    data.category[i] = Math.floor(random() * CAT_NAMES.length);
+    // Time: Uniform over a year
+    data.time[i] = random() * 365;
+  }
+  return data;
+};
+
+const data = generateData();
+const shuffledIds = d3.shuffle(Array.from(data.ids));
+const sampleIds = shuffledIds.slice(0, SAMPLE_N);
+
+// --- State Management ---
+const filters = {
+  price: null,
+  quantity: null,
+  category: null,
+  time: null
+};
+
+const isFiltered = (i) => {
+  if (filters.price && (data.price[i] < filters.price[0] || data.price[i] > filters.price[1])) return false;
+  if (filters.quantity && (data.quantity[i] < filters.quantity[0] || data.quantity[i] > filters.quantity[1])) return false;
+  if (filters.category !== null && data.category[i] !== filters.category) return false;
+  if (filters.time && (data.time[i] < filters.time[0] || data.time[i] > filters.time[1])) return false;
+  return true;
+};
+
+// --- Falcon Indexing ---
+const falcon = {
+  activeDim: null,
+  cumulative: {}
+};
+
+const getBin = (val, extent, numBins) => {
+  const b = Math.floor(((val - extent[0]) / (extent[1] - extent[0])) * numBins);
+  return Math.max(0, Math.min(numBins - 1, b));
+};
+
+const extents = {
+  price: [d3.min(data.price), d3.max(data.price)],
+  quantity: [d3.min(data.quantity), d3.max(data.quantity)],
+  category: [0, CAT_NAMES.length - 1],
+  time: [0, 365]
+};
+
+const precomputeFalcon = (dim) => {
+  falcon.activeDim = dim;
+  falcon.cumulative = {};
+  const otherDims = ["price", "category", "time"].filter(d => d !== dim);
+  const sortOrder = Array.from(data.ids).sort((a, b) => data[dim][a] - data[dim][b]);
+  
+  otherDims.forEach(targetDim => {
+    const targetBins = targetDim === "category" ? CAT_NAMES.length : BINS;
+    const targetExtent = extents[targetDim];
+    const table = new Uint32Array((BINS + 1) * targetBins);
+    const running = new Uint32Array(targetBins);
+    
+    let cursor = 0;
+    const brushExtent = extents[dim];
+    
+    for (let b = 0; b <= BINS; b++) {
+      const threshold = brushExtent[0] + (b / BINS) * (brushExtent[1] - brushExtent[0]);
+      while (cursor < N && data[dim][sortOrder[cursor]] <= threshold) {
+        const idx = sortOrder[cursor];
+        let pass = true;
+        if (filters.quantity && (data.quantity[idx] < filters.quantity[0] || data.quantity[idx] > filters.quantity[1])) pass = false;
+        ["price", "category", "time"].forEach(f => {
+          if (f !== dim && f !== targetDim && filters[f] !== null) {
+             if (f === "category") { if (data.category[idx] !== filters[f]) pass = false; }
+             else { if (data[f][idx] < filters[f][0] || data[f][idx] > filters[f][1]) pass = false; }
+          }
+        });
+        if (pass) {
+          const bin = getBin(data[targetDim][idx], targetExtent, targetBins);
+          running[bin]++;
+        }
+        cursor++;
+      }
+      table.set(running, b * targetBins);
+    }
+    falcon.cumulative[targetDim] = table;
+  });
+};
+
+// --- View Definitions ---
+const views = {};
+
+const initView = (id, margin = {top: 10, right: 20, bottom: 30, left: 40}) => {
+  const container = document.querySelector(`#${id} .panel-content`);
+  const rect = container.getBoundingClientRect();
+  const width = rect.width;
+  const height = rect.height;
+  const svg = d3.select(container).append("svg").attr("width", width).attr("height", height);
+  const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+  return { container, width, height, innerWidth: width - margin.left - margin.right, innerHeight: height - margin.top - margin.bottom, svg, g, margin };
+};
+
+// ==================== SCATTER PLOT ====================
+const setupScatter = () => {
+  const v = initView("panel-scatter", {top: 10, right: 10, bottom: 30, left: 40});
+  const canvas = d3.select(v.container).insert("canvas", "svg").attr("width", v.width * devicePixelRatio).attr("height", v.height * devicePixelRatio).style("width", v.width + "px").style("height", v.height + "px").node();
+  const ctx = canvas.getContext("2d");
+  ctx.scale(devicePixelRatio, devicePixelRatio);
+  const x = d3.scaleLog().domain(extents.price).range([0, v.innerWidth]);
+  const y = d3.scaleLinear().domain(extents.quantity).range([v.innerHeight, 0]).nice();
+  v.g.append("g").attr("transform", `translate(0,${v.innerHeight})`).attr("class", "axis").call(d3.axisBottom(x).ticks(5, "~s"));
+  v.g.append("g").attr("class", "axis").call(d3.axisLeft(y).ticks(5));
+  const brush = d3.brush().extent([[0, 0], [v.innerWidth, v.innerHeight]]).on("start brush end", (event) => {
+    if (event.selection) {
+      const [[x0, y0], [x1, y1]] = event.selection;
+      filters.price = [x.invert(x0), x.invert(x1)];
+      filters.quantity = [y.invert(y1), y.invert(y0)];
+    } else {
+      filters.price = null; filters.quantity = null;
+    }
+    updateAll("scatter", event.type);
+  });
+  v.g.append("g").attr("class", "brush").call(brush);
+  views.scatter = { ...v, ctx, x, y, brush };
+};
+
+const drawScatter = (progressive = false) => {
+  const { ctx, x, y, margin } = views.scatter;
+  ctx.clearRect(0, 0, views.scatter.width, views.scatter.height);
+  ctx.save(); ctx.translate(margin.left, margin.top);
+  const drawBatch = (ids) => {
+    for (const i of ids) {
+      if (isFiltered(i)) {
+        ctx.fillStyle = COLORS[data.category[i]]; ctx.globalAlpha = 0.4;
+        ctx.beginPath(); ctx.arc(x(data.price[i]), y(data.quantity[i]), 1.5, 0, 2 * Math.PI); ctx.fill();
+      }
+    }
+  };
+  if (progressive) {
+    drawBatch(sampleIds);
+    document.getElementById("refinement-status").textContent = "(approximate...)";
+    requestIdleCallback(() => {
+      ctx.clearRect(0, 0, views.scatter.width, views.scatter.height);
+      ctx.save(); ctx.translate(margin.left, margin.top);
+      drawBatch(data.ids); ctx.restore();
+      document.getElementById("refinement-status").textContent = ""; updateCounts();
+    });
+  } else {
+    drawBatch(data.ids);
+  }
+  ctx.restore();
+};
+
+// ==================== HISTOGRAM ====================
+const setupHistogram = () => {
+  const v = initView("panel-histogram");
+  const x = d3.scaleLog().domain(extents.price).range([0, v.innerWidth]);
+  const y = d3.scaleLinear().range([v.innerHeight, 0]);
+  const binEdges = d3.ticks(Math.log10(extents.price[0]), Math.log10(extents.price[1]), BINS).map(t => Math.pow(10, t));
+  const histogram = d3.bin().domain(x.domain()).thresholds(binEdges);
+  v.g.append("g").attr("transform", `translate(0,${v.innerHeight})`).attr("class", "axis").call(d3.axisBottom(x).ticks(5, "~s"));
+  const yAxisG = v.g.append("g").attr("class", "axis");
+  const barsG = v.g.append("g");
+  const brush = d3.brushX().extent([[0, 0], [v.innerWidth, v.innerHeight]]).on("start", () => precomputeFalcon("price")).on("brush end", (event) => {
+    filters.price = event.selection ? event.selection.map(x.invert) : null;
+    updateAll("histogram", event.type);
+  });
+  v.g.append("g").attr("class", "brush").call(brush);
+  views.histogram = { ...v, x, y, histogram, yAxisG, barsG, brush };
+};
+
+const drawHistogram = (source, type) => {
+  const v = views.histogram;
+  let counts;
+  if (source === "histogram" && type === "brush" && falcon.cumulative.price) {
+    const [x0, x1] = filters.price;
+    const b0 = getBin(x0, extents.price, BINS), b1 = getBin(x1, extents.price, BINS);
+    const table = falcon.cumulative.price; counts = new Uint32Array(BINS);
+    for (let i = 0; i < BINS; i++) counts[i] = table[b1 * BINS + i] - table[b0 * BINS + i];
+  } else {
+    const activeData = [];
+    for (let i = 0; i < N; i++) if (isFiltered(i)) activeData.push(data.price[i]);
+    counts = v.histogram(activeData).map(b => b.length);
+  }
+  v.y.domain([0, d3.max(counts) || 10]).nice();
+  v.yAxisG.call(d3.axisLeft(v.y).ticks(5));
+  const barW = v.innerWidth / BINS;
+  v.barsG.selectAll("rect").data(counts).join("rect").attr("class", "bar").attr("x", (d, i) => i * barW).attr("y", d => v.y(d)).attr("width", Math.max(0, barW - 1)).attr("height", d => v.innerHeight - v.y(d));
+};
+
+// ==================== CATEGORY BARS ====================
+const setupBars = () => {
+  const v = initView("panel-bars");
+  const x = d3.scaleBand().domain(d3.range(CAT_NAMES.length)).range([0, v.innerWidth]).padding(0.2);
+  const y = d3.scaleLinear().range([v.innerHeight, 0]);
+  v.g.append("g").attr("transform", `translate(0,${v.innerHeight})`).attr("class", "axis").call(d3.axisBottom(x).tickFormat(i => CAT_NAMES[i]));
+  const yAxisG = v.g.append("g").attr("class", "axis");
+  const barsG = v.g.append("g");
+  barsG.selectAll(".bar-bg").data(d3.range(CAT_NAMES.length)).enter().append("rect").attr("class", "bar-bg").attr("x", i => x(i)).attr("y", 0).attr("width", x.bandwidth()).attr("height", v.innerHeight).attr("cursor", "pointer").on("click", (e, i) => {
+    filters.category = filters.category === i ? null : i; updateAll("bars", "end");
+  });
+  views.bars = { ...v, x, y, yAxisG, barsG };
+};
+
+const drawBars = (source, type) => {
+  const v = views.bars; let counts = new Uint32Array(CAT_NAMES.length);
+  if (source !== null && type === "brush" && falcon.cumulative.category) {
+    const brushRange = filters[source];
+    const b0 = getBin(brushRange[0], extents[source], BINS), b1 = getBin(brushRange[1], extents[source], BINS);
+    const table = falcon.cumulative.category, n = CAT_NAMES.length;
+    for (let i = 0; i < n; i++) counts[i] = table[b1 * n + i] - table[b0 * n + i];
+  } else {
+    for (let i = 0; i < N; i++) if (isFiltered(i)) counts[data.category[i]]++;
+  }
+  v.y.domain([0, d3.max(counts) || 10]).nice();
+  v.yAxisG.call(d3.axisLeft(v.y).ticks(5));
+  v.barsG.selectAll(".bar").data(counts).join("rect").attr("class", "bar").attr("x", (d, i) => v.x(i)).attr("y", d => v.y(d)).attr("width", v.x.bandwidth()).attr("height", d => v.innerHeight - v.y(d)).attr("fill", (d, i) => COLORS[i]).attr("opacity", (d, i) => filters.category === null || filters.category === i ? 1 : 0.3).style("pointer-events", "none");
+};
+
+// ==================== TIMELINE ====================
+const setupTimeline = () => {
+  const v = initView("panel-timeline");
+  const x = d3.scaleLinear().domain(extents.time).range([0, v.innerWidth]);
+  const y = d3.scaleLinear().range([v.innerHeight, 0]);
+  v.g.append("g").attr("transform", `translate(0,${v.innerHeight})`).attr("class", "axis").call(d3.axisBottom(x).ticks(10).tickFormat(d => `Day ${d}`));
+  const yAxisG = v.g.append("g").attr("class", "axis");
+  const areaPath = v.g.append("path").attr("fill", "var(--primary)").attr("fill-opacity", 0.3).attr("stroke", "var(--primary)");
+  const brush = d3.brushX().extent([[0, 0], [v.innerWidth, v.innerHeight]]).on("start", () => precomputeFalcon("time")).on("brush end", (event) => {
+    filters.time = event.selection ? event.selection.map(x.invert) : null; updateAll("timeline", event.type);
+  });
+  v.g.append("g").attr("class", "brush").call(brush);
+  views.timeline = { ...v, x, y, yAxisG, areaPath, brush };
+};
+
+const drawTimeline = (source, type) => {
+  const v = views.timeline; let counts = new Uint32Array(BINS);
+  if (source !== "timeline" && source !== null && type === "brush" && falcon.cumulative.time) {
+    const brushRange = filters[source];
+    const b0 = getBin(brushRange[0], extents[source], BINS), b1 = getBin(brushRange[1], extents[source], BINS);
+    const table = falcon.cumulative.time;
+    for (let i = 0; i < BINS; i++) counts[i] = table[b1 * BINS + i] - table[b0 * BINS + i];
+  } else {
+    for (let i = 0; i < N; i++) if (isFiltered(i)) counts[getBin(data.time[i], extents.time, BINS)]++;
+  }
+  v.y.domain([0, d3.max(counts) || 10]).nice();
+  v.yAxisG.call(d3.axisLeft(v.y).ticks(5));
+  const area = d3.area().x((d, i) => v.x(extents.time[0] + (i / BINS) * (extents.time[1] - extents.time[0]))).y0(v.innerHeight).y1(d => v.y(d)).curve(d3.curveMonotoneX);
+  v.areaPath.attr("d", area(counts));
+};
+
+const updateCounts = () => {
+  let count = 0; for (let i = 0; i < N; i++) if (isFiltered(i)) count++;
+  document.getElementById("count-selected").textContent = count.toLocaleString();
+};
+
+const updateAll = (source, type) => {
+  const isInteraction = type === "brush";
+  if (source !== "scatter") drawScatter(isInteraction);
+  if (source !== "histogram") drawHistogram(source, type);
+  drawBars(source, type);
+  if (source !== "timeline") drawTimeline(source, type);
+  if (!isInteraction) updateCounts();
+};
+
+document.getElementById("count-total").textContent = N.toLocaleString();
+setupScatter(); setupHistogram(); setupBars(); setupTimeline();
+updateAll(null, "end");
+
+document.getElementById("reset-btn").addEventListener("click", () => {
+  filters.price = null; filters.quantity = null; filters.category = null; filters.time = null;
+  d3.selectAll(".brush").call(d3.brush().move, null);
+  d3.selectAll(".brush").call(d3.brushX().move, null);
+  updateAll(null, "end");
+});
+</script>
+</body>
+</html>

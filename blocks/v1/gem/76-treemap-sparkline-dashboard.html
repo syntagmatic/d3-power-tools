@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Product Performance Dashboard</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #f8f9fa;
+            --card-bg: #ffffff;
+            --text-main: #212529;
+            --text-muted: #6c757d;
+            --border-color: #dee2e6;
+            --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        body {
+            margin: 0;
+            padding: 20px;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            font-family: var(--font-family);
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            box-sizing: border-box;
+            overflow: hidden;
+        }
+
+        .dashboard-header {
+            margin-bottom: 20px;
+        }
+
+        .kpi-strip {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .kpi-card {
+            background: var(--card-bg);
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            border: 1px solid var(--border-color);
+        }
+
+        .kpi-label {
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            margin-bottom: 5px;
+        }
+
+        .kpi-value {
+            font-size: 1.5rem;
+            font-weight: 700;
+        }
+
+        .kpi-trend {
+            font-size: 0.85rem;
+            margin-top: 5px;
+        }
+
+        .kpi-trend.positive { color: #28a745; }
+        .kpi-trend.negative { color: #dc3545; }
+
+        #treemap-container {
+            flex-grow: 1;
+            background: var(--card-bg);
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            border: 1px solid var(--border-color);
+            position: relative;
+            overflow: hidden;
+        }
+
+        svg {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        .cell rect {
+            stroke: #fff;
+            stroke-width: 1px;
+        }
+
+        .cell:hover rect {
+            filter: brightness(0.9);
+        }
+
+        .cell text {
+            fill: #fff;
+            pointer-events: none;
+            font-weight: 600;
+        }
+
+        .cell-label {
+            font-size: 11px;
+        }
+
+        .cell-value {
+            font-size: 10px;
+            font-weight: 400;
+            opacity: 0.9;
+        }
+
+        .sparkline {
+            fill: none;
+            stroke: #fff;
+            stroke-width: 1.5px;
+            opacity: 0.8;
+        }
+
+        .sparkline-area {
+            fill: #fff;
+            opacity: 0.15;
+        }
+
+        .division-label {
+            font-size: 14px;
+            font-weight: 700;
+            fill: #333;
+            paint-order: stroke;
+            stroke: #fff;
+            stroke-width: 3px;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .tooltip {
+            position: absolute;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            color: #fff;
+            border-radius: 4px;
+            pointer-events: none;
+            font-size: 12px;
+            z-index: 100;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+<div class="dashboard-header">
+    <div class="kpi-strip" id="kpi-strip">
+        <!-- KPIs will be injected here -->
+    </div>
+</div>
+
+<div id="treemap-container">
+    <div class="tooltip" id="tooltip"></div>
+</div>
+
+<script>
+    // Configuration
+    const DIVISIONS = ["Electronics", "Fashion", "Home", "Health", "Sports"];
+    const COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"];
+    const PRODUCT_LINES_PER_DIV = 20;
+    const SPARKLINE_THRESHOLD_W = 60;
+    const SPARKLINE_THRESHOLD_H = 40;
+
+    // Generate Data
+    function generateData() {
+        const data = {
+            name: "Total",
+            children: DIVISIONS.map((div, i) => {
+                const products = Array.from({ length: PRODUCT_LINES_PER_DIV }, (_, j) => {
+                    // Trend is 12 months, some random walk
+                    let val = 40 + Math.random() * 40;
+                    const trend = Array.from({ length: 12 }, () => {
+                        val = Math.max(0, Math.min(100, val + (Math.random() - 0.5) * 20));
+                        return val;
+                    });
+                    
+                    return {
+                        name: `${div} ${String.fromCharCode(65 + j)}`,
+                        value: Math.floor(Math.random() * 1000) + 100,
+                        trend: trend,
+                        division: div
+                    };
+                });
+                return {
+                    name: div,
+                    children: products,
+                    color: COLORS[i]
+                };
+            })
+        };
+        return data;
+    }
+
+    const rawData = generateData();
+
+    // KPI Setup
+    function updateKPIs(data) {
+        const totalValue = d3.sum(data.children.flatMap(d => d.children), d => d.value);
+        const avgTrend = data.children.map(div => {
+            const divTotal = d3.sum(div.children, d => d.value);
+            const divStart = d3.mean(div.children, d => d.trend[0]);
+            const divEnd = d3.mean(div.children, d => d.trend[11]);
+            const pctChange = ((divEnd - divStart) / divStart) * 100;
+            return {
+                name: div.name,
+                value: divTotal,
+                pct: pctChange
+            };
+        });
+
+        const kpiStrip = d3.select("#kpi-strip");
+        kpiStrip.selectAll("*").remove();
+
+        // Total KPI
+        const totalCard = kpiStrip.append("div").attr("class", "kpi-card");
+        totalCard.append("div").attr("class", "kpi-label").text("Total Revenue");
+        totalCard.append("div").attr("class", "kpi-value").text(d3.format("$,.0f")(totalValue));
+        
+        // Division KPIs
+        avgTrend.forEach(d => {
+            const card = kpiStrip.append("div").attr("class", "kpi-card");
+            card.append("div").attr("class", "kpi-label").text(d.name);
+            card.append("div").attr("class", "kpi-value").text(d3.format("$,.0f")(d.value));
+            const trend = card.append("div")
+                .attr("class", `kpi-trend ${d.pct >= 0 ? 'positive' : 'negative'}`)
+                .text(`${d.pct >= 0 ? '▲' : '▼'} ${Math.abs(d.pct).toFixed(1)}%`);
+        });
+    }
+
+    updateKPIs(rawData);
+
+    // Visualization
+    const container = d3.select("#treemap-container");
+    const svg = container.append("svg");
+    const tooltip = d3.select("#tooltip");
+
+    const root = d3.hierarchy(rawData)
+        .sum(d => d.value)
+        .sort((a, b) => b.value - a.value);
+
+    const treemap = d3.treemap()
+        .tile(d3.treemapSquarify)
+        .paddingOuter(3)
+        .paddingTop(25)
+        .paddingInner(1)
+        .round(true);
+
+    const colorScale = d3.scaleOrdinal()
+        .domain(DIVISIONS)
+        .range(COLORS);
+
+    function render() {
+        const width = container.node().clientWidth;
+        const height = container.node().clientHeight;
+
+        svg.attr("viewBox", [0, 0, width, height]);
+
+        treemap.size([width, height])(root);
+
+        const leaf = svg.selectAll(".cell")
+            .data(root.leaves(), d => d.data.name)
+            .join(
+                enter => {
+                    const g = enter.append("g").attr("class", "cell");
+                    g.append("rect")
+                        .attr("fill", d => colorScale(d.data.division));
+                    
+                    g.append("text")
+                        .attr("class", "cell-label")
+                        .attr("x", 4)
+                        .attr("y", 13);
+                    
+                    g.append("text")
+                        .attr("class", "cell-value")
+                        .attr("x", 4)
+                        .attr("y", 25);
+                    
+                    g.append("path").attr("class", "sparkline-area");
+                    g.append("path").attr("class", "sparkline");
+                    
+                    return g;
+                }
+            );
+
+        leaf.transition().duration(400)
+            .attr("transform", d => `translate(${d.x0},${d.y0})`);
+
+        leaf.select("rect")
+            .attr("width", d => d.x1 - d.x0)
+            .attr("height", d => d.y1 - d.y0);
+
+        // Labels
+        leaf.select(".cell-label")
+            .text(d => {
+                const w = d.x1 - d.x0;
+                const h = d.y1 - d.y0;
+                if (w < 40 || h < 20) return "";
+                let label = d.data.name;
+                if (label.length * 7 > w) return label.substring(0, Math.floor(w/7)) + "...";
+                return label;
+            });
+
+        leaf.select(".cell-value")
+            .text(d => {
+                const w = d.x1 - d.x0;
+                const h = d.y1 - d.y0;
+                if (w < 50 || h < 35) return "";
+                return d3.format("$,.0f")(d.data.value);
+            });
+
+        // Sparklines
+        leaf.each(function(d) {
+            const g = d3.select(this);
+            const w = d.x1 - d.x0;
+            const h = d.y1 - d.y0;
+
+            const showSpark = w >= SPARKLINE_THRESHOLD_W && h >= SPARKLINE_THRESHOLD_H;
+
+            if (showSpark) {
+                const margin = { top: 30, right: 8, bottom: 8, left: 8 };
+                const sw = w - margin.left - margin.right;
+                const sh = h - margin.top - margin.bottom;
+
+                const x = d3.scaleLinear().domain([0, 11]).range([margin.left, w - margin.right]);
+                const y = d3.scaleLinear().domain([0, 100]).range([h - margin.bottom, margin.top]);
+
+                const line = d3.line()
+                    .x((_, i) => x(i))
+                    .y(v => y(v))
+                    .curve(d3.curveMonotoneX);
+
+                const area = d3.area()
+                    .x((_, i) => x(i))
+                    .y0(h - margin.bottom)
+                    .y1(v => y(v))
+                    .curve(d3.curveMonotoneX);
+
+                g.select(".sparkline")
+                    .attr("d", line(d.data.trend))
+                    .style("display", null);
+
+                g.select(".sparkline-area")
+                    .attr("d", area(d.data.trend))
+                    .style("display", null);
+            } else {
+                g.select(".sparkline").style("display", "none");
+                g.select(".sparkline-area").style("display", "none");
+            }
+        });
+
+        // Division Labels (Group headers)
+        svg.selectAll(".division-label")
+            .data(root.children, d => d.data.name)
+            .join("text")
+            .attr("class", "division-label")
+            .attr("x", d => d.x0 + 5)
+            .attr("y", d => d.y0 + 18)
+            .text(d => (d.x1 - d.x0 > 60) ? d.data.name : "")
+            .transition().duration(400)
+            .attr("x", d => d.x0 + 5)
+            .attr("y", d => d.y0 + 18);
+
+        // Tooltips
+        leaf.on("mousemove", (event, d) => {
+            const change = ((d.data.trend[11] - d.data.trend[0]) / d.data.trend[0]) * 100;
+            tooltip
+                .style("display", "block")
+                .style("left", (event.pageX + 15) + "px")
+                .style("top", (event.pageY - 20) + "px")
+                .html(`
+                    <strong>${d.data.name}</strong><br/>
+                    Revenue: ${d3.format("$,.0f")(d.data.value)}<br/>
+                    Trend: ${change >= 0 ? '+' : ''}${change.toFixed(1)}% (12m)
+                `);
+        })
+        .on("mouseout", () => tooltip.style("display", "none"));
+    }
+
+    // Responsive
+    const ro = new ResizeObserver(() => {
+        render();
+    });
+    ro.observe(container.node());
+
+    // Initial render
+    render();
+
+</script>
+</body>
+</html>

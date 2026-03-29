@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Accessible US Choropleth (Canvas)</title>
+  <link rel="stylesheet" href="../../../style/d3-power-tools.css">
+  <script src="../../../style/theme-switch.js"></script>
+  <style>
+    :root {
+      --focus-ring: #1a73e8;
+    }
+
+    [data-theme="dark"] {
+      --focus-ring: #8ab4f8;
+    }
+
+    body {
+      margin: 0;
+      padding: var(--sp-4);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 960px;
+      position: relative;
+    }
+
+    .viz-header {
+      margin-bottom: var(--sp-4);
+    }
+
+    .viz-area {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 960 / 600;
+      background: var(--color-surface);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      cursor: crosshair;
+    }
+
+    canvas:focus {
+      outline: none;
+    }
+
+    #focus-svg {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    .focus-ring {
+      fill: none;
+      stroke: var(--focus-ring);
+      stroke-width: 3;
+      stroke-dasharray: 4 2;
+      filter: drop-shadow(0 0 2px rgba(255, 255, 255, 0.8));
+    }
+
+    [data-theme="dark"] .focus-ring {
+      filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.8));
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border-width: 0;
+    }
+
+    .table-view {
+      margin-top: var(--sp-4);
+      display: none;
+      width: 100%;
+      max-height: 400px;
+      overflow-y: auto;
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius);
+    }
+
+    .table-view.visible {
+      display: block;
+    }
+
+    th {
+      cursor: pointer;
+      user-select: none;
+    }
+
+    th:after {
+      content: ' \2195';
+      opacity: 0.3;
+      font-size: 0.8em;
+    }
+
+    th.sort-asc:after {
+      content: ' \2191';
+      opacity: 1;
+    }
+
+    th.sort-desc:after {
+      content: ' \2193';
+      opacity: 1;
+    }
+
+    .legend {
+      display: flex;
+      gap: var(--sp-1);
+      margin-top: var(--sp-2);
+      font-size: 11px;
+      color: var(--color-text-muted);
+      align-items: center;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .legend-swatch {
+      width: 12px;
+      height: 12px;
+      border: 1px solid var(--color-border);
+    }
+
+    /* High contrast mode adaptations */
+    @media (forced-colors: active) {
+      .focus-ring {
+        stroke: Highlight;
+      }
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <div class="viz-header">
+    <h1>US Population Estimates <b>Choropleth</b></h1>
+    <p class="subtitle">Keyboard navigable US map with geographic sort order. Use Tab to enter, Arrow keys to explore.</p>
+  </div>
+
+  <div class="controls">
+    <button id="toggle-table" aria-expanded="false">Show Data Table</button>
+    <div class="legend" id="legend"></div>
+  </div>
+
+  <div class="viz-area" id="viz-container">
+    <canvas id="map-canvas" tabindex="0" role="application" aria-label="Interactive US choropleth map. Use arrow keys to navigate between states."></canvas>
+    <svg id="focus-svg"></svg>
+    <div id="aria-live" class="sr-only" aria-live="polite"></div>
+    <div id="mirror" class="sr-only"></div>
+  </div>
+
+  <div id="table-view" class="table-view">
+    <table id="data-table">
+      <thead>
+        <tr>
+          <th data-key="name">State</th>
+          <th data-key="value" class="num">Value</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<script type="module">
+  import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+  import * as topojson from "https://cdn.jsdelivr.net/npm/topojson-client@3/+esm";
+
+  const width = 960;
+  const height = 600;
+  const canvas = d3.select("#map-canvas").node();
+  const ctx = canvas.getContext("2d");
+  const svg = d3.select("#focus-svg");
+  const liveRegion = d3.select("#aria-live");
+  const dpr = window.devicePixelRatio || 1;
+
+  canvas.width = width * dpr;
+  canvas.height = height * dpr;
+  ctx.scale(dpr, dpr);
+
+  const projection = d3.geoAlbersUsa().scale(1280).translate([width / 2, height / 2]);
+  const path = d3.geoPath(projection);
+  const canvasPath = d3.geoPath(projection, ctx);
+
+  let states = [];
+  let focusedIndex = -1;
+  let sortedStates = [];
+  let dataMap = new Map();
+  let colorScale;
+  let patterns = new Map();
+
+  // Color Palette (Sequential Blue)
+  const colors = ["#deebf7", "#9ecae1", "#4292c6", "#2171b5", "#084594"];
+
+  async function init() {
+    const us = await d3.json("https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json");
+    states = topojson.feature(us, us.objects.states).features;
+
+    // Generate pseudo-random deterministic data for demo
+    states.forEach(d => {
+      const val = Math.floor(Math.abs(Math.sin(d.id * 100)) * 1000);
+      dataMap.set(d.id, val);
+      d.properties.value = val;
+    });
+
+    colorScale = d3.scaleQuantile()
+      .domain(Array.from(dataMap.values()))
+      .range(colors);
+
+    // Prepare Patterns for forced-colors mode
+    initPatterns();
+
+    // Geographic Sort: West-to-East (lon), then North-to-South (lat)
+    // d3.geoPath().centroid uses projected coordinates, but we want lon/lat logic if possible.
+    // However, for AlbersUsa, screen space X/Y is a good proxy for West-East/North-South.
+    sortedStates = states.slice().sort((a, b) => {
+      const ca = path.centroid(a);
+      const cb = path.centroid(b);
+      // Primary: West to East (X)
+      if (Math.abs(ca[0] - cb[0]) > 40) return ca[0] - cb[0];
+      // Secondary: North to South (Y)
+      return ca[1] - cb[1];
+    });
+
+    // Hidden DOM mirror for screen readers
+    d3.select("#mirror").selectAll("div")
+      .data(sortedStates)
+      .join("div")
+      .attr("id", d => `state-${d.id}`)
+      .text(d => `${d.properties.name}, value ${d.properties.value}`);
+
+    render();
+    renderLegend();
+    renderTable();
+
+    // Setup Event Listeners
+    canvas.addEventListener("keydown", handleKeydown);
+    canvas.addEventListener("focus", () => {
+      if (focusedIndex === -1) {
+        focusedIndex = 0;
+        updateFocus();
+      }
+    });
+    canvas.addEventListener("blur", () => {
+      // Keep focused index but clear visual ring if desired
+      // svg.selectAll(".focus-ring").remove();
+    });
+
+    d3.select("#toggle-table").on("click", function() {
+      const visible = d3.select("#table-view").classed("visible");
+      d3.select("#table-view").classed("visible", !visible);
+      this.setAttribute("aria-expanded", !visible);
+      this.textContent = visible ? "Show Data Table" : "Hide Data Table";
+    });
+
+    d3.selectAll("th").on("click", function() {
+      const key = this.getAttribute("data-key");
+      const currentSort = d3.select(this).attr("data-sort") || "none";
+      const nextSort = currentSort === "asc" ? "desc" : "asc";
+
+      d3.selectAll("th").attr("data-sort", "none").classed("sort-asc", false).classed("sort-desc", false);
+      d3.select(this).attr("data-sort", nextSort).classed(`sort-${nextSort}`, true);
+
+      sortTable(key, nextSort);
+    });
+
+    // Listen for high contrast changes
+    window.matchMedia("(forced-colors: active)").addEventListener("change", render);
+  }
+
+  function initPatterns() {
+    // 5 patterns of increasing density
+    const sizes = [12, 10, 8, 6, 4];
+    sizes.forEach((s, i) => {
+      const pCanvas = document.createElement("canvas");
+      pCanvas.width = s * dpr;
+      pCanvas.height = s * dpr;
+      const pCtx = pCanvas.getContext("2d");
+      pCtx.scale(dpr, dpr);
+      pCtx.strokeStyle = "#000";
+      pCtx.lineWidth = 1;
+      pCtx.beginPath();
+      pCtx.moveTo(0, s);
+      pCtx.lineTo(s, 0);
+      pCtx.stroke();
+      patterns.set(colors[i], ctx.createPattern(pCanvas, "repeat"));
+    });
+  }
+
+  function render() {
+    ctx.clearRect(0, 0, width, height);
+    const isHighContrast = window.matchMedia("(forced-colors: active)").matches;
+
+    // Batch by color
+    const groups = d3.group(states, d => colorScale(d.properties.value));
+
+    groups.forEach((features, color) => {
+      ctx.beginPath();
+      features.forEach(f => canvasPath(f));
+      if (isHighContrast) {
+        ctx.fillStyle = patterns.get(color);
+      } else {
+        ctx.fillStyle = color;
+      }
+      ctx.fill();
+
+      ctx.strokeStyle = "var(--color-bg)";
+      ctx.lineWidth = 0.5;
+      ctx.stroke();
+    });
+
+    // Outline nation
+    ctx.beginPath();
+    states.forEach(f => canvasPath(f));
+    ctx.strokeStyle = "var(--color-border)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    updateFocus();
+  }
+
+  function updateFocus() {
+    svg.selectAll(".focus-ring").remove();
+    if (focusedIndex < 0 || focusedIndex >= sortedStates.length) return;
+
+    const d = sortedStates[focusedIndex];
+    svg.append("path")
+      .attr("class", "focus-ring")
+      .attr("d", path(d));
+
+    const stateName = d.properties.name;
+    const val = d.properties.value;
+    
+    // ARIA Live announcement
+    liveRegion.text(`${stateName}, ${val}. Item ${focusedIndex + 1} of ${sortedStates.length}.`);
+    
+    // Update activedescendant
+    canvas.setAttribute("aria-activedescendant", `state-${d.id}`);
+  }
+
+  function handleKeydown(e) {
+    let nextIndex = focusedIndex;
+
+    switch (e.key) {
+      case "ArrowRight":
+      case "ArrowDown":
+        nextIndex = Math.min(focusedIndex + 1, sortedStates.length - 1);
+        break;
+      case "ArrowLeft":
+      case "ArrowUp":
+        nextIndex = Math.max(focusedIndex - 1, 0);
+        break;
+      case "Home":
+        nextIndex = 0;
+        break;
+      case "End":
+        nextIndex = sortedStates.length - 1;
+        break;
+      default:
+        return; // Let other keys (Tab) pass
+    }
+
+    if (nextIndex !== focusedIndex) {
+      e.preventDefault();
+      focusedIndex = nextIndex;
+      updateFocus();
+    }
+  }
+
+  function renderLegend() {
+    const legend = d3.select("#legend");
+    legend.html("");
+
+    const thresholds = colorScale.quantiles();
+    const items = [0, ...thresholds];
+
+    legend.selectAll(".legend-item")
+      .data(colors)
+      .join("div")
+      .attr("class", "legend-item")
+      .call(sel => {
+        sel.append("div")
+          .attr("class", "legend-swatch")
+          .style("background-color", d => d);
+        sel.append("span")
+          .text((d, i) => {
+            const low = items[i];
+            const high = items[i+1];
+            return high ? `${Math.round(low)}+` : `${Math.round(low)}+`;
+          });
+      });
+  }
+
+  function renderTable() {
+    const tbody = d3.select("#data-table tbody");
+    tbody.selectAll("tr")
+      .data(sortedStates, d => d.id)
+      .join("tr")
+      .call(tr => {
+        tr.append("td").text(d => d.properties.name);
+        tr.append("td").attr("class", "num").text(d => d.properties.value);
+      });
+  }
+
+  function sortTable(key, direction) {
+    const sorted = sortedStates.slice().sort((a, b) => {
+      const valA = key === "name" ? a.properties.name : a.properties.value;
+      const valB = key === "name" ? b.properties.name : b.properties.value;
+      if (direction === "asc") return d3.ascending(valA, valB);
+      return d3.descending(valA, valB);
+    });
+
+    const tbody = d3.select("#data-table tbody");
+    tbody.selectAll("tr")
+      .data(sorted, d => d.id)
+      .order()
+      .join("tr");
+  }
+
+  init();
+
+</script>
+</body>
+</html>

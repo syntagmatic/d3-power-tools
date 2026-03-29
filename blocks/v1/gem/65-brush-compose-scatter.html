@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Brush Composition Explorer | D3 Power Tools</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <link rel="stylesheet" href="../../../style/d3-power-tools.css">
+  <script src="../../../style/theme-switch.js"></script>
+  <style>
+    :root {
+      --panel-width: 320px;
+      --panel-height: 280px;
+    }
+
+    body {
+      padding: var(--sp-6);
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    .header-section {
+      margin-bottom: var(--sp-6);
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      border-bottom: 1px solid var(--color-border);
+      padding-bottom: var(--sp-4);
+    }
+
+    .controls-row {
+      display: flex;
+      gap: var(--sp-4);
+      align-items: center;
+      margin-top: var(--sp-4);
+    }
+
+    .grid-container {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: var(--sp-4);
+    }
+
+    .panel-card {
+      background: var(--color-surface);
+      border: 1px solid var(--color-border-light);
+      border-radius: var(--radius);
+      padding: var(--sp-2);
+      transition: border-color var(--duration);
+    }
+
+    .panel-card:hover {
+      border-color: var(--color-border);
+    }
+
+    .panel-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--color-text-muted);
+      margin-bottom: var(--sp-2);
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .dot {
+      stroke-width: 1px;
+      stroke: none;
+      transition: opacity var(--duration), r var(--duration);
+    }
+
+    .brush .selection {
+      fill: var(--color-primary);
+      fill-opacity: 0.1;
+      stroke: var(--color-primary);
+      stroke-width: 1px;
+    }
+
+    /* Annotation Styles */
+    .anno-badge-bg { fill: var(--color-primary); rx: 2; }
+    .anno-badge-text { fill: #fff; font-size: 10px; font-weight: 600; text-anchor: middle; }
+    
+    .anno-crosshair { 
+      stroke: var(--color-secondary); 
+      stroke-width: 1; 
+      stroke-dasharray: 3,3;
+      opacity: 0.8;
+    }
+
+    .anno-outlier-ring {
+      fill: none;
+      stroke: var(--color-secondary);
+      stroke-width: 1.5;
+    }
+
+    .anno-outlier-label {
+      font-size: 9px;
+      font-weight: 800;
+      fill: var(--color-secondary);
+    }
+
+    .selection-stats {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--color-text-muted);
+    }
+
+    .legend {
+      display: flex;
+      gap: var(--sp-3);
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: var(--sp-1);
+      font-size: 12px;
+    }
+
+    .legend-swatch {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+
+    .mode-toggle-group {
+      display: inline-flex;
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    .mode-btn {
+      border: none;
+      border-radius: 0;
+      padding: var(--sp-1) var(--sp-3);
+    }
+
+    .mode-btn.active {
+      background: var(--color-primary);
+      color: white;
+    }
+  </style>
+</head>
+<body>
+
+  <header class="header-section">
+    <div>
+      <h1>Health Metric <b>Composition</b></h1>
+      <p class="subtitle">Multi-panel brush interaction with progressive visual analysis</p>
+    </div>
+    <div class="selection-stats" id="selection-stats">
+      No selection active
+    </div>
+  </header>
+
+  <div class="controls">
+    <div class="mode-toggle-group">
+      <button id="btn-union" class="mode-btn active" onclick="setMode('union')">Union (OR)</button>
+      <button id="btn-intersect" class="mode-btn" onclick="setMode('intersect')">Intersection (AND)</button>
+    </div>
+    <div class="legend" id="legend"></div>
+  </div>
+
+  <div class="grid-container" id="grid"></div>
+
+  <script>
+    const CONFIG = {
+      n: 300,
+      margin: { top: 20, right: 15, bottom: 35, left: 45 },
+      width: 330,
+      height: 280,
+      groups: [
+        { name: "Active", color: "var(--color-cat-1)", offset: 0 },
+        { name: "Moderate", color: "var(--color-cat-3)", offset: 1 },
+        { name: "Sedentary", color: "var(--color-cat-2)", offset: 2 }
+      ],
+      metrics: ["height", "weight", "age", "resting_hr", "systolic_bp", "cholesterol", "fitness_score"],
+      panels: [
+        { x: "height", y: "weight", title: "Body Composition" },
+        { x: "age", y: "resting_hr", title: "Cardiac Aging" },
+        { x: "fitness_score", y: "systolic_bp", title: "Performance vs BP" },
+        { x: "cholesterol", y: "fitness_score", title: "Metabolic Profile" },
+        { x: "height", y: "systolic_bp", title: "Stature vs BP" },
+        { x: "weight", y: "cholesterol", title: "Lipid vs Mass" }
+      ]
+    };
+
+    let state = {
+      mode: 'union',
+      selections: new Map(), // panelIndex -> Set of IDs
+      data: []
+    };
+
+    // --- Data Generation ---
+    function generateData() {
+      const rng = d3.randomLcg(42);
+      const normal = d3.randomNormal.source(rng);
+      
+      return d3.range(CONFIG.n).map(i => {
+        const gi = i % 3;
+        const group = CONFIG.groups[gi];
+        
+        // Base means for different groups
+        const bases = [
+          [178, 70, 28, 55, 115, 175, 88], // Active
+          [172, 78, 42, 68, 125, 205, 65], // Moderate
+          [168, 88, 50, 78, 140, 245, 42]  // Sedentary
+        ];
+
+        const row = { id: i, group: group.name, color: group.color };
+        CONFIG.metrics.forEach((m, j) => {
+          let val = bases[gi][j] + normal(0, [8, 10, 12, 7, 12, 30, 10][j])();
+          // Clamp to realistic ranges
+          row[m] = Math.max([145, 45, 18, 40, 90, 120, 0][j], 
+                   Math.min([210, 140, 85, 120, 200, 400, 100][j], val));
+        });
+
+        // Add some structural correlation
+        row.fitness_score = Math.max(0, Math.min(100, 100 - (row.resting_hr - 40) * 0.7 - (row.age - 18) * 0.3 + normal(0, 5)()));
+        row.systolic_bp = Math.max(90, row.systolic_bp + (row.weight - 70) * 0.2 + normal(0, 5)());
+        
+        return row;
+      });
+    }
+
+    // --- Visualization ---
+    const chartWidth = CONFIG.width - CONFIG.margin.left - CONFIG.margin.right;
+    const chartHeight = CONFIG.height - CONFIG.margin.top - CONFIG.margin.bottom;
+
+    const panelComponents = [];
+
+    function init() {
+      state.data = generateData();
+      
+      // Render Legend
+      const legend = d3.select("#legend");
+      CONFIG.groups.forEach(g => {
+        const item = legend.append("div").attr("class", "legend-item");
+        item.append("div").attr("class", "legend-swatch").style("background", g.color);
+        item.append("span").text(g.name);
+      });
+
+      // Render Grid
+      const grid = d3.select("#grid");
+      
+      CONFIG.panels.forEach((p, i) => {
+        const card = grid.append("div").attr("class", "panel-card");
+        
+        card.append("div").attr("class", "panel-title")
+          .html(`<span>${p.title}</span><span style="opacity:0.6">${p.x} / ${p.y}</span>`);
+
+        const svg = card.append("svg")
+          .attr("width", CONFIG.width)
+          .attr("height", CONFIG.height);
+
+        const g = svg.append("g")
+          .attr("transform", `translate(${CONFIG.margin.left},${CONFIG.margin.top})`);
+
+        const x = d3.scaleLinear()
+          .domain(d3.extent(state.data, d => d[p.x])).nice()
+          .range([0, chartWidth]);
+
+        const y = d3.scaleLinear()
+          .domain(d3.extent(state.data, d => d[p.y])).nice()
+          .range([chartHeight, 0]);
+
+        // Axes
+        g.append("g")
+          .attr("transform", `translate(0,${chartHeight})`)
+          .call(d3.axisBottom(x).ticks(5).tickSize(-chartHeight))
+          .call(g => g.select(".domain").remove())
+          .call(g => g.selectAll(".tick line").attr("stroke", "var(--color-grid)"));
+
+        g.append("g")
+          .call(d3.axisLeft(y).ticks(5).tickSize(-chartWidth))
+          .call(g => g.select(".domain").remove())
+          .call(g => g.selectAll(".tick line").attr("stroke", "var(--color-grid)"));
+
+        // Labels
+        g.append("text")
+          .attr("x", chartWidth / 2)
+          .attr("y", chartHeight + 30)
+          .attr("text-anchor", "middle")
+          .attr("font-size", "10px")
+          .attr("fill", "var(--color-text-faint)")
+          .text(p.x);
+
+        g.append("text")
+          .attr("transform", "rotate(-90)")
+          .attr("x", -chartHeight / 2)
+          .attr("y", -35)
+          .attr("text-anchor", "middle")
+          .attr("font-size", "10px")
+          .attr("fill", "var(--color-text-faint)")
+          .text(p.y);
+
+        // Dots
+        const dots = g.append("g")
+          .selectAll("circle")
+          .data(state.data)
+          .join("circle")
+          .attr("class", "dot")
+          .attr("cx", d => x(d[p.x]))
+          .attr("cy", d => y(d[p.y]))
+          .attr("r", 3.5)
+          .attr("fill", d => d.color)
+          .attr("opacity", 0.6);
+
+        // Annotation Layer
+        const annoG = g.append("g").attr("class", "anno-layer");
+
+        // Brush
+        const brush = d3.brush()
+          .extent([[0, 0], [chartWidth, chartHeight]])
+          .on("brush end", (event) => {
+            if (!event.sourceEvent) return;
+            if (event.selection) {
+              const [[x0, y0], [x1, y1]] = event.selection;
+              const selectedIds = new Set();
+              state.data.forEach(d => {
+                const px = x(d[p.x]), py = y(d[p.y]);
+                if (px >= x0 && px <= x1 && py >= y0 && py <= y1) {
+                  selectedIds.add(d.id);
+                }
+              });
+              state.selections.set(i, selectedIds);
+            } else {
+              state.selections.delete(i);
+            }
+            update();
+          });
+
+        g.append("g")
+          .attr("class", "brush")
+          .call(brush);
+
+        panelComponents.push({ x, y, dots, annoG, config: p });
+      });
+    }
+
+    function getCombinedSelection() {
+      if (state.selections.size === 0) return null;
+      
+      const sets = Array.from(state.selections.values());
+      
+      if (state.mode === 'union') {
+        const union = new Set();
+        sets.forEach(s => s.forEach(id => union.add(id)));
+        return union;
+      } else {
+        let intersection = new Set(sets[0]);
+        for (let i = 1; i < sets.length; i++) {
+          const next = new Set();
+          for (const id of intersection) {
+            if (sets[i].has(id)) next.add(id);
+          }
+          intersection = next;
+        }
+        return intersection;
+      }
+    }
+
+    let timeouts = [];
+
+    function update() {
+      // Clear pending timeouts
+      timeouts.forEach(t => t.stop());
+      timeouts = [];
+
+      const selectedIds = getCombinedSelection();
+      const stats = d3.select("#selection-stats");
+
+      if (!selectedIds) {
+        stats.text("No selection active");
+        panelComponents.forEach(pc => {
+          pc.dots.attr("opacity", 0.6).attr("r", 3.5);
+          pc.annoG.selectAll("*").remove();
+        });
+        return;
+      }
+
+      const count = selectedIds.size;
+      stats.text(`${count} points selected (${state.mode.toUpperCase()})`);
+
+      const selectedData = state.data.filter(d => selectedIds.has(d.id));
+
+      panelComponents.forEach(pc => {
+        pc.dots
+          .attr("opacity", d => selectedIds.has(d.id) ? 0.9 : 0.1)
+          .attr("r", d => selectedIds.has(d.id) ? 4.5 : 2.5);
+
+        pc.annoG.selectAll("*").remove();
+
+        // STAGE 1: Count badge (Immediate)
+        const badge = pc.annoG.append("g")
+          .attr("transform", `translate(${chartWidth - 50}, -15)`);
+        
+        badge.append("rect")
+          .attr("class", "anno-badge-bg")
+          .attr("width", 50)
+          .attr("height", 16);
+        
+        badge.append("text")
+          .attr("class", "anno-badge-text")
+          .attr("x", 25)
+          .attr("y", 11)
+          .text(`${count} pts`);
+
+        if (count === 0) return;
+
+        // STAGE 2: Centroid (Delayed)
+        timeouts.push(d3.timeout(() => {
+          const meanX = d3.mean(selectedData, d => d[pc.config.x]);
+          const meanY = d3.mean(selectedData, d => d[pc.config.y]);
+          const px = pc.x(meanX), py = pc.y(meanY);
+
+          pc.annoG.append("line").attr("class", "anno-crosshair")
+            .attr("x1", 0).attr("x2", chartWidth).attr("y1", py).attr("y2", py);
+          pc.annoG.append("line").attr("class", "anno-crosshair")
+            .attr("x1", px).attr("x2", px).attr("y1", 0).attr("y2", chartHeight);
+        }, 400));
+
+        // STAGE 3: Outliers (Further Delay)
+        timeouts.push(d3.timeout(() => {
+          const meanX = d3.mean(selectedData, d => d[pc.config.x]);
+          const meanY = d3.mean(selectedData, d => d[pc.config.y]);
+          const sdX = d3.deviation(selectedData, d => d[pc.config.x]) || 0;
+          const sdY = d3.deviation(selectedData, d => d[pc.config.y]) || 0;
+
+          selectedData.forEach(d => {
+            const zX = sdX === 0 ? 0 : Math.abs(d[pc.config.x] - meanX) / sdX;
+            const zY = sdY === 0 ? 0 : Math.abs(d[pc.config.y] - meanY) / sdY;
+            
+            if (zX > 2.2 || zY > 2.2) {
+              const px = pc.x(d[pc.config.x]), py = pc.y(d[pc.config.y]);
+              pc.annoG.append("circle").attr("class", "anno-outlier-ring")
+                .attr("cx", px).attr("cy", py).attr("r", 9);
+              pc.annoG.append("text").attr("class", "anno-outlier-label")
+                .attr("x", px + 10).attr("y", py - 5).text("OUTLIER");
+            }
+          });
+        }, 800));
+      });
+    }
+
+    function setMode(mode) {
+      state.mode = mode;
+      d3.selectAll(".mode-btn").classed("active", false);
+      d3.select(`#btn-${mode}`).classed("active", true);
+      update();
+    }
+
+    init();
+  </script>
+</body>
+</html>

@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>5M Point WebGL Density Heatmap</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --text: #e0e6ed;
+    --accent: #4cc9f0;
+    --panel: rgba(20, 24, 33, 0.85);
+  }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    overflow: hidden;
+    user-select: none;
+  }
+  #container {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+  }
+  canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    image-rendering: pixelated;
+  }
+  svg {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 10;
+  }
+  .controls {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    background: var(--panel);
+    padding: 15px 20px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.1);
+    backdrop-filter: blur(8px);
+    z-index: 20;
+    pointer-events: auto;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+  }
+  h1 {
+    margin: 0 0 5px 0;
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--accent);
+  }
+  .stats {
+    font-size: 12px;
+    color: #94a3b8;
+    margin-bottom: 10px;
+  }
+  .legend {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 15px;
+  }
+  .ramp {
+    width: 150px;
+    height: 10px;
+    border-radius: 2px;
+  }
+  .mode-badge {
+    position: absolute;
+    top: 20px;
+    right: 20px;
+    background: var(--panel);
+    padding: 6px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    z-index: 20;
+  }
+  .loading {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg);
+    z-index: 100;
+    transition: opacity 0.5s;
+  }
+</style>
+</head>
+<body>
+
+<div id="container">
+  <div id="loading" class="loading">
+    <div style="text-align: center;">
+      <div style="font-size: 24px; margin-bottom: 10px; color: var(--accent);">Synthesizing 5,000,000 Points...</div>
+      <div id="load-progress" style="font-family: monospace; color: #64748b;">0%</div>
+    </div>
+  </div>
+  <canvas id="glCanvas"></canvas>
+  <div class="mode-badge" id="modeBadge">Heatmap Mode</div>
+  <div class="controls">
+    <h1>Density Explorer</h1>
+    <div class="stats">5,000,000 Points • WebGL 2.0</div>
+    <div id="zoom-stat" style="font-size: 13px; font-family: monospace; color: #cbd5e1;">Zoom: 1.00x</div>
+    <div class="legend" id="legend-heatmap">
+      <span style="font-size: 11px;">Low</span>
+      <div id="ramp" class="ramp"></div>
+      <span style="font-size: 11px;">High</span>
+    </div>
+    <div class="legend" id="legend-points" style="display: none;">
+      <div style="display: flex; gap: 8px;">
+        <span style="display: flex; align-items: center; gap: 4px; font-size: 11px;">
+          <div style="width: 8px; height: 8px; border-radius: 50%; background: #4cc9f0;"></div> Cluster A
+        </span>
+        <span style="display: flex; align-items: center; gap: 4px; font-size: 11px;">
+          <div style="width: 8px; height: 8px; border-radius: 50%; background: #f72585;"></div> Cluster B
+        </span>
+        <span style="display: flex; align-items: center; gap: 4px; font-size: 11px;">
+          <div style="width: 8px; height: 8px; border-radius: 50%; background: #4361ee;"></div> Cluster C
+        </span>
+      </div>
+    </div>
+  </div>
+  <svg id="svgOverlay"></svg>
+</div>
+
+<script>
+/**
+ * 5M Point Density Heatmap with Semantic Zoom & LOD Hysteresis
+ * Features:
+ * - Two-pass WebGL 2 rendering (Density Accumulation -> Colorization)
+ * - 5,000,000 points generated in parallel-ready chunks
+ * - Gaussian splatting for density overview
+ * - Individual cluster-colored points at high zoom
+ * - Hysteresis to prevent flickering between modes
+ */
+
+const CONFIG = {
+  N: 5_000_000,
+  MAX_ZOOM: 200,
+  LOD_SWITCH_IN: 4.0,   // Switch to points when k >= 4
+  LOD_SWITCH_OUT: 3.2,  // Switch to heatmap when k < 3.2
+  POINT_SIZE_HEATMAP: 12.0,
+  POINT_SIZE_INDIVIDUAL: 2.5,
+  DENSITY_ACCUM_SCALE: 0.08,
+  DENSITY_GRID_RES: 1024
+};
+
+const mulberry32 = (a) => () => {
+  a |= 0; a = a + 0x6D2B79F5 | 0;
+  let t = Math.imul(a ^ a >>> 15, 1 | a);
+  t ^= t + Math.imul(t ^ t >>> 7, 61 | t);
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+};
+
+const rng = mulberry32(12345);
+const randn = () => {
+  let u = 0, v = 0;
+  while(u === 0) u = rng();
+  while(v === 0) v = rng();
+  return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+};
+
+// --- DATA GENERATION ---
+const clusters = [
+  { x: 0.5, y: 0.5, sx: 0.15, sy: 0.15, weight: 0.25 },
+  { x: 0.2, y: 0.3, sx: 0.08, sy: 0.06, weight: 0.15 },
+  { x: 0.8, y: 0.7, sx: 0.10, sy: 0.12, weight: 0.20 },
+  { x: 0.3, y: 0.8, sx: 0.05, sy: 0.05, weight: 0.10 },
+  { x: 0.7, y: 0.2, sx: 0.04, sy: 0.09, weight: 0.12 },
+  { x: 0.5, y: 0.8, sx: 0.20, sy: 0.04, weight: 0.18 }
+];
+
+const clusterColors = [
+  [0.3, 0.79, 0.94, 0.8], // 4cc9f0
+  [0.97, 0.15, 0.52, 0.8], // f72585
+  [0.26, 0.38, 0.93, 0.8], // 4361ee
+  [0.24, 0.9, 0.5, 0.8],   // green
+  [0.9, 0.9, 0.2, 0.8],   // yellow
+  [0.6, 0.2, 0.9, 0.8]    // purple
+];
+
+async function generateData() {
+  const data = new Float32Array(CONFIG.N * 3); // x, y, cluster_id
+  const batchSize = 500_000;
+  
+  for (let i = 0; i < CONFIG.N; i++) {
+    if (i % batchSize === 0) {
+      document.getElementById('load-progress').textContent = `${Math.round(i / CONFIG.N * 100)}%`;
+      await new Promise(r => setTimeout(r, 0));
+    }
+    
+    // Choose cluster
+    const r = rng();
+    let acc = 0, cIdx = 0;
+    for (let j = 0; j < clusters.length; j++) {
+      acc += clusters[j].weight;
+      if (r <= acc) { cIdx = j; break; }
+    }
+    
+    const c = clusters[cIdx];
+    data[i * 3] = c.x + randn() * c.sx;
+    data[i * 3 + 1] = c.y + randn() * c.sy;
+    data[i * 3 + 2] = cIdx;
+  }
+  
+  document.getElementById('load-progress').textContent = '100%';
+  return data;
+}
+
+// --- WEBGL UTILS ---
+function createShader(gl, type, source) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    console.error(gl.getShaderInfoLog(shader));
+    gl.deleteShader(shader);
+    return null;
+  }
+  return shader;
+}
+
+function createProgram(gl, vsSource, fsSource) {
+  const vs = createShader(gl, gl.VERTEX_SHADER, vsSource);
+  const fs = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs);
+  gl.attachShader(prog, fs);
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.error(gl.getProgramInfoLog(prog));
+    return null;
+  }
+  return prog;
+}
+
+// --- SHADERS ---
+const vsAccum = `#version 300 es
+  in vec2 a_pos;
+  uniform vec2 u_translate;
+  uniform float u_scale;
+  uniform vec2 u_res;
+  uniform float u_pointSize;
+  void main() {
+    vec2 pos = a_pos * u_scale + u_translate;
+    vec2 clip = (pos / u_res) * 2.0 - 1.0;
+    clip.y = -clip.y;
+    gl_Position = vec4(clip, 0.0, 1.0);
+    gl_PointSize = u_pointSize;
+  }
+`;
+
+const fsAccum = `#version 300 es
+  precision mediump float;
+  uniform float u_intensity;
+  out vec4 fragColor;
+  void main() {
+    float d = length(gl_PointCoord - 0.5);
+    if (d > 0.5) discard;
+    float alpha = exp(-d * d * 15.0); 
+    fragColor = vec4(alpha * u_intensity, 0.0, 0.0, 1.0);
+  }
+`;
+
+const vsQuad = `#version 300 es
+  in vec2 a_pos;
+  out vec2 v_uv;
+  void main() {
+    gl_Position = vec4(a_pos, 0.0, 1.0);
+    v_uv = a_pos * 0.5 + 0.5;
+  }
+`;
+
+const fsColorize = `#version 300 es
+  precision mediump float;
+  uniform sampler2D u_density;
+  uniform sampler2D u_ramp;
+  in vec2 v_uv;
+  out vec4 fragColor;
+  void main() {
+    float d = texture(u_density, v_uv).r;
+    float v = clamp(d, 0.0, 1.0);
+    fragColor = texture(u_ramp, vec2(v, 0.5));
+  }
+`;
+
+const vsPoints = `#version 300 es
+  in vec2 a_pos;
+  in float a_cid;
+  uniform vec2 u_translate;
+  uniform float u_scale;
+  uniform vec2 u_res;
+  uniform float u_pointSize;
+  uniform vec4 u_colors[6];
+  out vec4 v_color;
+  void main() {
+    vec2 pos = a_pos * u_scale + u_translate;
+    vec2 clip = (pos / u_res) * 2.0 - 1.0;
+    clip.y = -clip.y;
+    gl_Position = vec4(clip, 0.0, 1.0);
+    gl_PointSize = u_pointSize;
+    v_color = u_colors[int(a_cid)];
+  }
+`;
+
+const fsPoints = `#version 300 es
+  precision mediump float;
+  in vec4 v_color;
+  out vec4 fragColor;
+  void main() {
+    float d = length(gl_PointCoord - 0.5);
+    if (d > 0.5) discard;
+    float aa = 1.0 - smoothstep(0.4, 0.5, d);
+    fragColor = vec4(v_color.rgb, v_color.a * aa);
+  }
+`;
+
+// --- MAIN ---
+async function main() {
+  const canvas = document.getElementById('glCanvas');
+  const gl = canvas.getContext('webgl2', { antialias: false, premultipliedAlpha: false });
+  if (!gl) {
+    alert("WebGL 2 not supported!");
+    return;
+  }
+
+  const data = await generateData();
+  document.getElementById('loading').style.opacity = '0';
+  setTimeout(() => document.getElementById('loading').remove(), 500);
+
+  const dpr = window.devicePixelRatio || 1;
+  let width, height;
+
+  const accumProg = createProgram(gl, vsAccum, fsAccum);
+  const colorProg = createProgram(gl, vsQuad, fsColorize);
+  const pointsProg = createProgram(gl, vsPoints, fsPoints);
+
+  // Buffer setup
+  const posBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+
+  const quadBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+
+  // Texture for density accumulation
+  const densityTex = gl.createTexture();
+  const fb = gl.createFramebuffer();
+  
+  function updateDensityTexSize(w, h) {
+    gl.bindTexture(gl.TEXTURE_2D, densityTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R16F, w, h, 0, gl.RED, gl.HALF_FLOAT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, densityTex, 0);
+  }
+
+  // Color Ramp Texture (Magma-ish)
+  const rampTex = gl.createTexture();
+  const rampColors = d3.range(256).map(i => {
+    const c = d3.rgb(d3.interpolateMagma(i / 255));
+    return [c.r, c.g, c.b, 255];
+  });
+  const rampData = new Uint8Array(rampColors.flat());
+  gl.bindTexture(gl.TEXTURE_2D, rampTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, rampData);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+  // UI Ramp
+  document.getElementById('ramp').style.background = `linear-gradient(to right, ${
+    d3.range(0, 1.1, 0.1).map(t => d3.interpolateMagma(t)).join(', ')
+  })`;
+
+  // VAOs
+  const accumVAO = gl.createVertexArray();
+  gl.bindVertexArray(accumVAO);
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+  gl.enableVertexAttribArray(gl.getAttribLocation(accumProg, "a_pos"));
+  gl.vertexAttribPointer(gl.getAttribLocation(accumProg, "a_pos"), 2, gl.FLOAT, false, 12, 0);
+
+  const quadVAO = gl.createVertexArray();
+  gl.bindVertexArray(quadVAO);
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+  gl.enableVertexAttribArray(gl.getAttribLocation(colorProg, "a_pos"));
+  gl.vertexAttribPointer(gl.getAttribLocation(colorProg, "a_pos"), 2, gl.FLOAT, false, 0, 0);
+
+  const pointsVAO = gl.createVertexArray();
+  gl.bindVertexArray(pointsVAO);
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+  gl.enableVertexAttribArray(gl.getAttribLocation(pointsProg, "a_pos"));
+  gl.vertexAttribPointer(gl.getAttribLocation(pointsProg, "a_pos"), 2, gl.FLOAT, false, 12, 0);
+  gl.enableVertexAttribArray(gl.getAttribLocation(pointsProg, "a_cid"));
+  gl.vertexAttribPointer(gl.getAttribLocation(pointsProg, "a_cid"), 1, gl.FLOAT, false, 12, 8);
+
+  // Resize
+  function resize() {
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    updateDensityTexSize(width * dpr, height * dpr);
+    render();
+  }
+  window.addEventListener('resize', resize);
+
+  // D3 Scales & Zoom
+  const xScale = d3.scaleLinear().domain([0, 1]).range([0, width]);
+  const yScale = d3.scaleLinear().domain([0, 1]).range([0, height]);
+  
+  let currentTransform = d3.zoomIdentity;
+  let currentMode = 'heatmap';
+
+  const zoom = d3.zoom()
+    .scaleExtent([1, CONFIG.MAX_ZOOM])
+    .on('zoom', (e) => {
+      currentTransform = e.transform;
+      updateLOD();
+      render();
+    });
+
+  const svg = d3.select('#svgOverlay');
+  svg.call(zoom);
+
+  function updateLOD() {
+    const k = currentTransform.k;
+    document.getElementById('zoom-stat').textContent = `Zoom: ${k.toFixed(2)}x`;
+    
+    if (currentMode === 'heatmap' && k >= CONFIG.LOD_SWITCH_IN) {
+      currentMode = 'points';
+      document.getElementById('modeBadge').textContent = 'Individual Points Mode';
+      document.getElementById('legend-heatmap').style.display = 'none';
+      document.getElementById('legend-points').style.display = 'flex';
+    } else if (currentMode === 'points' && k < CONFIG.LOD_SWITCH_OUT) {
+      currentMode = 'heatmap';
+      document.getElementById('modeBadge').textContent = 'Heatmap Mode';
+      document.getElementById('legend-heatmap').style.display = 'flex';
+      document.getElementById('legend-points').style.display = 'none';
+    }
+  }
+
+  function render() {
+    if (!width) return;
+
+    if (currentMode === 'heatmap') {
+      // Pass 1: Accumulate Density
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.viewport(0, 0, width * dpr, height * dpr);
+      gl.clearColor(0, 0, 0, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.ONE, gl.ONE);
+      
+      gl.useProgram(accumProg);
+      gl.bindVertexArray(accumVAO);
+      gl.uniform2f(gl.getUniformLocation(accumProg, "u_translate"), currentTransform.x * dpr, currentTransform.y * dpr);
+      gl.uniform1f(gl.getUniformLocation(accumProg, "u_scale"), currentTransform.k * dpr);
+      gl.uniform2f(gl.getUniformLocation(accumProg, "u_res"), width * dpr, height * dpr);
+      gl.uniform1f(gl.getUniformLocation(accumProg, "u_pointSize"), CONFIG.POINT_SIZE_HEATMAP * dpr);
+      gl.uniform1f(gl.getUniformLocation(accumProg, "u_intensity"), CONFIG.DENSITY_ACCUM_SCALE);
+      
+      gl.drawArrays(gl.POINTS, 0, CONFIG.N);
+      gl.disable(gl.BLEND);
+
+      // Pass 2: Colorize
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, width * dpr, height * dpr);
+      gl.useProgram(colorProg);
+      gl.bindVertexArray(quadVAO);
+      
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, densityTex);
+      gl.uniform1i(gl.getUniformLocation(colorProg, "u_density"), 0);
+      
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, rampTex);
+      gl.uniform1i(gl.getUniformLocation(colorProg, "u_ramp"), 1);
+      
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      
+    } else {
+      // Mode: Points
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, width * dpr, height * dpr);
+      gl.clearColor(0.043, 0.055, 0.078, 1); // #0b0e14
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      
+      gl.useProgram(pointsProg);
+      gl.bindVertexArray(pointsVAO);
+      gl.uniform2f(gl.getUniformLocation(pointsProg, "u_translate"), currentTransform.x * dpr, currentTransform.y * dpr);
+      gl.uniform1f(gl.getUniformLocation(pointsProg, "u_scale"), currentTransform.k * dpr);
+      gl.uniform2f(gl.getUniformLocation(pointsProg, "u_res"), width * dpr, height * dpr);
+      gl.uniform1f(gl.getUniformLocation(pointsProg, "u_pointSize"), CONFIG.POINT_SIZE_INDIVIDUAL * dpr);
+      
+      // Upload cluster colors
+      clusterColors.forEach((c, i) => {
+        gl.uniform4fv(gl.getUniformLocation(pointsProg, `u_colors[${i}]`), c);
+      });
+      
+      gl.drawArrays(gl.POINTS, 0, CONFIG.N);
+      gl.disable(gl.BLEND);
+    }
+  }
+
+  resize();
+}
+
+main();
+</script>
+</body>
+</html>

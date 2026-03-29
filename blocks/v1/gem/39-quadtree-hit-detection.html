@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Quadtree Nearest-Neighbor Demo</title>
+<style>
+  :root {
+    --bg-color: #0b0e14;
+    --panel-bg: rgba(22, 27, 34, 0.85);
+    --text-color: #c9d1d9;
+    --accent-color: #58a6ff;
+    --border-color: #30363d;
+  }
+  body {
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background-color: var(--bg-color);
+    color: var(--text-color);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  #container {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+  }
+  canvas, svg {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+  }
+  svg {
+    pointer-events: all;
+  }
+  .controls {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    z-index: 100;
+    background: var(--panel-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 12px 16px;
+    backdrop-filter: blur(8px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    pointer-events: none;
+    user-select: none;
+  }
+  .controls > * {
+    pointer-events: all;
+  }
+  .control-group {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+  .control-group:last-child {
+    margin-bottom: 0;
+  }
+  label {
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  input[type="checkbox"] {
+    accent-color: var(--accent-color);
+    width: 16px;
+    height: 16px;
+  }
+  .stats {
+    position: absolute;
+    bottom: 20px;
+    right: 20px;
+    z-index: 100;
+    background: var(--panel-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 11px;
+    font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace;
+    color: #8b949e;
+    pointer-events: none;
+  }
+  .voronoi-mesh {
+    fill: none;
+    stroke: rgba(255, 255, 255, 0.05);
+    stroke-width: 0.5;
+    pointer-events: none;
+  }
+  .voronoi-mesh.active {
+    stroke: rgba(88, 166, 255, 0.15);
+  }
+  #tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: rgba(0, 0, 0, 0.9);
+    border: 1px solid #444;
+    color: #fff;
+    padding: 6px 10px;
+    font-size: 12px;
+    border-radius: 4px;
+    display: none;
+    z-index: 200;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+  }
+</style>
+</head>
+<body>
+<div id="container">
+  <div class="controls">
+    <div class="control-group">
+      <label><input type="checkbox" id="voronoi-toggle"> Show Voronoi Mesh</label>
+    </div>
+    <div class="control-group">
+      <div id="interaction-info" style="font-size: 12px; color: #8b949e;">Hover to find 10 nearest neighbors</div>
+    </div>
+  </div>
+  <div class="stats" id="stats">5000 points | 0 FPS</div>
+  <div id="tooltip"></div>
+  <canvas id="bg-canvas"></canvas>
+  <canvas id="fg-canvas"></canvas>
+  <svg id="interaction-svg">
+    <path id="voronoi-path" class="voronoi-mesh"></path>
+  </svg>
+</div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(function() {
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+  const dpr = window.devicePixelRatio || 1;
+  const N = 5000;
+  const K = 10;
+  
+  const bgCanvas = document.getElementById('bg-canvas');
+  const fgCanvas = document.getElementById('fg-canvas');
+  const bgCtx = bgCanvas.getContext('2d', { alpha: false });
+  const fgCtx = fgCanvas.getContext('2d');
+  const svg = d3.select('#interaction-svg');
+  const voronoiPath = d3.select('#voronoi-path');
+  const statsEl = document.getElementById('stats');
+  const tooltip = d3.select('#tooltip');
+
+  // Setup Canvas
+  [bgCanvas, fgCanvas].forEach(canvas => {
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    canvas.style.width = width + 'px';
+    canvas.style.height = height + 'px';
+  });
+  bgCtx.scale(dpr, dpr);
+  fgCtx.scale(dpr, dpr);
+
+  // Colors - OKLCH-based vibrant palette for dark mode
+  const colors = [
+    'oklch(70% 0.18 20)',   // Reddish
+    'oklch(70% 0.18 60)',   // Orange
+    'oklch(70% 0.18 100)',  // Yellowish
+    'oklch(70% 0.18 150)',  // Greenish
+    'oklch(70% 0.18 200)',  // Cyanish
+    'oklch(70% 0.18 250)',  // Blueish
+    'oklch(70% 0.18 300)',  // Purple
+    'oklch(70% 0.18 340)'   // Pink
+  ];
+
+  // Data Generation
+  const random = d3.randomLcg(123);
+  const data = Array.from({ length: N }, (_, i) => {
+    // Clustered distribution
+    const cluster = Math.floor(random() * 8);
+    const cx = random() * width;
+    const cy = random() * height;
+    const angle = random() * Math.PI * 2;
+    const r = random() * 150 * (0.5 + random());
+    
+    return {
+      id: i,
+      x: Math.max(0, Math.min(width, cx + Math.cos(angle) * r)),
+      y: Math.max(0, Math.min(height, cy + Math.sin(angle) * r)),
+      category: cluster,
+      baseRadius: 1 + random() * 2
+    };
+  });
+
+  // State
+  let transform = d3.zoomIdentity;
+  let xScale = d3.scaleLinear().domain([0, width]).range([0, width]);
+  let yScale = d3.scaleLinear().domain([0, height]).range([0, height]);
+  let quadtree = d3.quadtree().x(d => d.x).y(d => d.y).addAll(data);
+  let nearest = [];
+  let mouse = null;
+  let showVoronoi = false;
+  let frameCount = 0;
+  let lastTime = performance.now();
+
+  function rebuildQuadtree() {
+    // We re-scale coordinates for the quadtree based on the current transform
+    // so we can use transform.x/y directly in find
+    quadtree = d3.quadtree()
+      .x(d => xScale(d.x))
+      .y(d => yScale(d.y))
+      .addAll(data);
+  }
+
+  // Efficient K-nearest search using quadtree visitor
+  function findKNearest(qx, qy, k) {
+    const heap = []; // Max-heap of {d2, data}
+    const push = (d2, data) => {
+      if (heap.length < k || d2 < heap[0].d2) {
+        heap.push({ d2, data });
+        heap.sort((a, b) => b.d2 - a.d2);
+        if (heap.length > k) heap.shift();
+      }
+    };
+
+    quadtree.visit((node, x0, y0, x1, y1) => {
+      if (node.length) { // branch
+        const dx = Math.max(0, x0 - qx, qx - x1);
+        const dy = Math.max(0, y0 - qy, qy - y1);
+        const d2 = dx * dx + dy * dy;
+        if (heap.length === k && d2 >= heap[0].d2) return true; // prune
+      } else { // leaf
+        let d = node;
+        do {
+          const dx = xScale(d.data.x) - qx;
+          const dy = yScale(d.data.y) - qy;
+          const d2 = dx * dx + dy * dy;
+          push(d2, d.data);
+        } while (d = d.next);
+      }
+      return false;
+    });
+
+    return heap.sort((a, b) => a.d2 - b.d2);
+  }
+
+  function render() {
+    // 1. Draw Background
+    bgCtx.fillStyle = '#0b0e14';
+    bgCtx.fillRect(0, 0, width, height);
+    
+    const k = transform.k;
+    const [xMin, xMax] = xScale.domain();
+    const [yMin, yMax] = yScale.domain();
+
+    // Batch draw by category
+    const groups = d3.group(data, d => d.category);
+    for (const [cat, points] of groups) {
+      bgCtx.fillStyle = colors[cat];
+      bgCtx.globalAlpha = 0.4;
+      bgCtx.beginPath();
+      for (const d of points) {
+        // Culling
+        if (d.x < xMin || d.x > xMax || d.y < yMin || d.y > yMax) continue;
+        
+        const px = xScale(d.x);
+        const py = yScale(d.y);
+        const r = d.baseRadius * Math.min(k, 2);
+        bgCtx.moveTo(px + r, py);
+        bgCtx.arc(px, py, r, 0, Math.PI * 2);
+      }
+      bgCtx.fill();
+    }
+
+    // 2. Draw Foreground (Highlights)
+    fgCtx.clearRect(0, 0, width, height);
+    if (mouse && nearest.length > 0) {
+      // Connector lines
+      fgCtx.beginPath();
+      fgCtx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+      fgCtx.lineWidth = 1;
+      nearest.forEach(n => {
+        fgCtx.moveTo(mouse[0], mouse[1]);
+        fgCtx.lineTo(xScale(n.data.x), yScale(n.data.y));
+      });
+      fgCtx.stroke();
+
+      // Glow and Points
+      nearest.forEach(n => {
+        const d = n.data;
+        const px = xScale(d.x);
+        const py = yScale(d.y);
+        const r = d.baseRadius * Math.min(k, 2) + 1;
+        
+        // Outer glow
+        const gradient = fgCtx.createRadialGradient(px, py, r, px, py, r + 15);
+        gradient.addColorStop(0, colors[d.category].replace('oklch', 'oklch').replace(')', ' / 0.4)'));
+        gradient.addColorStop(1, 'rgba(0,0,0,0)');
+        fgCtx.fillStyle = gradient;
+        fgCtx.beginPath();
+        fgCtx.arc(px, py, r + 15, 0, Math.PI * 2);
+        fgCtx.fill();
+
+        // Core point
+        fgCtx.fillStyle = '#fff';
+        fgCtx.beginPath();
+        fgCtx.arc(px, py, r, 0, Math.PI * 2);
+        fgCtx.fill();
+        
+        fgCtx.strokeStyle = colors[d.category];
+        fgCtx.lineWidth = 2;
+        fgCtx.stroke();
+      });
+      
+      // Cursor highlight
+      fgCtx.beginPath();
+      fgCtx.arc(mouse[0], mouse[1], 4, 0, Math.PI * 2);
+      fgCtx.fillStyle = '#fff';
+      fgCtx.fill();
+    }
+
+    // Stats
+    frameCount++;
+    const now = performance.now();
+    if (now - lastTime >= 1000) {
+      statsEl.textContent = `${N} points | ${Math.round(frameCount * 1000 / (now - lastTime))} FPS`;
+      frameCount = 0;
+      lastTime = now;
+    }
+
+    requestAnimationFrame(render);
+  }
+
+  // Zoom logic
+  const zoom = d3.zoom()
+    .scaleExtent([0.5, 40])
+    .on('zoom', ({ transform: t }) => {
+      transform = t;
+      xScale = transform.rescaleX(d3.scaleLinear().domain([0, width]).range([0, width]));
+      yScale = transform.rescaleY(d3.scaleLinear().domain([0, height]).range([0, height]));
+      rebuildQuadtree();
+      if (showVoronoi) updateVoronoi();
+      if (mouse) nearest = findKNearest(mouse[0], mouse[1], K);
+    });
+
+  svg.call(zoom);
+
+  // Interaction handlers
+  svg.on('pointermove', (event) => {
+    mouse = d3.pointer(event);
+    nearest = findKNearest(mouse[0], mouse[1], K);
+    
+    if (nearest.length > 0) {
+      const top = nearest[0];
+      tooltip.style('display', 'block')
+        .style('left', (mouse[0] + 15) + 'px')
+        .style('top', (mouse[1] - 15) + 'px')
+        .html(`<strong>Point #${top.data.id}</strong><br>Category: ${top.data.category}<br>Dist: ${Math.sqrt(top.d2).toFixed(1)}px`);
+    } else {
+      tooltip.style('display', 'none');
+    }
+  });
+
+  svg.on('pointerleave', () => {
+    mouse = null;
+    nearest = [];
+    tooltip.style('display', 'none');
+  });
+
+  // Voronoi
+  function updateVoronoi() {
+    const points = data.map(d => [xScale(d.x), yScale(d.y)]);
+    const delaunay = d3.Delaunay.from(points);
+    const voronoi = delaunay.voronoi([0, 0, width, height]);
+    voronoiPath.attr('d', voronoi.render());
+  }
+
+  document.getElementById('voronoi-toggle').addEventListener('change', (e) => {
+    showVoronoi = e.target.checked;
+    voronoiPath.classed('active', showVoronoi);
+    if (showVoronoi) updateVoronoi();
+    else voronoiPath.attr('d', null);
+  });
+
+  // Handle Resize
+  window.addEventListener('resize', () => {
+    const newWidth = window.innerWidth;
+    const newHeight = window.innerHeight;
+    // Update dimensions and re-init would be complex, just refresh if significant
+    if (Math.abs(newWidth - width) > 100 || Math.abs(newHeight - height) > 100) {
+      window.location.reload();
+    }
+  });
+
+  // Start
+  rebuildQuadtree();
+  requestAnimationFrame(render);
+})();
+</script>
+</body>
+</html>

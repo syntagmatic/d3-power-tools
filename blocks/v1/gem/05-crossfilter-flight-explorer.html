@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crossfilter Flight Explorer</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/crossfilter2/1.5.4/crossfilter.min.js"></script>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --primary-light: rgba(37, 99, 235, 0.1);
+            --bg: #f8fafc;
+            --card: #ffffff;
+            --text: #1e293b;
+            --text-muted: #64748b;
+            --border: #e2e8f0;
+            --bar-bg: #cbd5e1;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            padding: 2rem;
+        }
+
+        .container {
+            max-width: 900px;
+            width: 100%;
+            background: var(--card);
+            padding: 2rem;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+            margin-bottom: 2rem;
+            border-bottom: 2px solid var(--border);
+            padding-bottom: 1rem;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 1.5rem;
+            font-weight: 700;
+            letter-spacing: -0.025em;
+        }
+
+        .stats {
+            text-align: right;
+        }
+
+        #active-count {
+            font-weight: 700;
+            color: var(--primary);
+        }
+
+        .total-count {
+            color: var(--text-muted);
+            font-size: 0.875rem;
+        }
+
+        .charts-grid {
+            display: flex;
+            flex-direction: column;
+            gap: 2rem;
+        }
+
+        .chart-group {
+            position: relative;
+        }
+
+        .chart-title {
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            margin-bottom: 0.5rem;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .reset-link {
+            color: var(--primary);
+            cursor: pointer;
+            font-size: 0.75rem;
+            visibility: hidden;
+            text-decoration: underline;
+        }
+
+        .reset-link.active {
+            visibility: visible;
+        }
+
+        svg {
+            overflow: visible;
+        }
+
+        .bar {
+            fill: var(--primary);
+            transition: opacity 0.2s;
+        }
+
+        .bar.background {
+            fill: var(--bar-bg);
+        }
+
+        .axis text {
+            font-size: 10px;
+            fill: var(--text-muted);
+        }
+
+        .axis line, .axis path {
+            stroke: var(--border);
+        }
+
+        .brush .selection {
+            fill: var(--primary);
+            fill-opacity: 0.1;
+            stroke: var(--primary);
+            stroke-width: 1px;
+        }
+
+        .controls {
+            margin-top: 2rem;
+            display: flex;
+            justify-content: center;
+        }
+
+        button {
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 0.5rem 1.5rem;
+            border-radius: 6px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        button:hover {
+            background: #1d4ed8;
+        }
+
+        .tooltip {
+            position: absolute;
+            background: var(--text);
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <header>
+        <div>
+            <h1>Flight Explorer</h1>
+            <p style="margin: 0.25rem 0 0; color: var(--text-muted); font-size: 0.875rem;">Multi-dimensional brushing for 2,000 synthetic flights</p>
+        </div>
+        <div class="stats">
+            <div><span id="active-count">0</span> <span class="total-count">/ 2,000 flights</span></div>
+        </div>
+    </header>
+
+    <div class="charts-grid">
+        <div id="hour-chart" class="chart-group">
+            <div class="chart-title">
+                Departure Time (Hour)
+                <span class="reset-link" id="reset-hour">reset</span>
+            </div>
+        </div>
+        <div id="delay-chart" class="chart-group">
+            <div class="chart-title">
+                Delay (Minutes)
+                <span class="reset-link" id="reset-delay">reset</span>
+            </div>
+        </div>
+        <div id="distance-chart" class="chart-group">
+            <div class="chart-title">
+                Distance (Miles)
+                <span class="reset-link" id="reset-distance">reset</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button id="reset-all">Reset All Filters</button>
+    </div>
+</div>
+
+<script>
+    // 1. Generate Synthetic Data
+    const N = 2000;
+    const data = d3.range(N).map(i => {
+        // Bimodal Hour: Peak 1 (8 AM, SD=2), Peak 2 (6 PM, SD=2)
+        const peak = Math.random() < 0.45 ? 8 : 18;
+        let hour = Math.floor(d3.randomNormal(peak, 2)());
+        hour = Math.max(0, Math.min(23, hour));
+
+        // Delay: Right-skewed (Exponential-ish)
+        // Some early (-15), mostly small (0-20), some large (up to 180)
+        let delay;
+        const r = Math.random();
+        if (r < 0.2) delay = d3.randomUniform(-15, 0)();
+        else if (r < 0.8) delay = d3.randomExponential(1/15)();
+        else delay = d3.randomExponential(1/60)();
+        delay = Math.min(180, delay);
+
+        // Distance: Log-normal
+        let dist = Math.floor(d3.randomLogNormal(Math.log(1000), 0.6)());
+        dist = Math.max(100, Math.min(4000, dist));
+
+        return { hour, delay, dist, id: i };
+    });
+
+    // 2. Initialize Crossfilter
+    const ndx = crossfilter(data);
+    const all = ndx.groupAll();
+
+    // Dimensions
+    const hourDim = ndx.dimension(d => d.hour);
+    const delayDim = ndx.dimension(d => d.delay);
+    const distDim = ndx.dimension(d => d.dist);
+
+    // Groups (Histograms)
+    const hourGroup = hourDim.group(h => h);
+    const delayGroup = delayDim.group(d => Math.floor(d / 5) * 5); // 5 min bins
+    const distGroup = distDim.group(d => Math.floor(d / 100) * 100); // 100 mile bins
+
+    // 3. Chart Component
+    function barChart() {
+        if (!barChart.id) barChart.id = 0;
+
+        let margin = {top: 10, right: 10, bottom: 20, left: 10},
+            x,
+            y = d3.scaleLinear().range([80, 0]),
+            id = barChart.id++,
+            axis = d3.axisBottom().ticks(8),
+            brush = d3.brushX(),
+            brushDirty,
+            dimension,
+            group,
+            round;
+
+        function chart(div) {
+            const width = x.range()[1],
+                height = y.range()[0];
+
+            y.domain([0, group.top(1)[0].value]);
+
+            div.each(function() {
+                let div = d3.select(this),
+                    g = div.select("g");
+
+                const barPath = groups => {
+                    const path = [];
+                    let i = -1,
+                        n = groups.length,
+                        d;
+                    const binWidth = Math.max(0, (width / n) - 1);
+                    while (++i < n) {
+                        d = groups[i];
+                        path.push("M", x(d.key), ",", height, "V", y(d.value), "h", binWidth, "V", height);
+                    }
+                    return path.join("");
+                };
+
+                // Create skeleton
+                if (g.empty()) {
+                    g = div.append("svg")
+                        .attr("width", width + margin.left + margin.right)
+                        .attr("height", height + margin.top + margin.bottom)
+                      .append("g")
+                        .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
+
+                    g.append("clipPath")
+                        .attr("id", "clip-" + id)
+                      .append("rect")
+                        .attr("width", width)
+                        .attr("height", height);
+
+                    g.append("path")
+                        .attr("class", "background bar")
+                        .datum(group.all().map(d => ({...d})))
+                        .attr("d", barPath(group.all()));
+
+                    g.append("path")
+                        .attr("class", "foreground bar")
+                        .datum(group.all());
+
+                    g.selectAll(".foreground.bar")
+                        .attr("clip-path", "url(#clip-" + id + ")");
+
+                    g.append("g")
+                        .attr("class", "axis")
+                        .attr("transform", "translate(0," + height + ")")
+                        .call(axis);
+
+                    // Initialize brush
+                    g.append("g")
+                        .attr("class", "brush")
+                        .call(brush);
+
+                    brush.on("brush.chart", function(event) {
+                        if (event.selection) {
+                            const extent = event.selection.map(x.invert);
+                            chart.filter(extent);
+                        } else {
+                            chart.filter(null);
+                        }
+                        renderAll(); // Live update other charts
+                    });
+                }
+
+                // Update brush if necessary
+                if (brushDirty) {
+                    brushDirty = false;
+                    const g = div.select(".brush");
+                    const filter = chart.filter();
+                    if (filter) {
+                        g.call(brush.move, filter.map(x));
+                    } else {
+                        g.call(brush.move, null);
+                    }
+                }
+
+                g.select(".foreground.bar").attr("d", barPath(group.all()));
+            });
+        }
+
+        chart.margin = function(_) {
+            if (!arguments.length) return margin;
+            margin = _;
+            return chart;
+        };
+
+        chart.x = function(_) {
+            if (!arguments.length) return x;
+            x = _;
+            axis.scale(x);
+            brush.extent([[0, 0], [x.range()[1], y.range()[0]]]);
+            return chart;
+        };
+
+        chart.y = function(_) {
+            if (!arguments.length) return y;
+            y = _;
+            return chart;
+        };
+
+        chart.dimension = function(_) {
+            if (!arguments.length) return dimension;
+            dimension = _;
+            return chart;
+        };
+
+        chart.filter = function(_) {
+            if (_) {
+                dimension.filterRange(_);
+            } else {
+                dimension.filterAll();
+            }
+            brushDirty = true;
+            return chart;
+        };
+
+        chart.group = function(_) {
+            if (!arguments.length) return group;
+            group = _;
+            return chart;
+        };
+
+        return chart;
+    }
+
+    // 4. Create Chart Instances
+    const charts = [
+        barChart()
+            .dimension(hourDim)
+            .group(hourGroup)
+          .x(d3.scaleLinear()
+            .domain([0, 24])
+            .rangeRound([0, 840])),
+
+        barChart()
+            .dimension(delayDim)
+            .group(delayGroup)
+          .x(d3.scaleLinear()
+            .domain([-20, 180])
+            .rangeRound([0, 840])),
+
+        barChart()
+            .dimension(distDim)
+            .group(distGroup)
+          .x(d3.scaleLinear()
+            .domain([0, 4000])
+            .rangeRound([0, 840]))
+    ];
+
+    const chartDivs = d3.selectAll(".chart-group")
+        .data(charts);
+
+    function render(method) {
+        chartDivs.each(function(chart) {
+            d3.select(this).call(chart);
+            
+            // Show/hide reset link
+            const isFiltered = chart.dimension().currentFilter();
+            d3.select(this).select(".reset-link")
+                .classed("active", !!isFiltered)
+                .on("click", () => {
+                    chart.filter(null);
+                    renderAll();
+                });
+        });
+        d3.select("#active-count").text(d3.format(",")(all.value()));
+    }
+
+    function renderAll() {
+        render();
+    }
+
+    // Initialize
+    renderAll();
+
+    // Global Reset
+    d3.select("#reset-all").on("click", () => {
+        charts.forEach(c => c.filter(null));
+        renderAll();
+    });
+
+</script>
+</body>
+</html>

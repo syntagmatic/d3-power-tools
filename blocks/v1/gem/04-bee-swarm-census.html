@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bee Swarm Census: Income & Education</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #fdfdfd;
+            --text-color: #2c3e50;
+            --grid-color: #e0e0e0;
+            --accent-color: #34495e;
+            --font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        body {
+            margin: 0;
+            padding: 2rem;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: var(--font-family);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        #container {
+            width: 100%;
+            max-width: 1000px;
+            position: relative;
+        }
+
+        h1 {
+            margin: 0 0 0.5rem 0;
+            font-weight: 300;
+            font-size: 2rem;
+            text-align: center;
+        }
+
+        .subtitle {
+            margin-bottom: 2rem;
+            color: #7f8c8d;
+            text-align: center;
+            font-size: 1rem;
+        }
+
+        .chart-svg {
+            overflow: visible;
+        }
+
+        .axis text {
+            font-size: 12px;
+            fill: #95a5a6;
+        }
+
+        .axis path, .axis line {
+            stroke: var(--grid-color);
+        }
+
+        .percentile-line {
+            stroke: #bdc3c7;
+            stroke-dasharray: 4, 4;
+            stroke-width: 1px;
+        }
+
+        .percentile-label {
+            font-size: 10px;
+            fill: #95a5a6;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .swarm-circle {
+            stroke: #fff;
+            stroke-width: 0.5px;
+            transition: r 0.2s ease;
+        }
+
+        .swarm-circle:hover {
+            stroke: #000;
+            stroke-width: 1.5px;
+            cursor: pointer;
+        }
+
+        .box-plot rect {
+            fill: #ecf0f1;
+            stroke: #bdc3c7;
+            stroke-width: 1px;
+        }
+
+        .box-plot line {
+            stroke: #7f8c8d;
+            stroke-width: 1.5px;
+        }
+
+        .box-plot .median-line {
+            stroke: var(--accent-color);
+            stroke-width: 2.5px;
+        }
+
+        .annotation-line {
+            stroke: #7f8c8d;
+            stroke-width: 1px;
+            fill: none;
+        }
+
+        .annotation-text {
+            font-size: 11px;
+            fill: #2c3e50;
+            font-weight: 600;
+        }
+
+        .annotation-subtext {
+            font-size: 10px;
+            fill: #7f8c8d;
+        }
+
+        .legend {
+            display: flex;
+            justify-content: center;
+            gap: 1.5rem;
+            margin-top: 1rem;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            font-size: 13px;
+            color: #7f8c8d;
+        }
+
+        .legend-swatch {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 6px;
+        }
+
+        .tooltip {
+            position: absolute;
+            background: rgba(255, 255, 255, 0.95);
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            pointer-events: none;
+            font-size: 12px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            opacity: 0;
+            transition: opacity 0.2s;
+            z-index: 100;
+        }
+
+        .tooltip strong {
+            display: block;
+            margin-bottom: 2px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="container">
+        <h1>Synthetic Census: Income vs. Education</h1>
+        <div class="subtitle">Log-normal distribution of 400 individuals showing the correlation between academic attainment and earning power.</div>
+        <div id="chart"></div>
+        <div id="legend" class="legend"></div>
+        <div id="tooltip" class="tooltip"></div>
+    </div>
+
+    <script>
+        // --- DATA GENERATION ---
+        const n = 400;
+        const educationLevels = ["High School", "Bachelor's", "Master's", "PhD"];
+        const colors = ["#CC6677", "#DDCC77", "#117733", "#332288"]; // Paul Tol Muted palette subset
+
+        const randomLogNormal = d3.randomLogNormal(Math.log(85000), 0.7);
+        
+        const data = Array.from({ length: n }, (_, i) => {
+            let income = Math.max(15000, Math.min(500000, randomLogNormal()));
+            
+            // Correlated education assignment
+            // Probability shifts based on income decile
+            const p = Math.min(1, Math.max(0, (Math.log(income) - Math.log(15000)) / (Math.log(500000) - Math.log(15000))));
+            
+            let eduIdx;
+            if (p < 0.25) eduIdx = d3.randomInt(0, 2)(); // High School or Bachelor's
+            else if (p < 0.6) eduIdx = d3.randomInt(1, 3)(); // Bachelor's or Master's
+            else if (p < 0.85) eduIdx = d3.randomInt(1, 4)(); // Bachelor's, Master's, PhD
+            else eduIdx = d3.randomInt(2, 4)(); // Master's or PhD
+
+            return {
+                id: i,
+                income: income,
+                education: educationLevels[eduIdx],
+                color: colors[eduIdx]
+            };
+        });
+
+        // --- LAYOUT & SCALES ---
+        const width = 1000;
+        const height = 500;
+        const margin = { top: 80, right: 50, bottom: 50, left: 50 };
+        const swarmHeight = 250;
+        const boxPlotY = 40;
+
+        const svg = d3.select("#chart")
+            .append("svg")
+            .attr("width", "100%")
+            .attr("height", height)
+            .attr("viewBox", `0 0 ${width} ${height}`)
+            .attr("class", "chart-svg");
+
+        const xScale = d3.scaleLog()
+            .domain([15000, 500000])
+            .range([margin.left, width - margin.right])
+            .nice();
+
+        const colorScale = d3.scaleOrdinal()
+            .domain(educationLevels)
+            .range(colors);
+
+        // --- AXES ---
+        const xAxis = d3.axisBottom(xScale)
+            .ticks(5, d3.format("$.0s"))
+            .tickSizeOuter(0);
+
+        svg.append("g")
+            .attr("class", "axis x-axis")
+            .attr("transform", `translate(0, ${height - margin.bottom})`)
+            .call(xAxis);
+
+        // Grid lines
+        svg.append("g")
+            .attr("class", "grid")
+            .attr("transform", `translate(0, ${height - margin.bottom})`)
+            .call(d3.axisBottom(xScale).ticks(5).tickSize(- (height - margin.top - margin.bottom)).tickFormat(""))
+            .selectAll("line")
+            .attr("stroke", "#f0f0f0");
+
+        // --- STATS ---
+        const incomes = data.map(d => d.income).sort(d3.ascending);
+        const p25 = d3.quantile(incomes, 0.25);
+        const p50 = d3.quantile(incomes, 0.50);
+        const p75 = d3.quantile(incomes, 0.75);
+        const p90 = d3.quantile(incomes, 0.90);
+        
+        const computeStats = (values) => {
+            const q1 = d3.quantile(values, 0.25);
+            const median = d3.quantile(values, 0.5);
+            const q3 = d3.quantile(values, 0.75);
+            const iqr = q3 - q1;
+            const min = d3.min(values);
+            const max = d3.max(values);
+            return { min, q1, median, q3, max, iqr };
+        };
+        const stats = computeStats(incomes);
+
+        // --- BEE SWARM SIMULATION ---
+        const simulation = d3.forceSimulation(data)
+            .force("x", d3.forceX(d => xScale(d.income)).strength(1))
+            .force("y", d3.forceY(margin.top + (swarmHeight / 2) + 20).strength(0.1))
+            .force("collide", d3.forceCollide(5))
+            .stop();
+
+        // Run simulation statically to avoid jumps
+        for (let i = 0; i < 200; ++i) simulation.tick();
+
+        // --- RENDER BEE SWARM ---
+        const swarmGroup = svg.append("g").attr("class", "swarm");
+
+        const circles = swarmGroup.selectAll("circle")
+            .data(data)
+            .join("circle")
+            .attr("class", "swarm-circle")
+            .attr("cx", d => d.x)
+            .attr("cy", d => d.y)
+            .attr("r", 4.5)
+            .attr("fill", d => colorScale(d.education))
+            .on("pointerenter", (event, d) => {
+                d3.select("#tooltip")
+                    .style("opacity", 1)
+                    .html(`<strong>${d.education}</strong>Income: ${d3.format("$,.0f")(d.income)}`);
+                d3.select(event.currentTarget).attr("r", 7);
+            })
+            .on("pointermove", (event) => {
+                d3.select("#tooltip")
+                    .style("left", (event.pageX + 10) + "px")
+                    .style("top", (event.pageY - 10) + "px");
+            })
+            .on("pointerleave", (event) => {
+                d3.select("#tooltip").style("opacity", 0);
+                d3.select(event.currentTarget).attr("r", 4.5);
+            });
+
+        // --- MARGINAL BOX PLOT ---
+        const boxPlotGroup = svg.append("g")
+            .attr("class", "box-plot")
+            .attr("transform", `translate(0, ${margin.top - 30})`);
+
+        const boxHeight = 20;
+        
+        // Whisker line
+        boxPlotGroup.append("line")
+            .attr("x1", xScale(stats.min))
+            .attr("x2", xScale(stats.max))
+            .attr("y1", 0)
+            .attr("y2", 0);
+
+        // Box
+        boxPlotGroup.append("rect")
+            .attr("x", xScale(stats.q1))
+            .attr("y", -boxHeight / 2)
+            .attr("width", xScale(stats.q3) - xScale(stats.q1))
+            .attr("height", boxHeight)
+            .attr("rx", 2);
+
+        // Median line
+        boxPlotGroup.append("line")
+            .attr("class", "median-line")
+            .attr("x1", xScale(stats.median))
+            .attr("x2", xScale(stats.median))
+            .attr("y1", -boxHeight / 2)
+            .attr("y2", boxHeight / 2);
+
+        // --- PERCENTILE LINES ---
+        const percentiles = [
+            { v: p25, label: "25th" },
+            { v: p50, label: "Median" },
+            { v: p75, label: "75th" },
+            { v: p90, label: "90th" }
+        ];
+
+        const percentileGroup = svg.append("g").attr("class", "percentiles");
+
+        percentileGroup.selectAll(".percentile-line")
+            .data(percentiles)
+            .join("line")
+            .attr("class", "percentile-line")
+            .attr("x1", d => xScale(d.v))
+            .attr("x2", d => xScale(d.v))
+            .attr("y1", margin.top - 50)
+            .attr("y2", height - margin.bottom);
+
+        percentileGroup.selectAll(".percentile-label")
+            .data(percentiles)
+            .join("text")
+            .attr("class", "percentile-label")
+            .attr("x", d => xScale(d.v))
+            .attr("y", margin.top - 55)
+            .attr("text-anchor", "middle")
+            .text(d => d.label);
+
+        // --- LEADER-LINE CALLOUTS FOR TOP EARNERS ---
+        const topEarners = data.sort((a, b) => b.income - a.income).slice(0, 3);
+        
+        const calloutGroup = svg.append("g").attr("class", "callouts");
+
+        topEarners.forEach((d, i) => {
+            const dx = 40 + (i * 10);
+            const dy = -60 - (i * 20);
+            
+            // Leader line (s-curve)
+            calloutGroup.append("path")
+                .attr("class", "annotation-line")
+                .attr("d", `M ${d.x} ${d.y} C ${d.x} ${d.y + dy/2}, ${d.x + dx/2} ${d.y + dy}, ${d.x + dx} ${d.y + dy}`);
+
+            const text = calloutGroup.append("g")
+                .attr("transform", `translate(${d.x + dx + 5}, ${d.y + dy})`);
+
+            text.append("text")
+                .attr("class", "annotation-text")
+                .attr("y", -2)
+                .text(`${d.education} Professional`);
+
+            text.append("text")
+                .attr("class", "annotation-subtext")
+                .attr("y", 10)
+                .text(`${d3.format("$,.0f")(d.income)} / year`);
+        });
+
+        // --- LEGEND ---
+        const legendContainer = d3.select("#legend");
+        educationLevels.forEach((level, i) => {
+            const item = legendContainer.append("div").attr("class", "legend-item");
+            item.append("div")
+                .attr("class", "legend-swatch")
+                .style("background-color", colors[i]);
+            item.append("span").text(level);
+        });
+
+    </script>
+</body>
+</html>

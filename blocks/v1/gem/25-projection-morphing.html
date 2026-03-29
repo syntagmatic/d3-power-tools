@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>D3 World Projection Morphing</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://unpkg.com/topojson-client@3"></script>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --text: #f1f5f9;
+            --accent: #38bdf8;
+            --panel: rgba(30, 41, 59, 0.8);
+        }
+        body {
+            margin: 0;
+            padding: 0;
+            background: var(--bg);
+            color: var(--text);
+            font-family: system-ui, -apple-system, sans-serif;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+        }
+        #viz {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .controls {
+            position: absolute;
+            bottom: 40px;
+            display: flex;
+            gap: 10px;
+            padding: 15px;
+            background: var(--panel);
+            border-radius: 12px;
+            backdrop-filter: blur(8px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3);
+            z-index: 10;
+        }
+        button {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: var(--text);
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        button:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: var(--accent);
+        }
+        button.active {
+            background: var(--accent);
+            color: #000;
+            border-color: var(--accent);
+        }
+        .label {
+            position: absolute;
+            top: 40px;
+            font-size: 24px;
+            font-weight: 300;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: var(--accent);
+            pointer-events: none;
+        }
+        .sphere {
+            fill: #1e293b;
+            stroke: rgba(255, 255, 255, 0.1);
+            stroke-width: 0.5px;
+        }
+        .graticule {
+            fill: none;
+            stroke: rgba(255, 255, 255, 0.05);
+            stroke-width: 0.5px;
+        }
+        .country {
+            stroke: #0f172a;
+            stroke-width: 0.2px;
+            transition: opacity 0.3s;
+        }
+        .country:hover {
+            opacity: 0.8;
+            stroke-width: 1px;
+            stroke: #fff;
+        }
+        .status {
+            position: absolute;
+            bottom: 100px;
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.4);
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body>
+    <div class="label" id="proj-name">Natural Earth</div>
+    <div id="viz"></div>
+    <div class="controls" id="controls"></div>
+    <div class="status" id="timer-status">Auto-advancing in 4s...</div>
+
+    <script>
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+        const margin = 50;
+
+        const svg = d3.select("#viz")
+            .append("svg")
+            .attr("width", width)
+            .attr("height", height)
+            .attr("viewBox", `0 0 ${width} ${height}`);
+
+        const g = svg.append("g");
+
+        // UI elements
+        const spherePath = g.append("path").attr("class", "sphere");
+        const graticulePath = g.append("path").attr("class", "graticule");
+        const countriesGroup = g.append("g");
+
+        const graticule = d3.geoGraticule();
+        const sphere = { type: "Sphere" };
+
+        // Projections definition
+        const projections = [
+            { name: "Natural Earth", fn: d3.geoNaturalEarth1() },
+            { name: "Mercator", fn: d3.geoMercator().scale(width / 6.5) },
+            { name: "Orthographic", fn: d3.geoOrthographic().clipAngle(90) },
+            { name: "Equal Earth", fn: d3.geoEqualEarth() },
+            { name: "Azimuthal", fn: d3.geoAzimuthalEqualArea() }
+        ];
+
+        let currentIndex = 0;
+        let autoTimer;
+        let countdown;
+        let timeLeft = 4;
+
+        // Colors by continent (Simplified mapping for demo)
+        const continentColors = d3.scaleOrdinal(d3.schemeTableau10);
+        
+        // Continent groups based on numeric IDs from world-110m (approximate)
+        const getContinent = (id) => {
+            const n = parseInt(id);
+            if (n === 10) return "Antarctica";
+            if (n < 200) return "Africa/Americas";
+            if (n < 400) return "Europe/Asia";
+            if (n < 600) return "Asia/Oceania";
+            return "Other";
+        };
+
+        async function init() {
+            const world = await d3.json("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json");
+            const countries = topojson.feature(world, world.objects.countries).features;
+
+            // Setup buttons
+            const controlPanel = d3.select("#controls");
+            projections.forEach((p, i) => {
+                controlPanel.append("button")
+                    .text(p.name)
+                    .classed("active", i === 0)
+                    .on("click", function() {
+                        stopAuto();
+                        update(i);
+                    });
+            });
+
+            // Initial render
+            update(0);
+            startAuto();
+
+            function update(index) {
+                currentIndex = index;
+                const pObj = projections[index];
+                const projection = pObj.fn.fitExtent([[margin, margin], [width - margin, height - margin]], sphere);
+                const path = d3.geoPath(projection);
+
+                d3.select("#proj-name").text(pObj.name);
+                d3.selectAll("button").classed("active", (d, i) => i === index);
+
+                const t = d3.transition().duration(2000).ease(d3.easeCubicInOut);
+
+                spherePath.transition(t).attr("d", path(sphere));
+                graticulePath.transition(t).attr("d", path(graticule()));
+
+                const countryPaths = countriesGroup.selectAll(".country")
+                    .data(countries, d => d.id);
+
+                countryPaths.enter()
+                    .append("path")
+                    .attr("class", "country")
+                    .attr("fill", d => continentColors(getContinent(d.id)))
+                    .attr("d", path)
+                    .merge(countryPaths)
+                    .transition(t)
+                    .attr("d", path);
+            }
+
+            function startAuto() {
+                timeLeft = 4;
+                updateStatus();
+                
+                countdown = setInterval(() => {
+                    timeLeft--;
+                    if (timeLeft <= 0) {
+                        timeLeft = 4;
+                        const next = (currentIndex + 1) % projections.length;
+                        update(next);
+                    }
+                    updateStatus();
+                }, 1000);
+            }
+
+            function stopAuto() {
+                clearInterval(countdown);
+                d3.select("#timer-status").text("Auto-advance paused");
+            }
+
+            function updateStatus() {
+                d3.select("#timer-status").text(`Auto-advancing in ${timeLeft}s...`);
+            }
+        }
+
+        init();
+
+        window.addEventListener("resize", () => {
+            location.reload();
+        });
+    </script>
+</body>
+</html>

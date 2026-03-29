@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebGL Streaming Particles - 200K Flow</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  :root {
+    --bg: #04040c;
+    --panel-bg: rgba(15, 15, 25, 0.85);
+    --accent: #4cc9f0;
+    --text: #e0e0e0;
+    --ui-font: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--ui-font);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
+  #header {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    z-index: 10;
+    pointer-events: none;
+  }
+  h1 {
+    font-size: 18px;
+    font-weight: 500;
+    letter-spacing: 0.05em;
+    color: #fff;
+    text-shadow: 0 2px 10px rgba(0,0,0,0.5);
+  }
+  .subtitle {
+    font-size: 12px;
+    color: #888;
+    margin-top: 4px;
+  }
+  #canvas-container {
+    flex: 1;
+    position: relative;
+    cursor: crosshair;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+  #ui {
+    position: absolute;
+    bottom: 30px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--panel-bg);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 12px;
+    padding: 16px 24px;
+    display: flex;
+    gap: 32px;
+    align-items: center;
+    z-index: 20;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    transition: opacity 0.3s;
+  }
+  #ui:hover { opacity: 1; }
+  .control-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #aaa;
+    display: flex;
+    justify-content: space-between;
+  }
+  .val { color: var(--accent); font-weight: 600; }
+  input[type=range] {
+    width: 140px;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  button {
+    background: #222;
+    border: 1px solid #444;
+    color: #fff;
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    transition: all 0.2s;
+    min-width: 80px;
+  }
+  button:hover { background: #333; border-color: #666; }
+  button.active { background: var(--accent); color: #000; border-color: var(--accent); }
+  
+  #stats {
+    position: absolute;
+    top: 20px;
+    right: 20px;
+    text-align: right;
+    font-family: monospace;
+    font-size: 11px;
+    color: #666;
+    pointer-events: none;
+  }
+  .stat-item { margin-bottom: 2px; }
+  .stat-val { color: #aaa; }
+
+  /* Legend */
+  #legend {
+    position: absolute;
+    bottom: 30px;
+    right: 30px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    pointer-events: none;
+  }
+  .legend-bar {
+    width: 100px;
+    height: 6px;
+    background: linear-gradient(to right, #001219, #005f73, #0a9396, #94d2bd, #e9d8a6, #ee9b00, #ca6702, #bb3e03, #ae2012, #9b2226);
+    border-radius: 3px;
+  }
+  .legend-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    color: #555;
+    text-transform: uppercase;
+  }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <h1>STREAMING PARTICLES</h1>
+  <div class="subtitle">200,000 agents navigating a multi-scale vector field</div>
+</div>
+
+<div id="stats">
+  <div class="stat-item">FPS <span id="fps" class="stat-val">--</span></div>
+  <div class="stat-item">LOAD <span id="load" class="stat-val">-- ms</span></div>
+</div>
+
+<div id="canvas-container">
+  <canvas id="glCanvas"></canvas>
+  
+  <div id="ui">
+    <div class="control-group">
+      <button id="btnPlay">PAUSE</button>
+    </div>
+    
+    <div class="control-group">
+      <label>Count <span id="countVal" class="stat-val">200K</span></label>
+      <input type="range" id="sliderCount" min="10000" max="200000" step="10000" value="200000">
+    </div>
+    
+    <div class="control-group">
+      <label>Flow Speed <span id="speedVal" class="stat-val">1.0x</span></label>
+      <input type="range" id="sliderSpeed" min="0.1" max="4.0" step="0.1" value="1.0">
+    </div>
+
+    <div class="control-group">
+      <label>Complexity <span id="complexVal" class="stat-val">Medium</span></label>
+      <input type="range" id="sliderComplex" min="1" max="5" step="1" value="3">
+    </div>
+  </div>
+
+  <div id="legend">
+    <div class="legend-labels"><span>Slow</span><span>Fast</span></div>
+    <div class="legend-bar"></div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const MAX_PARTICLES = 200000;
+  let particleCount = 200000;
+  let flowSpeed = 1.0;
+  let fieldComplexity = 3;
+  let isPlaying = true;
+  
+  const canvas = document.getElementById('glCanvas');
+  const gl = canvas.getContext('webgl2', { 
+    antialias: false, 
+    preserveDrawingBuffer: true,
+    alpha: false,
+    premultipliedAlpha: false
+  });
+
+  if (!gl) {
+    document.body.innerHTML = '<div style="padding:50px; text-align:center;">WebGL 2 not supported. Please use a modern browser.</div>';
+    return;
+  }
+
+  // Particle data
+  // Using separate arrays for positions and velocities for efficient updates
+  const positions = new Float32Array(MAX_PARTICLES * 2);
+  const colors = new Float32Array(MAX_PARTICLES * 3);
+  
+  // Initialize particles with randomized positions
+  const initParticles = () => {
+    for (let i = 0; i < MAX_PARTICLES; i++) {
+      positions[i * 2] = Math.random() * window.innerWidth;
+      positions[i * 2 + 1] = Math.random() * window.innerHeight;
+    }
+  };
+  initParticles();
+
+  // Color Mapping: Turbo-like palette for velocity
+  // We'll compute velocity magnitude on CPU and map to color
+  const colorScale = d3.scaleSequential(d3.interpolateTurbo).domain([0.2, 1.8]);
+
+  // Shaders
+  const vsSource = `#version 300 es
+    in vec2 a_position;
+    in vec3 a_color;
+    uniform vec2 u_resolution;
+    uniform float u_dpr;
+    out vec3 v_color;
+    void main() {
+      // Normalize to clip space [-1, 1]
+      vec2 clip = (a_position / u_resolution) * 2.0 - 1.0;
+      clip.y = -clip.y; // Flip Y for screen space
+      gl_Position = vec4(clip, 0.0, 1.0);
+      gl_PointSize = 1.2 * u_dpr;
+      v_color = a_color;
+    }`;
+
+  const fsSource = `#version 300 es
+    precision lowp float;
+    in vec3 v_color;
+    out vec4 fragColor;
+    void main() {
+      // Soft circular points
+      float d = length(gl_PointCoord - 0.5);
+      if (d > 0.5) discard;
+      float alpha = 0.8 * (1.0 - smoothstep(0.3, 0.5, d));
+      fragColor = vec4(v_color, alpha);
+    }`;
+
+  // Trail Shader
+  const trailVs = `#version 300 es
+    in vec2 a_pos;
+    void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }`;
+  const trailFs = `#version 300 es
+    precision lowp float;
+    out vec4 fragColor;
+    void main() { fragColor = vec4(0.015, 0.015, 0.045, 0.06); }`;
+
+  const createShader = (gl, type, source) => {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, source);
+    gl.compileShader(s);
+    return s;
+  };
+
+  const createProgram = (gl, vs, fs) => {
+    const p = gl.createProgram();
+    gl.attachShader(p, createShader(gl, gl.VERTEX_SHADER, vs));
+    gl.attachShader(p, createShader(gl, gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(p);
+    return p;
+  };
+
+  const mainProg = createProgram(gl, vsSource, fsSource);
+  const trailProg = createProgram(gl, trailVs, trailFs);
+
+  // Buffer and VAO Setup
+  const mainVao = gl.createVertexArray();
+  gl.bindVertexArray(mainVao);
+
+  const posBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW);
+  const posLoc = gl.getAttribLocation(mainProg, 'a_position');
+  gl.enableVertexAttribArray(posLoc);
+  gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+  const colBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, colBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, colors, gl.DYNAMIC_DRAW);
+  const colLoc = gl.getAttribLocation(mainProg, 'a_color');
+  gl.enableVertexAttribArray(colLoc);
+  gl.vertexAttribPointer(colLoc, 3, gl.FLOAT, false, 0, 0);
+
+  const trailVao = gl.createVertexArray();
+  gl.bindVertexArray(trailVao);
+  const trailBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, trailBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
+  const trailPosLoc = gl.getAttribLocation(trailProg, 'a_pos');
+  gl.enableVertexAttribArray(trailPosLoc);
+  gl.vertexAttribPointer(trailPosLoc, 2, gl.FLOAT, false, 0, 0);
+
+  // Responsive Scaling
+  let width, height, dpr;
+  const resize = () => {
+    width = window.innerWidth;
+    height = window.innerHeight;
+    dpr = window.devicePixelRatio || 1;
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    gl.viewport(0, 0, width * dpr, height * dpr);
+    // When resizing, clear to avoid garbage
+    gl.clearColor(0.015, 0.015, 0.045, 1.0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+  };
+  window.addEventListener('resize', resize);
+  resize();
+
+  // Multi-scale Vector Field
+  const getVelocity = (x, y, t) => {
+    const nx = x * 0.002;
+    const ny = y * 0.002;
+    let vx = 0, vy = 0;
+    
+    // Octave 1: Large scale
+    vx += Math.sin(ny * 0.5 + t * 0.2);
+    vy += Math.cos(nx * 0.5 - t * 0.2);
+    
+    // Octave 2: Medium scale
+    if (fieldComplexity >= 2) {
+      vx += Math.cos(ny * 1.2 - t * 0.5) * 0.5;
+      vy += Math.sin(nx * 1.2 + t * 0.5) * 0.5;
+    }
+    
+    // Octave 3: Small scale
+    if (fieldComplexity >= 3) {
+      vx += Math.sin(ny * 3.5 + t) * 0.25;
+      vy += Math.cos(nx * 3.5 + t) * 0.25;
+    }
+
+    // Octave 4: Micro scale
+    if (fieldComplexity >= 4) {
+      vx += Math.cos(ny * 8.0 - t * 2.0) * 0.12;
+      vy += Math.sin(nx * 8.0 + t * 2.0) * 0.12;
+    }
+
+    // Octave 5: Chaotic
+    if (fieldComplexity >= 5) {
+      vx += Math.sin(ny * 20.0 + t * 5.0) * 0.06;
+      vy += Math.cos(nx * 20.0 - t * 5.0) * 0.06;
+    }
+    
+    return [vx, vy];
+  };
+
+  // Stats
+  let lastTime = performance.now();
+  let frameCount = 0;
+  let lastFpsUpdate = 0;
+  const fpsEl = document.getElementById('fps');
+  const loadEl = document.getElementById('load');
+
+  // Animation Loop
+  const tick = (now) => {
+    if (isPlaying) {
+      const dt = Math.min((now - lastTime) / 1000, 0.1);
+      lastTime = now;
+      const t = now * 0.001;
+      
+      const startUpdate = performance.now();
+      
+      // Update Particles
+      // Optimization: use localized variables to reduce property lookups
+      const w = width, h = height;
+      const scaledFlow = flowSpeed * 1.5;
+      
+      for (let i = 0; i < particleCount; i++) {
+        const i2 = i * 2;
+        const x = positions[i2];
+        const y = positions[i2 + 1];
+        
+        const [vx, vy] = getVelocity(x, y, t);
+        
+        const nextX = x + vx * scaledFlow;
+        const nextY = y + vy * scaledFlow;
+        
+        // Wrap around edges
+        positions[i2] = nextX < 0 ? w : (nextX > w ? 0 : nextX);
+        positions[i2 + 1] = nextY < 0 ? h : (nextY > h ? 0 : nextY);
+        
+        // Color by magnitude
+        const mag = Math.sqrt(vx*vx + vy*vy);
+        const rgb = d3.rgb(colorScale(mag));
+        const i3 = i * 3;
+        colors[i3] = rgb.r / 255;
+        colors[i3 + 1] = rgb.g / 255;
+        colors[i3 + 2] = rgb.b / 255;
+      }
+      
+      const endUpdate = performance.now();
+      loadEl.textContent = `${(endUpdate - startUpdate).toFixed(1)}ms`;
+
+      // Render
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      
+      // 1. Draw trail (fade previous frame)
+      gl.useProgram(trailProg);
+      gl.bindVertexArray(trailVao);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      
+      // 2. Draw points
+      gl.useProgram(mainProg);
+      gl.bindVertexArray(mainVao);
+      
+      gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, positions.subarray(0, particleCount * 2));
+      
+      gl.bindBuffer(gl.ARRAY_BUFFER, colBuf);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, colors.subarray(0, particleCount * 3));
+      
+      gl.uniform2f(gl.getUniformLocation(mainProg, 'u_resolution'), width, height);
+      gl.uniform1f(gl.getUniformLocation(mainProg, 'u_dpr'), dpr);
+      
+      gl.drawArrays(gl.POINTS, 0, particleCount);
+      
+      // FPS Calculation
+      frameCount++;
+      if (now - lastFpsUpdate > 1000) {
+        fpsEl.textContent = Math.round((frameCount * 1000) / (now - lastFpsUpdate));
+        frameCount = 0;
+        lastFpsUpdate = now;
+      }
+    } else {
+      lastTime = now;
+    }
+    
+    requestAnimationFrame(tick);
+  };
+
+  requestAnimationFrame(tick);
+
+  // UI Interaction
+  const btnPlay = document.getElementById('btnPlay');
+  btnPlay.addEventListener('click', () => {
+    isPlaying = !isPlaying;
+    btnPlay.textContent = isPlaying ? 'PAUSE' : 'PLAY';
+    btnPlay.classList.toggle('active', !isPlaying);
+    if (isPlaying) lastTime = performance.now();
+  });
+
+  const sliderCount = document.getElementById('sliderCount');
+  const countVal = document.getElementById('countVal');
+  sliderCount.addEventListener('input', (e) => {
+    particleCount = +e.target.value;
+    countVal.textContent = particleCount >= 1000 ? (particleCount / 1000) + 'K' : particleCount;
+  });
+
+  const sliderSpeed = document.getElementById('sliderSpeed');
+  const speedVal = document.getElementById('speedVal');
+  sliderSpeed.addEventListener('input', (e) => {
+    flowSpeed = +e.target.value;
+    speedVal.textContent = flowSpeed.toFixed(1) + 'x';
+  });
+
+  const sliderComplex = document.getElementById('sliderComplex');
+  const complexVal = document.getElementById('complexVal');
+  const complexityLabels = ['Low', 'Basic', 'Medium', 'High', 'Ultra'];
+  sliderComplex.addEventListener('input', (e) => {
+    fieldComplexity = +e.target.value;
+    complexVal.textContent = complexityLabels[fieldComplexity - 1];
+  });
+
+  // Context Loss Handling
+  canvas.addEventListener('webglcontextlost', (e) => e.preventDefault());
+  canvas.addEventListener('webglcontextrestored', () => {
+    // Programs and buffers need to be re-initialized if we don't handle this properly
+    // For this prototype, we'll just reload the page as it's the safest way to restore complex GL state
+    location.reload();
+  });
+
+})();
+</script>
+</body>
+</html>

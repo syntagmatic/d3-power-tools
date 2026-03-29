@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Parallel Coords + Sparkline Table</title>
+  <link rel="stylesheet" href="../../../style/d3-power-tools.css">
+  <style>
+    :root {
+      --pc-height: 340px;
+    }
+    body {
+      padding: var(--sp-4) var(--sp-6);
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      margin-bottom: var(--sp-4);
+    }
+    .badge {
+      background: var(--color-surface);
+      border: 1px solid var(--color-border);
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--color-text-muted);
+    }
+    .badge b {
+      color: var(--color-cat-1);
+    }
+
+    #viz-container {
+      display: flex;
+      flex-direction: column;
+      gap: var(--sp-6);
+    }
+
+    /* Parallel Coordinates Styles */
+    #pc-wrapper {
+      position: relative;
+      height: var(--pc-height);
+      user-select: none;
+    }
+    #pc-canvas, #pc-svg {
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+    #pc-svg {
+      pointer-events: none;
+    }
+    #pc-svg .axis {
+      pointer-events: all;
+    }
+    #pc-svg .brush {
+      pointer-events: all;
+    }
+    .axis-label {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      fill: var(--color-text);
+      cursor: default;
+    }
+    .axis text {
+      font-size: 10px;
+      fill: var(--color-text-muted);
+    }
+    .brush .selection {
+      fill: var(--color-cat-1);
+      fill-opacity: 0.15;
+      stroke: var(--color-cat-1);
+      stroke-width: 1px;
+    }
+
+    /* Table Styles */
+    table {
+      margin-top: var(--sp-2);
+    }
+    th {
+      background: var(--color-bg);
+      z-index: 10;
+    }
+    .spark-cell {
+      width: 180px;
+      padding: 4px 12px;
+    }
+    .sparkline-bg {
+      fill: var(--color-surface);
+    }
+    .sparkline-full {
+      fill: var(--color-text-faint);
+      opacity: 0.2;
+    }
+    .sparkline-subset {
+      fill: var(--color-cat-1);
+    }
+    
+    .legend {
+      display: flex;
+      gap: var(--sp-4);
+      margin-bottom: var(--sp-4);
+      flex-wrap: wrap;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: var(--sp-1);
+      font-size: 12px;
+      color: var(--color-text-muted);
+    }
+    .legend-color {
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+    }
+
+    [data-theme="dark"] .sparkline-bg { fill: #2a2a40; }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <div>
+      <h1>City <b>Metrics</b> Explorer</h1>
+      <p class="subtitle">Multivariate analysis of 150 synthetic metropolitan areas</p>
+    </div>
+    <div class="badge">
+      Selected: <span id="count-brushed">150</span> / <span id="count-total">150</span>
+    </div>
+  </div>
+
+  <div id="viz-container">
+    <div>
+      <div class="legend" id="legend"></div>
+      <div id="pc-wrapper">
+        <canvas id="pc-canvas"></canvas>
+        <svg id="pc-svg"></svg>
+      </div>
+    </div>
+
+    <div>
+      <h2>Summary Statistics</h2>
+      <table id="summary-table">
+        <thead>
+          <tr>
+            <th>Metric</th>
+            <th class="spark-cell">Distribution (Selection vs Total)</th>
+            <th class="num">Min</th>
+            <th class="num">Median</th>
+            <th class="num">Max</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="../../../style/theme-switch.js"></script>
+  <script>
+    // ── Configuration & Data ──────────────────────────────────────────
+    const n = 150;
+    const regions = ["Northeast", "Southeast", "Midwest", "Southwest", "West Coast", "Mountain"];
+    const metrics = [
+      { id: "population", label: "Population", format: d3.format(",.2s") },
+      { id: "avg_temp", label: "Avg Temp (°F)", format: d => d.toFixed(1) + "°" },
+      { id: "elevation", label: "Elevation (ft)", format: d3.format(",.0f") },
+      { id: "rainfall", label: "Rainfall (in)", format: d => d.toFixed(1) },
+      { id: "gdp_per_capita", label: "GDP / Cap ($)", format: d3.format("$,.2s") },
+      { id: "density", label: "Density (/mi²)", format: d3.format(",.0f") }
+    ];
+
+    const colors = [
+      "var(--color-cat-1)", "var(--color-cat-2)", "var(--color-cat-3)",
+      "var(--color-cat-4)", "var(--color-cat-5)", "var(--color-cat-6)"
+    ];
+    const colorScale = d3.scaleOrdinal().domain(regions).range(colors);
+
+    function generateData() {
+      const cityNames = [
+        "New York", "Los Angeles", "Chicago", "Houston", "Phoenix", "Philadelphia", "San Antonio", "San Diego", "Dallas", "San Jose",
+        "Austin", "Jacksonville", "Fort Worth", "Columbus", "Charlotte", "San Francisco", "Indianapolis", "Seattle", "Denver", "Washington",
+        "Boston", "El Paso", "Nashville", "Detroit", "Oklahoma City", "Portland", "Las Vegas", "Memphis", "Louisville", "Baltimore",
+        "Milwaukee", "Albuquerque", "Tucson", "Fresno", "Sacramento", "Mesa", "Kansas City", "Atlanta", "Long Beach", "Omaha",
+        "Raleigh", "Colorado Springs", "Miami", "Virginia Beach", "Oakland", "Minneapolis", "Tulsa", "Arlington", "New Orleans", "Wichita"
+      ];
+      
+      return Array.from({ length: n }, (_, i) => {
+        const region = regions[i % regions.length];
+        
+        // Correlated generation logic
+        let elevation, avg_temp, rainfall, population, gdp, density;
+        
+        if (region === "Mountain" || region === "Southwest") {
+          elevation = 4000 + Math.random() * 4000;
+          avg_temp = (region === "Southwest" ? 65 : 45) + (Math.random() - 0.5) * 20;
+          rainfall = 10 + Math.random() * 15;
+        } else if (region === "Southeast") {
+          elevation = 100 + Math.random() * 1000;
+          avg_temp = 68 + Math.random() * 12;
+          rainfall = 45 + Math.random() * 20;
+        } else {
+          elevation = 10 + Math.random() * 800;
+          avg_temp = 50 + Math.random() * 15;
+          rainfall = 30 + Math.random() * 20;
+        }
+
+        population = Math.pow(10, 5 + Math.random() * 1.5);
+        if (region === "West Coast" || region === "Northeast") population *= 1.5;
+        
+        gdp = 40000 + Math.random() * 40000 + (population > 1e6 ? 10000 : 0);
+        density = (population / 500) * (0.5 + Math.random());
+
+        return {
+          name: cityNames[i % cityNames.length] + " " + (Math.floor(i / cityNames.length) + 1),
+          region,
+          population,
+          avg_temp,
+          elevation,
+          rainfall,
+          gdp_per_capita: gdp,
+          density
+        };
+      });
+    }
+
+    const data = generateData();
+    let brushedData = [...data];
+
+    // ── Layout & Scales ───────────────────────────────────────────────
+    const margin = { top: 40, right: 50, bottom: 30, left: 50 };
+    const wrapper = d3.select("#pc-wrapper");
+    const width = wrapper.node().clientWidth - margin.left - margin.right;
+    const height = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--pc-height")) - margin.top - margin.bottom;
+
+    const canvas = d3.select("#pc-canvas")
+      .attr("width", width + margin.left + margin.right)
+      .attr("height", height + margin.top + margin.bottom)
+      .style("width", (width + margin.left + margin.right) + "px")
+      .style("height", (height + margin.top + margin.bottom) + "px");
+    
+    const ctx = canvas.node().getContext("2d");
+    ctx.translate(margin.left, margin.top);
+
+    const svg = d3.select("#pc-svg")
+      .attr("width", width + margin.left + margin.right)
+      .attr("height", height + margin.top + margin.bottom)
+      .append("g")
+      .attr("transform", `translate(${margin.left}, ${margin.top})`);
+
+    const x = d3.scalePoint()
+      .domain(metrics.map(m => m.id))
+      .range([0, width]);
+
+    const y = new Map(metrics.map(m => [
+      m.id,
+      d3.scaleLinear()
+        .domain(d3.extent(data, d => d[m.id]))
+        .range([height, 0])
+        .nice()
+    ]));
+
+    // ── Components ────────────────────────────────────────────────────
+    
+    // Legend
+    const legend = d3.select("#legend");
+    regions.forEach(r => {
+      const item = legend.append("div").attr("class", "legend-item");
+      item.append("div")
+        .attr("class", "legend-color")
+        .style("background", colorScale(r));
+      item.append("span").text(r);
+    });
+
+    // Brushes
+    const brushes = new Map();
+    const activeBrushes = new Map();
+
+    function onBrush({selection}, dim) {
+      if (selection) {
+        activeBrushes.set(dim, selection.map(y.get(dim).invert));
+      } else {
+        activeBrushes.delete(dim);
+      }
+      update();
+    }
+
+    // ── Draw Functions ────────────────────────────────────────────────
+    
+    function drawLines() {
+      ctx.clearRect(-margin.left, -margin.top, canvas.attr("width"), canvas.attr("height"));
+      
+      // Determine selection status
+      const brushedIds = new Set(brushedData.map(d => data.indexOf(d)));
+      
+      // Draw non-selected first (faint)
+      ctx.globalAlpha = 0.05;
+      ctx.lineWidth = 1;
+      data.forEach((d, i) => {
+        if (!brushedIds.has(i)) drawPath(d);
+      });
+
+      // Draw selected (colored)
+      ctx.globalAlpha = 0.6;
+      ctx.lineWidth = 1.5;
+      data.forEach((d, i) => {
+        if (brushedIds.has(i)) {
+          ctx.strokeStyle = colorScale(d.region);
+          drawPath(d);
+        }
+      });
+    }
+
+    function drawPath(d) {
+      ctx.beginPath();
+      metrics.forEach((m, i) => {
+        const px = x(m.id);
+        const py = y.get(m.id)(d[m.id]);
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      });
+      ctx.stroke();
+    }
+
+    function update() {
+      // Filter data based on all active brushes
+      brushedData = data.filter(d => {
+        return Array.from(activeBrushes).every(([dim, range]) => {
+          const val = d[dim];
+          return val >= Math.min(...range) && val <= Math.max(...range);
+        });
+      });
+
+      // Update counters
+      d3.select("#count-brushed").text(brushedData.length);
+      
+      drawLines();
+      updateTable();
+    }
+
+    // Table initialization
+    const tableBody = d3.select("#summary-table tbody");
+    const rows = tableBody.selectAll("tr")
+      .data(metrics)
+      .enter()
+      .append("tr");
+
+    rows.append("td").style("font-weight", "600").text(d => d.label);
+    
+    const sparkContainer = rows.append("td").attr("class", "spark-cell")
+      .append("svg")
+      .attr("width", 160)
+      .attr("height", 30);
+    
+    sparkContainer.append("rect")
+      .attr("class", "sparkline-bg")
+      .attr("width", 160)
+      .attr("height", 30)
+      .attr("rx", 3);
+
+    const minCell = rows.append("td").attr("class", "num");
+    const medianCell = rows.append("td").attr("class", "num");
+    const maxCell = rows.append("td").attr("class", "num");
+
+    function updateTable() {
+      rows.each(function(m) {
+        const row = d3.select(this);
+        const values = brushedData.map(d => d[m.id]).sort(d3.ascending);
+        const allValues = data.map(d => d[m.id]).sort(d3.ascending);
+
+        const min = d3.min(values);
+        const max = d3.max(values);
+        const median = d3.median(values);
+
+        row.select(".num:nth-child(3)").text(min !== undefined ? m.format(min) : "-");
+        row.select(".num:nth-child(4)").text(median !== undefined ? m.format(median) : "-");
+        row.select(".num:nth-child(5)").text(max !== undefined ? m.format(max) : "-");
+
+        // Update Sparklines
+        const sparkSvg = row.select("svg");
+        const sx = d3.scaleLinear().domain(y.get(m.id).domain()).range([4, 156]);
+        
+        const bins = d3.bin().domain(sx.domain()).thresholds(20);
+        const fullBins = bins(allValues);
+        const subsetBins = bins(values);
+        
+        const sy = d3.scaleLinear()
+          .domain([0, d3.max(fullBins, b => b.length)])
+          .range([30, 5]);
+
+        const area = d3.area()
+          .x(d => sx(d.x0))
+          .y0(30)
+          .y1(d => sy(d.length))
+          .curve(d3.curveBasis);
+
+        let fullPath = sparkSvg.selectAll(".sparkline-full").data([fullBins]);
+        fullPath.enter().append("path").attr("class", "sparkline-full")
+          .merge(fullPath).attr("d", area);
+
+        let subsetPath = sparkSvg.selectAll(".sparkline-subset").data([subsetBins]);
+        subsetPath.enter().append("path").attr("class", "sparkline-subset")
+          .merge(subsetPath).attr("d", area);
+      });
+    }
+
+    // ── Final Setup ───────────────────────────────────────────────────
+    
+    // Create Axes
+    metrics.forEach(m => {
+      const g = svg.append("g")
+        .attr("class", "axis")
+        .attr("transform", `translate(${x(m.id)}, 0)`);
+
+      g.call(d3.axisLeft(y.get(m.id)).ticks(5).tickFormat(m.format));
+
+      g.append("text")
+        .attr("class", "axis-label")
+        .attr("y", -15)
+        .attr("text-anchor", "middle")
+        .text(m.label);
+
+      const brush = d3.brushY()
+        .extent([[-10, 0], [10, height]])
+        .on("start brush end", (event) => onBrush(event, m.id));
+
+      g.append("g")
+        .attr("class", "brush")
+        .call(brush);
+      
+      brushes.set(m.id, brush);
+    });
+
+    // Handle Resize
+    window.addEventListener("resize", () => {
+      const newWidth = wrapper.node().clientWidth - margin.left - margin.right;
+      if (Math.abs(newWidth - width) < 10) return;
+      location.reload(); // Simple reload for layout recalculation
+    });
+
+    // Initialize
+    update();
+
+  </script>
+</body>
+</html>

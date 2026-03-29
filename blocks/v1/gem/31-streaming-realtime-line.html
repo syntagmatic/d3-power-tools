@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Streaming Real-time Line Chart - D3 Power Tools</title>
+    <link rel="stylesheet" href="../../../style/d3-power-tools.css">
+    <style>
+        :root {
+            --primary: #4f46e5;
+            --accent: #10b981;
+            --bg: #0f172a;
+            --surface: #1e293b;
+            --text: #f8fafc;
+            --text-muted: #94a3b8;
+        }
+
+        body {
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        .container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+            width: 100%;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .controls {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            background: var(--surface);
+            padding: 10px 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+        }
+
+        .btn {
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: opacity 0.2s;
+        }
+
+        .btn:hover { opacity: 0.9; }
+        .btn.paused { background: var(--accent); }
+
+        .stat-card {
+            background: var(--surface);
+            padding: 10px 20px;
+            border-radius: 8px;
+            min-width: 150px;
+        }
+
+        .stat-label { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; }
+        .stat-value { font-size: 1.25rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+        .chart-area {
+            flex: 1;
+            position: relative;
+            background: var(--surface);
+            border-radius: 12px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #main-chart {
+            flex: 1;
+            position: relative;
+        }
+
+        #overview-chart {
+            height: 100px;
+            border-top: 1px solid #334155;
+        }
+
+        canvas { display: block; }
+        
+        .axis line, .axis path { stroke: #475569; }
+        .axis text { fill: #94a3b8; font-size: 10px; }
+        
+        .brush .selection {
+            fill: var(--primary);
+            fill-opacity: 0.2;
+            stroke: var(--primary);
+        }
+
+        .grid-line { stroke: #1e293b; stroke-width: 1; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div>
+                <h1 style="margin: 0; font-size: 1.5rem;">Ornstein-Uhlenbeck Process</h1>
+                <p style="margin: 4px 0 0; color: var(--text-muted); font-size: 0.875rem;">Real-time streaming • 60s detail • 5m overview</p>
+            </div>
+            <div class="controls">
+                <div class="stat-card">
+                    <div class="stat-label">Current Value</div>
+                    <div id="val-display" class="stat-value">0.000</div>
+                </div>
+                <button id="toggle-pause" class="btn">Pause</button>
+                <div style="display: flex; flex-direction: column; gap: 4px;">
+                    <div class="stat-label">Speed: <span id="speed-val">1x</span></div>
+                    <input type="range" id="speed-slider" min="0.5" max="5" step="0.5" value="1">
+                </div>
+            </div>
+        </div>
+
+        <div class="chart-area">
+            <div id="main-chart"></div>
+            <div id="overview-chart"></div>
+        </div>
+    </div>
+
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script>
+        // --- Constants & Config ---
+        const UPDATE_INTERVAL = 100; // ms
+        const MAX_HISTORY = 5 * 60 * 1000; // 5 minutes
+        const WINDOW_SIZE = 60 * 1000; // 60 seconds detail
+        const OVERVIEW_POINTS = 600; // Points for LTTB
+
+        // OU Process Parameters
+        const THETA = 0.1;
+        const MU = 0;
+        const SIGMA = 0.2;
+
+        // --- State Management ---
+        let data = [];
+        let currentValue = 0;
+        let isPaused = false;
+        let speedFactor = 1;
+        let lastTimestamp = Date.now();
+        let isAutoScrolling = true;
+        let viewWindow = [0, 0]; // [start, end] in ms
+
+        // --- LTTB Algorithm ---
+        function lttb(data, threshold) {
+            if (threshold >= data.length || threshold < 3) return data;
+            const sampled = [data[0]], bSize = (data.length - 2) / (threshold - 2);
+            let prevIdx = 0;
+            for (let i = 0; i < threshold - 2; i++) {
+                const bStart = Math.floor(i * bSize) + 1, bEnd = Math.floor((i + 1) * bSize) + 1,
+                      nEnd = Math.min(Math.floor((i + 2) * bSize) + 1, data.length);
+                let avgX = 0, avgY = 0;
+                for (let j = bEnd; j < nEnd; j++) { avgX += data[j].t; avgY += data[j].v; }
+                avgX /= (nEnd - bEnd); avgY /= (nEnd - bEnd);
+                let maxArea = -1, maxIdx = bStart;
+                const prev = data[prevIdx];
+                for (let j = bStart; j < bEnd; j++) {
+                    const area = Math.abs((prev.t - avgX) * (data[j].v - prev.v) - (prev.t - data[j].t) * (avgY - prev.v));
+                    if (area > maxArea) { maxArea = area; maxIdx = j; }
+                }
+                sampled.push(data[maxIdx]); prevIdx = maxIdx;
+            }
+            sampled.push(data[data.length - 1]);
+            return sampled;
+        }
+
+        // --- Data Generation ---
+        function generatePoint() {
+            if (isPaused) return;
+            const now = Date.now();
+            const dt = (UPDATE_INTERVAL / 1000) * speedFactor;
+            // Approx Gaussian noise via Central Limit Theorem
+            const noise = (Math.random() + Math.random() + Math.random() + Math.random() + Math.random() + Math.random() - 3) / 3 * 2.5; 
+            
+            currentValue = currentValue + THETA * (MU - currentValue) * dt + SIGMA * Math.sqrt(dt) * noise;
+            
+            data.push({ t: now, v: currentValue });
+            
+            // Keep history limited
+            const cutoff = now - MAX_HISTORY;
+            while (data.length > 0 && data[0].t < cutoff) data.shift();
+            
+            document.getElementById('val-display').textContent = currentValue.toFixed(3);
+            
+            if (isAutoScrolling) {
+                viewWindow = [now - WINDOW_SIZE, now];
+            }
+        }
+
+        // --- Main Chart Setup (Canvas) ---
+        const mainDiv = d3.select("#main-chart");
+        const canvas = mainDiv.append("canvas");
+        const ctx = canvas.node().getContext("2d");
+        const svgOverlay = mainDiv.append("svg").style("position", "absolute").style("top", 0).style("left", 0).style("pointer-events", "none");
+        const gAxisX = svgOverlay.append("g").attr("class", "axis");
+        const gAxisY = svgOverlay.append("g").attr("class", "axis");
+
+        // --- Overview Chart Setup (SVG) ---
+        const overviewDiv = d3.select("#overview-chart");
+        const ovSvg = overviewDiv.append("svg");
+        const ovPath = ovSvg.append("path").attr("fill", "none").attr("stroke", "var(--accent)").attr("stroke-width", 1.5);
+        const ovBrushG = ovSvg.append("g").attr("class", "brush");
+        const brush = d3.brushX().on("brush end", brushed);
+
+        function resize() {
+            const mainRect = mainDiv.node().getBoundingClientRect();
+            const ovRect = overviewDiv.node().getBoundingClientRect();
+            const dpr = window.devicePixelRatio || 1;
+
+            canvas.attr("width", mainRect.width * dpr).attr("height", mainRect.height * dpr)
+                  .style("width", mainRect.width + "px").style("height", mainRect.height + "px");
+            ctx.setTransform(1, 0, 0, 1, 0, 0); // Reset transform before scaling
+            ctx.scale(dpr, dpr);
+
+            svgOverlay.attr("width", mainRect.width).attr("height", mainRect.height);
+            ovSvg.attr("width", ovRect.width).attr("height", ovRect.height);
+            
+            brush.extent([[0, 0], [ovRect.width, ovRect.height]]);
+            ovBrushG.call(brush);
+        }
+
+        function brushed(event) {
+            if (!event.sourceEvent) return; // Ignore programmatic moves
+            const selection = event.selection;
+            if (!selection) {
+                isAutoScrolling = true;
+                return;
+            }
+
+            const ovRect = overviewDiv.node().getBoundingClientRect();
+            const now = Date.now();
+            const xOv = d3.scaleTime().domain([now - MAX_HISTORY, now]).range([0, ovRect.width]);
+            
+            const [t0, t1] = selection.map(xOv.invert);
+            viewWindow = [t0.getTime(), t1.getTime()];
+            
+            // If brush is at the very end, resume auto-scroll
+            isAutoScrolling = (selection[1] >= ovRect.width - 2);
+        }
+
+        function render() {
+            const mainRect = mainDiv.node().getBoundingClientRect();
+            const ovRect = overviewDiv.node().getBoundingClientRect();
+            const now = Date.now();
+
+            // --- Main Chart Rendering ---
+            const xMain = d3.scaleTime().domain([viewWindow[0], viewWindow[1]]).range([0, mainRect.width]);
+            // Dynamically scale Y based on visible data
+            const visibleData = data.filter(d => d.t >= viewWindow[0] - 1000 && d.t <= viewWindow[1] + 1000);
+            const yExtent = d3.extent(visibleData, d => d.v);
+            const padding = (yExtent[1] - yExtent[0]) * 0.2 || 0.5;
+            const yMain = d3.scaleLinear().domain([yExtent[0] - padding, yExtent[1] + padding]).range([mainRect.height - 25, 20]);
+
+            ctx.clearRect(0, 0, mainRect.width, mainRect.height);
+            
+            // Grid lines
+            ctx.strokeStyle = "#1e293b";
+            ctx.beginPath();
+            yMain.ticks(5).forEach(d => {
+                const y = yMain(d);
+                ctx.moveTo(0, y); ctx.lineTo(mainRect.width, y);
+            });
+            xMain.ticks(6).forEach(d => {
+                const x = xMain(d);
+                ctx.moveTo(x, 0); ctx.lineTo(x, mainRect.height);
+            });
+            ctx.stroke();
+
+            // Line
+            if (visibleData.length > 1) {
+                ctx.strokeStyle = "var(--primary)";
+                ctx.lineWidth = 2;
+                ctx.lineJoin = "round";
+                ctx.lineCap = "round";
+                ctx.beginPath();
+                ctx.moveTo(xMain(visibleData[0].t), yMain(visibleData[0].v));
+                for (let i = 1; i < visibleData.length; i++) {
+                    ctx.lineTo(xMain(visibleData[i].t), yMain(visibleData[i].v));
+                }
+                ctx.stroke();
+
+                // Pulse dot at current head if visible
+                if (data.length > 0) {
+                    const head = data[data.length - 1];
+                    const hx = xMain(head.t);
+                    const hy = yMain(head.v);
+                    if (hx >= 0 && hx <= mainRect.width) {
+                        ctx.fillStyle = "var(--primary)";
+                        ctx.beginPath();
+                        ctx.arc(hx, hy, 4, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.strokeStyle = "white";
+                        ctx.lineWidth = 1;
+                        ctx.stroke();
+                    }
+                }
+            }
+
+            gAxisX.attr("transform", `translate(0, ${mainRect.height - 25})`)
+                  .call(d3.axisBottom(xMain).ticks(6).tickSize(0).tickPadding(8));
+            gAxisY.attr("transform", `translate(${mainRect.width - 45}, 0)`)
+                  .call(d3.axisRight(yMain).ticks(5).tickSize(0).tickPadding(8));
+
+            // --- Overview Chart Rendering ---
+            const xOv = d3.scaleTime().domain([now - MAX_HISTORY, now]).range([0, ovRect.width]);
+            const yOv = d3.scaleLinear().domain(d3.extent(data, d => d.v) || [-1, 1]).range([ovRect.height - 10, 10]);
+            
+            const sampled = lttb(data, OVERVIEW_POINTS);
+            const lineGen = d3.line().x(d => xOv(d.t)).y(d => yOv(d.v));
+            ovPath.attr("d", lineGen(sampled));
+
+            if (isAutoScrolling) {
+                const b0 = xOv(viewWindow[0]);
+                const b1 = xOv(viewWindow[1]);
+                ovBrushG.call(brush.move, [b0, b1]);
+            }
+
+            requestAnimationFrame(render);
+        }
+
+        // --- Initialize ---
+        window.addEventListener("resize", resize);
+        resize();
+
+        // Start generator
+        setInterval(generatePoint, UPDATE_INTERVAL);
+        
+        // Start renderer
+        requestAnimationFrame(render);
+
+        // UI Listeners
+        document.getElementById('toggle-pause').addEventListener('click', function() {
+            isPaused = !isPaused;
+            this.textContent = isPaused ? "Resume" : "Pause";
+            this.classList.toggle('paused', isPaused);
+        });
+
+        document.getElementById('speed-slider').addEventListener('input', function() {
+            speedFactor = +this.value;
+            document.getElementById('speed-val').textContent = speedFactor + "x";
+        });
+
+        // Initial Data fill
+        for(let i=0; i<100; i++) {
+            const t = Date.now() - (100 - i) * 100;
+            data.push({t, v: 0});
+        }
+    </script>
+</body>
+</html>

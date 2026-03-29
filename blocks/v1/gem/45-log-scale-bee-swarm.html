@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Log-Scale Bee Swarm: Company Revenues</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #f8f9fa;
+            --text-color: #212529;
+            --accent-color: #4e79a7;
+            --border-color: #dee2e6;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+
+        .container {
+            width: 1000px;
+            background: white;
+            padding: 2rem;
+            border-radius: 12px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.05);
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 1.5rem;
+            font-weight: 700;
+        }
+
+        .controls {
+            display: flex;
+            gap: 0.5rem;
+            background: #eee;
+            padding: 0.25rem;
+            border-radius: 8px;
+        }
+
+        button {
+            padding: 0.5rem 1rem;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            border-radius: 6px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+
+        button.active {
+            background: white;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            color: var(--accent-color);
+        }
+
+        .chart-area {
+            position: relative;
+        }
+
+        .tooltip {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 0.5rem 0.75rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+            z-index: 10;
+        }
+
+        .legend {
+            display: flex;
+            gap: 1.5rem;
+            margin-top: 1rem;
+            flex-wrap: wrap;
+            justify-content: center;
+            font-size: 0.85rem;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 2px;
+        }
+
+        .axis-label {
+            font-size: 0.75rem;
+            fill: #666;
+            font-weight: 500;
+        }
+
+        .box-plot-part {
+            fill: none;
+            stroke: #444;
+            stroke-width: 1.5px;
+        }
+
+        .box-plot-rect {
+            fill: #e9ecef;
+            stroke: #444;
+            stroke-width: 1.5px;
+            opacity: 0.7;
+        }
+
+        .box-plot-median {
+            stroke: #222;
+            stroke-width: 3px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header">
+        <h1>Company Revenue Distribution</h1>
+        <div class="controls" id="scale-controls">
+            <button data-scale="linear">Linear</button>
+            <button data-scale="log" class="active">Log</button>
+            <button data-scale="symlog">Symlog</button>
+        </div>
+    </div>
+    <div class="chart-area" id="chart">
+        <div class="tooltip" id="tooltip"></div>
+    </div>
+    <div class="legend" id="legend"></div>
+</div>
+
+<script>
+    // Configuration
+    const width = 1000;
+    const height = 500;
+    const margin = {top: 100, right: 40, bottom: 60, left: 60};
+    const radius = 4.5;
+    const numPoints = 500;
+
+    const sectors = ["Technology", "Healthcare", "Financials", "Energy", "Consumer", "Utilities"];
+    const sectorColors = d3.scaleOrdinal(d3.schemeTableau10).domain(sectors);
+
+    // Generate Data
+    // log-normal distribution for revenues: e^mu + e^sigma
+    // We want a range from $100k to $1B.
+    // ln(100,000) ≈ 11.5, ln(1,000,000,000) ≈ 20.7
+    // mu = 16.1 (middle), sigma = 1.8 (spread)
+    const randomRevenue = d3.randomLogNormal(16.1, 1.8);
+    const data = Array.from({length: numPoints}, (_, i) => {
+        let rev = randomRevenue();
+        // Clamp to realistic bounds for our demonstration
+        rev = Math.max(100000, Math.min(1000000000, rev));
+        return {
+            id: i,
+            name: `Company ${i + 1}`,
+            revenue: rev,
+            sector: sectors[Math.floor(Math.random() * sectors.length)],
+            x: width / 2,
+            y: height / 2
+        };
+    });
+
+    // SVG Setup
+    const svg = d3.select("#chart")
+        .append("svg")
+        .attr("viewBox", [0, 0, width, height]);
+
+    const gAxes = svg.append("g").attr("class", "axes");
+    const gBoxPlot = svg.append("g").attr("class", "box-plot");
+    const gSwarm = svg.append("g").attr("class", "swarm");
+
+    // Tooltip
+    const tooltip = d3.select("#tooltip");
+    const formatCurrency = d3.format("$,.0f");
+
+    // Scales
+    const xScales = {
+        linear: d3.scaleLinear()
+            .domain([100000, 1000000000])
+            .range([margin.left, width - margin.right])
+            .nice(),
+        log: d3.scaleLog()
+            .domain([100000, 1000000000])
+            .range([margin.left, width - margin.right]),
+        symlog: d3.scaleSymlog()
+            .domain([100000, 1000000000])
+            .range([margin.left, width - margin.right])
+            .constant(1000000) // 1M constant for linear region
+    };
+
+    let currentScaleType = "log";
+
+    // Legend
+    const legend = d3.select("#legend");
+    sectors.forEach(s => {
+        const item = legend.append("div").attr("class", "legend-item");
+        item.append("div")
+            .attr("class", "legend-color")
+            .style("background-color", sectorColors(s));
+        item.append("span").text(s);
+    });
+
+    // Simulation
+    const simulation = d3.forceSimulation(data)
+        .force("x", d3.forceX(d => xScales[currentScaleType](d.revenue)).strength(1))
+        .force("y", d3.forceY(height / 2 + 40).strength(0.1))
+        .force("collide", d3.forceCollide(radius + 0.5))
+        .stop();
+
+    // Box Plot Elements
+    const boxRect = gBoxPlot.append("rect").attr("class", "box-plot-rect");
+    const medianLine = gBoxPlot.append("line").attr("class", "box-plot-median");
+    const lowWhisker = gBoxPlot.append("line").attr("class", "box-plot-part");
+    const highWhisker = gBoxPlot.append("line").attr("class", "box-plot-part");
+    const lowCap = gBoxPlot.append("line").attr("class", "box-plot-part");
+    const highCap = gBoxPlot.append("line").attr("class", "box-plot-part");
+
+    function updateBoxPlot(scale) {
+        const revenues = data.map(d => d.revenue).sort(d3.ascending);
+        const q1 = d3.quantile(revenues, 0.25);
+        const median = d3.quantile(revenues, 0.5);
+        const q3 = d3.quantile(revenues, 0.75);
+        const iqr = q3 - q1;
+        const minVal = d3.min(revenues.filter(d => d >= q1 - 1.5 * iqr));
+        const maxVal = d3.max(revenues.filter(d => d <= q3 + 1.5 * iqr));
+
+        const yPos = 50;
+        const boxHeight = 25;
+
+        boxRect.transition().duration(800)
+            .attr("x", scale(q1))
+            .attr("y", yPos - boxHeight/2)
+            .attr("width", scale(q3) - scale(q1))
+            .attr("height", boxHeight);
+
+        medianLine.transition().duration(800)
+            .attr("x1", scale(median)).attr("x2", scale(median))
+            .attr("y1", yPos - boxHeight/2).attr("y2", yPos + boxHeight/2);
+
+        lowWhisker.transition().duration(800)
+            .attr("x1", scale(minVal)).attr("x2", scale(q1))
+            .attr("y1", yPos).attr("y2", yPos);
+
+        highWhisker.transition().duration(800)
+            .attr("x1", scale(q3)).attr("x2", scale(maxVal))
+            .attr("y1", yPos).attr("y2", yPos);
+
+        lowCap.transition().duration(800)
+            .attr("x1", scale(minVal)).attr("x2", scale(minVal))
+            .attr("y1", yPos - 8).attr("y2", yPos + 8);
+
+        highCap.transition().duration(800)
+            .attr("x1", scale(maxVal)).attr("x2", scale(maxVal))
+            .attr("y1", yPos - 8).attr("y2", yPos + 8);
+    }
+
+    // Points
+    const node = gSwarm.selectAll("circle")
+        .data(data)
+        .join("circle")
+        .attr("r", radius)
+        .attr("fill", d => sectorColors(d.sector))
+        .attr("stroke", "#fff")
+        .attr("stroke-width", 0.5)
+        .on("mouseover", (event, d) => {
+            d3.select(event.currentTarget).attr("stroke", "#000").attr("stroke-width", 1.5);
+            tooltip.style("opacity", 1)
+                .html(`<strong>${d.name}</strong><br>Sector: ${d.sector}<br>Revenue: ${formatCurrency(d.revenue)}`)
+                .style("left", (event.pageX + 10) + "px")
+                .style("top", (event.pageY - 28) + "px");
+        })
+        .on("mousemove", (event) => {
+            tooltip.style("left", (event.pageX + 10) + "px")
+                .style("top", (event.pageY - 28) + "px");
+        })
+        .on("mouseout", (event) => {
+            d3.select(event.currentTarget).attr("stroke", "#fff").attr("stroke-width", 0.5);
+            tooltip.style("opacity", 0);
+        });
+
+    function update() {
+        const scale = xScales[currentScaleType];
+
+        // Update Axis
+        const xAxis = d3.axisBottom(scale)
+            .ticks(currentScaleType === "log" ? 10 : 6, currentScaleType === "log" ? ".0s" : "$.0s");
+        
+        gAxes.selectAll(".x-axis").data([0]).join("g")
+            .attr("class", "x-axis")
+            .attr("transform", `translate(0, ${height - margin.bottom})`)
+            .transition().duration(800)
+            .call(xAxis);
+
+        gAxes.selectAll(".axis-label").data([0]).join("text")
+            .attr("class", "axis-label")
+            .attr("text-anchor", "middle")
+            .attr("x", width / 2)
+            .attr("y", height - 15)
+            .text("Annual Revenue (USD)");
+
+        // Update Simulation
+        simulation.force("x", d3.forceX(d => scale(d.revenue)).strength(1));
+        simulation.alpha(1).restart();
+
+        // Update Box Plot
+        updateBoxPlot(scale);
+    }
+
+    // Force simulation ticker
+    simulation.on("tick", () => {
+        node.attr("cx", d => d.x)
+            .attr("cy", d => d.y);
+    });
+
+    // Initial render
+    update();
+
+    // Scale Controls
+    d3.selectAll("#scale-controls button").on("click", function() {
+        const btn = d3.select(this);
+        d3.selectAll("#scale-controls button").classed("active", false);
+        btn.classed("active", true);
+        currentScaleType = btn.attr("data-scale");
+        update();
+    });
+
+</script>
+</body>
+</html>

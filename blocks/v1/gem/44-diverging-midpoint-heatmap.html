@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Daily Temperature Departures Heatmap</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #fdfdfd;
+            --text-color: #1a1a1a;
+            --muted-text: #666;
+            --border-color: #eee;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 2rem;
+        }
+        .container {
+            width: 100%;
+            max-width: 1000px;
+        }
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+            text-align: center;
+        }
+        p.description {
+            color: var(--muted-text);
+            text-align: center;
+            font-size: 0.9rem;
+            margin-bottom: 2rem;
+            max-width: 700px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        .heatmap-container {
+            position: relative;
+            width: 100%;
+            overflow-x: auto;
+        }
+        .tooltip {
+            position: absolute;
+            background: rgba(255, 255, 255, 0.95);
+            border: 1px solid #ddd;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            pointer-events: none;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            z-index: 10;
+            display: none;
+        }
+        .legend-container {
+            margin-top: 1rem;
+            display: flex;
+            justify-content: center;
+        }
+        .annotation-text {
+            font-size: 0.75rem;
+            fill: var(--muted-text);
+        }
+        .annotation-title {
+            font-size: 0.75rem;
+            font-weight: bold;
+            fill: var(--text-color);
+        }
+        .city-label {
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+        .month-label {
+            font-size: 0.75rem;
+            fill: var(--muted-text);
+        }
+        .day-label {
+            font-size: 0.65rem;
+            fill: #999;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Atmospheric Anomalies</h1>
+    <p class="description">
+        Daily temperature departures from the 30-year climate norm. 
+        Blue indicates colder-than-average days, while red highlights heatwaves. 
+        Note the stability of Singapore compared to the volatile seasonal shifts in New York and London.
+    </p>
+
+    <div class="heatmap-container" id="heatmap">
+        <div class="tooltip" id="tooltip"></div>
+    </div>
+
+    <div class="legend-container" id="legend"></div>
+</div>
+
+<script>
+    async function init() {
+        const width = 960;
+        const cellSize = 13;
+        const dayWidth = cellSize + 1;
+        const margin = { top: 40, right: 40, bottom: 20, left: 100 };
+        
+        const cities = [
+            { id: "Singapore", avgVar: 0.8, base: 0 },
+            { id: "London", avgVar: 4.5, base: 0 },
+            { id: "New York", avgVar: 6.2, base: 0 }
+        ];
+
+        // Generate data for 2025 (365 days)
+        const startDate = new Date(2025, 0, 1);
+        const data = [];
+        
+        cities.forEach(city => {
+            for (let i = 0; i < 365; i++) {
+                const date = new Date(startDate);
+                date.setDate(startDate.getDate() + i);
+                
+                // Simulate temperature departures with some autocorrelation (weather patterns)
+                let prev = i > 0 ? data[data.length - 1].value : 0;
+                let noise = (Math.random() - 0.5) * city.avgVar * 1.5;
+                
+                // Seasonal patterns for NY/London (heatwaves in summer, cold snaps in winter)
+                let seasonalBias = 0;
+                if (city.id !== "Singapore") {
+                    const dayOfYear = i;
+                    // Winter: Jan (0), Dec (334-364)
+                    if (dayOfYear < 45 || dayOfYear > 330) {
+                        if (Math.random() > 0.95) seasonalBias = -12; // Cold snap
+                    }
+                    // Summer: June-Aug (151-243)
+                    if (dayOfYear > 160 && dayOfYear < 230) {
+                        if (Math.random() > 0.95) seasonalBias = 10; // Heat wave
+                    }
+                }
+
+                let value = (prev * 0.7) + noise + seasonalBias;
+                
+                // Clamp Singapore to narrow range
+                if (city.id === "Singapore") {
+                    value = Math.max(-2, Math.min(2, value));
+                }
+
+                data.push({
+                    city: city.id,
+                    date: date,
+                    value: value,
+                    dayOfYear: i
+                });
+            }
+        });
+
+        const svgHeight = (cellSize + 10) * cities.length * 4 + margin.top + margin.bottom;
+        
+        const svg = d3.select("#heatmap")
+            .append("svg")
+            .attr("viewBox", `0 0 ${width} ${svgHeight}`)
+            .attr("width", width)
+            .attr("height", svgHeight);
+
+        const g = svg.append("g")
+            .attr("transform", `translate(${margin.left}, ${margin.top})`);
+
+        // Scales
+        const x = d3.scaleLinear()
+            .domain([0, 364])
+            .range([0, 365 * dayWidth]);
+
+        const colorScale = d3.scaleDiverging()
+            .domain([-10, 0, 10]) // Typical departures
+            .interpolator(d3.interpolateRdBu)
+            .clamp(false);
+
+        // Group by city
+        const cityGroups = g.selectAll(".city-group")
+            .data(cities)
+            .join("g")
+            .attr("class", "city-group")
+            .attr("transform", (d, i) => `translate(0, ${i * (cellSize * 4 + 40)})`);
+
+        // City Labels
+        cityGroups.append("text")
+            .attr("class", "city-label")
+            .attr("x", -10)
+            .attr("y", cellSize * 2)
+            .attr("text-anchor", "end")
+            .attr("dominant-baseline", "middle")
+            .text(d => d.id);
+
+        // Monthly separators and labels
+        const months = d3.utcMonths(new Date(2025, 0, 1), new Date(2026, 0, 1));
+        const monthFormat = d3.utcFormat("%b");
+
+        cityGroups.each(function(city) {
+            const group = d3.select(this);
+            const cityData = data.filter(d => d.city === city.id);
+
+            group.selectAll(".day-rect")
+                .data(cityData)
+                .join("rect")
+                .attr("class", "day-rect")
+                .attr("x", d => d.dayOfYear * dayWidth)
+                .attr("y", 0)
+                .attr("width", cellSize)
+                .attr("height", cellSize * 4)
+                .attr("fill", d => colorScale(d.value))
+                .attr("rx", 1)
+                .on("pointerenter", (event, d) => {
+                    const tooltip = d3.select("#tooltip");
+                    tooltip.style("display", "block")
+                        .html(`
+                            <strong>${d.city}</strong><br/>
+                            ${d3.timeFormat("%B %d, %Y")(d.date)}<br/>
+                            Departure: <span style="color:${d.value > 0 ? '#d73027' : '#4575b4'}">${d.value.toFixed(1)}°C</span>
+                        `);
+                })
+                .on("pointermove", (event) => {
+                    const [mx, my] = d3.pointer(event, document.body);
+                    d3.select("#tooltip")
+                        .style("left", (mx + 15) + "px")
+                        .style("top", (my - 15) + "px");
+                })
+                .on("pointerleave", () => {
+                    d3.select("#tooltip").style("display", "none");
+                });
+
+            // Month Labels (Only on top city group)
+            if (city.id === "New York") {
+                group.selectAll(".month-label")
+                    .data(months)
+                    .join("text")
+                    .attr("class", "month-label")
+                    .attr("x", d => d3.timeDay.count(new Date(2025, 0, 1), d) * dayWidth)
+                    .attr("y", -10)
+                    .text(d => monthFormat(d));
+            }
+        });
+
+        // Annotations
+        const annotations = [
+            {
+                city: "New York",
+                day: 15,
+                title: "January Cold Snap",
+                text: "Arctic blast pushes temps 12°C below norm.",
+                dx: 20, dy: -25
+            },
+            {
+                city: "London",
+                day: 195,
+                title: "Summer Heatwave",
+                text: "Intense high pressure over SE England.",
+                dx: 30, dy: -20
+            },
+            {
+                city: "Singapore",
+                day: 300,
+                title: "Equatorial Stability",
+                text: "Daily range rarely exceeds ±1.5°C departure.",
+                dx: 40, dy: 45
+            }
+        ];
+
+        annotations.forEach(anno => {
+            const cityIdx = cities.findIndex(c => c.id === anno.city);
+            const yOffset = cityIdx * (cellSize * 4 + 40);
+            const xPos = anno.day * dayWidth + cellSize / 2;
+            const yPos = yOffset + cellSize * 2;
+
+            const annoG = g.append("g")
+                .attr("transform", `translate(${xPos}, ${yPos})`);
+
+            annoG.append("line")
+                .attr("x1", 0).attr("y1", 0)
+                .attr("x2", anno.dx).attr("y2", anno.dy)
+                .attr("stroke", "#333")
+                .attr("stroke-width", 1);
+
+            annoG.append("circle")
+                .attr("cx", 0).attr("cy", 0)
+                .attr("r", 3)
+                .attr("fill", "none")
+                .attr("stroke", "#333");
+
+            const textBlock = annoG.append("g")
+                .attr("transform", `translate(${anno.dx + (anno.dx > 0 ? 5 : -5)}, ${anno.dy})`);
+
+            textBlock.append("text")
+                .attr("class", "annotation-title")
+                .attr("text-anchor", anno.dx > 0 ? "start" : "end")
+                .attr("y", -5)
+                .text(anno.title);
+
+            textBlock.append("text")
+                .attr("class", "annotation-text")
+                .attr("text-anchor", anno.dx > 0 ? "start" : "end")
+                .attr("y", 10)
+                .text(anno.text);
+        });
+
+        // Legend
+        const legendWidth = 300;
+        const legendHeight = 40;
+        const legendSvg = d3.select("#legend")
+            .append("svg")
+            .attr("width", legendWidth + 40)
+            .attr("height", legendHeight + 20);
+
+        const legendG = legendSvg.append("g")
+            .attr("transform", "translate(20, 10)");
+
+        const legendScale = d3.scaleLinear()
+            .domain([-10, 10])
+            .range([0, legendWidth]);
+
+        const legendPoints = d3.range(-10, 10.1, 0.5);
+        
+        legendG.selectAll("rect")
+            .data(legendPoints)
+            .join("rect")
+            .attr("x", d => legendScale(d))
+            .attr("y", 0)
+            .attr("width", legendWidth / legendPoints.length + 1)
+            .attr("height", 10)
+            .attr("fill", d => colorScale(d));
+
+        const legendAxis = d3.axisBottom(legendScale)
+            .tickValues([-10, -5, 0, 5, 10])
+            .tickFormat(d => d + "°C");
+
+        legendG.append("g")
+            .attr("transform", "translate(0, 10)")
+            .call(legendAxis)
+            .call(g => g.select(".domain").remove());
+
+        legendG.append("text")
+            .attr("x", legendWidth / 2)
+            .attr("y", 40)
+            .attr("text-anchor", "middle")
+            .attr("font-size", "0.7rem")
+            .attr("fill", "#666")
+            .text("Departure from Climate Normal");
+    }
+
+    init();
+</script>
+
+</body>
+</html>

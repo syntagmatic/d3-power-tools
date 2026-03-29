@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Radial Dendrogram — Hierarchical Edge Bundling</title>
+    <style>
+        :root {
+            --bg-color: #ffffff;
+            --text-color: #1a1a1a;
+            --muted-color: #888;
+            --accent-color: #2563eb;
+            --edge-color: #ccc;
+            --edge-opacity: 0.25;
+            --hover-edge-color: #2563eb;
+            --hover-edge-width: 1.5px;
+            --font-family: 'Inter', system-ui, -apple-system, sans-serif;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: var(--font-family);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        header {
+            padding: 24px;
+            text-align: center;
+            width: 100%;
+            z-index: 10;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 1.25rem;
+            font-weight: 600;
+            letter-spacing: -0.025em;
+        }
+
+        .controls {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-top: 12px;
+            font-size: 0.875rem;
+            color: var(--muted-color);
+        }
+
+        input[type="range"] {
+            width: 160px;
+            cursor: pointer;
+        }
+
+        #viz {
+            flex: 1;
+            width: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+        }
+
+        svg {
+            width: 100%;
+            height: 100%;
+            max-width: 900px;
+            max-height: 900px;
+            user-select: none;
+        }
+
+        .node text {
+            font-size: 8px;
+            fill: var(--muted-color);
+            transition: fill 0.2s, font-weight 0.2s, font-size 0.2s;
+            pointer-events: none;
+        }
+
+        .node:hover text {
+            fill: var(--text-color);
+            font-weight: 600;
+            font-size: 10px;
+        }
+
+        .node circle {
+            fill: #ddd;
+            transition: fill 0.2s, r 0.2s;
+            cursor: crosshair;
+        }
+
+        .node:hover circle {
+            fill: var(--accent-color);
+            r: 4px;
+        }
+
+        .edge {
+            fill: none;
+            stroke: var(--edge-color);
+            stroke-opacity: var(--edge-opacity);
+            stroke-width: 1px;
+            pointer-events: none;
+            transition: stroke 0.3s, stroke-opacity 0.3s, stroke-width 0.3s;
+        }
+
+        .edge--active {
+            stroke: var(--hover-edge-color);
+            stroke-opacity: 1;
+            stroke-width: var(--hover-edge-width);
+        }
+
+        .node--highlighted text {
+            fill: var(--text-color);
+            font-weight: 600;
+        }
+
+        .node--highlighted circle {
+            fill: var(--accent-color);
+            r: 3px;
+        }
+
+        .tooltip {
+            position: absolute;
+            padding: 8px 12px;
+            background: rgba(255, 255, 255, 0.95);
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+            font-size: 0.75rem;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+            white-space: nowrap;
+            z-index: 20;
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>Software Module Dependencies</h1>
+    <div class="controls">
+        <label for="tension">Bundle Tension</label>
+        <input type="range" id="tension" min="0" max="1" step="0.01" value="0.85">
+        <span id="tension-val">0.85</span>
+    </div>
+</header>
+
+<div id="viz">
+    <div class="tooltip" id="tooltip"></div>
+</div>
+
+<script type="module">
+    import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+    const width = 900;
+    const height = 900;
+    const radius = width / 2;
+    const innerRadius = radius - 140;
+
+    const svg = d3.select("#viz")
+        .append("svg")
+        .attr("viewBox", [-width / 2, -height / 2, width, height]);
+
+    const gEdges = svg.append("g").attr("class", "edges");
+    const gNodes = svg.append("g").attr("class", "nodes");
+
+    const tooltip = d3.select("#tooltip");
+
+    // --- Data Generation ---
+    function generateData() {
+        const modules = ["Core", "UI", "Network", "Storage", "Auth", "Util", "Graphics", "Audio"];
+        const submodules = ["Parser", "Service", "Manager", "Adapter", "Factory", "Worker", "Proxy", "Helper"];
+        
+        const root = { name: "root", children: [] };
+        const allLeaves = [];
+
+        modules.forEach(m => {
+            const module = { name: m, children: [] };
+            const nSubs = 3 + Math.floor(Math.random() * 3);
+            for (let i = 0; i < nSubs; i++) {
+                const subName = submodules[i % submodules.length];
+                const submodule = { name: subName, children: [] };
+                const nFiles = 3 + Math.floor(Math.random() * 4);
+                for (let j = 0; j < nFiles; j++) {
+                    const leaf = { name: `File_${j + 1}` };
+                    submodule.children.push(leaf);
+                    allLeaves.push(leaf);
+                }
+                module.children.push(submodule);
+            }
+            root.children.push(module);
+        });
+
+        // Hierarchy and Cluster Layout
+        const hierarchy = d3.hierarchy(root)
+            .sort((a, b) => d3.ascending(a.data.name, b.data.name));
+        
+        const cluster = d3.cluster()
+            .size([360, innerRadius]);
+        
+        cluster(hierarchy);
+
+        // Generate ~80 cross-module dependency edges
+        const leaves = hierarchy.leaves();
+        const links = [];
+        const nEdges = 80;
+        let count = 0;
+
+        while (count < nEdges) {
+            const source = leaves[Math.floor(Math.random() * leaves.length)];
+            const target = leaves[Math.floor(Math.random() * leaves.length)];
+
+            if (source === target) continue;
+            // Ensure cross-module (at least different parent's parent)
+            if (source.parent.parent === target.parent.parent) continue;
+
+            // Check if link already exists
+            const exists = links.some(l => l.source === source && l.target === target);
+            if (exists) continue;
+
+            links.push({ source, target });
+            count++;
+        }
+
+        return { hierarchy, leaves, links };
+    }
+
+    const { hierarchy, leaves, links } = generateData();
+
+    // --- Line Generator ---
+    let tension = 0.85;
+    const line = d3.lineRadial()
+        .curve(d3.curveBundle.beta(tension))
+        .radius(d => d.y)
+        .angle(d => (d.x * Math.PI) / 180);
+
+    // --- Rendering ---
+    const linkPaths = gEdges.selectAll(".edge")
+        .data(links)
+        .join("path")
+        .attr("class", "edge")
+        .attr("d", d => line(d.source.path(d.target)));
+
+    const node = gNodes.selectAll(".node")
+        .data(leaves)
+        .join("g")
+        .attr("class", "node")
+        .attr("transform", d => `rotate(${d.x - 90}) translate(${d.y},0)`)
+        .on("pointerenter", (event, d) => {
+            // Highlight edges
+            linkPaths.classed("edge--active", l => l.source === d || l.target === d);
+            
+            // Highlight connected nodes
+            const connected = new Set();
+            links.forEach(l => {
+                if (l.source === d) connected.add(l.target);
+                if (l.target === d) connected.add(l.source);
+            });
+            
+            node.classed("node--highlighted", n => connected.has(n));
+
+            // Tooltip
+            const pathName = d.ancestors().reverse().slice(1).map(a => a.data.name).join(".");
+            tooltip
+                .style("opacity", 1)
+                .html(`<strong>${pathName}</strong><br/>${connected.size} dependencies`)
+                .style("left", (event.pageX + 10) + "px")
+                .style("top", (event.pageY + 10) + "px");
+        })
+        .on("pointermove", (event) => {
+            tooltip
+                .style("left", (event.pageX + 10) + "px")
+                .style("top", (event.pageY + 10) + "px");
+        })
+        .on("pointerleave", () => {
+            linkPaths.classed("edge--active", false);
+            node.classed("node--highlighted", false);
+            tooltip.style("opacity", 0);
+        });
+
+    node.append("circle")
+        .attr("r", 2.5);
+
+    node.append("text")
+        .attr("dy", "0.31em")
+        .attr("x", d => d.x < 180 ? 6 : -6)
+        .attr("text-anchor", d => d.x < 180 ? "start" : "end")
+        .attr("transform", d => d.x >= 180 ? "rotate(180)" : null)
+        .text(d => d.data.name);
+
+    // --- Tension Slider ---
+    const slider = d3.select("#tension");
+    const tensionVal = d3.select("#tension-val");
+
+    slider.on("input", function() {
+        tension = +this.value;
+        tensionVal.text(tension.toFixed(2));
+        
+        line.curve(d3.curveBundle.beta(tension));
+        linkPaths.attr("d", d => line(d.source.path(d.target)));
+    });
+
+</script>
+</body>
+</html>

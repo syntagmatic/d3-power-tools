@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Expandable Radial Edge Bundling</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --text-color: #f1f5f9;
+            --node-color: #38bdf8;
+            --node-collapsed: #f472b6;
+            --edge-color: #64748b;
+            --edge-highlight: #38bdf8;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: system-ui, -apple-system, sans-serif;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+        }
+
+        #chart {
+            width: 100%;
+            height: 100%;
+        }
+
+        .node {
+            cursor: pointer;
+            pointer-events: all;
+        }
+
+        .node circle {
+            stroke: var(--bg-color);
+            stroke-width: 1.5px;
+        }
+
+        .node text {
+            font-size: 10px;
+            fill: var(--text-color);
+            pointer-events: none;
+            text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+        }
+
+        .link {
+            fill: none;
+            stroke: var(--edge-color);
+            stroke-opacity: 0.2;
+            pointer-events: none;
+            transition: stroke-opacity 0.2s;
+        }
+
+        .link.highlight {
+            stroke: var(--edge-highlight);
+            stroke-opacity: 0.8;
+        }
+
+        .ui-overlay {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            pointer-events: none;
+        }
+
+        .ui-overlay h1 {
+            margin: 0;
+            font-size: 1.25rem;
+            font-weight: 600;
+        }
+
+        .ui-overlay p {
+            margin: 4px 0 0;
+            font-size: 0.875rem;
+            opacity: 0.7;
+        }
+
+        .legend {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            font-size: 0.75rem;
+            display: flex;
+            gap: 16px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .legend-swatch {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="ui-overlay">
+        <h1>Expandable Edge Bundling</h1>
+        <p>Click internal nodes to collapse subtrees • Hover to highlight</p>
+    </div>
+
+    <div class="legend">
+        <div class="legend-item">
+            <div class="legend-swatch" style="background: var(--node-color)"></div>
+            <span>Expanded / Leaf</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-swatch" style="background: var(--node-collapsed)"></div>
+            <span>Collapsed</span>
+        </div>
+    </div>
+
+    <div id="chart"></div>
+
+    <script>
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+        const radius = Math.min(width, height) / 2 - 120;
+
+        const svg = d3.select("#chart")
+            .append("svg")
+            .attr("viewBox", [-width / 2, -height / 2, width, height]);
+
+        const gLinks = svg.append("g").attr("class", "links-layer");
+        const gNodes = svg.append("g").attr("class", "nodes-layer");
+
+        // 1. Generate Synthetic Data
+        function generateData() {
+            const groups = ["Analytics", "Kernel", "UI", "Network", "Storage"];
+            const childrenPerGroup = 10;
+            const data = { name: "root", children: [] };
+
+            groups.forEach(g => {
+                const group = { name: g, children: [] };
+                for (let i = 0; i < childrenPerGroup; i++) {
+                    group.children.push({ name: `${g}-${i}`, id: `${g}-${i}` });
+                }
+                data.children.push(group);
+            });
+
+            // Random connections between leaves
+            const connections = [];
+            const leaves = data.children.flatMap(g => g.children);
+            for (let i = 0; i < 150; i++) {
+                const source = leaves[Math.floor(Math.random() * leaves.length)];
+                const target = leaves[Math.floor(Math.random() * leaves.length)];
+                if (source !== target) {
+                    connections.push({ source: source.id, target: target.id });
+                }
+            }
+
+            return { hierarchy: data, connections };
+        }
+
+        const { hierarchy, connections } = generateData();
+
+        // Initialize Hierarchy
+        let root = d3.hierarchy(hierarchy);
+        root.each(d => d.data.id = d.data.id || d.data.name);
+
+        const cluster = d3.cluster()
+            .size([2 * Math.PI, radius]);
+
+        const line = d3.lineRadial()
+            .curve(d3.curveBundle.beta(0.85))
+            .radius(d => d.y)
+            .angle(d => d.x);
+
+        function findVisibleAncestor(d) {
+            let curr = d;
+            while (curr.parent && !curr.parent.children?.includes(curr)) {
+                curr = curr.parent;
+            }
+            return curr;
+        }
+
+        function update(sourceNode) {
+            cluster(root);
+            const nodes = root.descendants();
+            
+            // 2. Edge Aggregation Logic
+            const aggregatedLinksMap = new Map();
+            connections.forEach(c => {
+                const sLeaf = root.find(d => d.data.id === c.source);
+                const tLeaf = root.find(d => d.data.id === c.target);
+                
+                const sVis = findVisibleAncestor(sLeaf);
+                const tVis = findVisibleAncestor(tLeaf);
+                
+                if (sVis === tVis) return;
+                
+                const key = sVis.data.id < tVis.data.id ? `${sVis.data.id}-${tVis.data.id}` : `${tVis.data.id}-${sVis.data.id}`;
+                
+                if (!aggregatedLinksMap.has(key)) {
+                    aggregatedLinksMap.set(key, { s: sVis, t: tVis, weight: 0, id: key });
+                }
+                aggregatedLinksMap.get(key).weight++;
+            });
+
+            const linksData = Array.from(aggregatedLinksMap.values()).map(l => ({
+                id: l.id,
+                weight: l.weight,
+                source: l.s,
+                target: l.t,
+                path: l.s.path(l.t)
+            }));
+
+            const t = svg.transition().duration(800).ease(d3.easeCubicInOut);
+
+            // 3. Update Nodes
+            const node = gNodes.selectAll("g.node")
+                .data(nodes, d => d.data.id);
+
+            const nodeEnter = node.enter().append("g")
+                .attr("class", "node")
+                .attr("transform", d => `rotate(${sourceNode.x0 * 180 / Math.PI - 90}) translate(${sourceNode.y0},0)`)
+                .style("opacity", 0)
+                .on("click", (e, d) => {
+                    if (!d.children && !d._children) return;
+                    if (d.children) { d._children = d.children; d.children = null; }
+                    else if (d._children) { d.children = d._children; d._children = null; }
+                    update(d);
+                })
+                .on("mouseenter", (e, d) => {
+                    const ancestors = new Set(d.ancestors());
+                    gLinks.selectAll(".link").classed("highlight", l => ancestors.has(l.source) || ancestors.has(l.target));
+                })
+                .on("mouseleave", () => gLinks.selectAll(".link").classed("highlight", false));
+
+            nodeEnter.append("circle").attr("r", 4);
+            nodeEnter.append("text").attr("dy", "0.31em").text(d => d.data.name);
+
+            const nodeUpdate = node.merge(nodeEnter);
+            nodeUpdate.transition(t)
+                .attr("transform", d => `rotate(${d.x * 180 / Math.PI - 90}) translate(${d.y},0)`)
+                .style("opacity", 1);
+
+            nodeUpdate.select("circle")
+                .attr("fill", d => d._children ? "var(--node-collapsed)" : "var(--node-color)");
+
+            nodeUpdate.select("text")
+                .attr("x", d => d.x < Math.PI ? 8 : -8)
+                .attr("text-anchor", d => d.x < Math.PI ? "start" : "end")
+                .attr("transform", d => d.x >= Math.PI ? "rotate(180)" : null);
+
+            node.exit().transition(t)
+                .attr("transform", d => `rotate(${sourceNode.x * 180 / Math.PI - 90}) translate(${sourceNode.y},0)`)
+                .style("opacity", 0)
+                .remove();
+
+            // 4. Update Links
+            const link = gLinks.selectAll("path.link")
+                .data(linksData, d => d.id);
+
+            const linkEnter = link.enter().append("path")
+                .attr("class", "link")
+                .attr("stroke-width", d => Math.sqrt(d.weight))
+                .attr("d", d => {
+                    const path = d.path.map(() => ({ x: sourceNode.x0, y: sourceNode.y0 }));
+                    return line(path);
+                });
+
+            link.merge(linkEnter).transition(t)
+                .attr("stroke-width", d => Math.sqrt(d.weight))
+                .attrTween("d", function(d) {
+                    const interpolators = d.path.map(n => ({
+                        x: d3.interpolate(n.x0 ?? sourceNode.x0, n.x),
+                        y: d3.interpolate(n.y0 ?? sourceNode.y0, n.y)
+                    }));
+                    return function(time) {
+                        const interpolatedPath = d.path.map((n, i) => ({
+                            x: interpolators[i].x(time),
+                            y: interpolators[i].y(time)
+                        }));
+                        return line(interpolatedPath);
+                    };
+                });
+
+            link.exit().transition(t)
+                .attrTween("d", function(d) {
+                    const interpolators = d.path.map(n => ({
+                        x: d3.interpolate(n.x, sourceNode.x),
+                        y: d3.interpolate(n.y, sourceNode.y)
+                    }));
+                    return function(time) {
+                        const interpolatedPath = d.path.map((n, i) => ({
+                            x: interpolators[i].x(time),
+                            y: interpolators[i].y(time)
+                        }));
+                        return line(interpolatedPath);
+                    };
+                })
+                .remove();
+
+            // Stash positions
+            root.each(d => {
+                d.x0 = d.x;
+                d.y0 = d.y;
+            });
+        }
+
+        // Initial render
+        root.each(d => { d.x0 = 0; d.y0 = 0; });
+        update(root);
+
+    </script>
+</body>
+</html>

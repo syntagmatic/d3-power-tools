@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Scale Perception in Social Networks</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --panel: #1e293b;
+            --text: #f1f5f9;
+            --accent: #38bdf8;
+            --dim: #94a3b8;
+        }
+        body {
+            margin: 0;
+            padding: 20px;
+            background-color: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            overflow: hidden;
+            height: 100vh;
+        }
+        .header {
+            width: 100%;
+            max-width: 1000px;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+            margin-bottom: 20px;
+        }
+        .title-block h1 {
+            margin: 0;
+            font-size: 1.5rem;
+            color: var(--accent);
+        }
+        .title-block p {
+            margin: 5px 0 0;
+            font-size: 0.9rem;
+            color: var(--dim);
+        }
+        .controls {
+            background: var(--panel);
+            padding: 12px 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+        select {
+            background: var(--bg);
+            color: var(--text);
+            border: 1px solid var(--dim);
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            outline: none;
+        }
+        select:focus {
+            border-color: var(--accent);
+        }
+        #viz {
+            width: 100%;
+            max-width: 1000px;
+            flex-grow: 1;
+            background: var(--panel);
+            border-radius: 12px;
+            position: relative;
+            box-shadow: inset 0 2px 4px 0 rgba(0,0,0,0.06);
+        }
+        .tooltip {
+            position: absolute;
+            padding: 10px;
+            background: rgba(15, 23, 42, 0.9);
+            border: 1px solid var(--accent);
+            border-radius: 4px;
+            pointer-events: none;
+            font-size: 0.8rem;
+            opacity: 0;
+            transition: opacity 0.2s;
+            z-index: 10;
+        }
+        .legend {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            background: rgba(15, 23, 42, 0.7);
+            padding: 12px;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .color-ramp {
+            width: 100px;
+            height: 10px;
+            background: linear-gradient(to right, #ef4444, #fde047, #22c55e);
+            border-radius: 2px;
+        }
+        .annotation {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            max-width: 250px;
+            font-size: 0.85rem;
+            color: var(--dim);
+            line-height: 1.4;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <div class="title-block">
+        <h1>Influence & Perception</h1>
+        <p>How scale choice distorts social importance</p>
+    </div>
+    <div class="controls">
+        <label for="scale-type">Size Scale:</label>
+        <select id="scale-type">
+            <option value="sqrt">Square Root (Area-Correct)</option>
+            <option value="linear">Linear (Exaggerated)</option>
+            <option value="log">Logarithmic (Compressed)</option>
+        </select>
+    </div>
+</div>
+
+<div id="viz">
+    <div class="annotation" id="annotation">
+        <strong>Square Root</strong> scale maps influence to node area. This is the most perceptually accurate representation of magnitude.
+    </div>
+    <div class="legend">
+        <div class="legend-item">
+            <div class="color-ramp"></div>
+            <span>Sentiment (-1 to +1)</span>
+        </div>
+        <div class="legend-item">
+            <div style="width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid var(--dim);"></div>
+            <span>Influence (Degree/Followers)</span>
+        </div>
+    </div>
+</div>
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+    const width = 1000;
+    const height = 600;
+
+    const svg = d3.select("#viz")
+        .append("svg")
+        .attr("viewBox", [0, 0, width, height])
+        .attr("width", "100%")
+        .attr("height", "100%");
+
+    const g = svg.append("g");
+
+    // Zoom behavior
+    svg.call(d3.zoom()
+        .extent([[0, 0], [width, height]])
+        .scaleExtent([0.5, 4])
+        .on("zoom", (event) => g.attr("transform", event.transform)));
+
+    // Data Generation
+    const nodes = Array.from({ length: 60 }, (_, i) => {
+        // Power-law-ish distribution for influence
+        const influence = Math.pow(Math.random(), 3) * 100 + 5;
+        const sentiment = (Math.random() * 2) - 1;
+        return { id: i, influence, sentiment };
+    });
+
+    const links = [];
+    for (let i = 0; i < nodes.length; i++) {
+        // High influence nodes get more connections
+        const numLinks = Math.floor(nodes[i].influence / 10) + 1;
+        for (let j = 0; j < numLinks; j++) {
+            const target = Math.floor(Math.random() * nodes.length);
+            if (target !== i) {
+                links.push({ source: i, target: target });
+            }
+        }
+    }
+
+    // Scales
+    const scales = {
+        linear: d3.scaleLinear().domain([5, 105]).range([4, 40]),
+        sqrt: d3.scaleSqrt().domain([5, 105]).range([4, 40]),
+        log: d3.scaleLog().domain([5, 105]).range([4, 40])
+    };
+
+    const colorScale = d3.scaleDiverging(d3.interpolateRdYlGn).domain([-1, 0, 1]);
+
+    const annotations = {
+        sqrt: "<strong>Square Root</strong> scale maps influence to node area. This is the most perceptually accurate representation of magnitude.",
+        linear: "<strong>Linear</strong> scale maps influence to radius. Because area grows with the square of the radius, high-influence nodes appear <em>massively</em> larger than they actually are.",
+        log: "<strong>Logarithmic</strong> scale compresses the variance. It allows you to see the network structure without being distracted by massive size differences, but hides the true scale of influence."
+    };
+
+    let currentScale = "sqrt";
+
+    // Simulation
+    const simulation = d3.forceSimulation(nodes)
+        .force("link", d3.forceLink(links).id(d => d.id).distance(50))
+        .force("charge", d3.forceManyBody().strength(-150))
+        .force("center", d3.forceCenter(width / 2, height / 2))
+        .force("collide", d3.forceCollide().radius(d => scales[currentScale](d.influence) + 2));
+
+    const link = g.append("g")
+        .attr("stroke", "#475569")
+        .attr("stroke-opacity", 0.4)
+        .selectAll("line")
+        .data(links)
+        .join("line")
+        .attr("stroke-width", 1);
+
+    const node = g.append("g")
+        .selectAll("circle")
+        .data(nodes)
+        .join("circle")
+        .attr("r", d => scales[currentScale](d.influence))
+        .attr("fill", d => colorScale(d.sentiment))
+        .attr("stroke", "#f1f5f9")
+        .attr("stroke-width", 1.5)
+        .call(d3.drag()
+            .on("start", dragstarted)
+            .on("drag", dragged)
+            .on("end", dragended));
+
+    const tooltip = d3.select("#tooltip");
+
+    node.on("mouseover", (event, d) => {
+        tooltip.style("opacity", 1)
+            .html(`
+                <strong>Node ${d.id}</strong><br/>
+                Influence: ${d.influence.toFixed(1)}<br/>
+                Sentiment: ${d.sentiment > 0 ? '+' : ''}${d.sentiment.toFixed(2)}
+            `);
+        d3.select(event.currentTarget).attr("stroke", "var(--accent)").attr("stroke-width", 3);
+    })
+    .on("mousemove", (event) => {
+        tooltip.style("left", (event.pageX + 15) + "px")
+            .style("top", (event.pageY - 28) + "px");
+    })
+    .on("mouseout", (event) => {
+        tooltip.style("opacity", 0);
+        d3.select(event.currentTarget).attr("stroke", "#f1f5f9").attr("stroke-width", 1.5);
+    });
+
+    simulation.on("tick", () => {
+        link
+            .attr("x1", d => d.source.x)
+            .attr("y1", d => d.source.y)
+            .attr("x2", d => d.target.x)
+            .attr("y2", d => d.target.y);
+
+        node
+            .attr("cx", d => d.x)
+            .attr("cy", d => d.y);
+    });
+
+    // Handle Scale Change
+    d3.select("#scale-type").on("change", function() {
+        currentScale = this.value;
+        
+        // Update Annotation
+        d3.select("#annotation").html(annotations[currentScale]);
+
+        // Transition Radii
+        node.transition()
+            .duration(750)
+            .attr("r", d => scales[currentScale](d.influence));
+
+        // Update Collision and Reheat
+        simulation.force("collide").radius(d => scales[currentScale](d.influence) + 2);
+        simulation.alpha(0.3).restart();
+    });
+
+    function dragstarted(event) {
+        if (!event.active) simulation.alphaTarget(0.3).restart();
+        event.subject.fx = event.subject.x;
+        event.subject.fy = event.subject.y;
+    }
+
+    function dragged(event) {
+        event.subject.fx = event.x;
+        event.subject.fy = event.y;
+    }
+
+    function dragended(event) {
+        if (!event.active) simulation.alphaTarget(0);
+        event.subject.fx = null;
+        event.subject.fy = null;
+    }
+</script>
+</body>
+</html>

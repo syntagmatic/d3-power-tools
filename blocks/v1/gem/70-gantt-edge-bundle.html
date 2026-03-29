@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gantt Chart with Edge-Bundled Dependencies</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #ffffff;
+            --text-color: #1a1a1a;
+            --muted-text: #666666;
+            --grid-color: #f0f0f0;
+            --highlight-color: #EE6677;
+            --font-family: 'Inter', system-ui, -apple-system, sans-serif;
+        }
+
+        body {
+            margin: 0;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: var(--font-family);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+        }
+
+        #chart-container {
+            width: 100%;
+            max-width: 1200px;
+            height: 800px;
+            position: relative;
+        }
+
+        .tooltip {
+            position: absolute;
+            padding: 10px 14px;
+            background: rgba(255, 255, 255, 0.96);
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            pointer-events: none;
+            font-size: 13px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            opacity: 0;
+            z-index: 10;
+            transition: opacity 0.2s;
+            line-height: 1.4;
+        }
+
+        .tooltip strong {
+            display: block;
+            margin-bottom: 4px;
+            color: var(--text-color);
+        }
+
+        .axis-label {
+            font-size: 11px;
+            fill: var(--muted-text);
+        }
+
+        .phase-label {
+            font-size: 14px;
+            font-weight: 600;
+            fill: var(--text-color);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .task-label {
+            font-size: 10px;
+            fill: var(--muted-text);
+        }
+
+        .grid line {
+            stroke: var(--grid-color);
+        }
+
+        .dep-line {
+            fill: none;
+            stroke-linecap: round;
+        }
+
+        .legend {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            font-size: 12px;
+            background: white;
+            padding: 12px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .legend-swatch {
+            width: 12px;
+            height: 12px;
+            border-radius: 2px;
+        }
+    </style>
+</head>
+<body>
+
+<div id="chart-container">
+    <div class="tooltip" id="tooltip"></div>
+</div>
+
+<script>
+    /**
+     * D3.js Gantt Chart with Hierarchical Edge Bundling
+     * Features:
+     * - ~50 tasks across 4 project phases
+     * - Hierarchical routing for dependencies (LCA path bundling)
+     * - Recursive highlight of upstream/downstream dependency chains
+     * - Clean, modern aesthetic using Paul Tol's palettes
+     */
+
+    const CONFIG = {
+        width: 1200,
+        height: 800,
+        margin: { top: 80, right: 40, bottom: 40, left: 240 },
+        phases: [
+            { id: "discovery", name: "Discovery", color: "#4477AA" },
+            { id: "design", name: "Design", color: "#228833" },
+            { id: "build", name: "Engineering", color: "#CCBB44" },
+            { id: "launch", name: "Launch & QA", color: "#EE6677" }
+        ],
+        taskCount: 52,
+        depCount: 45,
+        beta: 0.85 // Bundle tension (1 - β). beta 0.85 means β = 0.15
+    };
+
+    const innerWidth = CONFIG.width - CONFIG.margin.left - CONFIG.margin.right;
+    const innerHeight = CONFIG.height - CONFIG.margin.top - CONFIG.margin.bottom;
+
+    // --- Data Generation ---
+    function generateData() {
+        const tasks = [];
+        const hierarchy = [{ id: "root", parent: null }];
+        const startDate = new Date(2026, 0, 5); // Monday, Jan 5, 2026
+        
+        CONFIG.phases.forEach(p => hierarchy.push({ id: p.id, parent: "root", name: p.name }));
+
+        const tasksPerPhase = Math.floor(CONFIG.taskCount / CONFIG.phases.length);
+        let currentIdx = 0;
+
+        CONFIG.phases.forEach((phase, pi) => {
+            for (let i = 0; i < tasksPerPhase + (pi === 3 ? CONFIG.taskCount % 4 : 0); i++) {
+                const id = `t-${currentIdx}`;
+                const duration = 3 + Math.floor(Math.random() * 8);
+                
+                // Staggered start times based on phase and index
+                const startOffset = pi * 15 + i * 2 + Math.floor(Math.random() * 4);
+                const start = new Date(startDate);
+                start.setDate(start.getDate() + startOffset);
+                
+                const end = new Date(start);
+                end.setDate(end.getDate() + duration);
+
+                const task = {
+                    id,
+                    name: `Task ${currentIdx + 1}`,
+                    phaseId: phase.id,
+                    color: phase.color,
+                    start,
+                    end,
+                    duration
+                };
+
+                tasks.push(task);
+                hierarchy.push({ id, parent: phase.id, name: task.name });
+                currentIdx++;
+            }
+        });
+
+        // Generate dependencies
+        const deps = [];
+        const used = new Set();
+        while (deps.length < CONFIG.depCount) {
+            const si = Math.floor(Math.random() * tasks.length);
+            const ti = Math.floor(Math.random() * tasks.length);
+            if (si === ti) continue;
+            
+            const source = tasks[si];
+            const target = tasks[ti];
+            
+            // Logic: Source must end before target starts (mostly)
+            // Allow some overlap but usually sequential
+            if (source.end < target.start && !used.has(`${si}-${ti}`)) {
+                deps.push({ source: source.id, target: target.id });
+                used.add(`${si}-${ti}`);
+            }
+        }
+
+        return { tasks, hierarchy, deps };
+    }
+
+    const { tasks, hierarchy, deps } = generateData();
+
+    // --- Hierarchy for Bundling ---
+    const root = d3.stratify()
+        .id(d => d.id)
+        .parentId(d => d.parent)(hierarchy);
+
+    const nodesById = new Map(root.descendants().map(d => [d.id, d]));
+
+    // --- Scales ---
+    const xScale = d3.scaleTime()
+        .domain([
+            d3.min(tasks, d => d.start),
+            d3.max(tasks, d => d.end)
+        ])
+        .range([0, innerWidth])
+        .nice();
+
+    const yScale = d3.scaleBand()
+        .domain(tasks.map(d => d.id))
+        .range([0, innerHeight])
+        .padding(0.2);
+
+    // --- Visualization ---
+    const svg = d3.select("#chart-container")
+        .append("svg")
+        .attr("viewBox", `0 0 ${CONFIG.width} ${CONFIG.height}`)
+        .attr("width", "100%")
+        .attr("height", "100%");
+
+    // Markers for arrows
+    svg.append("defs").append("marker")
+        .attr("id", "arrowhead")
+        .attr("viewBox", "0 -5 10 10")
+        .attr("refX", 8)
+        .attr("refY", 0)
+        .attr("markerWidth", 5)
+        .attr("markerHeight", 5)
+        .attr("orient", "auto")
+        .append("path")
+        .attr("d", "M0,-5L10,0L0,5")
+        .attr("fill", "#999");
+
+    const g = svg.append("g")
+        .attr("transform", `translate(${CONFIG.margin.left},${CONFIG.margin.top})`);
+
+    // --- Grid & Axes ---
+    const xAxis = d3.axisTop(xScale)
+        .ticks(d3.timeWeek.every(1))
+        .tickFormat(d3.timeFormat("%b %d"));
+
+    g.append("g")
+        .attr("class", "grid")
+        .call(d3.axisTop(xScale)
+            .ticks(d3.timeWeek.every(1))
+            .tickSize(-innerHeight)
+            .tickFormat("")
+        );
+
+    const xAxisG = g.append("g")
+        .attr("class", "axis-label")
+        .call(xAxis);
+
+    xAxisG.select(".domain").remove();
+
+    // --- Phase Backgrounds & Labels ---
+    const phaseGroups = d3.group(tasks, d => d.phaseId);
+    phaseGroups.forEach((phaseTasks, phaseId) => {
+        const phase = CONFIG.phases.find(p => p.id === phaseId);
+        const y0 = yScale(phaseTasks[0].id);
+        const y1 = yScale(phaseTasks[phaseTasks.length - 1].id) + yScale.bandwidth();
+        
+        g.insert("rect", ":first-child")
+            .attr("x", -CONFIG.margin.left + 20)
+            .attr("y", y0 - 4)
+            .attr("width", innerWidth + CONFIG.margin.left - 40)
+            .attr("height", y1 - y0 + 8)
+            .attr("fill", phase.color)
+            .attr("fill-opacity", 0.04)
+            .attr("rx", 10);
+
+        g.append("text")
+            .attr("class", "phase-label")
+            .attr("x", -CONFIG.margin.left + 30)
+            .attr("y", (y0 + y1) / 2)
+            .attr("dominant-baseline", "middle")
+            .attr("fill", phase.color)
+            .attr("opacity", 0.6)
+            .attr("transform", `rotate(-90, ${-CONFIG.margin.left + 30}, ${(y0 + y1) / 2})`)
+            .attr("text-anchor", "middle")
+            .text(phase.name);
+    });
+
+    // --- Task Labels ---
+    g.selectAll(".task-label")
+        .data(tasks)
+        .enter()
+        .append("text")
+        .attr("class", "task-label")
+        .attr("x", -15)
+        .attr("y", d => yScale(d.id) + yScale.bandwidth() / 2)
+        .attr("dy", "0.35em")
+        .attr("text-anchor", "end")
+        .text(d => d.name);
+
+    // --- Pre-calculate Bundle Points ---
+    // For Cartesian bundling, we need to assign X and Y positions to every node in the hierarchy
+    root.each(d => {
+        if (d.height === 0) {
+            // Leaf: use the task's bar position
+            const task = tasks.find(t => t.id === d.id);
+            d._y = yScale(d.id) + yScale.bandwidth() / 2;
+            d._xStart = xScale(task.start);
+            d._xEnd = xScale(task.end);
+        } else {
+            // Internal: use average of children
+            const leaves = d.leaves();
+            d._y = d3.mean(leaves, l => yScale(l.id) + yScale.bandwidth() / 2);
+            // x for internal nodes will be determined per-edge to be between source and target
+        }
+    });
+
+    const bundleLine = d3.line()
+        .curve(d3.curveBundle.beta(1 - CONFIG.beta))
+        .x(d => d.currX)
+        .y(d => d._y);
+
+    // Process edge paths
+    const edgeData = deps.map(d => {
+        const sourceNode = nodesById.get(d.source);
+        const targetNode = nodesById.get(d.target);
+        const path = sourceNode.path(targetNode);
+        
+        // Enhance path with current X for routing
+        const xStart = sourceNode._xEnd;
+        const xEnd = targetNode._xStart;
+        
+        const enhancedPath = path.map((node, i) => {
+            const t = i / (path.length - 1);
+            return {
+                ...node,
+                currX: i === 0 ? xStart : (i === path.length - 1 ? xEnd : xStart + (xEnd - xStart) * t)
+            };
+        });
+
+        return {
+            source: d.source,
+            target: d.target,
+            path: enhancedPath
+        };
+    });
+
+    // --- Dependency Graph for Highlighting ---
+    const adj = new Map();
+    const revAdj = new Map();
+    deps.forEach(d => {
+        if (!adj.has(d.source)) adj.set(d.source, []);
+        if (!revAdj.has(d.target)) revAdj.set(d.target, []);
+        adj.get(d.source).push(d.target);
+        revAdj.get(d.target).push(d.source);
+    });
+
+    function getChain(id, direction = 'both') {
+        const visited = new Set();
+        const edges = new Set();
+        
+        function walk(nodeId, mode) {
+            if (visited.has(nodeId)) return;
+            visited.add(nodeId);
+            
+            if (mode === 'down' || mode === 'both') {
+                const neighbors = adj.get(nodeId) || [];
+                neighbors.forEach(next => {
+                    edges.add(`${nodeId}->${next}`);
+                    walk(next, 'down');
+                });
+            }
+            if (mode === 'up' || mode === 'both') {
+                const neighbors = revAdj.get(nodeId) || [];
+                neighbors.forEach(prev => {
+                    edges.add(`${prev}->${nodeId}`);
+                    walk(prev, 'up');
+                });
+            }
+        }
+        
+        walk(id, direction);
+        return { nodes: visited, edges };
+    }
+
+    // --- Render Edges ---
+    const edgePaths = g.selectAll(".dep-line")
+        .data(edgeData)
+        .enter()
+        .append("path")
+        .attr("class", "dep-line")
+        .attr("d", d => bundleLine(d.path))
+        .attr("stroke", "#999")
+        .attr("stroke-opacity", 0.25)
+        .attr("stroke-width", 1.2);
+
+    // --- Render Task Bars ---
+    const barGroups = g.selectAll(".bar-group")
+        .data(tasks)
+        .enter()
+        .append("g")
+        .attr("class", "bar-group");
+
+    const bars = barGroups.append("rect")
+        .attr("x", d => xScale(d.start))
+        .attr("y", d => yScale(d.id))
+        .attr("width", d => xScale(d.end) - xScale(d.start))
+        .attr("height", yScale.bandwidth())
+        .attr("fill", d => d.color)
+        .attr("rx", 4)
+        .attr("cursor", "pointer");
+
+    // --- Interaction ---
+    const tooltip = d3.select("#tooltip");
+    const fmt = d3.timeFormat("%b %d, %Y");
+
+    barGroups.on("mouseenter", (event, d) => {
+        const { nodes, edges } = getChain(d.id);
+        
+        // Highlight bars
+        bars.transition().duration(200)
+            .attr("opacity", t => nodes.has(t.id) ? 1 : 0.1)
+            .attr("stroke", t => t.id === d.id ? "#000" : "none")
+            .attr("stroke-width", 2);
+
+        // Highlight edges
+        edgePaths.transition().duration(200)
+            .attr("stroke", e => edges.has(`${e.source}->${e.target}`) ? CONFIG.phases.find(p => p.id === nodesById.get(e.source).parent.id).color : "#999")
+            .attr("stroke-opacity", e => edges.has(`${e.source}->${e.target}`) ? 0.9 : 0.05)
+            .attr("stroke-width", e => edges.has(`${e.source}->${e.target}`) ? 2.5 : 1)
+            .attr("marker-end", e => edges.has(`${e.source}->${e.target}`) ? "url(#arrowhead)" : "none");
+
+        // Tooltip
+        tooltip.style("opacity", 1)
+            .html(`<strong>${d.name}</strong>
+                   Phase: ${CONFIG.phases.find(p => p.id === d.phaseId).name}<br>
+                   Range: ${fmt(d.start)} – ${fmt(d.end)}<br>
+                   Duration: ${d.duration} days`)
+            .style("left", (event.pageX + 15) + "px")
+            .style("top", (event.pageY - 10) + "px");
+    })
+    .on("mousemove", (event) => {
+        tooltip.style("left", (event.pageX + 15) + "px")
+               .style("top", (event.pageY - 10) + "px");
+    })
+    .on("mouseleave", () => {
+        bars.transition().duration(200)
+            .attr("opacity", 1)
+            .attr("stroke", "none");
+
+        edgePaths.transition().duration(200)
+            .attr("stroke", "#999")
+            .attr("stroke-opacity", 0.25)
+            .attr("stroke-width", 1.2)
+            .attr("marker-end", "none");
+
+        tooltip.style("opacity", 0);
+    });
+
+    // --- Title & Header ---
+    svg.append("text")
+        .attr("x", CONFIG.width / 2)
+        .attr("y", 35)
+        .attr("text-anchor", "middle")
+        .attr("font-size", "22px")
+        .attr("font-weight", "700")
+        .text("Project Roadmap & Strategic Dependencies");
+
+    svg.append("text")
+        .attr("x", CONFIG.width / 2)
+        .attr("y", 58)
+        .attr("text-anchor", "middle")
+        .attr("font-size", "14px")
+        .attr("fill", "#666666")
+        .text("Hover over a task to trace its upstream and downstream dependency chains.");
+
+</script>
+
+</body>
+</html>

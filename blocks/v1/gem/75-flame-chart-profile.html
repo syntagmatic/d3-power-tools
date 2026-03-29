@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>CPU Flame Chart Profile</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    :root {
+      --bg: #1e1e1e;
+      --text: #d4d4d4;
+      --border: #333;
+      --accent: #007acc;
+    }
+    body {
+      margin: 0;
+      padding: 20px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+    .header {
+      margin-bottom: 20px;
+      flex-shrink: 0;
+    }
+    h1 {
+      margin: 0;
+      font-size: 1.2rem;
+      font-weight: 500;
+    }
+    .meta {
+      font-size: 0.85rem;
+      color: #888;
+      margin-top: 4px;
+    }
+    #chart-container {
+      position: relative;
+      flex-grow: 1;
+      border: 1px solid var(--border);
+      background: #111;
+      cursor: crosshair;
+      overflow: hidden;
+    }
+    canvas {
+      display: block;
+    }
+    .tooltip {
+      position: absolute;
+      pointer-events: none;
+      background: rgba(30, 30, 30, 0.95);
+      border: 1px solid #444;
+      padding: 8px 12px;
+      border-radius: 4px;
+      font-size: 12px;
+      color: #eee;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+      opacity: 0;
+      z-index: 100;
+      line-height: 1.4;
+    }
+    .tooltip .name { font-weight: bold; color: #fff; margin-bottom: 2px; display: block; }
+    .tooltip .mod { font-size: 11px; color: #aaa; }
+    .controls {
+      display: flex;
+      gap: 20px;
+      margin-top: 10px;
+      font-size: 0.8rem;
+      color: #888;
+      flex-shrink: 0;
+    }
+    kbd {
+      background: #333;
+      padding: 2px 4px;
+      border-radius: 3px;
+      color: #ccc;
+    }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <h1>CPU Profile — Flame Chart</h1>
+  <div class="meta" id="stats">800 frames, 8 modules</div>
+</div>
+
+<div id="chart-container">
+  <div class="tooltip" id="tooltip"></div>
+</div>
+
+<div class="controls">
+  <span><kbd>Scroll</kbd> Zoom Horizontally</span>
+  <span><kbd>Click</kbd> Focus Subtree</span>
+  <span><kbd>Right Click</kbd> Reset</span>
+  <span id="zoom-level">Zoom: 1.0x</span>
+</div>
+
+<script>
+(async () => {
+  const container = document.getElementById('chart-container');
+  const tooltip = d3.select('#tooltip');
+  const statsEl = document.getElementById('stats');
+  const zoomEl = document.getElementById('zoom-level');
+
+  const width = container.clientWidth;
+  const height = container.clientHeight;
+  const dpr = window.devicePixelRatio || 1;
+  const rowHeight = 20;
+
+  // 8 Modules with distinct colors
+  const modules = [
+    { name: "Kernel", color: "#e6194B" },
+    { name: "Driver", color: "#3cb44b" },
+    { name: "FileSystem", color: "#ffe119" },
+    { name: "Network", color: "#4363d8" },
+    { name: "UserSpace", color: "#f58231" },
+    { name: "Graphics", color: "#911eb4" },
+    { name: "Audio", color: "#42d4f4" },
+    { name: "Security", color: "#f032e6" }
+  ];
+
+  const funcPrefixes = ["handle", "on", "exec", "wait", "parse", "send", "recv", "update", "compute", "render"];
+  const funcSuffixes = ["Request", "Event", "Buffer", "Data", "State", "Packet", "Lock", "Thread", "Frame", "Query"];
+
+  // Generate ~800 nodes
+  const nodes = [];
+  let idSeq = 0;
+
+  function generateHierarchy() {
+    const root = { id: idSeq++, name: "root", value: 1000, module: modules[0] };
+    nodes.push(root);
+
+    function addChildren(parent, currentDepth, maxDepth) {
+      if (currentDepth >= maxDepth || nodes.length >= 800) return;
+
+      const numChildren = Math.floor(Math.random() * 6) + 1;
+      let remainingValue = parent.value;
+
+      for (let i = 0; i < numChildren; i++) {
+        if (nodes.length >= 800) break;
+        const val = i === numChildren - 1 ? remainingValue : Math.random() * remainingValue * 0.7;
+        if (val < 1) continue;
+        remainingValue -= val;
+
+        const mod = Math.random() > 0.8 ? modules[Math.floor(Math.random() * modules.length)] : parent.module;
+        const name = funcPrefixes[Math.floor(Math.random() * funcPrefixes.length)] + 
+                     funcSuffixes[Math.floor(Math.random() * funcSuffixes.length)];
+        
+        const child = { 
+          id: idSeq++, 
+          name, 
+          value: val, 
+          parentId: parent.id,
+          module: mod 
+        };
+        nodes.push(child);
+        if (val > 10) {
+          addChildren(child, currentDepth + 1, maxDepth);
+        }
+      }
+    }
+
+    // Start with core modules
+    let rootRemaining = root.value;
+    modules.forEach((m, i) => {
+      const val = i === modules.length - 1 ? rootRemaining : (Math.random() * 0.15 + 0.05) * root.value;
+      rootRemaining -= val;
+      const child = { id: idSeq++, name: m.name + "Main", value: val, parentId: root.id, module: m };
+      nodes.push(child);
+      addChildren(child, 1, 15);
+    });
+
+    return d3.stratify()
+      .id(d => d.id)
+      .parentId(d => d.parentId)(nodes);
+  }
+
+  const root = generateHierarchy();
+  root.sum(d => d.value);
+
+  // Partition flipped vertically: we calculate total height based on max depth
+  const maxDepth = root.height;
+  const chartHeight = (maxDepth + 1) * rowHeight;
+  
+  const partition = d3.partition()
+    .size([width, chartHeight])
+    .padding(0);
+
+  partition(root);
+
+  // Canvas setup
+  const canvas = d3.select(container).append('canvas')
+    .attr('width', width * dpr)
+    .attr('height', height * dpr)
+    .style('width', width + 'px')
+    .style('height', height + 'px')
+    .node();
+
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  // Flattened data for quick rendering
+  const allNodes = root.descendants();
+  statsEl.textContent = `${allNodes.length} stack frames, 8 modules`;
+
+  let currentTransform = d3.zoomIdentity;
+  let pendingRender = false;
+
+  function render() {
+    pendingRender = false;
+    ctx.clearRect(0, 0, width, height);
+
+    const k = currentTransform.k;
+    const tx = currentTransform.x;
+
+    ctx.save();
+    
+    // Draw rectangles
+    for (const d of allNodes) {
+      const x0 = d.x0 * k + tx;
+      const x1 = d.x1 * k + tx;
+      const w = x1 - x0;
+
+      // Culling
+      if (x1 < 0 || x0 > width) continue;
+      
+      // LOD: Don't draw very small ones
+      if (w < 0.5 / k) continue;
+
+      // "Flipped Vertically" logic: Root at bottom
+      // d.y0 is distance from root. Root is at d.y0 = 0.
+      // We want root at y = height - rowHeight
+      const y = height - d.y0 - rowHeight;
+
+      // Draw box
+      ctx.fillStyle = d.data.module.color;
+      ctx.globalAlpha = 0.85;
+      ctx.fillRect(x0, y, w, rowHeight - 1);
+      
+      // Stroke for definition
+      ctx.strokeStyle = 'rgba(0,0,0,0.2)';
+      ctx.lineWidth = 0.5;
+      ctx.strokeRect(x0, y, w, rowHeight - 1);
+
+      // Label LOD
+      if (w > 40) {
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = '#fff';
+        ctx.font = '10px sans-serif';
+        ctx.textBaseline = 'middle';
+        
+        const label = d.data.name;
+        const metrics = ctx.measureText(label);
+        if (metrics.width < w - 6) {
+          ctx.fillText(label, x0 + 3, y + rowHeight / 2);
+        } else if (w > 20) {
+          // Truncate if possible
+          const chars = Math.floor(w / 7);
+          if (chars > 3) {
+            ctx.fillText(label.substring(0, chars - 2) + '..', x0 + 3, y + rowHeight / 2);
+          }
+        }
+      }
+    }
+    ctx.restore();
+    
+    zoomEl.textContent = `Zoom: ${k.toFixed(1)}x`;
+  }
+
+  function requestRender() {
+    if (!pendingRender) {
+      pendingRender = true;
+      requestAnimationFrame(render);
+    }
+  }
+
+  // Zoom behavior
+  const zoom = d3.zoom()
+    .scaleExtent([1, 1000])
+    .translateExtent([[0, 0], [width, height]])
+    .on('zoom', (event) => {
+      // Force horizontal zoom only by overriding the transform
+      const t = event.transform;
+      currentTransform = d3.zoomIdentity.translate(t.x, 0).scale(t.k);
+      requestRender();
+    });
+
+  d3.select(canvas).call(zoom);
+
+  // Interaction: Hit Detection
+  function getNodeAt(mx, my) {
+    const k = currentTransform.k;
+    const tx = currentTransform.x;
+
+    for (const d of allNodes) {
+      const x0 = d.x0 * k + tx;
+      const x1 = d.x1 * k + tx;
+      const y = height - d.y0 - rowHeight;
+
+      if (mx >= x0 && mx <= x1 && my >= y && my <= y + rowHeight) {
+        return d;
+      }
+    }
+    return null;
+  }
+
+  canvas.addEventListener('mousemove', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+
+    const node = getNodeAt(mx, my);
+    if (node) {
+      const total = root.value;
+      const pct = ((node.value / total) * 100).toFixed(2);
+      tooltip
+        .style('opacity', 1)
+        .style('left', (e.clientX + 15) + 'px')
+        .style('top', (e.clientY - 10) + 'px')
+        .html(`
+          <span class="name">${node.data.name}</span>
+          <span class="mod">${node.data.module.name}</span><br/>
+          Value: ${node.value.toFixed(1)} (${pct}%)
+        `);
+      canvas.style.cursor = 'pointer';
+    } else {
+      tooltip.style('opacity', 0);
+      canvas.style.cursor = 'crosshair';
+    }
+  });
+
+  canvas.addEventListener('click', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+
+    const node = getNodeAt(mx, my);
+    if (node) {
+      // Zoom to fit node horizontally
+      const nodeW = node.x1 - node.x0;
+      const targetK = width / nodeW;
+      const targetX = -node.x0 * targetK;
+
+      d3.select(canvas).transition().duration(750).ease(d3.easeCubicOut)
+        .call(zoom.transform, d3.zoomIdentity.translate(targetX, 0).scale(targetK));
+    }
+  });
+
+  canvas.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    d3.select(canvas).transition().duration(750).ease(d3.easeCubicOut)
+      .call(zoom.transform, d3.zoomIdentity);
+  });
+
+  // Initial render
+  requestRender();
+
+  window.addEventListener('resize', () => {
+    const newWidth = container.clientWidth;
+    const newHeight = container.clientHeight;
+    
+    // Update partition if width changed
+    if (newWidth !== width) {
+      partition.size([newWidth, (root.height + 1) * rowHeight])(root);
+    }
+    
+    canvas.width = newWidth * dpr;
+    canvas.height = newHeight * dpr;
+    canvas.style.width = newWidth + 'px';
+    canvas.style.height = newHeight + 'px';
+    ctx.scale(dpr, dpr);
+    
+    requestRender();
+  });
+
+})();
+</script>
+</body>
+</html>

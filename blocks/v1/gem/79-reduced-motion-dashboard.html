@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Reduced Motion Crossfilter Dashboard</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card-bg: #ffffff;
+      --text: #1e293b;
+      --text-muted: #64748b;
+      --border: #e2e8f0;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      padding: 2rem;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 2rem;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+
+    h1 { font-size: 1.5rem; font-weight: 700; color: var(--text); }
+
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .status-badge {
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.25rem 0.75rem;
+      border-radius: 9999px;
+      background: var(--border);
+      color: var(--text-muted);
+    }
+
+    .status-badge.active {
+      background: #dcfce7;
+      color: #166534;
+    }
+
+    button {
+      appearance: none;
+      background: var(--primary);
+      color: white;
+      border: none;
+      padding: 0.5rem 1rem;
+      border-radius: 0.375rem;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 0.875rem;
+      transition: background 0.2s;
+    }
+
+    button:hover { background: var(--primary-hover); }
+    button.secondary { background: white; color: var(--text); border: 1px solid var(--border); }
+    button.secondary:hover { background: var(--bg); }
+
+    .dashboard-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+      gap: 1.5rem;
+    }
+
+    .card {
+      background: var(--card-bg);
+      border-radius: 0.75rem;
+      padding: 1.5rem;
+      box-shadow: var(--shadow);
+      border: 1px solid var(--border);
+    }
+
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1rem;
+    }
+
+    .card-title {
+      font-size: 0.875rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.025em;
+      color: var(--text-muted);
+    }
+
+    .viz { width: 100%; height: 250px; position: relative; }
+
+    /* D3 Styles */
+    .axis-label { font-size: 10px; fill: var(--text-muted); }
+    .domain, .tick line { stroke: var(--border); }
+    .tick text { fill: var(--text-muted); font-size: 10px; }
+    
+    .bar { cursor: pointer; }
+    .bar:hover { filter: brightness(0.9); }
+    
+    .dot { stroke: #fff; stroke-width: 1px; }
+    
+    .brush .selection { fill: var(--primary); fill-opacity: 0.1; stroke: var(--primary); }
+
+    .tooltip {
+      position: absolute;
+      padding: 0.5rem;
+      background: rgba(15, 23, 42, 0.9);
+      color: white;
+      border-radius: 0.25rem;
+      font-size: 0.75rem;
+      pointer-events: none;
+      opacity: 0;
+      z-index: 10;
+    }
+
+    @media (max-width: 640px) {
+      body { padding: 1rem; }
+      .dashboard-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <header>
+      <div>
+        <h1>Sales Intelligence</h1>
+        <p style="color: var(--text-muted); font-size: 0.875rem;">Interactive Crossfilter Dashboard</p>
+      </div>
+      <div class="controls">
+        <div id="motion-status" class="status-badge">Motion: Enabled</div>
+        <button id="toggle-motion" class="secondary">Reduce Motion</button>
+        <button id="reset-filters">Reset All</button>
+      </div>
+    </header>
+
+    <div class="dashboard-grid">
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Revenue by Category</span>
+        </div>
+        <div id="bar-chart" class="viz"></div>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Daily Sales Trend</span>
+        </div>
+        <div id="line-chart" class="viz"></div>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Efficiency: Margin vs Volume</span>
+        </div>
+        <div id="scatter-plot" class="viz"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="tooltip" class="tooltip"></div>
+
+  <script>
+    // Configuration & State
+    const CONFIG = {
+      categories: ["Electronics", "Furniture", "Apparel", "Beauty", "Grocery", "Home"],
+      colors: ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899"],
+      duration: 300
+    };
+
+    let state = {
+      reducedMotion: window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+      filters: {
+        category: null,
+        timeRange: null,
+        scatterSelection: null
+      }
+    };
+
+    // Data Generation
+    const generateData = (n = 400) => {
+      const random = d3.randomLcg(123);
+      const now = new Date(2024, 0, 1);
+      return Array.from({ length: n }, (_, i) => {
+        const catIdx = Math.floor(random() * CONFIG.categories.length);
+        const dayOffset = Math.floor(random() * 90);
+        return {
+          id: i,
+          category: CONFIG.categories[catIdx],
+          date: new Date(now.getTime() + dayOffset * 24 * 60 * 60 * 1000),
+          revenue: 10 + random() * 90 + (catIdx * 10),
+          margin: 0.05 + random() * 0.4,
+          quantity: Math.floor(1 + random() * 20)
+        };
+      });
+    };
+
+    const data = generateData();
+    const dispatcher = d3.dispatch("filter");
+
+    // Utilities
+    const getTransition = () => state.reducedMotion ? d3.transition().duration(0) : d3.transition().duration(CONFIG.duration);
+    
+    const updateMotionUI = () => {
+      const btn = document.getElementById("toggle-motion");
+      const status = document.getElementById("motion-status");
+      if (state.reducedMotion) {
+        btn.textContent = "Enable Motion";
+        status.textContent = "Motion: Reduced";
+        status.classList.remove("active");
+      } else {
+        btn.textContent = "Reduce Motion";
+        status.textContent = "Motion: Enabled";
+        status.classList.add("active");
+      }
+    };
+
+    const tooltip = d3.select("#tooltip");
+
+    // --- Chart Components ---
+
+    const BarChart = (selector) => {
+      const container = d3.select(selector);
+      const width = container.node().clientWidth;
+      const height = container.node().clientHeight;
+      const margin = { top: 10, right: 10, bottom: 30, left: 40 };
+
+      const svg = container.append("svg")
+        .attr("width", width)
+        .attr("height", height);
+
+      const g = svg.append("g")
+        .attr("transform", `translate(${margin.left},${margin.top})`);
+
+      const x = d3.scaleBand()
+        .domain(CONFIG.categories)
+        .range([0, width - margin.left - margin.right])
+        .padding(0.3);
+
+      const y = d3.scaleLinear()
+        .range([height - margin.top - margin.bottom, 0]);
+
+      const xAxis = g.append("g")
+        .attr("transform", `translate(0,${height - margin.top - margin.bottom})`);
+
+      const yAxis = g.append("g");
+
+      xAxis.call(d3.axisBottom(x).tickSize(0).tickPadding(10));
+
+      const update = (filteredData) => {
+        const aggregated = d3.rollup(filteredData, 
+          v => d3.sum(v, d => d.revenue), 
+          d => d.category
+        );
+
+        const plotData = CONFIG.categories.map(c => ({
+          category: c,
+          value: aggregated.get(c) || 0
+        }));
+
+        y.domain([0, d3.max(plotData, d => d.value) || 100]).nice();
+
+        yAxis.transition(getTransition())
+          .call(d3.axisLeft(y).ticks(5, "$.0s").tickSize(-(width - margin.left - margin.right)));
+
+        const bars = g.selectAll(".bar")
+          .data(plotData, d => d.category);
+
+        bars.join(
+          enter => enter.append("rect")
+            .attr("class", "bar")
+            .attr("x", d => x(d.category))
+            .attr("y", y(0))
+            .attr("width", x.bandwidth())
+            .attr("height", 0)
+            .attr("fill", (d, i) => CONFIG.colors[i % CONFIG.colors.length])
+            .attr("rx", 4),
+          update => update,
+          exit => exit.remove()
+        )
+        .on("click", (e, d) => {
+          state.filters.category = state.filters.category === d.category ? null : d.category;
+          dispatcher.call("filter");
+        })
+        .on("mouseover", (e, d) => {
+          tooltip.style("opacity", 1)
+            .html(`<strong>${d.category}</strong><br/>$${d3.format(",.0f")(d.value)}`);
+        })
+        .on("mousemove", (e) => {
+          tooltip.style("left", (e.pageX + 10) + "px").style("top", (e.pageY - 20) + "px");
+        })
+        .on("mouseout", () => tooltip.style("opacity", 0))
+        .transition(getTransition())
+          .attr("y", d => y(d.value))
+          .attr("height", d => y(0) - y(d.value))
+          .attr("opacity", d => (!state.filters.category || state.filters.category === d.category) ? 1 : 0.3);
+      };
+
+      return { update };
+    };
+
+    const LineChart = (selector) => {
+      const container = d3.select(selector);
+      const width = container.node().clientWidth;
+      const height = container.node().clientHeight;
+      const margin = { top: 10, right: 10, bottom: 30, left: 40 };
+
+      const svg = container.append("svg")
+        .attr("width", width)
+        .attr("height", height);
+
+      const g = svg.append("g")
+        .attr("transform", `translate(${margin.left},${margin.top})`);
+
+      const x = d3.scaleTime()
+        .range([0, width - margin.left - margin.right]);
+
+      const y = d3.scaleLinear()
+        .range([height - margin.top - margin.bottom, 0]);
+
+      const xAxis = g.append("g")
+        .attr("transform", `translate(0,${height - margin.top - margin.bottom})`);
+
+      const yAxis = g.append("g");
+
+      const area = d3.area()
+        .x(d => x(d[0]))
+        .y0(y(0))
+        .y1(d => y(d[1]))
+        .curve(d3.curveMonotoneX);
+
+      const path = g.append("path")
+        .attr("fill", CONFIG.colors[0])
+        .attr("fill-opacity", 0.1);
+
+      const linePath = g.append("path")
+        .attr("fill", "none")
+        .attr("stroke", CONFIG.colors[0])
+        .attr("stroke-width", 2);
+
+      const update = (filteredData) => {
+        const aggregated = d3.rollup(filteredData,
+          v => d3.sum(v, d => d.revenue),
+          d => d3.timeDay(d.date)
+        );
+
+        const plotData = Array.from(aggregated).sort((a, b) => a[0] - b[0]);
+
+        x.domain(d3.extent(data, d => d.date));
+        y.domain([0, d3.max(plotData, d => d[1]) || 100]).nice();
+
+        xAxis.transition(getTransition())
+          .call(d3.axisBottom(x).ticks(5).tickFormat(d3.timeFormat("%b %d")));
+
+        yAxis.transition(getTransition())
+          .call(d3.axisLeft(y).ticks(5, "$.0s").tickSize(-(width - margin.left - margin.right)));
+
+        path.datum(plotData)
+          .transition(getTransition())
+          .attr("d", area);
+
+        linePath.datum(plotData)
+          .transition(getTransition())
+          .attr("d", d3.line().x(d => x(d[0])).y(d => y(d[1])).curve(d3.curveMonotoneX));
+      };
+
+      return { update };
+    };
+
+    const ScatterPlot = (selector) => {
+      const container = d3.select(selector);
+      const width = container.node().clientWidth;
+      const height = container.node().clientHeight;
+      const margin = { top: 10, right: 10, bottom: 30, left: 40 };
+
+      const svg = container.append("svg")
+        .attr("width", width)
+        .attr("height", height);
+
+      const g = svg.append("g")
+        .attr("transform", `translate(${margin.left},${margin.top})`);
+
+      const x = d3.scaleLinear()
+        .domain([0, d3.max(data, d => d.quantity)])
+        .range([0, width - margin.left - margin.right]);
+
+      const y = d3.scaleLinear()
+        .domain([0, d3.max(data, d => d.margin)])
+        .range([height - margin.top - margin.bottom, 0]);
+
+      const xAxis = g.append("g")
+        .attr("transform", `translate(0,${height - margin.top - margin.bottom})`);
+
+      const yAxis = g.append("g");
+
+      xAxis.call(d3.axisBottom(x).ticks(5));
+      yAxis.call(d3.axisLeft(y).ticks(5, "%").tickSize(-(width - margin.left - margin.right)));
+
+      const brush = d3.brush()
+        .extent([[0, 0], [width - margin.left - margin.right, height - margin.top - margin.bottom]])
+        .on("brush end", (event) => {
+          if (!event.sourceEvent) return;
+          state.filters.scatterSelection = event.selection;
+          dispatcher.call("filter");
+        });
+
+      g.append("g")
+        .attr("class", "brush")
+        .call(brush);
+
+      const update = (filteredData) => {
+        const dots = g.selectAll(".dot")
+          .data(data, d => d.id);
+
+        const activeIds = new Set(filteredData.map(d => d.id));
+
+        dots.join(
+          enter => enter.append("circle")
+            .attr("class", "dot")
+            .attr("cx", d => x(d.quantity))
+            .attr("cy", d => y(d.margin))
+            .attr("r", 4)
+            .attr("fill", d => CONFIG.colors[CONFIG.categories.indexOf(d.category)])
+            .attr("opacity", 0.6),
+          update => update,
+          exit => exit.remove()
+        )
+        .transition(getTransition())
+          .attr("opacity", d => activeIds.has(d.id) ? 0.7 : 0.05)
+          .attr("r", d => activeIds.has(d.id) ? 4 : 2);
+      };
+
+      return { update, brush, brushG: g.select(".brush") };
+    };
+
+    // --- Main Logic ---
+
+    const bar = BarChart("#bar-chart");
+    const line = LineChart("#line-chart");
+    const scatter = ScatterPlot("#scatter-plot");
+
+    const filterData = () => {
+      let filtered = data;
+      
+      if (state.filters.category) {
+        filtered = filtered.filter(d => d.category === state.filters.category);
+      }
+
+      if (state.filters.scatterSelection) {
+        const [[x0, y0], [x1, y1]] = state.filters.scatterSelection;
+        // Map pixel coords to data scales
+        const xS = d3.scaleLinear().domain([0, d3.max(data, d => d.quantity)]).range([0, scatter.brushG.node().getBBox().width]);
+        const yS = d3.scaleLinear().domain([0, d3.max(data, d => d.margin)]).range([scatter.brushG.node().getBBox().height, 0]);
+        
+        filtered = filtered.filter(d => {
+          const px = xS(d.quantity);
+          const py = yS(d.margin);
+          return px >= x0 && px <= x1 && py >= y0 && py <= y1;
+        });
+      }
+
+      return filtered;
+    };
+
+    dispatcher.on("filter", () => {
+      const filtered = filterData();
+      bar.update(filtered);
+      line.update(filtered);
+      scatter.update(filtered);
+    });
+
+    // Initial Render
+    updateMotionUI();
+    dispatcher.call("filter");
+
+    // Event Listeners
+    document.getElementById("toggle-motion").addEventListener("click", () => {
+      state.reducedMotion = !state.reducedMotion;
+      updateMotionUI();
+    });
+
+    document.getElementById("reset-filters").addEventListener("click", () => {
+      state.filters.category = null;
+      state.filters.scatterSelection = null;
+      scatter.brushG.call(scatter.brush.move, null);
+      dispatcher.call("filter");
+    });
+
+    // Handle Resize
+    window.addEventListener("resize", () => {
+      // For simplicity in this demo, we just re-render. 
+      // In a production app, we would recalculate scales.
+      location.reload();
+    });
+
+  </script>
+</body>
+</html>

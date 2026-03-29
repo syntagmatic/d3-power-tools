@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2D Density & Contour Zoom</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --text: #f8fafc;
+            --muted: #64748b;
+            --contour-stroke: rgba(255, 255, 255, 0.1);
+        }
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+        #container {
+            position: relative;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            border-radius: 8px;
+            background: #1e293b;
+            padding: 20px;
+        }
+        .controls {
+            position: absolute;
+            top: 30px;
+            right: 30px;
+            text-align: right;
+            pointer-events: none;
+        }
+        .controls h1 {
+            margin: 0;
+            font-size: 1.2rem;
+            font-weight: 600;
+            letter-spacing: -0.025em;
+        }
+        .controls p {
+            margin: 4px 0 0;
+            font-size: 0.8rem;
+            color: var(--muted);
+        }
+        .axis path, .axis line {
+            stroke: var(--muted);
+        }
+        .axis text {
+            fill: var(--muted);
+            font-size: 10px;
+        }
+        .brush .selection {
+            fill: rgba(255, 255, 255, 0.1);
+            stroke: #fff;
+            stroke-dasharray: 4;
+        }
+        .point {
+            fill: rgba(255, 255, 255, 0.3);
+            pointer-events: none;
+        }
+        .contour-path {
+            stroke: var(--contour-stroke);
+            stroke-width: 0.5;
+            mix-blend-mode: screen;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div class="controls">
+            <h1>Multiscale Density Explorer</h1>
+            <p>Brush to zoom • Double-click to reset</p>
+            <p id="stats" style="font-family: monospace;"></p>
+        </div>
+        <svg id="viz"></svg>
+    </div>
+
+    <script>
+        const width = 800;
+        const height = 600;
+        const margin = { top: 40, right: 40, bottom: 40, left: 40 };
+        const innerWidth = width - margin.left - margin.right;
+        const innerHeight = height - margin.top - margin.bottom;
+
+        // 1. Generate Data: 3 Bivariate Normal Clusters
+        function generateData(n1, n2, n3) {
+            const randomX1 = d3.randomNormal(150, 60);
+            const randomY1 = d3.randomNormal(150, 60);
+            const randomX2 = d3.randomNormal(450, 100);
+            const randomY2 = d3.randomNormal(350, 80);
+            const randomX3 = d3.randomNormal(600, 40);
+            const randomY3 = d3.randomNormal(150, 40);
+
+            const data = [];
+            for (let i = 0; i < n1; i++) data.push({ id: i, x: randomX1(), y: randomY1() });
+            for (let i = 0; i < n2; i++) data.push({ id: i + n1, x: randomX2(), y: randomY2() });
+            for (let i = 0; i < n3; i++) data.push({ id: i + n1 + n2, x: randomX3(), y: randomY3() });
+            return data;
+        }
+
+        const rawData = generateData(5000, 2000, 1000);
+        document.getElementById('stats').innerText = `n=8,000 points`;
+
+        // 2. Setup SVG
+        const svg = d3.select("#viz")
+            .attr("width", width)
+            .attr("height", height);
+
+        const mainG = svg.append("g")
+            .attr("transform", `translate(${margin.left}, ${margin.top})`);
+
+        // Clip path for zoom
+        mainG.append("defs").append("clipPath")
+            .attr("id", "clip")
+          .append("rect")
+            .attr("width", innerWidth)
+            .attr("height", innerHeight);
+
+        const pointLayer = mainG.append("g").attr("clip-path", "url(#clip)");
+        const contourLayer = mainG.append("g").attr("clip-path", "url(#clip)");
+        const axisX = mainG.append("g").attr("class", "axis").attr("transform", `translate(0, ${innerHeight})`);
+        const axisY = mainG.append("g").attr("class", "axis");
+
+        // 3. Setup Scales
+        const xExtent = d3.extent(rawData, d => d.x);
+        const yExtent = d3.extent(rawData, d => d.y);
+        
+        // Add padding
+        const padX = (xExtent[1] - xExtent[0]) * 0.1;
+        const padY = (yExtent[1] - yExtent[0]) * 0.1;
+
+        const xScale = d3.scaleLinear().domain([xExtent[0] - padX, xExtent[1] + padX]).range([0, innerWidth]);
+        const yScale = d3.scaleLinear().domain([yExtent[0] - padY, yExtent[1] + padY]).range([innerHeight, 0]);
+
+        const color = d3.scaleSequential(d3.interpolateTurbo)
+            .domain([0, 0.0005]); // Will update based on density
+
+        // 4. Initial Rendering
+        function update(xDomain, yDomain) {
+            const currentXScale = xScale.copy().domain(xDomain);
+            const currentYScale = yScale.copy().domain(yDomain);
+
+            // Update axes
+            axisX.transition().duration(750).call(d3.axisBottom(currentXScale).ticks(8));
+            axisY.transition().duration(750).call(d3.axisLeft(currentYScale).ticks(8));
+
+            // Filter points for performance if deeply zoomed.
+            const visibleData = rawData.filter(d => 
+                d.x >= xDomain[0] && d.x <= xDomain[1] && 
+                d.y >= yDomain[0] && d.y <= yDomain[1]
+            );
+
+            // Update Points (Back Layer)
+            const points = pointLayer.selectAll(".point")
+                .data(visibleData, d => d.id);
+
+            points.exit().remove();
+
+            points.enter()
+              .append("circle")
+                .attr("class", "point")
+                .attr("r", 1.2)
+                .attr("cx", d => currentXScale(d.x))
+                .attr("cy", d => currentYScale(d.y))
+              .merge(points)
+                .transition().duration(750)
+                .attr("cx", d => currentXScale(d.x))
+                .attr("cy", d => currentYScale(d.y));
+
+            // Recompute Contours
+            // As we zoom in, we want to maintain resolution.
+            const density = d3.contourDensity()
+                .x(d => currentXScale(d.x))
+                .y(d => currentYScale(d.y))
+                .size([innerWidth, innerHeight])
+                .bandwidth(20) // pixel-space bandwidth
+                .thresholds(25)
+                (visibleData);
+
+            // Update color domain based on current max density
+            const maxVal = d3.max(density, d => d.value);
+            color.domain([0, maxVal]);
+
+            const contours = contourLayer.selectAll(".contour-path")
+                .data(density);
+
+            contours.exit().remove();
+
+            contours.enter()
+              .append("path")
+                .attr("class", "contour-path")
+                .attr("fill", d => color(d.value))
+                .attr("opacity", 0)
+              .merge(contours)
+                .transition().duration(750)
+                .attr("d", d3.geoPath())
+                .attr("fill", d => color(d.value))
+                .attr("opacity", 0.6);
+        }
+
+        // 5. Interaction: Brush
+        const brush = d3.brush()
+            .extent([[0, 0], [innerWidth, innerHeight]])
+            .on("end", brushed);
+
+        const brushG = mainG.append("g")
+            .attr("class", "brush")
+            .call(brush);
+
+        function brushed({ selection }) {
+            if (!selection) return;
+
+            const [[x0, y0], [x1, y1]] = selection;
+            
+            const newXDomain = [xScale.invert(x0), xScale.invert(x1)];
+            const newYDomain = [yScale.invert(y1), yScale.invert(y0)]; // Y is inverted
+
+            // Adjust xDomain and yDomain relative to the current scale if we wanted nested zoom,
+            // but here we use the original xScale for simplicity in inverting.
+            // Actually, we need to invert based on the PREVIOUS scale if we want recursive zoom.
+            // Let's keep it simple: brush always relative to the current view.
+            
+            const currentX = axisX.node().__currentX || xScale;
+            const currentY = axisY.node().__currentY || yScale;
+
+            const finalXDomain = [currentX.invert(x0), currentX.invert(x1)];
+            const finalYDomain = [currentY.invert(y1), currentY.invert(y0)];
+
+            // Save the current scale on the node for next zoom
+            axisX.node().__currentX = d3.scaleLinear().domain(finalXDomain).range([0, innerWidth]);
+            axisY.node().__currentY = d3.scaleLinear().domain(finalYDomain).range([innerHeight, 0]);
+
+            update(finalXDomain, finalYDomain);
+            brushG.call(brush.move, null);
+        }
+
+        // 6. Reset on double-click
+        svg.on("dblclick", () => {
+            axisX.node().__currentX = xScale;
+            axisY.node().__currentY = yScale;
+            update(xScale.domain(), yScale.domain());
+        });
+
+        // Initialize
+        update(xScale.domain(), yScale.domain());
+
+    </script>
+</body>
+</html>

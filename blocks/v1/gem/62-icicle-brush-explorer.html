@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Icicle Brush Explorer</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #f8f9fa;
+            --text-color: #212529;
+            --panel-bg: #ffffff;
+            --border-color: #dee2e6;
+            --primary-color: #0d6efd;
+            --highlight-color: #ffca2c;
+            --accent-color: #6610f2;
+            --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: var(--font-family);
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            height: 100vh;
+            box-sizing: border-box;
+            overflow: hidden;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 1.5rem;
+            font-weight: 600;
+        }
+
+        #breadcrumbs {
+            display: flex;
+            gap: 5px;
+            font-size: 0.9rem;
+            background: var(--panel-bg);
+            padding: 8px 12px;
+            border-radius: 4px;
+            border: 1px solid var(--border-color);
+            overflow-x: auto;
+            white-space: nowrap;
+        }
+
+        .breadcrumb-item {
+            color: var(--primary-color);
+            cursor: pointer;
+            text-decoration: none;
+        }
+
+        .breadcrumb-item:hover {
+            text-decoration: underline;
+        }
+
+        .breadcrumb-item::after {
+            content: "/";
+            margin-left: 5px;
+            color: var(--text-color);
+            text-decoration: none !important;
+            display: inline-block;
+        }
+
+        .breadcrumb-item:last-child {
+            color: var(--text-color);
+            cursor: default;
+        }
+
+        .breadcrumb-item:last-child:hover {
+            text-decoration: none;
+        }
+
+        .breadcrumb-item:last-child::after {
+            content: "";
+        }
+
+        main {
+            flex: 1;
+            display: grid;
+            grid-template-rows: 1fr 180px;
+            gap: 20px;
+            min-height: 0;
+        }
+
+        .panel {
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            position: relative;
+            overflow: hidden;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+
+        #icicle-container svg {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        #histogram-container svg {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        .node {
+            cursor: pointer;
+            stroke: #fff;
+            stroke-width: 0.5px;
+            transition: opacity 0.2s;
+        }
+
+        .node:hover rect {
+            filter: brightness(0.9);
+        }
+
+        .node text {
+            font-size: 11px;
+            pointer-events: none;
+            fill: #fff;
+            text-shadow: 0 1px 2px rgba(0,0,0,0.4);
+        }
+
+        .node.dimmed {
+            opacity: 0.15;
+        }
+
+        .node.highlighted rect {
+            stroke: var(--highlight-color);
+            stroke-width: 2px;
+        }
+
+        .histogram-bar {
+            fill: var(--primary-color);
+            opacity: 0.7;
+        }
+
+        .brush .selection {
+            fill: var(--highlight-color);
+            fill-opacity: 0.3;
+            stroke: var(--highlight-color);
+        }
+
+        .tooltip {
+            position: absolute;
+            padding: 8px 12px;
+            background: rgba(0, 0, 0, 0.8);
+            color: #fff;
+            border-radius: 4px;
+            font-size: 12px;
+            pointer-events: none;
+            z-index: 100;
+            display: none;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+
+        .controls {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .stats {
+            font-size: 0.85rem;
+            color: #6c757d;
+        }
+
+        .label-bg {
+            fill: rgba(0,0,0,0.2);
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>Icicle Brush Explorer</h1>
+    <div class="controls">
+        <div class="stats" id="stats">Files: 0 | Total Size: 0 MB</div>
+    </div>
+</header>
+
+<div id="breadcrumbs"></div>
+
+<main>
+    <div id="icicle-container" class="panel">
+        <div id="icicle-tooltip" class="tooltip"></div>
+    </div>
+    <div id="histogram-container" class="panel">
+        <div id="histogram-tooltip" class="tooltip"></div>
+    </div>
+</main>
+
+<script>
+    // --- Data Generation ---
+    function generateFileSystem(depth, maxDepth, leavesCount) {
+        const folders = ["src", "lib", "node_modules", "tests", "docs", "assets", "bin", "config", "dist", "public", "scripts", "styles", "vendor"];
+        const fileNames = ["index", "main", "utils", "config", "types", "constants", "App", "Component", "service", "test", "styles", "api", "auth", "helper", "db", "router", "view"];
+        const extensions = [".js", ".ts", ".html", ".css", ".json", ".md", ".py", ".rs", ".go", ".c", ".cpp", ".java", ".svg", ".png", ".jpg"];
+
+        let idCounter = 0;
+        const root = { name: "root", path: "root", children: [] };
+
+        function addChildren(parent, currentDepth) {
+            if (currentDepth >= maxDepth) return;
+
+            const numChildren = Math.floor(Math.random() * 6) + 2;
+            for (let i = 0; i < numChildren; i++) {
+                const isFolder = Math.random() > 0.6 && currentDepth < maxDepth - 1;
+                const name = isFolder ? folders[Math.floor(Math.random() * folders.length)] + "_" + (idCounter++) : 
+                             fileNames[Math.floor(Math.random() * fileNames.length)] + extensions[Math.floor(Math.random() * extensions.length)];
+                
+                const node = { 
+                    name: name, 
+                    path: parent.path + "/" + name,
+                    depth: currentDepth + 1
+                };
+
+                if (isFolder) {
+                    node.children = [];
+                    addChildren(node, currentDepth + 1);
+                } else {
+                    // Log-normal distribution for file sizes
+                    // exp(5 + normal(0, 3)) results in sizes from bytes to megabytes
+                    node.size = Math.round(Math.exp(5 + (Math.random() * 10 - 2))); 
+                }
+                parent.children.push(node);
+            }
+        }
+
+        addChildren(root, 0);
+
+        // Ensure we have ~500 leaves by pruning or growing if needed
+        // (Simplified for this task: random growth is usually enough)
+        return root;
+    }
+
+    const data = generateFileSystem(0, 5, 500);
+    
+    // --- State ---
+    let currentFocus = null;
+    let selectedSizeRange = null;
+
+    // --- Dimensions ---
+    const icicleRect = document.getElementById("icicle-container").getBoundingClientRect();
+    const histRect = document.getElementById("histogram-container").getBoundingClientRect();
+
+    const width = icicleRect.width;
+    const height = icicleRect.height;
+    const histHeight = histRect.height;
+
+    // --- Scales & Layout ---
+    const x = d3.scaleLinear().range([0, width]);
+    const y = d3.scaleLinear().range([0, height]);
+
+    const partition = d3.partition()
+        .size([width, height])
+        .padding(1);
+
+    const root = d3.hierarchy(data)
+        .sum(d => d.size)
+        .sort((a, b) => b.value - a.value);
+
+    partition(root);
+    currentFocus = root;
+
+    // --- Icicle Rendering ---
+    const icicleSvg = d3.select("#icicle-container").append("svg")
+        .attr("viewBox", [0, 0, width, height]);
+
+    const color = d3.scaleOrdinal(d3.quantize(d3.interpolateRainbow, root.children.length + 1));
+
+    const cell = icicleSvg.selectAll("g")
+        .data(root.descendants())
+        .join("g")
+        .attr("class", "node")
+        .attr("transform", d => `translate(${d.x0},${d.y0})`);
+
+    const rect = cell.append("rect")
+        .attr("width", d => d.x1 - d.x0)
+        .attr("height", d => d.y1 - d.y0)
+        .attr("fill", d => {
+            if (!d.depth) return "#ccc";
+            while (d.depth > 1) d = d.parent;
+            return color(d.data.name);
+        });
+
+    const label = cell.append("text")
+        .attr("x", 4)
+        .attr("y", 14)
+        .text(d => d.data.name)
+        .attr("opacity", d => (d.x1 - d.x0) > 40 ? 1 : 0);
+
+    // --- Tooltips ---
+    const icicleTooltip = d3.select("#icicle-tooltip");
+    const histTooltip = d3.select("#histogram-tooltip");
+
+    cell.on("mouseenter", (event, d) => {
+        icicleTooltip.style("display", "block")
+            .html(`<strong>${d.data.name}</strong><br>${d3.format(".3s")(d.value)}B<br>${d.data.children ? "Folder" : "File"}`);
+    })
+    .on("mousemove", (event) => {
+        icicleTooltip.style("left", (event.offsetX + 15) + "px")
+            .style("top", (event.offsetY + 15) + "px");
+    })
+    .on("mouseleave", () => {
+        icicleTooltip.style("display", "none");
+    })
+    .on("click", (event, d) => {
+        zoomTo(d);
+    });
+
+    // --- Zooming ---
+    function zoomTo(d) {
+        currentFocus = d;
+        updateBreadcrumbs(d);
+
+        x.domain([d.x0, d.x1]);
+        y.domain([d.y0, height]).range([0, height]);
+
+        const t = icicleSvg.transition().duration(750);
+
+        cell.transition(t)
+            .attr("transform", n => `translate(${x(n.x0)},${y(n.y0)})`)
+            .attr("opacity", n => isDescendant(n, d) ? 1 : 0)
+            .style("pointer-events", n => isDescendant(n, d) ? "all" : "none");
+
+        rect.transition(t)
+            .attr("width", n => Math.max(0, x(n.x1) - x(n.x0)))
+            .attr("height", n => Math.max(0, y(n.y1) - y(n.y0)));
+
+        label.transition(t)
+            .attr("opacity", n => (x(n.x1) - x(n.x0)) > 40 && isDescendant(n, d) ? 1 : 0);
+    }
+
+    function isDescendant(node, ancestor) {
+        if (node === ancestor) return true;
+        while (node.parent) {
+            if (node.parent === ancestor) return true;
+            node = node.parent;
+        }
+        return false;
+    }
+
+    // --- Breadcrumbs ---
+    function updateBreadcrumbs(d) {
+        const ancestors = d.ancestors().reverse();
+        const breadcrumbs = d3.select("#breadcrumbs");
+        
+        breadcrumbs.selectAll(".breadcrumb-item")
+            .data(ancestors)
+            .join("span")
+            .attr("class", "breadcrumb-item")
+            .text(n => n.data.name)
+            .on("click", (event, n) => zoomTo(n));
+    }
+    updateBreadcrumbs(root);
+
+    // --- Histogram ---
+    const margin = { top: 20, right: 30, bottom: 40, left: 40 };
+    const histWidth = width - margin.left - margin.right;
+    const histContentHeight = histHeight - margin.top - margin.bottom;
+
+    const histSvg = d3.select("#histogram-container").append("svg")
+        .attr("width", width)
+        .attr("height", histHeight);
+
+    const gHist = histSvg.append("g")
+        .attr("transform", `translate(${margin.left},${margin.top})`);
+
+    const leafNodes = root.leaves();
+    const sizes = leafNodes.map(d => d.value);
+
+    // Log scale for x-axis (sizes)
+    const xHist = d3.scaleLog()
+        .domain([d3.min(sizes), d3.max(sizes)])
+        .range([0, histWidth])
+        .nice();
+
+    const bins = d3.bin()
+        .domain(xHist.domain())
+        .thresholds(xHist.ticks(40))
+        (sizes);
+
+    const yHist = d3.scaleLinear()
+        .domain([0, d3.max(bins, d => d.length)])
+        .range([histContentHeight, 0]);
+
+    // Axes
+    gHist.append("g")
+        .attr("transform", `translate(0,${histContentHeight})`)
+        .call(d3.axisBottom(xHist).ticks(10, ".1s"))
+        .append("text")
+        .attr("x", histWidth / 2)
+        .attr("y", 35)
+        .attr("fill", "currentColor")
+        .attr("text-anchor", "middle")
+        .text("File Size (Bytes, Log Scale)");
+
+    gHist.append("g")
+        .call(d3.axisLeft(yHist).ticks(5))
+        .append("text")
+        .attr("transform", "rotate(-90)")
+        .attr("y", -30)
+        .attr("x", -histContentHeight / 2)
+        .attr("fill", "currentColor")
+        .attr("text-anchor", "middle")
+        .text("Frequency");
+
+    const bars = gHist.selectAll(".histogram-bar")
+        .data(bins)
+        .join("rect")
+        .attr("class", "histogram-bar")
+        .attr("x", d => xHist(d.x0))
+        .attr("width", d => Math.max(0, xHist(d.x1) - xHist(d.x0) - 1))
+        .attr("y", d => yHist(d.length))
+        .attr("height", d => histContentHeight - yHist(d.length));
+
+    // --- Brushing ---
+    const brush = d3.brushX()
+        .extent([[0, 0], [histWidth, histContentHeight]])
+        .on("brush end", brushed);
+
+    gHist.append("g")
+        .attr("class", "brush")
+        .call(brush);
+
+    function brushed({ selection }) {
+        if (!selection) {
+            cell.classed("dimmed", false).classed("highlighted", false);
+            return;
+        }
+
+        const [x0, x1] = selection.map(xHist.invert);
+        
+        cell.classed("dimmed", d => {
+            if (d.data.children) {
+                // Dim folders if none of their leaves are in range
+                return !d.leaves().some(leaf => leaf.value >= x0 && leaf.value <= x1);
+            }
+            return d.value < x0 || d.value > x1;
+        });
+
+        cell.classed("highlighted", d => {
+            if (d.data.children) return false;
+            return d.value >= x0 && d.value <= x1;
+        });
+    }
+
+    // --- Stats ---
+    document.getElementById("stats").innerHTML = `Files: ${leafNodes.length} | Total Size: ${d3.format(".3s")(root.value)}B`;
+
+</script>
+</body>
+</html>

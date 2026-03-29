@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Zoomable Treemap — File System Explorer</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    :root {
+      --bg: #fdfdfd;
+      --text: #1a1a1a;
+      --border: #e0e0e0;
+      --accent: #3b82f6;
+      --hover: #f1f5f9;
+      --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    header {
+      padding: 1rem 1.5rem;
+      background: white;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      z-index: 20;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 1.25rem;
+      font-weight: 700;
+      letter-spacing: -0.025em;
+    }
+
+    .stats {
+      font-size: 0.875rem;
+      color: #64748b;
+    }
+
+    #breadcrumb-container {
+      background: #f8fafc;
+      padding: 0.5rem 1.5rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.875rem;
+      z-index: 20;
+      overflow-x: auto;
+      white-space: nowrap;
+    }
+
+    .breadcrumb-item {
+      cursor: pointer;
+      padding: 0.25rem 0.5rem;
+      border-radius: 0.25rem;
+      transition: background 0.2s;
+      color: #64748b;
+    }
+
+    .breadcrumb-item:hover {
+      background: var(--hover);
+      color: var(--accent);
+    }
+
+    .breadcrumb-item.active {
+      font-weight: 600;
+      color: var(--text);
+      cursor: default;
+    }
+
+    .breadcrumb-item.active:hover {
+      background: transparent;
+    }
+
+    .separator {
+      color: #cbd5e1;
+      user-select: none;
+    }
+
+    #chart {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+      cursor: crosshair;
+    }
+
+    svg {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+
+    .node {
+      position: absolute;
+      overflow: hidden;
+    }
+
+    .node rect {
+      stroke: #fff;
+      stroke-width: 1px;
+    }
+
+    .node:hover rect {
+      filter: brightness(1.05);
+    }
+
+    .label {
+      pointer-events: none;
+      font-size: 11px;
+      font-weight: 500;
+      fill: rgba(0, 0, 0, 0.7);
+      dominant-baseline: hanging;
+    }
+
+    #tooltip {
+      position: absolute;
+      padding: 0.5rem 0.75rem;
+      background: rgba(15, 23, 42, 0.95);
+      color: white;
+      border-radius: 0.375rem;
+      font-size: 0.75rem;
+      pointer-events: none;
+      display: none;
+      z-index: 100;
+      box-shadow: var(--shadow);
+      line-height: 1.4;
+      backdrop-filter: blur(4px);
+    }
+
+    .tooltip-name { font-weight: 600; margin-bottom: 2px; }
+    .tooltip-size { color: #94a3b8; }
+    .tooltip-path { color: #64748b; font-family: monospace; font-size: 0.7rem; margin-top: 4px; }
+
+    /* Transitions */
+    .node rect, .label {
+      transition: opacity 0.3s;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>File Explorer</h1>
+    <div class="stats" id="stats">Calculating...</div>
+  </header>
+
+  <div id="breadcrumb-container"></div>
+
+  <div id="chart">
+    <div id="tooltip"></div>
+  </div>
+
+  <script>
+    // --- Configuration & Data Generation ---
+    const WIDTH = window.innerWidth;
+    const HEIGHT = window.innerHeight - 100; // Rough header/breadcrumb offset
+
+    function generateData() {
+      const topDirs = ["Applications", "System", "Users", "Library", "Volumes", "Network", "Private", "Developer"];
+      const subDirTemplates = ["bin", "etc", "lib", "share", "src", "tmp", "var", "opt", "include", "man", "config", "cache", "logs"];
+      const fileExts = [".js", ".py", ".cpp", ".h", ".json", ".md", ".txt", ".png", ".jpg", ".zip", ".gz", ".conf", ".sh", ".dmg", ".iso"];
+      const filePrefixes = ["main", "utils", "index", "core", "test", "setup", "build", "deploy", "config", "README", "LICENSE", "api", "auth"];
+      
+      const root = { name: "root", children: [] };
+      let fileCount = 0;
+      
+      topDirs.forEach(td => {
+        const dir = { name: td, children: [] };
+        // 4-6 subdirs per top dir to reach ~400 total files
+        const numSub = 4 + Math.floor(Math.random() * 3); 
+        for (let i = 0; i < numSub; i++) {
+          const sdName = subDirTemplates[Math.floor(Math.random() * subDirTemplates.length)] + (i > 0 ? `_${i}` : "");
+          const sdir = { name: sdName, children: [] };
+          
+          // 8-12 files per subdir
+          const numFiles = 8 + Math.floor(Math.random() * 5); 
+          for (let j = 0; j < numFiles; j++) {
+            const prefix = filePrefixes[Math.floor(Math.random() * filePrefixes.length)];
+            const ext = fileExts[Math.floor(Math.random() * fileExts.length)];
+            const fileName = `${prefix}_${j}${ext}`;
+            
+            // Log-distributed size between 1KB and 1GB
+            // We use a skewed distribution to simulate real file systems
+            const size = Math.round(Math.exp(Math.random() * (Math.log(1024 * 1024 * 1024) - Math.log(1024)) + Math.log(1024)));
+            sdir.children.push({ name: fileName, size: size });
+            fileCount++;
+          }
+          dir.children.push(sdir);
+        }
+        root.children.push(dir);
+      });
+      return { root, count: fileCount };
+    }
+
+    const { root: rawData, count: totalFiles } = generateData();
+
+    // --- Formatters ---
+    const formatSize = (bytes) => {
+      if (bytes === 0) return "0 B";
+      const k = 1024;
+      const sizes = ["B", "KB", "MB", "GB", "TB"];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+    };
+
+    // --- Hierarchy & Treemap ---
+    const root = d3.hierarchy(rawData)
+      .sum(d => d.size)
+      .sort((a, b) => b.value - a.value);
+
+    document.getElementById('stats').textContent = `${totalFiles} files • ${formatSize(root.value)}`;
+
+    const treemap = d3.treemap()
+      .size([WIDTH, HEIGHT])
+      .paddingOuter(3)
+      .paddingTop(19)
+      .paddingInner(1)
+      .round(true);
+
+    treemap(root);
+
+    // --- Color Scale ---
+    // Use a distinct palette for the 8 top-level directories
+    const colors = [
+      "#3b82f6", "#ef4444", "#10b981", "#f59e0b", 
+      "#8b5cf6", "#ec4899", "#06b6d4", "#71717a"
+    ];
+    const colorScale = d3.scaleOrdinal()
+      .domain(rawData.children.map(d => d.name))
+      .range(colors);
+
+    // --- Setup SVG ---
+    const svg = d3.select("#chart").append("svg")
+      .attr("viewBox", [0, 0, WIDTH, HEIGHT])
+      .style("font", "10px sans-serif");
+
+    // Scales for zooming
+    const x = d3.scaleLinear().rangeRound([0, WIDTH]);
+    const y = d3.scaleLinear().rangeRound([0, HEIGHT]);
+
+    let focus = root;
+
+    // --- Render ---
+    const node = svg.selectAll("g")
+      .data(root.descendants())
+      .join("g")
+      .attr("transform", d => `translate(${d.x0},${d.y0})`);
+
+    const rect = node.append("rect")
+      .attr("id", (d, i) => `rect-${i}`)
+      .attr("fill", d => {
+        if (d.depth === 0) return "none";
+        // Color based on the top-level ancestor
+        let ancestor = d;
+        while (ancestor.depth > 1) ancestor = ancestor.parent;
+        return colorScale(ancestor.data.name);
+      })
+      .attr("fill-opacity", d => (d.children ? (d.depth === 1 ? 0.3 : 0.2) : 0.8))
+      .attr("stroke", "#fff")
+      .attr("width", d => d.x1 - d.x0)
+      .attr("height", d => d.y1 - d.y0);
+
+    // Clip path for text
+    node.append("clipPath")
+      .attr("id", (d, i) => `clip-${i}`)
+      .append("use")
+      .attr("xlink:href", (d, i) => `#rect-${i}`);
+
+    const text = node.append("text")
+      .attr("clip-path", (d, i) => `url(#clip-${i})`)
+      .attr("class", "label")
+      .selectAll("tspan")
+      .data(d => [d.data.name])
+      .join("tspan")
+      .attr("x", 4)
+      .attr("y", d => 13)
+      .text(d => d);
+
+    // Update label visibility
+    function updateLabels(d) {
+      const w = x(d.x1) - x(d.x0);
+      const h = y(d.y1) - y(d.y0);
+      return w > 40 && h > 20;
+    }
+
+    text.style("opacity", d => updateLabels(d) ? 1 : 0);
+
+    // --- Interaction ---
+    const tooltip = d3.select("#tooltip");
+
+    node
+      .filter(d => d.depth > 0)
+      .on("mousemove", (event, d) => {
+        const path = d.ancestors().reverse().map(a => a.data.name).join("/");
+        tooltip
+          .style("display", "block")
+          .style("left", (event.clientX + 15) + "px")
+          .style("top", (event.clientY + 15) + "px")
+          .html(`
+            <div class="tooltip-name">${d.data.name}</div>
+            <div class="tooltip-size">${formatSize(d.value)}</div>
+            <div class="tooltip-path">${path}</div>
+          `);
+      })
+      .on("mouseleave", () => tooltip.style("display", "none"))
+      .on("click", (event, d) => {
+        if (d.children) {
+          zoom(event, d);
+        }
+      });
+
+    // --- Zoom Logic ---
+    function zoom(event, d) {
+      focus = d;
+      const transition = svg.transition()
+          .duration(750)
+          .ease(d3.easeCubicInOut);
+
+      x.domain([d.x0, d.x1]);
+      y.domain([d.y0, d.y1]);
+
+      svg.selectAll("g")
+        .transition(transition)
+        .attr("transform", d => `translate(${x(d.x0)},${y(d.y0)})`);
+
+      svg.selectAll("rect")
+        .transition(transition)
+        .attr("width", d => x(d.x1) - x(d.x0))
+        .attr("height", d => y(d.y1) - y(d.y0));
+
+      svg.selectAll("text")
+        .transition(transition)
+        .style("opacity", d => {
+          // Only show labels for descendants of the current focus
+          let isDescendant = false;
+          let temp = d;
+          while (temp) {
+            if (temp === focus) { isDescendant = true; break; }
+            temp = temp.parent;
+          }
+          if (!isDescendant) return 0;
+          
+          return updateLabels(d) ? 1 : 0;
+        });
+
+      updateBreadcrumbs();
+    }
+
+    // --- Breadcrumbs ---
+    function updateBreadcrumbs() {
+      const container = d3.select("#breadcrumb-container");
+      container.html("");
+      
+      const ancestors = focus.ancestors().reverse();
+      
+      ancestors.forEach((d, i) => {
+        if (i > 0) {
+          container.append("span").attr("class", "separator").text("/");
+        }
+        
+        const item = container.append("span")
+          .attr("class", `breadcrumb-item ${i === ancestors.length - 1 ? 'active' : ''}`)
+          .text(d.data.name === "root" ? "Files" : d.data.name)
+          .on("click", (event) => {
+            if (i < ancestors.length - 1) zoom(event, d);
+          });
+      });
+    }
+
+    updateBreadcrumbs();
+
+    // Resize listener
+    window.addEventListener("resize", () => {
+      // For simplicity in this block, we don't fully re-layout, but a real app would.
+      // We at least update the SVG dimensions if it weren't using viewBox.
+    });
+
+  </script>
+</body>
+</html>

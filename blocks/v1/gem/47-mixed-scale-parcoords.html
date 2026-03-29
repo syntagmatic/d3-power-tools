@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mixed Scale Parallel Coordinates</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <link rel="stylesheet" href="../../../style/d3-power-tools.css">
+    <style>
+        :root {
+            --bg-color: #ffffff;
+            --text-color: #2c3e50;
+            --axis-color: #95a5a6;
+            --line-faint: rgba(200, 200, 200, 0.15);
+        }
+
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            overflow: hidden;
+        }
+
+        #container {
+            position: relative;
+            width: 100%;
+            height: calc(100vh - 100px);
+            margin-top: 20px;
+        }
+
+        canvas, svg {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+
+        svg {
+            pointer-events: none;
+        }
+
+        .axis {
+            pointer-events: all;
+        }
+
+        .axis line, .axis path {
+            fill: none;
+            stroke: var(--axis-color);
+            shape-rendering: crispEdges;
+        }
+
+        .axis text {
+            font-size: 11px;
+            fill: var(--text-color);
+            text-shadow: 0 1px 0 #fff, 1px 0 0 #fff, 0 -1px 0 #fff, -1px 0 0 #fff;
+            cursor: default;
+        }
+
+        .axis-label {
+            font-size: 13px;
+            font-weight: 600;
+            text-anchor: middle;
+        }
+
+        .brush .selection {
+            fill: #3498db;
+            fill-opacity: 0.2;
+            stroke: #2980b9;
+            stroke-width: 1px;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #eee;
+        }
+
+        .legend {
+            display: flex;
+            gap: 15px;
+            font-size: 12px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 2px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h2 style="margin: 0;">Employee Performance Metrics</h2>
+            <p style="margin: 5px 0 0 0; font-size: 13px; color: #7f8c8d;">Mixed scale types: Linear, Log (Salary), and Ordinal Point axes.</p>
+        </div>
+        <div id="legend" class="legend"></div>
+        <div id="stats" style="font-size: 13px; font-weight: 600;">Selected: 300 / 300</div>
+    </div>
+    <div id="container"></div>
+
+    <script>
+        // 1. Configuration & Data Generation
+        const n = 300;
+        const margin = {top: 50, right: 50, bottom: 40, left: 50};
+        const depts = ['Engineering', 'Sales', 'Marketing', 'HR', 'Product', 'Design'];
+        const levels = ['Junior', 'Mid', 'Senior', 'Lead', 'Principal'];
+        const colors = d3.scaleOrdinal(depts, d3.schemeTableau10);
+
+        const data = Array.from({length: n}, (_, i) => {
+            const dept = depts[Math.floor(Math.random() * depts.length)];
+            const level = levels[Math.floor(Math.random() * levels.length)];
+            const years = Math.floor(Math.random() * 20);
+            
+            // Bias some values based on level/dept for visual structure
+            const levelIdx = levels.indexOf(level);
+            const baseSalary = 40000 * Math.pow(1.6, levelIdx);
+            const salary = baseSalary * (0.8 + Math.random() * 0.4);
+            
+            return {
+                id: i,
+                yearsExp: years,
+                perfScore: 30 + Math.random() * 70,
+                salary: salary,
+                department: dept,
+                level: level,
+                commuteDist: Math.random() * 50
+            };
+        });
+
+        const dimensions = [
+            {key: 'yearsExp', label: 'Experience (Years)', type: 'linear'},
+            {key: 'perfScore', label: 'Performance', type: 'linear'},
+            {key: 'salary', label: 'Salary ($)', type: 'log'},
+            {key: 'department', label: 'Department', type: 'point'},
+            {key: 'level', label: 'Level', type: 'point'},
+            {key: 'commuteDist', label: 'Commute (km)', type: 'linear'}
+        ];
+
+        // 2. Setup DOM
+        const container = d3.select("#container");
+        const width = container.node().clientWidth;
+        const height = container.node().clientHeight;
+        const dpr = window.devicePixelRatio || 1;
+
+        const canvas = container.append("canvas")
+            .attr("width", width * dpr)
+            .attr("height", height * dpr)
+            .style("width", width + "px")
+            .style("height", height + "px");
+        
+        const ctx = canvas.node().getContext("2d");
+        ctx.scale(dpr, dpr);
+
+        const svg = container.append("svg")
+            .attr("width", width)
+            .attr("height", height);
+
+        // 3. Scales
+        const x = d3.scalePoint()
+            .domain(dimensions.map(d => d.key))
+            .range([margin.left, width - margin.right])
+            .padding(0.2);
+
+        const y = {};
+        dimensions.forEach(d => {
+            if (d.type === 'linear') {
+                y[d.key] = d3.scaleLinear()
+                    .domain(d3.extent(data, p => p[d.key]))
+                    .range([height - margin.bottom, margin.top])
+                    .nice();
+            } else if (d.type === 'log') {
+                y[d.key] = d3.scaleLog()
+                    .domain(d3.extent(data, p => p[d.key]))
+                    .range([height - margin.bottom, margin.top])
+                    .nice();
+            } else if (d.type === 'point') {
+                const domain = d.key === 'level' ? levels : depts;
+                y[d.key] = d3.scalePoint()
+                    .domain(domain)
+                    .range([height - margin.bottom, margin.top])
+                    .padding(0.5);
+            }
+        });
+
+        // 4. Brushing Logic
+        const filters = new Map();
+
+        function brushed(event, key) {
+            if (!event.selection) {
+                filters.delete(key);
+            } else {
+                const [y1, y2] = event.selection;
+                const scale = y[key];
+                
+                if (dimensions.find(d => d.key === key).type === 'point') {
+                    // Ordinal point brushing
+                    filters.set(key, d => {
+                        const val = scale(d[key]);
+                        return val >= y1 && val <= y2;
+                    });
+                } else {
+                    // Continuous brushing
+                    const val1 = scale.invert(y1);
+                    const val2 = scale.invert(y2);
+                    filters.set(key, d => d[key] >= Math.min(val1, val2) && d[key] <= Math.max(val1, val2));
+                }
+            }
+            render();
+        }
+
+        const brush = d3.brushY()
+            .extent([[-10, margin.top], [10, height - margin.bottom]])
+            .on("brush end", brushed);
+
+        // 5. Rendering
+        function render() {
+            ctx.clearRect(0, 0, width, height);
+
+            const selected = data.filter(d => {
+                for (let [key, filter] of filters) {
+                    if (!filter(d)) return false;
+                }
+                return true;
+            });
+
+            d3.select("#stats").text(`Selected: ${selected.length} / ${data.length}`);
+
+            // Draw background lines (faint)
+            ctx.lineWidth = 1;
+            ctx.globalAlpha = 1.0;
+            ctx.strokeStyle = "rgba(200, 200, 200, 0.15)";
+            
+            data.forEach(d => drawLine(d, ctx));
+
+            // Draw foreground lines (colored)
+            ctx.lineWidth = 1.5;
+            selected.forEach(d => {
+                ctx.strokeStyle = colors(d.department);
+                drawLine(d, ctx);
+            });
+        }
+
+        function drawLine(d, context) {
+            context.beginPath();
+            dimensions.forEach((dim, i) => {
+                const px = x(dim.key);
+                const py = y[dim.key](d[dim.key]);
+                if (i === 0) context.moveTo(px, py);
+                else context.lineTo(px, py);
+            });
+            context.stroke();
+        }
+
+        // 6. Draw Axes
+        const gAxes = svg.selectAll(".axis")
+            .data(dimensions)
+            .enter().append("g")
+            .attr("class", "axis")
+            .attr("transform", d => `translate(${x(d.key)}, 0)`)
+            .each(function(d) {
+                const axis = d3.axisLeft(y[d.key]);
+                if (d.type === 'log') axis.ticks(5, "$,.0s");
+                d3.select(this).call(axis);
+            });
+
+        gAxes.append("text")
+            .attr("class", "axis-label")
+            .attr("y", margin.top - 20)
+            .text(d => d.label);
+
+        gAxes.append("g")
+            .attr("class", "brush")
+            .each(function(d) {
+                d3.select(this).call(brush, d.key);
+            });
+
+        // Legend
+        const legend = d3.select("#legend");
+        depts.forEach(dept => {
+            const item = legend.append("div").attr("class", "legend-item");
+            item.append("div")
+                .attr("class", "legend-color")
+                .style("background-color", colors(dept));
+            item.append("span").text(dept);
+        });
+
+        // Initial render
+        render();
+
+        // Handle resize
+        window.addEventListener('resize', () => {
+            const newWidth = container.node().clientWidth;
+            const newHeight = container.node().clientHeight;
+            
+            canvas.attr("width", newWidth * dpr).attr("height", newHeight * dpr)
+                .style("width", newWidth + "px").style("height", newHeight + "px");
+            ctx.scale(dpr, dpr);
+            svg.attr("width", newWidth).attr("height", newHeight);
+            
+            x.range([margin.left, newWidth - margin.right]);
+            
+            dimensions.forEach(d => {
+                y[d.key].range([newHeight - margin.bottom, margin.top]);
+            });
+
+            svg.selectAll(".axis")
+                .attr("transform", d => `translate(${x(d.key)}, 0)`)
+                .each(function(d) {
+                    const axis = d3.axisLeft(y[d.key]);
+                    if (d.type === 'log') axis.ticks(5, "$,.0s");
+                    d3.select(this).call(axis);
+                });
+            
+            render();
+        });
+    </script>
+</body>
+</html>

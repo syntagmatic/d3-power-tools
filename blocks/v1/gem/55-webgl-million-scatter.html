@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebGL 1M-Point Scatterplot — D3 Power Tools</title>
+  <link rel="stylesheet" href="../../../style/d3-power-tools.css">
+  <style>
+    :root {
+      --inset-width: 240px;
+      --inset-height: 240px;
+    }
+
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: var(--color-bg);
+      font-family: var(--font-sans);
+    }
+
+    #container {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      padding: 1rem 1.5rem;
+      z-index: 10;
+      pointer-events: none;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+    }
+
+    header * {
+      pointer-events: all;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: var(--color-text);
+    }
+
+    .meta {
+      font-size: 0.875rem;
+      color: var(--color-text-muted);
+      margin-top: 0.25rem;
+    }
+
+    #viz-layers {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+    }
+
+    canvas, svg {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+    }
+
+    #gl-canvas { z-index: 1; }
+    #canvas-2d { z-index: 1; display: none; }
+    #svg-layer { z-index: 2; pointer-events: all; }
+
+    .controls {
+      position: absolute;
+      bottom: 1.5rem;
+      left: 1.5rem;
+      z-index: 10;
+      background: var(--color-surface);
+      border: 1px solid var(--color-border);
+      padding: 1rem;
+      border-radius: 8px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      min-width: 200px;
+    }
+
+    .control-group {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .fps-display {
+      font-family: var(--font-mono);
+      font-weight: 600;
+      color: var(--color-cat-1);
+    }
+
+    .toggle-switch {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    #inset-histogram {
+      position: absolute;
+      bottom: 1.5rem;
+      right: 1.5rem;
+      z-index: 10;
+      width: var(--inset-width);
+      height: var(--inset-height);
+      background: var(--color-surface);
+      border: 1px solid var(--color-border);
+      border-radius: 8px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    #inset-histogram canvas {
+      position: relative;
+      width: 100%;
+      height: 100%;
+    }
+
+    .inset-label {
+      position: absolute;
+      top: 0.5rem;
+      left: 0.5rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--color-text-muted);
+      background: rgba(255,255,255,0.8);
+      padding: 2px 4px;
+      border-radius: 2px;
+      pointer-events: none;
+    }
+
+    .brush .selection {
+      fill: var(--color-link);
+      fill-opacity: 0.1;
+      stroke: var(--color-link);
+      stroke-width: 1px;
+    }
+
+    .stats {
+      font-size: 0.75rem;
+      color: var(--color-text-faint);
+    }
+
+    [data-theme="dark"] #inset-histogram .inset-label {
+      background: rgba(0,0,0,0.6);
+    }
+  </style>
+</head>
+<body data-theme="light">
+  <div id="container">
+    <header>
+      <div>
+        <h1>WebGL 1M-Point Scatterplot</h1>
+        <div class="meta">Instanced SDF Circles • SVG Brush • 2D Histogram Inset</div>
+      </div>
+      <div data-theme-switch></div>
+    </header>
+
+    <div id="viz-layers">
+      <canvas id="gl-canvas"></canvas>
+      <canvas id="canvas-2d"></canvas>
+      <svg id="svg-layer"></svg>
+    </div>
+
+    <div class="controls">
+      <div class="control-group">
+        <span>Renderer</span>
+        <label class="toggle-switch">
+          <input type="checkbox" id="renderer-toggle">
+          <span id="renderer-label">WebGL 2</span>
+        </label>
+      </div>
+      <div class="control-group">
+        <span>Performance</span>
+        <span class="fps-display" id="fps-counter">-- FPS</span>
+      </div>
+      <div class="stats" id="points-count">Loading 1,000,000 points...</div>
+    </div>
+
+    <div id="inset-histogram">
+      <div class="inset-label">Brushed Density (50x50)</div>
+      <canvas id="hist-canvas"></canvas>
+    </div>
+  </div>
+
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="../../../style/theme-switch.js"></script>
+  <script>
+    /**
+     * SHADERS
+     */
+    const vs = `#version 300 es
+    layout(location = 0) in vec2 a_quad;      // unit square [-0.5, 0.5]
+    layout(location = 1) in vec2 a_position;  // center in CSS pixels
+    layout(location = 2) in vec4 a_color;     // RGBA
+    layout(location = 3) in float a_visible;  // 1.0 or 0.1
+
+    uniform vec2 u_resolution;
+    uniform float u_scale;
+    uniform vec2 u_translate;
+    uniform float u_pointSize;
+    uniform float u_dpr;
+
+    out vec4 v_color;
+    out vec2 v_quad;
+    out float v_visible;
+
+    void main() {
+      // Transform position by zoom/pan
+      vec2 pos = a_position * u_scale + u_translate;
+      
+      // Offset by quad vertex for instancing
+      pos += a_quad * u_pointSize;
+
+      // Convert to clip space
+      vec2 clip = (pos / u_resolution) * 2.0 - 1.0;
+      gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
+      
+      v_color = a_color;
+      v_quad = a_quad;
+      v_visible = a_visible;
+    }
+    `;
+
+    const fs = `#version 300 es
+    precision highp float;
+    in vec4 v_color;
+    in vec2 v_quad;
+    in float v_visible;
+    out vec4 fragColor;
+
+    void main() {
+      float dist = length(v_quad);
+      if (dist > 0.5) discard;
+      
+      // SDF antialiasing
+      float alpha = 1.0 - smoothstep(0.4, 0.5, dist);
+      fragColor = vec4(v_color.rgb, v_color.a * alpha * v_visible);
+    }
+    `;
+
+    /**
+     * INITIALIZATION
+     */
+    const N = 1_000_000;
+    const margin = { top: 20, right: 20, bottom: 20, left: 20 };
+    let width, height, dpr;
+    let data;
+    
+    // GL State
+    let gl, program, vao, visBuffer;
+    let useWebGL = true;
+    let pointSize = 3.0;
+    let transform = d3.zoomIdentity;
+
+    // Buffers
+    const posArr = new Float32Array(N * 2);
+    const colArr = new Float32Array(N * 4);
+    const visArr = new Float32Array(N).fill(1.0);
+
+    // Canvas 2D
+    let ctx2d;
+    
+    // FPS tracking
+    let lastTime = 0;
+    let frames = 0;
+    let fps = 0;
+
+    /**
+     * DATA GENERATION
+     */
+    function generateData() {
+      const colorScale = d3.scaleSequential(d3.interpolateViridis);
+      
+      // Create a few clusters
+      const clusters = [
+        { x: 0.3, y: 0.3, sx: 0.1, sy: 0.1, color: 0.2 },
+        { x: 0.7, y: 0.4, sx: 0.15, sy: 0.1, color: 0.5 },
+        { x: 0.5, y: 0.7, sx: 0.1, sy: 0.2, color: 0.8 },
+        { x: 0.5, y: 0.5, sx: 0.4, sy: 0.4, color: 0.4 } // Background noise
+      ];
+
+      data = new Array(N);
+      for (let i = 0; i < N; i++) {
+        const c = clusters[Math.floor(Math.random() * (i < N * 0.8 ? 3 : 4))];
+        const x = d3.randomNormal(c.x, c.sx)();
+        const y = d3.randomNormal(c.y, c.sy)();
+        
+        data[i] = { x, y };
+        
+        // Pack into buffers for WebGL
+        // Initial mapping to [margin, width-margin]
+        // But we store raw [0,1] and scale in js before upload or use scales
+        posArr[i * 2] = x;
+        posArr[i * 2 + 1] = y;
+
+        const rgb = d3.rgb(colorScale(c.color + (Math.random() - 0.5) * 0.1));
+        colArr[i * 4] = rgb.r / 255;
+        colArr[i * 4 + 1] = rgb.g / 255;
+        colArr[i * 4 + 2] = rgb.b / 255;
+        colArr[i * 4 + 3] = 0.6;
+      }
+      
+      document.getElementById("points-count").innerText = `1,000,000 points generated`;
+    }
+
+    /**
+     * WEBGL HELPERS
+     */
+    function createShader(gl, type, source) {
+      const shader = gl.createShader(type);
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(shader));
+        gl.deleteShader(shader);
+        return null;
+      }
+      return shader;
+    }
+
+    function createProgram(gl, vsSource, fsSource) {
+      const vShader = createShader(gl, gl.VERTEX_SHADER, vsSource);
+      const fShader = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
+      const program = gl.createProgram();
+      gl.attachShader(program, vShader);
+      gl.attachShader(program, fShader);
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        console.error(gl.getProgramInfoLog(program));
+        return null;
+      }
+      return program;
+    }
+
+    function initGL() {
+      const canvas = document.getElementById("gl-canvas");
+      gl = canvas.getContext("webgl2", { antialias: false });
+      if (!gl) return alert("WebGL 2 not supported");
+
+      program = createProgram(gl, vs, fs);
+      gl.useProgram(program);
+
+      vao = gl.createVertexArray();
+      gl.bindVertexArray(vao);
+
+      // Unit quad for instancing
+      const quad = new Float32Array([-0.5,-0.5, 0.5,-0.5, 0.5,0.5, -0.5,-0.5, 0.5,0.5, -0.5,0.5]);
+      const quadBuf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+      gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+      // Positions (instanced)
+      const posBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+      // We'll update this once data is scaled to screen
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(N * 2), gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(1);
+      gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 0, 0);
+      gl.vertexAttribDivisor(1, 1);
+
+      // Colors (instanced)
+      const colBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, colBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, colArr, gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(2);
+      gl.vertexAttribPointer(2, 4, gl.FLOAT, false, 0, 0);
+      gl.vertexAttribDivisor(2, 1);
+
+      // Visibility (instanced)
+      visBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, visBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, visArr, gl.DYNAMIC_DRAW);
+      gl.enableVertexAttribArray(3);
+      gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 0, 0);
+      gl.vertexAttribDivisor(3, 1);
+
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    }
+
+    /**
+     * SCALING & RESIZE
+     */
+    let xScale, yScale;
+    function resize() {
+      width = window.innerWidth;
+      height = window.innerHeight;
+      dpr = window.devicePixelRatio || 1;
+
+      const glCanvas = document.getElementById("gl-canvas");
+      glCanvas.width = width * dpr;
+      glCanvas.height = height * dpr;
+      gl.viewport(0, 0, width * dpr, height * dpr);
+
+      const c2d = document.getElementById("canvas-2d");
+      c2d.width = width * dpr;
+      c2d.height = height * dpr;
+      ctx2d = c2d.getContext("2d");
+      ctx2d.scale(dpr, dpr);
+
+      xScale = d3.scaleLinear().domain([-0.1, 1.1]).range([margin.left, width - margin.right]);
+      yScale = d3.scaleLinear().domain([-0.1, 1.1]).range([height - margin.bottom, margin.top]);
+
+      // Update positions buffer with screen coordinates
+      const scaledPos = new Float32Array(N * 2);
+      for (let i = 0; i < N; i++) {
+        scaledPos[i * 2] = xScale(posArr[i * 2]);
+        scaledPos[i * 2 + 1] = yScale(posArr[i * 2 + 1]);
+      }
+      gl.useProgram(program);
+      const posLoc = 1; // a_position
+      gl.bindBuffer(gl.ARRAY_BUFFER, gl.getVertexAttrib(posLoc, gl.VERTEX_ATTRIB_ARRAY_BUFFER_BINDING));
+      gl.bufferData(gl.ARRAY_BUFFER, scaledPos, gl.STATIC_DRAW);
+      
+      // Update resolution uniform
+      gl.uniform2f(gl.getUniformLocation(program, "u_resolution"), width, height);
+      gl.uniform1f(gl.getUniformLocation(program, "u_dpr"), dpr);
+      
+      d3.select("#svg-layer")
+        .attr("width", width)
+        .attr("height", height);
+        
+      setupBrush();
+    }
+
+    /**
+     * BRUSHING & HISTOGRAM
+     */
+    const histN = 50;
+    const histCanvas = document.getElementById("hist-canvas");
+    const histCtx = histCanvas.getContext("2d");
+    
+    function setupBrush() {
+      const brush = d3.brush()
+        .extent([[0, 0], [width, height]])
+        .on("brush end", brushed);
+
+      d3.select("#svg-layer")
+        .selectAll(".brush")
+        .data([0])
+        .join("g")
+        .attr("class", "brush")
+        .call(brush);
+
+      function brushed({ selection }) {
+        if (!selection) {
+          visArr.fill(1.0);
+          updateVisBuffer();
+          drawHistogram(null);
+          return;
+        }
+
+        const [[x0, y0], [x1, y1]] = selection;
+        
+        // Transform screen coords back to data domain for faster comparison if needed
+        // but here we have the scaled positions in a separate buffer already if we wanted.
+        // Let's just use the data domain for simplicity in logic.
+        const dx0 = xScale.invert(x0);
+        const dy0 = yScale.invert(y1); // inverted Y
+        const dx1 = xScale.invert(x1);
+        const dy1 = yScale.invert(y0);
+
+        // Density grid
+        const grid = new Uint32Array(histN * histN);
+        let count = 0;
+
+        for (let i = 0; i < N; i++) {
+          const px = posArr[i * 2];
+          const py = posArr[i * 2 + 1];
+          const inside = px >= dx0 && px <= dx1 && py >= dy0 && py <= dy1;
+          
+          visArr[i] = inside ? 1.0 : 0.05;
+          
+          if (inside) {
+            count++;
+            const gx = Math.floor(((px - dx0) / (dx1 - dx0)) * histN);
+            const gy = Math.floor(((py - dy0) / (dy1 - dy0)) * histN);
+            if (gx >= 0 && gx < histN && gy >= 0 && gy < histN) {
+              grid[gy * histN + gx]++;
+            }
+          }
+        }
+
+        updateVisBuffer();
+        drawHistogram(grid);
+      }
+    }
+
+    function updateVisBuffer() {
+      gl.bindBuffer(gl.ARRAY_BUFFER, visBuffer);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, visArr);
+    }
+
+    function drawHistogram(grid) {
+      const w = histCanvas.width = 240 * dpr;
+      const h = histCanvas.height = 240 * dpr;
+      histCtx.clearRect(0, 0, w, h);
+      
+      if (!grid) return;
+
+      const maxVal = d3.max(grid);
+      const cellW = w / histN;
+      const cellH = h / histN;
+      const color = d3.scaleSequential(d3.interpolateInferno).domain([0, maxVal]);
+
+      for (let y = 0; y < histN; y++) {
+        for (let x = 0; x < histN; x++) {
+          const val = grid[y * histN + x];
+          if (val === 0) continue;
+          histCtx.fillStyle = color(val);
+          // Flip Y for histogram display to match screen space (origin top-left)
+          histCtx.fillRect(x * cellW, (histN - 1 - y) * cellH, cellW + 0.5, cellH + 0.5);
+        }
+      }
+    }
+
+    /**
+     * DRAW LOOPS
+     */
+    function draw() {
+      if (useWebGL) {
+        drawWebGL();
+      } else {
+        drawCanvas2D();
+      }
+
+      // Update FPS
+      const now = performance.now();
+      frames++;
+      if (now > lastTime + 1000) {
+        fps = Math.round((frames * 1000) / (now - lastTime));
+        document.getElementById("fps-counter").innerText = `${fps} FPS`;
+        frames = 0;
+        lastTime = now;
+      }
+
+      requestAnimationFrame(draw);
+    }
+
+    function drawWebGL() {
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+
+      gl.useProgram(program);
+      gl.uniform1f(gl.getUniformLocation(program, "u_scale"), transform.k);
+      gl.uniform2f(gl.getUniformLocation(program, "u_translate"), transform.x, transform.y);
+      gl.uniform1f(gl.getUniformLocation(program, "u_pointSize"), pointSize * dpr);
+
+      gl.bindVertexArray(vao);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, N);
+    }
+
+    function drawCanvas2D() {
+      ctx2d.clearRect(0, 0, width, height);
+      
+      const k = transform.k;
+      const tx = transform.x;
+      const ty = transform.y;
+      const r = pointSize / 2;
+
+      for (let i = 0; i < N; i++) {
+        if (visArr[i] < 0.1) continue; // Basic culling for perf comparison
+
+        const x = xScale(posArr[i * 2]) * k + tx;
+        const y = yScale(posArr[i * 2 + 1]) * k + ty;
+
+        // Skip if outside
+        if (x < -r || x > width + r || y < -r || y > height + r) continue;
+
+        ctx2d.fillStyle = `rgba(${colArr[i*4]*255}, ${colArr[i*4+1]*255}, ${colArr[i*4+2]*255}, ${colArr[i*4+3]})`;
+        ctx2d.beginPath();
+        ctx2d.arc(x, y, r, 0, Math.PI * 2);
+        ctx2d.fill();
+      }
+    }
+
+    /**
+     * CONTROLS & EVENTS
+     */
+    document.getElementById("renderer-toggle").addEventListener("change", (e) => {
+      useWebGL = !e.target.checked;
+      document.getElementById("renderer-label").innerText = useWebGL ? "WebGL 2" : "Canvas 2D";
+      document.getElementById("gl-canvas").style.display = useWebGL ? "block" : "none";
+      document.getElementById("canvas-2d").style.display = useWebGL ? "none" : "block";
+    });
+
+    // Zoom handling
+    const zoom = d3.zoom()
+      .scaleExtent([0.5, 40])
+      .on("zoom", (e) => {
+        transform = e.transform;
+      });
+
+    d3.select("#svg-layer").call(zoom);
+
+    // Initial load
+    generateData();
+    initGL();
+    resize();
+    window.addEventListener("resize", resize);
+    requestAnimationFrame(draw);
+
+    // Handle theme changes for histogram
+    document.documentElement.addEventListener("themechange", () => {
+      // Could adjust colors here if needed
+    });
+  </script>
+</body>
+</html>

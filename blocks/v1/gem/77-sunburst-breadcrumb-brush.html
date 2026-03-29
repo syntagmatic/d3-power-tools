@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sunburst Breadcrumb Brush</title>
+  <link rel="stylesheet" href="../../../style/d3-power-tools.css">
+  <script src="../../../style/theme-switch.js"></script>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    body {
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      padding: var(--sp-6);
+    }
+
+    #header {
+      margin-bottom: var(--sp-4);
+    }
+
+    #breadcrumb {
+      display: flex;
+      gap: var(--sp-2);
+      margin-bottom: var(--sp-4);
+      height: 24px;
+      align-items: center;
+      font-size: 13px;
+      font-weight: 500;
+    }
+
+    .crumb {
+      padding: 2px 8px;
+      border-radius: 4px;
+      color: #fff;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+
+    .crumb:hover {
+      opacity: 0.8;
+    }
+
+    .crumb-sep {
+      color: var(--color-text-faint);
+    }
+
+    #chart-container {
+      flex-grow: 1;
+      position: relative;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+
+    svg {
+      width: 100%;
+      height: 100%;
+    }
+
+    .node-arc {
+      cursor: pointer;
+      stroke: var(--color-bg);
+      stroke-width: 1px;
+      transition: opacity 0.3s, filter 0.3s;
+    }
+
+    .node-arc.deselected {
+      opacity: 0.2;
+      filter: grayscale(80%);
+    }
+
+    .brush-ring {
+      fill: none;
+      stroke: var(--color-border-light);
+      stroke-width: 20px;
+      pointer-events: all;
+    }
+
+    .brush-selection {
+      fill: var(--color-cat-1);
+      fill-opacity: 0.2;
+      stroke: var(--color-cat-1);
+      stroke-width: 1px;
+    }
+
+    .brush-handle {
+      fill: var(--color-cat-1);
+      cursor: ew-resize;
+    }
+
+    .label {
+      pointer-events: none;
+      text-anchor: middle;
+      font-size: 10px;
+      fill: var(--color-text);
+    }
+
+    .center-label {
+      text-anchor: middle;
+      font-weight: 600;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="header">
+    <h1>Sunburst <b>Explorer</b></h1>
+    <p class="subtitle">4-level product taxonomy with radial brush filtering and drill-down.</p>
+  </div>
+
+  <div id="breadcrumb"></div>
+
+  <div id="chart-container">
+    <div id="tooltip" class="tooltip"></div>
+  </div>
+
+  <script>
+    // 1. Data Generation
+    const generateData = () => {
+      const categories = ["Electronics", "Home & Garden", "Apparel", "Automotive"];
+      const subcats = {
+        "Electronics": ["Audio", "Computers", "Mobile", "Cameras", "Gaming"],
+        "Home & Garden": ["Kitchen", "Furniture", "Lighting", "Outdoor"],
+        "Apparel": ["Men's", "Women's", "Children's", "Accessories"],
+        "Automotive": ["Parts", "Tools", "Cleaning", "Tires"]
+      };
+
+      const root = { name: "Products", children: [] };
+      categories.forEach(cat => {
+        const catNode = { name: cat, children: [] };
+        root.children.push(catNode);
+        subcats[cat].forEach(sub => {
+          const subNode = { name: sub, children: [] };
+          catNode.children.push(subNode);
+          const groupCount = 3 + Math.floor(Math.random() * 2);
+          for (let i = 0; i < groupCount; i++) {
+            const groupNode = { name: `${sub} Group ${i+1}`, children: [] };
+            subNode.children.push(groupNode);
+            const productCount = 1 + Math.floor(Math.random() * 2);
+            for (let j = 0; j < productCount; j++) {
+              groupNode.children.push({
+                name: `${sub} P${i+1}-${j+1}`,
+                value: 10 + Math.floor(Math.random() * 90)
+              });
+            }
+          }
+        });
+      });
+      return root;
+    };
+
+    const data = generateData();
+
+    // 2. Setup Dimensions
+    const container = d3.select("#chart-container");
+    const width = container.node().clientWidth;
+    const height = container.node().clientHeight;
+    const radius = Math.min(width, height) / 2 - 40;
+
+    const svg = container.append("svg")
+      .attr("viewBox", [-width / 2, -height / 2, width, height]);
+
+    const g = svg.append("g");
+
+    // 3. Layout
+    const partition = data => {
+      const root = d3.hierarchy(data)
+          .sum(d => d.value)
+          .sort((a, b) => b.value - a.value);
+      return d3.partition()
+          .size([2 * Math.PI, root.height + 1])
+          (root);
+    };
+
+    const root = partition(data);
+    root.each(d => d.current = d);
+
+    const arc = d3.arc()
+      .startAngle(d => d.x0)
+      .endAngle(d => d.x1)
+      .padAngle(d => Math.min((d.x1 - d.x0) / 2, 0.005))
+      .padRadius(radius / 3)
+      .innerRadius(d => d.y0 * radius / (root.height + 1))
+      .outerRadius(d => d.y1 * radius / (root.height + 1) - 1);
+
+    // 4. Colors
+    const color = d3.scaleOrdinal(d3.quantize(d3.interpolateRainbow, root.children.length + 1));
+    const getColor = d => {
+      if (d.depth === 0) return "#ccc";
+      while (d.depth > 1) d = d.parent;
+      return color(d.data.name);
+    };
+
+    // 5. Render
+    const path = g.append("g")
+      .selectAll("path")
+      .data(root.descendants().slice(1))
+      .join("path")
+        .attr("class", "node-arc")
+        .attr("fill", d => getColor(d))
+        .attr("fill-opacity", d => d.children ? 0.8 : 0.6)
+        .attr("d", d => arc(d.current))
+        .on("mouseenter", (event, d) => {
+          updateBreadcrumb(d);
+          showTooltip(event, d);
+        })
+        .on("mouseleave", hideTooltip)
+        .on("click", clicked);
+
+    const center = g.append("circle")
+      .datum(root)
+      .attr("r", radius / (root.height + 1))
+      .attr("fill", "none")
+      .attr("pointer-events", "all")
+      .on("click", clicked);
+
+    const centerLabel = g.append("text")
+      .attr("class", "center-label")
+      .attr("dy", "0.35em")
+      .text("");
+
+    // 6. Brush
+    let brushRange = [0, 2 * Math.PI];
+    const brushG = svg.append("g").attr("class", "brush-g");
+
+    const brushRing = brushG.append("circle")
+      .attr("class", "brush-ring")
+      .attr("r", radius + 15);
+
+    const brushSelection = brushG.append("path")
+      .attr("class", "brush-selection");
+
+    const handleData = [{ type: "start", angle: 0 }, { type: "end", angle: 2 * Math.PI }];
+
+    const brushArc = d3.arc()
+      .innerRadius(radius + 5)
+      .outerRadius(radius + 25)
+      .startAngle(d => d[0])
+      .endAngle(d => d[1]);
+
+    const updateBrushUI = () => {
+      brushSelection.attr("d", brushArc(brushRange));
+      
+      const handles = brushG.selectAll(".brush-handle")
+        .data(brushRange);
+
+      handles.join("circle")
+        .attr("class", "brush-handle")
+        .attr("r", 6)
+        .attr("cx", (d, i) => (radius + 15) * Math.sin(d))
+        .attr("cy", (d, i) => -(radius + 15) * Math.cos(d))
+        .call(d3.drag()
+          .on("drag", function(event, d) {
+            const i = brushRange.indexOf(d);
+            const [x, y] = [event.x, event.y];
+            let angle = Math.atan2(x, -y);
+            if (angle < 0) angle += 2 * Math.PI;
+            brushRange[i] = angle;
+            updateBrushUI();
+            updateFiltering();
+          })
+        );
+    };
+
+    updateBrushUI();
+
+    function updateFiltering() {
+      const [s, e] = brushRange;
+      const isReversed = s > e;
+
+      path.classed("deselected", d => {
+        // Average angle of the arc
+        let angle = (d.x0 + d.x1) / 2;
+        // Normalize to [0, 2PI]
+        angle = angle % (2 * Math.PI);
+        if (angle < 0) angle += 2 * Math.PI;
+
+        if (isReversed) {
+          return angle < s && angle > e;
+        } else {
+          return angle < s || angle > e;
+        }
+      });
+    }
+
+    // 7. Interactions
+    function clicked(event, p) {
+      center.datum(p.parent || root);
+
+      root.each(d => d.target = {
+        x0: Math.max(0, Math.min(1, (d.x0 - p.x0) / (p.x1 - p.x0))) * 2 * Math.PI,
+        x1: Math.max(0, Math.min(1, (d.x1 - p.x0) / (p.x1 - p.x0))) * 2 * Math.PI,
+        y0: Math.max(0, d.y0 - p.depth),
+        y1: Math.max(0, d.y1 - p.depth)
+      });
+
+      const t = g.transition().duration(750);
+
+      path.transition(t)
+          .tween("data", d => {
+            const i = d3.interpolate(d.current, d.target);
+            return t => d.current = i(t);
+          })
+          .filter(function(d) {
+            return +this.getAttribute("fill-opacity") || arcVisible(d.target);
+          })
+            .attr("fill-opacity", d => arcVisible(d.target) ? (d.children ? 0.8 : 0.6) : 0)
+            .attr("pointer-events", d => arcVisible(d.target) ? "auto" : "none")
+            .attrTween("d", d => () => arc(d.current));
+
+      centerLabel.text(p.depth > 0 ? p.data.name : "")
+        .transition(t)
+        .attr("opacity", 1);
+    }
+
+    function arcVisible(d) {
+      return d.y1 <= 5 && d.y0 >= 1 && d.x1 > d.x0;
+    }
+
+    // Breadcrumb
+    function updateBreadcrumb(d) {
+      const ancestors = d.ancestors().reverse();
+      const bc = d3.select("#breadcrumb");
+      
+      const crumbs = bc.selectAll(".crumb-wrap")
+        .data(ancestors, d => d.data.name);
+
+      const enter = crumbs.enter().append("div")
+        .attr("class", "crumb-wrap")
+        .style("display", "flex")
+        .style("align-items", "center");
+
+      enter.append("div")
+        .attr("class", "crumb")
+        .style("background", d => getColor(d))
+        .text(d => d.data.name)
+        .on("click", (event, d) => clicked(event, d));
+
+      enter.filter((d, i) => i < ancestors.length - 1)
+        .append("span")
+        .attr("class", "crumb-sep")
+        .style("margin", "0 4px")
+        .text("›");
+
+      crumbs.exit().remove();
+    }
+
+    // Tooltip
+    const tooltip = d3.select("#tooltip");
+    function showTooltip(event, d) {
+      tooltip.classed("visible", true)
+        .style("left", (event.pageX + 10) + "px")
+        .style("top", (event.pageY - 10) + "px")
+        .html(`<strong>${d.data.name}</strong><br>Value: ${d.value}`);
+    }
+
+    function hideTooltip() {
+      tooltip.classed("visible", false);
+    }
+
+    // Initial breadcrumb
+    updateBreadcrumb(root);
+
+  </script>
+</body>
+</html>

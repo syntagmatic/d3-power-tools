@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Violin Plot Orchestra: Decadal Warming</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    :root {
+      --bg: #fff;
+      --text: #1a1a1a;
+      --text-muted: #666;
+      --grid: #eee;
+      --c1: #4361ee; /* 2010s - Cool */
+      --c2: #f72585; /* 2020s - Warm */
+      --font: system-ui, -apple-system, sans-serif;
+    }
+    body {
+      margin: 0;
+      background: var(--bg);
+      font-family: var(--font);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem 1rem;
+    }
+    .header {
+      max-width: 1000px;
+      width: 100%;
+      margin-bottom: 2rem;
+      text-align: center;
+    }
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 800;
+      margin: 0 0 0.5rem 0;
+      letter-spacing: -0.02em;
+    }
+    p {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+      margin: 0;
+    }
+    #chart {
+      width: 100%;
+      max-width: 1100px;
+    }
+    svg {
+      width: 100%;
+      height: auto;
+      overflow: visible;
+    }
+    .city-label {
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .month-label {
+      font-size: 10px;
+      fill: var(--text-muted);
+      font-weight: 600;
+    }
+    .axis-label {
+      font-size: 9px;
+      fill: #999;
+    }
+    .tick line {
+      stroke: var(--grid);
+    }
+    .tick text {
+      fill: #999;
+      font-size: 9px;
+    }
+    .domain {
+      display: none;
+    }
+    .legend {
+      display: flex;
+      gap: 1.5rem;
+      margin-top: 1rem;
+      font-size: 0.8rem;
+      font-weight: 600;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .swatch {
+      width: 12px;
+      height: 12px;
+      border-radius: 2px;
+    }
+    .cell-bg {
+      fill: transparent;
+      stroke: var(--grid);
+      stroke-width: 0.5;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <h1>Decadal Temperature Shift: Oslo to Singapore</h1>
+    <p>Monthly distributions comparing 2010s (left) and 2020s (right). Note the consistent upward shift in the newer decade.</p>
+    <div class="legend">
+      <div class="legend-item">
+        <div class="swatch" style="background: var(--c1)"></div>
+        <span>2010s</span>
+      </div>
+      <div class="legend-item">
+        <div class="swatch" style="background: var(--c2)"></div>
+        <span>2020s</span>
+      </div>
+    </div>
+  </div>
+
+  <div id="chart"></div>
+
+  <script>
+    const config = {
+      margin: { top: 40, right: 20, bottom: 20, left: 100 },
+      cellPadding: 4,
+      cities: [
+        { name: "Oslo", lat: 59.9, base: 6, amp: 12 },
+        { name: "London", lat: 51.5, base: 11, amp: 9 },
+        { name: "Rome", lat: 41.9, base: 16, amp: 10 },
+        { name: "Cairo", lat: 30.0, base: 22, amp: 8 },
+        { name: "Mumbai", lat: 19.0, base: 27, amp: 3 },
+        { name: "Singapore", lat: 1.3, base: 28, amp: 1 }
+      ],
+      months: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+      warming: 1.4, // Celsius shift
+      n: 40 // samples per month/decade
+    };
+
+    // Generate Synthetic Data
+    const genData = () => {
+      const data = [];
+      const random = d3.randomLcg(42);
+      const normal = d3.randomNormal.source(random);
+
+      config.cities.forEach(city => {
+        config.months.forEach((month, m) => {
+          // Seasonal cycle peaks in July (index 6)
+          const seasonal = Math.cos((m - 6) * Math.PI / 6) * -city.amp;
+          
+          ["2010s", "2020s"].forEach(decade => {
+            const shift = decade === "2020s" ? config.warming : 0;
+            const mean = city.base + seasonal + shift;
+            const sd = 2.5 + (Math.abs(seasonal) * 0.1); // slightly higher variance in extreme months
+            
+            const values = Array.from({ length: config.n }, () => normal(mean, sd)());
+            data.push({ city: city.name, month: m, decade, values });
+          });
+        });
+      });
+      return data;
+    };
+
+    const kernelDensityEstimator = (kernel, X) => {
+      return V => X.map(x => [x, d3.mean(V, v => kernel(x - v))]);
+    };
+
+    const kernelEpanechnikov = k => {
+      return v => Math.abs(v /= k) <= 1 ? 0.75 * (1 - v * v) / k : 0;
+    };
+
+    const draw = () => {
+      const data = genData();
+      const width = 1000;
+      const cellW = (width - config.margin.left - config.margin.right) / 12;
+      const cellH = 100;
+      const height = cellH * config.cities.length + config.margin.top + config.margin.bottom;
+
+      const svg = d3.select("#chart")
+        .append("svg")
+        .attr("viewBox", [0, 0, width, height]);
+
+      const x = d3.scaleLinear()
+        .domain([0, 11])
+        .range([config.margin.left, width - config.margin.right]);
+
+      const y = d3.scaleLinear()
+        .domain([-10, 40]) // Celsius range for all cities
+        .range([cellH - config.cellPadding, config.cellPadding]);
+
+      // Shared density scale
+      const maxDensity = 0.25; // Pre-calculated for uniform width
+      const vScale = d3.scaleLinear()
+        .domain([0, maxDensity])
+        .range([0, cellW / 2 - 2]);
+
+      const g = svg.append("g");
+
+      // Grid & Labels
+      config.cities.forEach((city, i) => {
+        const rowY = config.margin.top + i * cellH;
+        
+        g.append("text")
+          .attr("class", "city-label")
+          .attr("x", config.margin.left - 15)
+          .attr("y", rowY + cellH / 2)
+          .attr("text-anchor", "end")
+          .attr("dominant-baseline", "middle")
+          .text(city.name);
+
+        // Temp axis for the first city (or all if we want)
+        const yAxis = d3.axisLeft(y).ticks(4).tickFormat(d => d + "°");
+        g.append("g")
+          .attr("transform", `translate(${config.margin.left}, ${rowY})`)
+          .call(yAxis);
+
+        config.months.forEach((month, m) => {
+          const colX = config.margin.left + m * cellW;
+          
+          if (i === 0) {
+            g.append("text")
+              .attr("class", "month-label")
+              .attr("x", colX + cellW / 2)
+              .attr("y", config.margin.top - 15)
+              .attr("text-anchor", "middle")
+              .text(month);
+          }
+
+          g.append("rect")
+            .attr("class", "cell-bg")
+            .attr("x", colX)
+            .attr("y", rowY)
+            .attr("width", cellW)
+            .attr("height", cellH);
+
+          // Violin Logic
+          const cellData = data.filter(d => d.city === city.name && d.month === m);
+          
+          cellData.forEach(d => {
+            const kde = kernelDensityEstimator(kernelEpanechnikov(2), y.ticks(40));
+            const density = kde(d.values);
+            const isLeft = d.decade === "2010s";
+            
+            const area = d3.area()
+              .curve(d3.curveBasis)
+              .x0(0)
+              .x1(p => isLeft ? -vScale(p[1]) : vScale(p[1]))
+              .y(p => y(p[0]));
+
+            const violinG = g.append("g")
+              .attr("transform", `translate(${colX + cellW / 2}, ${rowY})`);
+
+            violinG.append("path")
+              .datum(density)
+              .attr("d", area)
+              .attr("fill", isLeft ? "var(--c1)" : "var(--c2)")
+              .attr("fill-opacity", 0.8)
+              .attr("stroke", isLeft ? "var(--c1)" : "var(--c2)")
+              .attr("stroke-width", 0.5);
+
+            // Median line
+            const median = d3.median(d.values);
+            violinG.append("line")
+              .attr("x1", isLeft ? -vScale(maxDensity * 0.4) : 0)
+              .attr("x2", isLeft ? 0 : vScale(maxDensity * 0.4))
+              .attr("y1", y(median))
+              .attr("y2", y(median))
+              .attr("stroke", "#fff")
+              .attr("stroke-width", 1.5)
+              .attr("stroke-linecap", "round");
+          });
+        });
+      });
+    };
+
+    draw();
+  </script>
+</body>
+</html>

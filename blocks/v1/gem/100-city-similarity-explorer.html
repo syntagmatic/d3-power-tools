@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>City Similarity Explorer</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://unpkg.com/topojson@3"></script>
+    <style>
+        :root {
+            --bg: #1a1a2e;
+            --text: #e0e0e0;
+            --accent: #4cc9f0;
+            --dim: #444;
+            --highlight: #f72585;
+        }
+        body {
+            margin: 0;
+            padding: 20px;
+            background-color: var(--bg);
+            color: var(--text);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            overflow-x: hidden;
+        }
+        h1 { margin: 10px 0; font-weight: 300; letter-spacing: 2px; }
+        .description { margin-bottom: 20px; font-size: 0.9em; color: #aaa; text-align: center; max-width: 800px; }
+        #container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            width: 100%;
+            max-width: 1100px;
+        }
+        .chart-card {
+            background: #16213e;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            position: relative;
+        }
+        .axis line, .axis path { stroke: var(--dim); }
+        .axis text { fill: #aaa; font-size: 10px; }
+        .axis-label { fill: var(--text); font-size: 12px; font-weight: bold; cursor: pointer; }
+        .city-path {
+            fill: none;
+            stroke: var(--accent);
+            stroke-width: 1.5;
+            stroke-opacity: 0.3;
+            transition: stroke-opacity 0.2s, stroke-width 0.2s;
+        }
+        .city-path.selected { stroke-opacity: 0.8; stroke-width: 2; }
+        .city-path.hidden { stroke-opacity: 0.05; stroke: #333; }
+        .city-path.highlighted { stroke: var(--highlight); stroke-opacity: 1; stroke-width: 3; }
+
+        .map-land { fill: #0f3460; stroke: #1a1a2e; stroke-width: 0.5; }
+        .map-borders { fill: none; stroke: #16213e; stroke-width: 0.5; }
+        .city-dot {
+            fill: var(--accent);
+            stroke: var(--bg);
+            stroke-width: 1;
+            opacity: 0.4;
+            transition: opacity 0.2s, r 0.2s;
+        }
+        .city-dot.selected { opacity: 1; r: 5; fill: var(--accent); }
+        .city-dot.hidden { opacity: 0.1; r: 2; fill: #555; }
+        .city-dot.highlighted { opacity: 1; r: 7; fill: var(--highlight); stroke: #fff; stroke-width: 2; }
+
+        .tooltip {
+            position: absolute;
+            background: rgba(0,0,0,0.85);
+            padding: 8px 12px;
+            border-radius: 4px;
+            pointer-events: none;
+            font-size: 12px;
+            border: 1px solid var(--accent);
+            z-index: 100;
+            display: none;
+            color: #fff;
+        }
+
+        .brush .selection { fill: var(--highlight); fill-opacity: 0.3; stroke: var(--highlight); }
+        
+        .controls { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; }
+        .stat { font-size: 14px; color: var(--accent); }
+    </style>
+</head>
+<body>
+
+    <h1>CITY SIMILARITY EXPLORER</h1>
+    <div class="description">
+        Brush along the vertical axes to filter 40 world cities by population, density, elevation, temperature, rainfall, and cost. 
+        Selected cities highlight on both the parallel coordinates and the world map.
+    </div>
+
+    <div id="container">
+        <div class="chart-card" id="pcp-card">
+            <div id="pcp"></div>
+            <div class="controls">
+                <div class="stat" id="city-count">Showing 40 of 40 cities</div>
+                <button id="reset-brushes" style="background:none; border: 1px solid var(--dim); color: #aaa; padding: 4px 8px; cursor: pointer; border-radius: 4px;">Reset Filters</button>
+            </div>
+        </div>
+        <div class="chart-card" id="map-card">
+            <div id="map"></div>
+        </div>
+    </div>
+
+    <div class="tooltip" id="tooltip"></div>
+
+    <script>
+        // Data for 40 world cities
+        const cities = [
+            { name: "Tokyo", lat: 35.6895, lon: 139.6917, pop: 37.4, density: 6158, elev: 40, temp: 15.4, rain: 1530, cost: 105 },
+            { name: "New York", lat: 40.7128, lon: -74.0060, pop: 8.8, density: 10431, elev: 10, temp: 12.7, rain: 1200, cost: 100 },
+            { name: "London", lat: 51.5074, lon: -0.1278, pop: 8.9, density: 5701, elev: 11, temp: 11.3, rain: 601, cost: 95 },
+            { name: "Paris", lat: 48.8566, lon: 2.3522, pop: 2.1, density: 21000, elev: 35, temp: 12.3, rain: 637, cost: 92 },
+            { name: "Shanghai", lat: 31.2304, lon: 121.4737, pop: 24.9, density: 3800, elev: 4, temp: 15.8, rain: 1164, cost: 78 },
+            { name: "Mumbai", lat: 19.0760, lon: 72.8777, pop: 20.4, density: 21000, elev: 14, temp: 27.2, rain: 2429, cost: 35 },
+            { name: "Mexico City", lat: 19.4326, lon: -99.1332, pop: 9.2, density: 6000, elev: 2240, temp: 17.5, rain: 707, cost: 45 },
+            { name: "Sao Paulo", lat: -23.5505, lon: -46.6333, pop: 12.3, density: 7300, elev: 760, temp: 19.8, rain: 1441, cost: 55 },
+            { name: "Cairo", lat: 30.0444, lon: 31.2357, pop: 9.5, density: 19000, elev: 23, temp: 21.4, rain: 25, cost: 40 },
+            { name: "Istanbul", lat: 41.0082, lon: 28.9784, pop: 15.5, density: 2500, elev: 30, temp: 14.4, rain: 810, cost: 42 },
+            { name: "Moscow", lat: 55.7558, lon: 37.6173, pop: 12.5, density: 4800, elev: 156, temp: 5.8, rain: 707, cost: 65 },
+            { name: "Beijing", lat: 39.9042, lon: 116.4074, pop: 21.5, density: 1300, elev: 43, temp: 11.8, rain: 570, cost: 70 },
+            { name: "Seoul", lat: 37.5665, lon: 126.9780, pop: 9.7, density: 16000, elev: 38, temp: 12.5, rain: 1450, cost: 85 },
+            { name: "Jakarta", lat: -6.2088, lon: 106.8456, pop: 10.6, density: 14400, elev: 8, temp: 28.1, rain: 1816, cost: 45 },
+            { name: "Lagos", lat: 6.5244, lon: 3.3792, pop: 14.8, density: 13000, elev: 10, temp: 27.0, rain: 1514, cost: 38 },
+            { name: "Kinshasa", lat: -4.4419, lon: 15.2663, pop: 14.3, density: 1500, elev: 240, temp: 25.3, rain: 1540, cost: 50 },
+            { name: "Lima", lat: -12.0464, lon: -77.0428, pop: 9.7, density: 3000, elev: 154, temp: 18.5, rain: 15, cost: 48 },
+            { name: "Bogota", lat: 4.7110, lon: -74.0721, pop: 7.4, density: 4800, elev: 2640, temp: 14.5, rain: 840, cost: 32 },
+            { name: "Bangkok", lat: 13.7563, lon: 100.5018, pop: 10.5, density: 5300, elev: 2, temp: 28.1, rain: 1650, cost: 58 },
+            { name: "Ho Chi Minh City", lat: 10.8231, lon: 106.6297, pop: 8.9, density: 4300, elev: 19, temp: 27.5, rain: 1930, cost: 38 },
+            { name: "Dhaka", lat: 23.8103, lon: 90.4125, pop: 10.3, density: 23000, elev: 4, temp: 25.8, rain: 2123, cost: 28 },
+            { name: "Karachi", lat: 24.8607, lon: 67.0011, pop: 16.0, density: 4700, elev: 8, temp: 26.0, rain: 174, cost: 25 },
+            { name: "Manila", lat: 14.5995, lon: 120.9842, pop: 13.9, density: 18000, elev: 16, temp: 27.3, rain: 2040, cost: 45 },
+            { name: "Rio de Janeiro", lat: -22.9068, lon: -43.1729, pop: 6.7, density: 5300, elev: 5, temp: 23.2, rain: 1175, cost: 52 },
+            { name: "Buenos Aires", lat: -34.6037, lon: -58.3816, pop: 3.1, density: 15000, elev: 25, temp: 17.6, rain: 1214, cost: 45 },
+            { name: "Sydney", lat: -33.8688, lon: 151.2093, pop: 5.3, density: 430, elev: 3, temp: 18.3, rain: 1213, cost: 88 },
+            { name: "Auckland", lat: -36.8485, lon: 174.7633, pop: 1.6, density: 1200, elev: 10, temp: 15.1, rain: 1210, cost: 82 },
+            { name: "Cape Town", lat: -33.9249, lon: 18.4241, pop: 4.6, density: 1500, elev: 0, temp: 16.2, rain: 507, cost: 48 },
+            { name: "Nairobi", lat: -1.2921, lon: 36.8219, pop: 4.4, density: 6300, elev: 1795, temp: 19.0, rain: 1024, cost: 40 },
+            { name: "Dubai", lat: 25.2048, lon: 55.2708, pop: 3.3, density: 400, elev: 0, temp: 28.2, rain: 94, cost: 75 },
+            { name: "Riyadh", lat: 24.7136, lon: 46.6753, pop: 7.7, density: 4400, elev: 612, temp: 26.2, rain: 100, cost: 55 },
+            { name: "Tehran", lat: 35.6892, lon: 51.3890, pop: 8.7, density: 11800, elev: 1200, temp: 17.0, rain: 230, cost: 35 },
+            { name: "Berlin", lat: 52.5200, lon: 13.4050, pop: 3.7, density: 4100, elev: 34, temp: 9.1, rain: 570, cost: 75 },
+            { name: "Madrid", lat: 40.4168, lon: -3.7038, pop: 3.3, density: 5400, elev: 667, temp: 15.0, rain: 436, cost: 68 },
+            { name: "Rome", lat: 41.9028, lon: 12.4964, pop: 2.8, density: 2200, elev: 21, temp: 15.8, rain: 800, cost: 80 },
+            { name: "Amsterdam", lat: 52.3676, lon: 4.9041, pop: 0.9, density: 4400, elev: -2, temp: 10.2, rain: 838, cost: 85 },
+            { name: "Singapore", lat: 1.3521, lon: 103.8198, pop: 5.7, density: 8300, elev: 15, temp: 27.6, rain: 2340, cost: 110 },
+            { name: "Hong Kong", lat: 22.3193, lon: 114.1694, pop: 7.5, density: 7100, elev: 7, temp: 23.3, rain: 2400, cost: 108 },
+            { name: "San Francisco", lat: 37.7749, lon: -122.4194, pop: 0.8, density: 7200, elev: 16, temp: 14.5, rain: 600, cost: 115 },
+            { name: "Chicago", lat: 41.8781, lon: -87.6298, pop: 2.7, density: 4600, elev: 182, temp: 9.9, rain: 940, cost: 85 }
+        ];
+
+        const dims = [
+            { key: "pop", label: "Population (M)", domain: [0, 40] },
+            { key: "density", label: "Density (p/km²)", domain: [0, 25000] },
+            { key: "elev", label: "Elevation (m)", domain: [-5, 3000] },
+            { key: "temp", label: "Avg Temp (°C)", domain: [0, 30] },
+            { key: "rain", label: "Rainfall (mm)", domain: [0, 2600] },
+            { key: "cost", label: "Cost Index", domain: [20, 120] }
+        ];
+
+        // Layout Constants
+        const margin = { top: 50, right: 60, bottom: 30, left: 60 };
+        const width = 1000 - margin.left - margin.right;
+        const height = 400 - margin.top - margin.bottom;
+
+        // State
+        const filters = {};
+        let highlightedCity = null;
+
+        // Create PCP
+        const pcpSvg = d3.select("#pcp").append("svg")
+            .attr("viewBox", `0 0 ${width + margin.left + margin.right} ${height + margin.top + margin.bottom}`)
+            .append("g")
+            .attr("transform", `translate(${margin.left},${margin.top})`);
+
+        const x = d3.scalePoint()
+            .range([0, width])
+            .padding(0.1)
+            .domain(dims.map(d => d.key));
+
+        const yScales = {};
+        dims.forEach(d => {
+            yScales[d.key] = d3.scaleLinear()
+                .domain(d.domain)
+                .range([height, 0]);
+        });
+
+        // Path generator
+        function path(d) {
+            return d3.line()(dims.map(p => [x(p.key), yScales[p.key](d[p.key])]));
+        }
+
+        // Add city paths
+        const cityLines = pcpSvg.append("g")
+            .selectAll("path")
+            .data(cities)
+            .enter().append("path")
+            .attr("class", "city-path")
+            .attr("d", path)
+            .on("mouseover", (e, d) => highlight(d))
+            .on("mouseout", () => highlight(null));
+
+        // Add axes
+        const gAxes = pcpSvg.selectAll(".axis")
+            .data(dims)
+            .enter().append("g")
+            .attr("class", "axis")
+            .attr("transform", d => `translate(${x(d.key)})`)
+            .each(function(d) { d3.select(this).call(d3.axisLeft(yScales[d.key]).ticks(8)); });
+
+        gAxes.append("text")
+            .attr("class", "axis-label")
+            .attr("y", -15)
+            .attr("text-anchor", "middle")
+            .text(d => d.label);
+
+        // Brushes
+        const brushes = {};
+        gAxes.append("g")
+            .attr("class", "brush")
+            .each(function(d) {
+                const b = d3.brushY()
+                    .extent([[-10, 0], [10, height]])
+                    .on("brush end", (event) => brushed(event, d.key));
+                brushes[d.key] = b;
+                d3.select(this).call(b);
+            });
+
+        // Map Setup
+        const mapWidth = 1000;
+        const mapHeight = 450;
+        const mapSvg = d3.select("#map").append("svg")
+            .attr("viewBox", `0 0 ${mapWidth} ${mapHeight}`);
+
+        const projection = d3.geoNaturalEarth1()
+            .scale(180)
+            .translate([mapWidth / 2, mapHeight / 2]);
+
+        const mapPath = d3.geoPath().projection(projection);
+
+        // Load and Draw Map
+        d3.json("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json").then(world => {
+            mapSvg.append("path")
+                .datum(topojson.feature(world, world.objects.land))
+                .attr("class", "map-land")
+                .attr("d", mapPath);
+
+            mapSvg.append("path")
+                .datum(topojson.mesh(world, world.objects.countries, (a, b) => a !== b))
+                .attr("class", "map-borders")
+                .attr("d", mapPath);
+
+            // Add city dots
+            const cityDots = mapSvg.append("g")
+                .selectAll("circle")
+                .data(cities)
+                .enter().append("circle")
+                .attr("class", "city-dot selected")
+                .attr("r", 4)
+                .attr("cx", d => projection([d.lon, d.lat])[0])
+                .attr("cy", d => projection([d.lon, d.lat])[1])
+                .on("mouseover", (e, d) => highlight(d))
+                .on("mouseout", () => highlight(null));
+        });
+
+        // Interaction Logic
+        function brushed(event, key) {
+            if (!event.selection) {
+                delete filters[key];
+            } else {
+                const [y1, y0] = event.selection.map(yScales[key].invert);
+                filters[key] = [Math.min(y1, y0), Math.max(y1, y0)];
+            }
+            update();
+        }
+
+        function update() {
+            const selectedCities = cities.filter(d => {
+                return Object.keys(filters).every(key => {
+                    const [min, max] = filters[key];
+                    return d[key] >= min && d[key] <= max;
+                });
+            });
+
+            d3.select("#city-count").text(`Showing ${selectedCities.length} of ${cities.length} cities`);
+
+            const selectedSet = new Set(selectedCities);
+
+            d3.selectAll(".city-path")
+                .classed("hidden", d => !selectedSet.has(d))
+                .classed("selected", d => selectedSet.has(d));
+
+            d3.selectAll(".city-dot")
+                .classed("hidden", d => !selectedSet.has(d))
+                .classed("selected", d => selectedSet.has(d));
+        }
+
+        function highlight(d) {
+            highlightedCity = d;
+            d3.selectAll(".city-path")
+                .classed("highlighted", city => city === d);
+            d3.selectAll(".city-dot")
+                .classed("highlighted", city => city === d);
+
+            const tooltip = d3.select("#tooltip");
+            if (d) {
+                tooltip.style("display", "block")
+                    .html(`
+                        <strong>${d.name}</strong><br/>
+                        Pop: ${d.pop}M<br/>
+                        Density: ${d.density}<br/>
+                        Temp: ${d.temp}°C<br/>
+                        Cost: ${d.cost}
+                    `)
+                    .style("left", (event.pageX + 15) + "px")
+                    .style("top", (event.pageY - 15) + "px");
+            } else {
+                tooltip.style("display", "none");
+            }
+        }
+
+        d3.select("#reset-brushes").on("click", () => {
+            d3.selectAll(".brush").call(d3.brushY().move, null);
+            Object.keys(filters).forEach(k => delete filters[k]);
+            update();
+        });
+
+    </script>
+</body>
+</html>

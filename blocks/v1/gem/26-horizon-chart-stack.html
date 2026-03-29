@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Horizon Chart: Server CPU Clusters</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #fdfdfd;
+            --text-color: #1a1a1a;
+            --accent-color: #3b82f6;
+            --border-color: #e5e7eb;
+            --font-main: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        body {
+            margin: 0;
+            padding: 2rem;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: var(--font-main);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 1000px;
+        }
+
+        header {
+            margin-bottom: 2rem;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 1rem;
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            margin: 0 0 0.5rem 0;
+            letter-spacing: -0.025em;
+        }
+
+        p {
+            font-size: 0.875rem;
+            color: #666;
+            margin: 0;
+        }
+
+        #chart-container {
+            position: relative;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            padding: 1rem;
+            overflow: hidden;
+        }
+
+        .horizon-row {
+            cursor: crosshair;
+        }
+
+        .server-label {
+            font-size: 11px;
+            font-weight: 600;
+            fill: #4b5563;
+        }
+
+        .axis-label {
+            font-size: 10px;
+            fill: #9ca3af;
+        }
+
+        .crosshair-line {
+            stroke: #374151;
+            stroke-width: 1px;
+            stroke-dasharray: 4 2;
+            pointer-events: none;
+        }
+
+        .tooltip {
+            position: absolute;
+            top: 1rem;
+            right: 1rem;
+            background: rgba(255, 255, 255, 0.95);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 0.75rem;
+            font-size: 11px;
+            pointer-events: none;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+            display: none;
+            min-width: 160px;
+            z-index: 10;
+        }
+
+        .tooltip-header {
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 0.25rem;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .tooltip-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 2px;
+        }
+
+        .tooltip-val {
+            font-family: monospace;
+            font-weight: 600;
+        }
+
+        .band-legend {
+            display: flex;
+            gap: 1rem;
+            margin-top: 1rem;
+            font-size: 0.75rem;
+            color: #666;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.25rem;
+        }
+
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 2px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <header>
+        <h1>Server Cluster Performance</h1>
+        <p>24-hour CPU utilization across server groups. Horizon charts use 3-layer folding (0-33%, 33-66%, 66-100%).</p>
+    </header>
+
+    <div id="chart-container">
+        <div id="tooltip" class="tooltip"></div>
+        <svg id="chart"></svg>
+        <div class="band-legend">
+            <div class="legend-item"><div class="legend-color" style="background: #93c5fd;"></div> 0-33%</div>
+            <div class="legend-item"><div class="legend-color" style="background: #3b82f6;"></div> 33-66%</div>
+            <div class="legend-item"><div class="legend-color" style="background: #1d4ed8;"></div> 66-100%</div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // --- Configuration ---
+    const config = {
+        nServers: 8,
+        nPoints: 1440, // 24 hours * 60 minutes
+        bands: 3,
+        rowHeight: 40,
+        margin: { top: 20, right: 30, bottom: 30, left: 120 },
+        width: 960,
+        colors: ["#93c5fd", "#3b82f6", "#1d4ed8"], // Blue shades for positive bands
+        serverGroups: [
+            { name: "Frontend", indices: [0, 1, 2], base: 15, jitter: 5 },
+            { name: "API", indices: [3, 4], base: 25, jitter: 8 },
+            { name: "Database", indices: [5, 6], base: 40, jitter: 12 },
+            { name: "Auth", indices: [7], base: 10, jitter: 4 }
+        ]
+    };
+
+    // --- Data Generation ---
+    function generateData() {
+        const seed = 123;
+        const random = () => {
+            let x = Math.sin(seed++) * 10000;
+            return x - Math.floor(x);
+        };
+
+        const data = [];
+        const now = new Date();
+        now.setHours(0, 0, 0, 0);
+
+        // Spike clusters (randomly positioned events that affect groups)
+        const clusters = [
+            { time: 480, duration: 60, intensity: 45, groups: ["Frontend", "API"] },   // Morning rush
+            { time: 840, duration: 45, intensity: 30, groups: ["Frontend", "Auth"] },  // Lunch dip/spike
+            { time: 1100, duration: 90, intensity: 55, groups: ["Database", "API"] }, // Batch processing
+            { time: 1320, duration: 30, intensity: 20, groups: ["Frontend"] }          // Late night blip
+        ];
+
+        for (let i = 0; i < config.nServers; i++) {
+            const group = config.serverGroups.find(g => g.indices.includes(i));
+            const series = [];
+            let val = group.base;
+
+            for (let t = 0; t < config.nPoints; t++) {
+                // Brown noise + mean reversion
+                val += (Math.random() - 0.5) * 4;
+                val += (group.base - val) * 0.05;
+
+                // Add cluster effects
+                clusters.forEach(c => {
+                    if (c.groups.includes(group.name)) {
+                        const dist = Math.abs(t - c.time);
+                        if (dist < c.duration) {
+                            const weight = Math.pow(1 - dist / c.duration, 2);
+                            val += weight * c.intensity * (0.8 + Math.random() * 0.4);
+                        }
+                    }
+                });
+
+                series.push({
+                    time: new Date(now.getTime() + t * 60000),
+                    value: Math.max(0, Math.min(100, val))
+                });
+            }
+            
+            data.push({
+                id: i,
+                name: `${group.name} Server ${i - group.indices[0] + 1}`,
+                group: group.name,
+                values: series
+            });
+        }
+        return data;
+    }
+
+    const seriesData = generateData();
+
+    // --- Chart Setup ---
+    const width = config.width;
+    const height = config.rowHeight * config.nServers + config.margin.top + config.margin.bottom;
+    
+    const svg = d3.select("#chart")
+        .attr("viewBox", [0, 0, width, height])
+        .attr("width", "100%")
+        .attr("height", "auto");
+
+    const x = d3.scaleTime()
+        .domain(d3.extent(seriesData[0].values, d => d.time))
+        .range([config.margin.left, width - config.margin.right]);
+
+    const y = d3.scaleLinear()
+        .domain([0, 100 / config.bands])
+        .range([config.rowHeight, 0]);
+
+    const area = d3.area()
+        .curve(d3.curveMonotoneX)
+        .x(d => x(d.time))
+        .y0(config.rowHeight)
+        .y1(d => y(d.value));
+
+    // --- Rendering ---
+    const rows = svg.append("g")
+        .selectAll("g")
+        .data(seriesData)
+        .join("g")
+        .attr("class", "horizon-row")
+        .attr("transform", (d, i) => `translate(0, ${config.margin.top + i * config.rowHeight})`);
+
+    // Define clipping paths for each row
+    svg.append("defs")
+        .selectAll("clipPath")
+        .data(seriesData)
+        .join("clipPath")
+        .attr("id", d => `clip-${d.id}`)
+        .append("rect")
+        .attr("x", config.margin.left)
+        .attr("y", 0)
+        .attr("width", width - config.margin.left - config.margin.right)
+        .attr("height", config.rowHeight);
+
+    // Labels
+    rows.append("text")
+        .attr("class", "server-label")
+        .attr("x", config.margin.left - 10)
+        .attr("y", config.rowHeight / 2)
+        .attr("dy", "0.35em")
+        .attr("text-anchor", "end")
+        .text(d => d.name);
+
+    // Horizon Bands
+    rows.each(function(d) {
+        const row = d3.select(this);
+        const step = 100 / config.bands;
+
+        for (let i = 0; i < config.bands; i++) {
+            const bandData = d.values.map(v => ({
+                time: v.time,
+                value: Math.max(0, Math.min(step, v.value - i * step))
+            }));
+
+            row.append("path")
+                .datum(bandData)
+                .attr("fill", config.colors[i])
+                .attr("d", area)
+                .attr("clip-path", `url(#clip-${d.id})`);
+        }
+    });
+
+    // Separators
+    rows.append("line")
+        .attr("x1", config.margin.left)
+        .attr("x2", width - config.margin.right)
+        .attr("y1", config.rowHeight)
+        .attr("y2", config.rowHeight)
+        .attr("stroke", "#f3f4f6");
+
+    // X-Axis
+    const xAxis = d3.axisBottom(x)
+        .ticks(d3.timeHour.every(3))
+        .tickFormat(d3.timeFormat("%H:%M"));
+
+    svg.append("g")
+        .attr("transform", `translate(0, ${height - config.margin.bottom})`)
+        .call(xAxis)
+        .call(g => g.select(".domain").remove())
+        .call(g => g.selectAll(".tick line").attr("stroke", "#e5e7eb"))
+        .call(g => g.selectAll(".tick text").attr("class", "axis-label"));
+
+    // --- Interaction ---
+    const crosshair = svg.append("line")
+        .attr("class", "crosshair-line")
+        .attr("y1", config.margin.top)
+        .attr("y2", height - config.margin.bottom)
+        .style("opacity", 0);
+
+    const tooltip = d3.select("#tooltip");
+
+    svg.on("mousemove", function(event) {
+        const [mx, my] = d3.pointer(event);
+        if (mx < config.margin.left || mx > width - config.margin.right) {
+            hideCrosshair();
+            return;
+        }
+
+        const date = x.invert(mx);
+        const bisect = d3.bisector(d => d.time).left;
+        
+        crosshair
+            .attr("x1", mx)
+            .attr("x2", mx)
+            .style("opacity", 1);
+
+        // Update Tooltip
+        let html = `
+            <div class="tooltip-header">
+                <span>${d3.timeFormat("%H:%M")(date)}</span>
+                <span style="color: #9ca3af">CPU %</span>
+            </div>
+        `;
+
+        seriesData.forEach(s => {
+            const idx = bisect(s.values, date);
+            const d = s.values[idx] || s.values[s.values.length - 1];
+            html += `
+                <div class="tooltip-row">
+                    <span>${s.name}</span>
+                    <span class="tooltip-val">${d.value.toFixed(1)}%</span>
+                </div>
+            `;
+        });
+
+        tooltip
+            .style("display", "block")
+            .html(html);
+    });
+
+    svg.on("mouseleave", hideCrosshair);
+
+    function hideCrosshair() {
+        crosshair.style("opacity", 0);
+        tooltip.style("display", "none");
+    }
+
+</script>
+</body>
+</html>

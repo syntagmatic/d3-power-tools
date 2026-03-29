@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock Performance Dashboard</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg: #ffffff;
+            --text: #1a1a1a;
+            --muted: #666666;
+            --border: #eeeeee;
+            --win: #2ca02c;
+            --loss: #d62728;
+            --price: #3182bd;
+            --volume: #9ecae1;
+            --bullet-bg: #eeeeee;
+            --bullet-measure: #333333;
+            --bullet-target: #000000;
+            --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        body {
+            margin: 0;
+            padding: 40px;
+            font-family: var(--font);
+            background-color: var(--bg);
+            color: var(--text);
+            display: flex;
+            justify-content: center;
+        }
+
+        .dashboard-container {
+            width: 1000px;
+        }
+
+        header {
+            margin-bottom: 24px;
+        }
+
+        h1 {
+            font-size: 20px;
+            font-weight: 600;
+            margin: 0 0 8px 0;
+        }
+
+        .description {
+            font-size: 13px;
+            color: var(--muted);
+            margin: 0;
+        }
+
+        /* Table Structure */
+        .table {
+            display: flex;
+            flex-direction: column;
+            position: relative;
+            border-top: 1px solid var(--text);
+        }
+
+        .thead {
+            display: grid;
+            grid-template-columns: 100px 160px 120px 140px 180px 100px 100px;
+            border-bottom: 1px solid var(--text);
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            background: var(--bg);
+            z-index: 10;
+        }
+
+        .th {
+            padding: 12px 8px;
+            cursor: pointer;
+            user-select: none;
+            display: flex;
+            align-items: center;
+            transition: background 0.2s;
+        }
+
+        .th:hover {
+            background: #f9f9f9;
+        }
+
+        .th.sort-active {
+            color: var(--price);
+        }
+
+        .th::after {
+            content: "↕";
+            margin-left: 6px;
+            font-size: 10px;
+            opacity: 0.3;
+        }
+
+        .th.asc::after { content: "↑"; opacity: 1; }
+        .th.desc::after { content: "↓"; opacity: 1; }
+
+        .tbody {
+            position: relative;
+            height: 1000px; /* Calculated: 25 rows * 40px */
+        }
+
+        .tr {
+            display: grid;
+            grid-template-columns: 100px 160px 120px 140px 180px 100px 100px;
+            position: absolute;
+            width: 100%;
+            height: 40px;
+            align-items: center;
+            border-bottom: 1px solid var(--border);
+            font-size: 13px;
+            background: var(--bg);
+            transition: background 0.2s;
+        }
+
+        .tr:hover {
+            background: #fcfcfc;
+        }
+
+        .td {
+            padding: 0 8px;
+            white-space: nowrap;
+            overflow: hidden;
+        }
+
+        .td.num {
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+        }
+
+        /* Sparkline Styles */
+        .spark-container {
+            display: flex;
+            align-items: center;
+            height: 100%;
+        }
+
+        svg {
+            display: block;
+        }
+
+        .ticker {
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .change-up { color: var(--win); }
+        .change-down { color: var(--loss); }
+
+        .bullet-label {
+            font-size: 10px;
+            color: var(--muted);
+            margin-left: 4px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="dashboard-container">
+    <header>
+        <h1>Market Performance Dashboard</h1>
+        <p class="description">Active Equity Watchlist • 30D Trend • 7D Volume • 20D Win/Loss • Perf vs Target</p>
+    </header>
+
+    <div class="table" id="stock-table">
+        <div class="thead" id="table-head">
+            <div class="th" data-key="ticker">Symbol</div>
+            <div class="th" data-key="lastPrice">30D Price</div>
+            <div class="th" data-key="avgVolume">7D Vol</div>
+            <div class="th" data-key="winRate">20D W/L</div>
+            <div class="th" data-key="perfScore">Performance</div>
+            <div class="th num" data-key="lastPrice">Price</div>
+            <div class="th num" data-key="change">Change</div>
+        </div>
+        <div class="tbody" id="table-body"></div>
+    </div>
+</div>
+
+<script>
+/**
+ * Mock Data Generation
+ */
+const tickers = [
+    "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA", "META", "BRK.B", "V", "UNH",
+    "JNJ", "WMT", "JPM", "PG", "MA", "HD", "CVX", "LLY", "ABBV", "PFE",
+    "BAC", "KO", "PEP", "TMO", "COST"
+];
+
+const generateData = () => {
+    return tickers.map((symbol, i) => {
+        // Price: 30 days of random walk
+        const prices = [];
+        let cur = 100 + Math.random() * 400;
+        for(let j=0; j<30; j++) {
+            cur *= (1 + (Math.random() - 0.48) * 0.04);
+            prices.push(cur);
+        }
+        
+        // Volume: 7 days
+        const volumes = Array.from({length: 7}, () => Math.random() * 1000 + 500);
+        
+        // Win/Loss: 20 days (binary)
+        const winLoss = Array.from({length: 20}, () => Math.random() > 0.45 ? 1 : -1);
+        
+        // Bullet Chart: Current Perf vs Target
+        const target = 100;
+        const performance = 60 + Math.random() * 60; // 60 to 120
+        const ranges = [60, 90, 120];
+
+        const lastPrice = prices[prices.length - 1];
+        const prevPrice = prices[prices.length - 2];
+        const change = (lastPrice - prevPrice) / prevPrice;
+
+        return {
+            id: i,
+            ticker: symbol,
+            prices,
+            volumes,
+            winLoss,
+            performance,
+            target,
+            ranges,
+            lastPrice,
+            change,
+            winRate: winLoss.filter(d => d > 0).length / 20,
+            avgVolume: d3.mean(volumes),
+            perfScore: performance / target
+        };
+    });
+};
+
+const data = generateData();
+
+/**
+ * Constants & Scales
+ */
+const rowHeight = 40;
+const colWidths = [100, 160, 120, 140, 180, 100, 100];
+
+// Shared Y-domains for visual comparability across rows
+const priceExtent = d3.extent(data.flatMap(d => d.prices));
+const volMax = d3.max(data.flatMap(d => d.volumes));
+
+/**
+ * Sparkline Renderers
+ */
+
+function drawPriceSpark(selection, d) {
+    const w = 140, h = 24;
+    const x = d3.scaleLinear().domain([0, 29]).range([0, w]);
+    const y = d3.scaleLinear().domain(d3.extent(d.prices)).range([h - 2, 2]); // Local extent for shape
+
+    const area = d3.area()
+        .x((_, i) => x(i))
+        .y0(h)
+        .y1(v => y(v))
+        .curve(d3.curveMonotoneX);
+
+    const line = d3.line()
+        .x((_, i) => x(i))
+        .y(v => y(v))
+        .curve(d3.curveMonotoneX);
+
+    const svg = selection.append("svg")
+        .attr("width", w)
+        .attr("height", h);
+
+    svg.append("path")
+        .datum(d.prices)
+        .attr("fill", "var(--price)")
+        .attr("fill-opacity", 0.1)
+        .attr("d", area);
+
+    svg.append("path")
+        .datum(d.prices)
+        .attr("fill", "none")
+        .attr("stroke", "var(--price)")
+        .attr("stroke-width", 1.5)
+        .attr("d", line);
+
+    // End point
+    svg.append("circle")
+        .attr("cx", x(29))
+        .attr("cy", y(d.prices[29]))
+        .attr("r", 2)
+        .attr("fill", "var(--price)");
+}
+
+function drawVolumeSpark(selection, d) {
+    const w = 100, h = 20;
+    const barW = (w / d.volumes.length) - 2;
+    const x = d3.scaleLinear().domain([0, d.volumes.length]).range([0, w]);
+    const y = d3.scaleLinear().domain([0, volMax]).range([h, 0]);
+
+    const svg = selection.append("svg")
+        .attr("width", w)
+        .attr("height", h);
+
+    svg.selectAll("rect")
+        .data(d.volumes)
+        .join("rect")
+        .attr("x", (_, i) => i * (barW + 2))
+        .attr("y", v => y(v))
+        .attr("width", barW)
+        .attr("height", v => h - y(v))
+        .attr("fill", "var(--volume)");
+}
+
+function drawWinLossSpark(selection, d) {
+    const w = 120, h = 12;
+    const barW = (w / d.winLoss.length) - 1;
+    const mid = h / 2;
+
+    const svg = selection.append("svg")
+        .attr("width", w)
+        .attr("height", h);
+
+    svg.selectAll("rect")
+        .data(d.winLoss)
+        .join("rect")
+        .attr("x", (_, i) => i * (barW + 1))
+        .attr("y", v => v > 0 ? 0 : mid + 1)
+        .attr("width", barW)
+        .attr("height", mid - 1)
+        .attr("fill", v => v > 0 ? "var(--win)" : "var(--loss)");
+}
+
+function drawBulletSpark(selection, d) {
+    const w = 140, h = 16;
+    const x = d3.scaleLinear().domain([0, 130]).range([0, w]);
+
+    const svg = selection.append("svg")
+        .attr("width", w)
+        .attr("height", h);
+
+    // Background ranges
+    svg.selectAll("rect.range")
+        .data([...d.ranges].sort((a,b) => b-a))
+        .join("rect")
+        .attr("class", "range")
+        .attr("width", v => x(v))
+        .attr("height", h)
+        .attr("fill", (_, i) => ["#e0e0e0", "#ededed", "#f5f5f5"][i]);
+
+    // Measure
+    svg.append("rect")
+        .attr("y", h * 0.3)
+        .attr("width", x(d.performance))
+        .attr("height", h * 0.4)
+        .attr("fill", "var(--bullet-measure)");
+
+    // Target
+    svg.append("line")
+        .attr("x1", x(d.target))
+        .attr("x2", x(d.target))
+        .attr("y1", 2)
+        .attr("y2", h - 2)
+        .attr("stroke", "var(--bullet-target)")
+        .attr("stroke-width", 2);
+}
+
+/**
+ * Table Core Logic
+ */
+let sortKey = "ticker";
+let sortOrder = "asc";
+
+function updateTable() {
+    // Sort data
+    const sortedData = [...data].sort((a, b) => {
+        let v1 = a[sortKey];
+        let v2 = b[sortKey];
+        if (typeof v1 === "string") {
+            return sortOrder === "asc" ? v1.localeCompare(v2) : v2.localeCompare(v1);
+        }
+        return sortOrder === "asc" ? v1 - v2 : v2 - v1;
+    });
+
+    const tbody = d3.select("#table-body");
+    
+    // Join rows
+    const rows = tbody.selectAll(".tr")
+        .data(sortedData, d => d.id)
+        .join(
+            enter => {
+                const tr = enter.append("div").attr("class", "tr");
+                
+                tr.append("div").attr("class", "td ticker").text(d => d.ticker);
+                
+                tr.append("div").attr("class", "td").call(drawPriceSpark);
+                tr.append("div").attr("class", "td").call(drawVolumeSpark);
+                tr.append("div").attr("class", "td").call(drawWinLossSpark);
+                
+                const bulletTd = tr.append("div").attr("class", "td spark-container");
+                bulletTd.call(drawBulletSpark);
+                bulletTd.append("span").attr("class", "bullet-label").text(d => Math.round(d.performance) + "%");
+                
+                tr.append("div").attr("class", "td num price-val").text(d => d3.format("$,.2f")(d.lastPrice));
+                tr.append("div").attr("class", "td num change-val");
+                
+                return tr;
+            }
+        );
+
+    // Update row positions and dynamic values
+    rows.transition()
+        .duration(600)
+        .style("transform", (_, i) => `translateY(${i * rowHeight}px)`);
+
+    rows.select(".change-val")
+        .text(d => d3.format("+.2%")(d.change))
+        .attr("class", d => `td num change-val ${d.change >= 0 ? "change-up" : "change-down"}`);
+
+    // Update headers
+    d3.selectAll(".th")
+        .classed("sort-active", function() { return d3.select(this).attr("data-key") === sortKey; })
+        .classed("asc", function() { return d3.select(this).attr("data-key") === sortKey && sortOrder === "asc"; })
+        .classed("desc", function() { return d3.select(this).attr("data-key") === sortKey && sortOrder === "desc"; });
+}
+
+// Header Interactions
+d3.selectAll(".th").on("click", function() {
+    const key = d3.select(this).attr("data-key");
+    if (sortKey === key) {
+        sortOrder = sortOrder === "asc" ? "desc" : "asc";
+    } else {
+        sortKey = key;
+        sortOrder = "asc";
+    }
+    updateTable();
+});
+
+// Initial Render
+updateTable();
+
+</script>
+</body>
+</html>

@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Earthquake Depth Globe</title>
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<script src="https://cdn.jsdelivr.net/npm/topojson-client@3"></script>
+<script src="https://cdn.jsdelivr.net/npm/versor@0.2"></script>
+<style>
+:root {
+  --bg: #0a0a12;
+  --panel-bg: #161625;
+  --text: #e0e0f0;
+  --text-dim: #8a8a9a;
+  --accent: #4cc9f0;
+  --border: rgba(255, 255, 255, 0.1);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Inter', -apple-system, system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  padding: 24px;
+}
+
+header {
+  margin-bottom: 24px;
+  flex: 0 0 auto;
+}
+h1 { font-size: 24px; font-weight: 700; letter-spacing: -0.5px; margin-bottom: 4px; }
+.subtitle { font-size: 14px; color: var(--text-dim); }
+
+main {
+  display: grid;
+  grid-template-columns: 1fr 440px;
+  gap: 24px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.globe-section {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: radial-gradient(circle at center, #1a1a2e 0%, #0a0a12 70%);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+canvas#globe { cursor: grab; }
+canvas#globe:active { cursor: grabbing; }
+
+.charts-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+}
+
+.card {
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+}
+
+.card-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 16px;
+}
+
+.scatter-container { flex: 1 1 45%; min-height: 0; }
+.ridge-container { flex: 1 1 55%; min-height: 0; }
+
+svg { width: 100%; height: 100%; overflow: visible; }
+.axis text { font-size: 10px; fill: var(--text-dim); }
+.axis path, .axis line { stroke: var(--border); }
+.grid line { stroke: var(--border); stroke-dasharray: 2,2; }
+
+.brush .selection { fill: rgba(255, 255, 255, 0.1); stroke: #fff; stroke-width: 1; }
+
+.controls {
+  position: absolute;
+  bottom: 20px;
+  left: 20px;
+  display: flex;
+  gap: 12px;
+}
+
+button {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--border);
+  color: #fff;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+button:hover { background: rgba(255, 255, 255, 0.2); }
+button.active { background: var(--accent); color: #000; border-color: var(--accent); }
+
+.tooltip {
+  position: absolute;
+  background: rgba(0,0,0,0.8);
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s;
+  z-index: 100;
+  border: 1px solid var(--border);
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Global Seismic Activity</h1>
+  <p class="subtitle">500 simulated events by tectonic zone • Brush scatter plot to filter globe</p>
+</header>
+
+<main>
+  <div class="globe-section">
+    <canvas id="globe"></canvas>
+    <div class="controls">
+      <button id="toggle-rotation" class="active">Auto-Rotate</button>
+      <button id="reset-view">Reset View</button>
+    </div>
+    <div id="tooltip" class="tooltip"></div>
+  </div>
+
+  <div class="charts-section">
+    <div class="card scatter-container">
+      <div class="card-title">Depth vs Magnitude</div>
+      <svg id="scatter"></svg>
+    </div>
+    <div class="card ridge-container">
+      <div class="card-title">Depth Distribution by Zone</div>
+      <svg id="ridgeline"></svg>
+    </div>
+  </div>
+</main>
+
+<script type="module">
+// --- CONFIG & SCALES ---
+const N = 500;
+const zones = [
+  { name: "Ring of Fire", color: "#ff4d6d", count: 220 },
+  { name: "Alpide Belt", color: "#ff9e00", count: 80 },
+  { name: "Mid-Atlantic Ridge", color: "#00b4d8", count: 70 },
+  { name: "East African Rift", color: "#9ef01a", count: 40 },
+  { name: "Intraplate", color: "#9d4edd", count: 90 }
+];
+
+const depthScale = d3.scaleSequential(d3.interpolateTurbo).domain([700, 0]); // Deep=Cool, Shallow=Hot
+const magScale = d3.scaleSqrt().domain([2, 9]).range([2, 12]);
+
+// --- DATA GENERATION ---
+function randomNormal(mu, sigma) {
+  let u = 0, v = 0;
+  while(u === 0) u = Math.random();
+  while(v === 0) v = Math.random();
+  return mu + sigma * Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+}
+
+function generateQuakes() {
+  const quakes = [];
+  zones.forEach(z => {
+    for (let i = 0; i < z.count; i++) {
+      let lat, lon, depth, mag;
+      
+      if (z.name === "Ring of Fire") {
+        // Approximate Pacific rim
+        const t = Math.random();
+        if (t < 0.3) { // West Pacific (Japan/Phils/Indo)
+          lon = randomNormal(130, 15); lat = randomNormal(10, 25);
+        } else if (t < 0.6) { // East Pacific (Americas)
+          lon = randomNormal(-100, 20); lat = randomNormal(-10, 40);
+        } else { // South Pacific (NZ/Tonga)
+          lon = randomNormal(175, 10); lat = randomNormal(-30, 15);
+        }
+        depth = Math.random() < 0.4 ? randomNormal(400, 150) : randomNormal(30, 20);
+      } else if (z.name === "Alpide Belt") {
+        lon = randomNormal(60, 40); lat = randomNormal(35, 10);
+        depth = randomNormal(40, 30);
+      } else if (z.name === "Mid-Atlantic Ridge") {
+        lon = randomNormal(-30, 5); lat = randomNormal(20, 40);
+        depth = randomNormal(10, 5);
+      } else if (z.name === "East African Rift") {
+        lon = randomNormal(35, 5); lat = randomNormal(-5, 15);
+        depth = randomNormal(15, 10);
+      } else {
+        lon = (Math.random() * 360) - 180;
+        lat = (Math.random() * 160) - 80;
+        depth = randomNormal(20, 15);
+      }
+
+      // Constraints
+      lat = Math.max(-85, Math.min(85, lat));
+      lon = ((lon + 180) % 360 + 360) % 360 - 180;
+      depth = Math.max(0, Math.min(700, depth));
+      mag = 2 + Math.exp(Math.random() * 1.8); // Skewed towards smaller mag
+      
+      quakes.push({ id: quakes.length, lat, lon, depth, mag, zone: z.name });
+    }
+  });
+  return quakes;
+}
+
+const data = generateQuakes();
+
+// --- STATE ---
+let rotationActive = true;
+let highlightedIds = new Set();
+let hoveredId = null;
+
+// --- GLOBE SETUP ---
+const canvas = document.getElementById("globe");
+const ctx = canvas.getContext("2d");
+const dpr = window.devicePixelRatio || 1;
+
+let width, height, radius, projection, path;
+
+function resize() {
+  const container = canvas.parentElement;
+  width = container.clientWidth;
+  height = container.clientHeight;
+  canvas.width = width * dpr;
+  canvas.height = height * dpr;
+  canvas.style.width = width + "px";
+  canvas.style.height = height + "px";
+  ctx.scale(dpr, dpr);
+  
+  radius = Math.min(width, height) / 2 - 40;
+  projection = d3.geoOrthographic()
+    .scale(radius)
+    .translate([width / 2, height / 2])
+    .clipAngle(90);
+  
+  path = d3.geoPath(projection, ctx);
+}
+
+resize();
+window.addEventListener("resize", () => { resize(); render(); });
+
+// Load World Atlas
+let world;
+d3.json("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json").then(data => {
+  world = topojson.feature(data, data.objects.land);
+  render();
+});
+
+// --- INTERACTION ---
+const dispatch = d3.dispatch("filter", "hover");
+
+// Versor rotation
+let v0, q0, r0;
+d3.select(canvas).call(d3.drag()
+  .on("start", (event) => {
+    rotationActive = false;
+    d3.select("#toggle-rotation").classed("active", false);
+    const p = projection.invert([event.x, event.y]);
+    v0 = versor(p);
+    q0 = versor(projection.rotate());
+  })
+  .on("drag", (event) => {
+    const p = projection.invert([event.x, event.y]);
+    if (!p) return;
+    const v1 = versor(p);
+    const q1 = versor.multiply(q0, versor.delta(v0, v1));
+    projection.rotate(versor.rotation(q1));
+    render();
+  })
+);
+
+canvas.addEventListener("mousemove", (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+  const p = projection.invert([x, y]);
+  
+  if (!p) { hoveredId = null; updateTooltip(null); render(); return; }
+  
+  // Simple nearest neighbor
+  let minD = Infinity;
+  let found = null;
+  data.forEach(d => {
+    const dist = d3.geoDistance([d.lon, d.lat], p);
+    if (dist < 0.05 && dist < minD) {
+      const coords = projection([d.lon, d.lat]);
+      if (coords) { // Must be on front hemisphere
+        minD = dist;
+        found = d;
+      }
+    }
+  });
+  
+  if (found !== hoveredId) {
+    hoveredId = found;
+    dispatch.call("hover", null, found ? found.id : null);
+    updateTooltip(found, e.clientX, e.clientY);
+    render();
+  }
+});
+
+function updateTooltip(d, x, y) {
+  const tt = document.getElementById("tooltip");
+  if (!d) { tt.style.opacity = 0; return; }
+  tt.innerHTML = `<strong>${d.zone}</strong><br>Mag: ${d.mag.toFixed(1)} • Depth: ${Math.round(d.depth)}km`;
+  tt.style.left = (x + 10) + "px";
+  tt.style.top = (y + 10) + "px";
+  tt.style.opacity = 1;
+}
+
+// --- RENDERING ---
+function render() {
+  ctx.clearRect(0, 0, width, height);
+
+  // Ocean
+  ctx.beginPath();
+  ctx.arc(width/2, height/2, radius, 0, 2*Math.PI);
+  ctx.fillStyle = "#0a0a1f";
+  ctx.fill();
+
+  // Graticule
+  ctx.beginPath();
+  path(d3.geoGraticule()());
+  ctx.strokeStyle = "rgba(255,255,255,0.05)";
+  ctx.lineWidth = 0.5;
+  ctx.stroke();
+
+  if (world) {
+    ctx.beginPath();
+    path(world);
+    ctx.fillStyle = "#1c1c2e";
+    ctx.fill();
+    ctx.strokeStyle = "#2c2c44";
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+  }
+
+  // Earthquake points
+  const hasFilter = highlightedIds.size > 0;
+  
+  data.forEach(d => {
+    const coords = projection([d.lon, d.lat]);
+    if (!coords) return;
+    
+    // Check if on back side manually just in case clipAngle isn't enough for the dots
+    const gDist = d3.geoDistance([d.lon, d.lat], projection.invert([width/2, height/2]));
+    if (gDist > Math.PI / 2) return;
+
+    const r = magScale(d.mag);
+    const isHighlighted = highlightedIds.has(d.id);
+    const isHovered = hoveredId && hoveredId.id === d.id;
+    
+    ctx.beginPath();
+    ctx.arc(coords[0], coords[1], r, 0, 2 * Math.PI);
+    
+    if (hasFilter && !isHighlighted) {
+      ctx.fillStyle = "rgba(100, 100, 100, 0.1)";
+    } else {
+      ctx.fillStyle = depthScale(d.depth);
+      ctx.globalAlpha = isHovered ? 1 : 0.8;
+    }
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    if (isHovered) {
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  });
+
+  // Sphere border
+  ctx.beginPath();
+  ctx.arc(width/2, height/2, radius, 0, 2*Math.PI);
+  ctx.strokeStyle = "rgba(255,255,255,0.1)";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+
+// Auto-rotation
+d3.timer(() => {
+  if (rotationActive) {
+    const rotate = projection.rotate();
+    projection.rotate([rotate[0] + 0.2, rotate[1]]);
+    render();
+  }
+});
+
+// --- SCATTER PLOT ---
+const scatterSvg = d3.select("#scatter");
+const scatterMargin = { top: 10, right: 10, bottom: 40, left: 45 };
+let scatterW, scatterH;
+
+function initScatter() {
+  const box = scatterSvg.node().parentElement.getBoundingClientRect();
+  scatterW = box.width - scatterMargin.left - scatterMargin.right;
+  scatterH = box.height - scatterMargin.top - scatterMargin.bottom - 40; // title height
+  
+  scatterSvg.selectAll("*").remove();
+  const g = scatterSvg.append("g").attr("transform", `translate(${scatterMargin.left},${scatterMargin.top})`);
+  
+  const x = d3.scaleLinear().domain([2, 9]).range([0, scatterW]);
+  const y = d3.scaleLinear().domain([0, 700]).range([0, scatterH]); // 0 depth at top
+
+  // Grid
+  g.append("g").attr("class", "grid")
+    .attr("transform", `translate(0,${scatterH})`)
+    .call(d3.axisBottom(x).ticks(5).tickSize(-scatterH).tickFormat(""));
+  g.append("g").attr("class", "grid")
+    .call(d3.axisLeft(y).ticks(5).tickSize(-scatterW).tickFormat(""));
+
+  const xAxis = d3.axisBottom(x).ticks(5);
+  const yAxis = d3.axisLeft(y).ticks(5);
+
+  g.append("g").attr("class", "axis").attr("transform", `translate(0,${scatterH})`).call(xAxis);
+  g.append("g").attr("class", "axis").call(yAxis);
+
+  // Labels
+  g.append("text").attr("x", scatterW/2).attr("y", scatterH + 35).attr("text-anchor", "middle")
+    .attr("fill", "#8a8a9a").attr("font-size", "10px").text("Magnitude");
+  g.append("text").attr("transform", "rotate(-90)").attr("x", -scatterH/2).attr("y", -35).attr("text-anchor", "middle")
+    .attr("fill", "#8a8a9a").attr("font-size", "10px").text("Depth (km)");
+
+  const dots = g.selectAll(".dot")
+    .data(data)
+    .join("circle")
+    .attr("class", "dot")
+    .attr("cx", d => x(d.mag))
+    .attr("cy", d => y(d.depth))
+    .attr("r", 3)
+    .attr("fill", d => depthScale(d.depth))
+    .attr("opacity", 0.6);
+
+  // Brush
+  const brush = d3.brush()
+    .extent([[0, 0], [scatterW, scatterH]])
+    .on("brush end", ({ selection }) => {
+      if (!selection) {
+        highlightedIds = new Set();
+        dots.attr("opacity", 0.6).attr("r", 3);
+      } else {
+        const [[x0, y0], [x1, y1]] = selection;
+        highlightedIds = new Set();
+        data.forEach(d => {
+          const cx = x(d.mag);
+          const cy = y(d.depth);
+          if (cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1) highlightedIds.add(d.id);
+        });
+        dots.attr("opacity", d => highlightedIds.has(d.id) ? 0.9 : 0.05)
+            .attr("r", d => highlightedIds.has(d.id) ? 4 : 2);
+      }
+      dispatch.call("filter", null, highlightedIds);
+      render();
+    });
+
+  g.append("g").attr("class", "brush").call(brush);
+
+  dispatch.on("hover.scatter", id => {
+    dots.attr("stroke", d => d.id === id ? "#fff" : null)
+        .attr("stroke-width", d => d.id === id ? 2 : 0)
+        .raise();
+  });
+}
+
+// --- RIDGELINE PLOT ---
+const ridgeSvg = d3.select("#ridgeline");
+const ridgeMargin = { top: 20, right: 10, bottom: 40, left: 100 };
+let ridgeW, ridgeH;
+
+function initRidge() {
+  const box = ridgeSvg.node().parentElement.getBoundingClientRect();
+  ridgeW = box.width - ridgeMargin.left - ridgeMargin.right;
+  ridgeH = box.height - ridgeMargin.top - ridgeMargin.bottom - 40;
+  
+  ridgeSvg.selectAll("*").remove();
+  const g = ridgeSvg.append("g").attr("transform", `translate(${ridgeMargin.left},${ridgeMargin.top})`);
+
+  const x = d3.scaleLinear().domain([0, 700]).range([0, ridgeW]);
+  const y = d3.scaleBand().domain(zones.map(z => z.name)).range([0, ridgeH]).paddingInner(0.2);
+
+  g.append("g").attr("class", "axis").attr("transform", `translate(0,${ridgeH})`).call(d3.axisBottom(x).ticks(5));
+  g.append("text").attr("x", ridgeW/2).attr("y", ridgeH + 35).attr("text-anchor", "middle")
+    .attr("fill", "#8a8a9a").attr("font-size", "10px").text("Depth (km)");
+
+  // KDE logic
+  function kernelEpanechnikov(k) {
+    return v => Math.abs(v /= k) <= 1 ? 0.75 * (1 - v * v) / k : 0;
+  }
+  function kernelDensityEstimator(kernel, X) {
+    return V => X.map(x => [x, d3.mean(V, v => kernel(x - v))]);
+  }
+
+  const kde = kernelDensityEstimator(kernelEpanechnikov(40), x.ticks(50));
+  
+  const ridgeData = zones.map(z => {
+    const values = data.filter(d => d.zone === z.name).map(d => d.depth);
+    return { name: z.name, color: z.color, density: kde(values) };
+  });
+
+  const maxDensity = d3.max(ridgeData, r => d3.max(r.density, d => d[1]));
+  const zScale = d3.scaleLinear().domain([0, maxDensity]).range([y.bandwidth() * 1.5, 0]);
+
+  const line = d3.line().curve(d3.curveBasis).x(d => x(d[0])).y(d => zScale(d[1]));
+  const area = d3.area().curve(d3.curveBasis).x(d => x(d[0])).y0(y.bandwidth()).y1(d => zScale(d[1]));
+
+  const rows = g.selectAll(".ridge-row")
+    .data(ridgeData)
+    .join("g")
+    .attr("class", "ridge-row")
+    .attr("transform", d => `translate(0,${y(d.name)})`);
+
+  rows.append("path")
+    .attr("class", "ridge-area")
+    .attr("d", d => area(d.density))
+    .attr("fill", d => d.color)
+    .attr("fill-opacity", 0.3);
+
+  rows.append("path")
+    .attr("class", "ridge-line")
+    .attr("d", d => line(d.density))
+    .attr("fill", "none")
+    .attr("stroke", d => d.color)
+    .attr("stroke-width", 1.5);
+
+  rows.append("text")
+    .attr("x", -10)
+    .attr("y", y.bandwidth() / 2 + 4)
+    .attr("text-anchor", "end")
+    .attr("fill", d => d.color)
+    .attr("font-size", "11px")
+    .attr("font-weight", "500")
+    .text(d => d.name);
+
+  dispatch.on("filter.ridge", hl => {
+    if (hl.size === 0) {
+      rows.style("opacity", 1);
+    } else {
+      const activeZones = new Set();
+      data.forEach(d => { if (hl.has(d.id)) activeZones.add(d.zone); });
+      rows.style("opacity", d => activeZones.has(d.name) ? 1 : 0.2);
+    }
+  });
+}
+
+// --- INITIALIZE ---
+initScatter();
+initRidge();
+
+window.addEventListener("resize", () => {
+  initScatter();
+  initRidge();
+});
+
+// UI Controls
+d3.select("#toggle-rotation").on("click", function() {
+  rotationActive = !rotationActive;
+  d3.select(this).classed("active", rotationActive);
+});
+
+d3.select("#reset-view").on("click", () => {
+  projection.rotate([0, 0, 0]).scale(radius);
+  render();
+});
+
+</script>
+</body>
+</html>

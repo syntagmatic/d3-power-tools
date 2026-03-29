@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Sunburst-Icicle Morph</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: #f8f9fa;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+    }
+    #controls {
+      position: absolute;
+      top: 20px;
+      z-index: 10;
+    }
+    button {
+      padding: 10px 20px;
+      font-size: 14px;
+      cursor: pointer;
+      background: #fff;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+      transition: all 0.2s;
+    }
+    button:hover {
+      background: #f0f0f0;
+      box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    }
+    button:active {
+      transform: translateY(1px);
+    }
+    #chart-container {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .node {
+      stroke: #fff;
+      stroke-width: 0.5px;
+      transition: opacity 0.2s;
+    }
+    .node:hover {
+      stroke-width: 1.5px;
+      stroke: #333;
+    }
+    .label {
+      pointer-events: none;
+      font-size: 10px;
+      fill: #333;
+      text-anchor: middle;
+      dominant-baseline: middle;
+    }
+    #tooltip {
+      position: absolute;
+      padding: 8px 12px;
+      background: rgba(255, 255, 255, 0.95);
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      pointer-events: none;
+      font-size: 12px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+      opacity: 0;
+      transition: opacity 0.2s;
+      z-index: 100;
+    }
+    .breadcrumb {
+      font-weight: bold;
+      color: #555;
+      margin-bottom: 4px;
+    }
+    .value {
+      color: #888;
+    }
+  </style>
+</head>
+<body>
+
+<div id="controls">
+  <button id="toggle">Switch to Icicle</button>
+</div>
+
+<div id="chart-container">
+  <div id="tooltip"></div>
+</div>
+
+<script>
+  // --- Configuration ---
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+  const radius = Math.min(width, height) / 2 - 40;
+  const icicleWidth = width * 0.8;
+  const icicleHeight = height * 0.6;
+  const duration = 1200;
+  const samples = 40; // points along the curved edges
+
+  // --- Data Generation ---
+  function generateOrgChart() {
+    const roles = ["VP", "Director", "Manager", "Lead", "Senior", "Junior"];
+    const names = ["Alice", "Bob", "Charlie", "David", "Eve", "Frank", "Grace", "Henry", "Ivy", "Jack", "Karl", "Leo", "Mia", "Noah", "Olivia", "Paul", "Quinn", "Rose", "Sam", "Tara"];
+    
+    let idCounter = 0;
+    function createNode(name, depth) {
+      const node = {
+        name: name,
+        id: idCounter++,
+        value: depth === 3 ? Math.floor(Math.random() * 100) + 10 : 0
+      };
+      
+      if (depth < 3) {
+        node.children = [];
+        const numChildren = depth === 0 ? 5 : (depth === 1 ? 5 : 6);
+        for (let i = 0; i < numChildren; i++) {
+          const childName = names[Math.floor(Math.random() * names.length)] + " " + (depth + 1) + "-" + i;
+          node.children.push(createNode(childName, depth + 1));
+        }
+      }
+      return node;
+    }
+    
+    return createNode("CEO", 0);
+  }
+
+  const data = generateOrgChart();
+
+  // --- D3 Setup ---
+  const svg = d3.select("#chart-container")
+    .append("svg")
+    .attr("width", width)
+    .attr("height", height)
+    .append("g")
+    .attr("transform", `translate(${width / 2}, ${height / 2})`);
+
+  const partition = d3.partition()
+    .size([2 * Math.PI, 1]); // normalize: x is angle [0, 2PI], y is depth [0, 1]
+
+  const root = d3.hierarchy(data)
+    .sum(d => d.value)
+    .sort((a, b) => b.value - a.value);
+
+  partition(root);
+
+  // --- Morphing Logic ---
+  let isSunburst = true;
+  let t = 1; // 1 = Sunburst, 0 = Icicle
+
+  // Helper to interpolate between Polar and Cartesian
+  function project(angle, depth, t) {
+    // Sunburst (Polar)
+    const r = depth * radius;
+    const sx = r * Math.sin(angle);
+    const sy = -r * Math.cos(angle);
+    
+    // Icicle (Cartesian)
+    const ix = (angle / (2 * Math.PI) - 0.5) * icicleWidth;
+    const iy = (depth - 0.5) * icicleHeight;
+    
+    return [
+      sx * t + ix * (1 - t),
+      sy * t + iy * (1 - t)
+    ];
+  }
+
+  // Path generator that samples points along horizontal edges
+  function generatePath(d, t) {
+    const points = [];
+    
+    // Inner edge (top in icicle, inner arc in sunburst)
+    for (let i = 0; i <= samples; i++) {
+      const angle = d.x0 + (i / samples) * (d.x1 - d.x0);
+      points.push(project(angle, d.y0, t));
+    }
+    
+    // Outer edge (bottom in icicle, outer arc in sunburst) - in reverse
+    for (let i = samples; i >= 0; i--) {
+      const angle = d.x0 + (i / samples) * (d.x1 - d.x0);
+      points.push(project(angle, d.y1, t));
+    }
+    
+    return d3.line()(points) + "Z";
+  }
+
+  // Color Scale
+  const color = d3.scaleOrdinal(d3.quantize(d3.interpolateRainbow, root.children.length + 1));
+
+  // Render Nodes
+  const nodes = svg.selectAll(".node")
+    .data(root.descendants().filter(d => d.depth > 0))
+    .join("path")
+    .attr("class", "node")
+    .attr("d", d => generatePath(d, t))
+    .attr("fill", d => {
+      while (d.depth > 1) d = d.parent;
+      return color(d.data.name);
+    })
+    .attr("fill-opacity", d => (1 - d.depth * 0.15))
+    .on("mouseover", handleMouseOver)
+    .on("mousemove", handleMouseMove)
+    .on("mouseout", handleMouseOut);
+
+  // Render Labels
+  const labels = svg.selectAll(".label")
+    .data(root.descendants().filter(d => d.depth > 0 && (d.x1 - d.x0) > 0.05))
+    .join("text")
+    .attr("class", "label")
+    .text(d => d.data.name.split(" ")[0])
+    .attr("transform", d => getLabelTransform(d, t))
+    .attr("opacity", d => getLabelOpacity(d, t));
+
+  function getLabelTransform(d, t) {
+    const angle = (d.x0 + d.x1) / 2;
+    const depth = (d.y0 + d.y1) / 2;
+    const [x, y] = project(angle, depth, t);
+    
+    if (t > 0.5) {
+      // Sunburst labeling: rotate
+      const rotation = (angle * 180 / Math.PI) - 0; // Adjust based on project orientation
+      // If we use Math.sin/cos for project, angle 0 is up.
+      // Angle in degrees
+      let deg = (angle * 180 / Math.PI);
+      if (deg > 90 && deg < 270) {
+        deg += 180;
+      }
+      return `translate(${x},${y}) rotate(${deg})`;
+    } else {
+      // Icicle labeling: horizontal
+      return `translate(${x},${y})`;
+    }
+  }
+  
+  function getLabelOpacity(d, t) {
+    // Hide if cell is too small
+    const xDist = (d.x1 - d.x0) * (t * radius * d.y0 + (1 - t) * icicleWidth / (2*Math.PI));
+    return xDist > 20 ? 1 : 0;
+  }
+
+  // --- Interactions ---
+  const tooltip = d3.select("#tooltip");
+
+  function handleMouseOver(event, d) {
+    const ancestors = d.ancestors().reverse();
+    const pathString = ancestors.map(a => a.data.name).join(" > ");
+    
+    tooltip.transition().duration(200).style("opacity", 1);
+    tooltip.html(`
+      <div class="breadcrumb">${pathString}</div>
+      <div class="value">Team Value: ${d.value}</div>
+    `);
+    
+    // Highlight ancestors
+    const ancestorIds = new Set(ancestors.map(a => a.id));
+    nodes.style("opacity", n => ancestorIds.has(n.id) ? 1 : 0.2);
+  }
+
+  function handleMouseMove(event) {
+    tooltip
+      .style("left", (event.pageX + 15) + "px")
+      .style("top", (event.pageY - 15) + "px");
+  }
+
+  function handleMouseOut() {
+    tooltip.transition().duration(200).style("opacity", 0);
+    nodes.style("opacity", 1);
+  }
+
+  // --- Toggle ---
+  d3.select("#toggle").on("click", function() {
+    isSunburst = !isSunburst;
+    d3.select(this).text(isSunburst ? "Switch to Icicle" : "Switch to Sunburst");
+    
+    const targetT = isSunburst ? 1 : 0;
+    
+    d3.transition()
+      .duration(duration)
+      .ease(d3.easeCubicInOut)
+      .tween("morph", () => {
+        const i = d3.interpolate(t, targetT);
+        return (time) => {
+          t = i(time);
+          nodes.attr("d", d => generatePath(d, t));
+          labels
+            .attr("transform", d => getLabelTransform(d, t))
+            .attr("opacity", d => getLabelOpacity(d, t));
+        };
+      });
+  });
+
+  // Handle Resize
+  window.addEventListener("resize", () => {
+    // Simple reload or recalculate
+    location.reload();
+  });
+
+</script>
+</body>
+</html>

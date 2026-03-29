@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sentence Rhythm — Book Analysis</title>
+    <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+    <style>
+        :root {
+            --bg: #ffffff;
+            --text: #1a1a1a;
+            --text-muted: #666;
+            --border: #e5e7eb;
+            --hover: #f9fafb;
+            --accent: #3b82f6;
+            --font-mono: "JetBrains Mono", "SF Mono", "Fira Code", monospace;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: #fcfcfc;
+            color: var(--text);
+            padding: 40px 20px;
+            line-height: 1.5;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+
+        header {
+            margin-bottom: 32px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 20px;
+        }
+
+        h1 {
+            font-size: 24px;
+            font-weight: 800;
+            letter-spacing: -0.025em;
+            margin-bottom: 4px;
+        }
+
+        .description {
+            font-size: 14px;
+            color: var(--text-muted);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            font-size: 13px;
+        }
+
+        th {
+            padding: 12px 8px;
+            text-align: left;
+            font-weight: 600;
+            color: var(--text-muted);
+            border-bottom: 2px solid var(--border);
+            cursor: pointer;
+            user-select: none;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-size: 11px;
+            transition: color 0.2s;
+        }
+
+        th:hover { color: var(--text); }
+        th.active { color: var(--accent); }
+        th .sort-icon {
+            display: inline-block;
+            width: 12px;
+            margin-left: 4px;
+            font-size: 10px;
+        }
+
+        td {
+            padding: 10px 8px;
+            border-bottom: 1px solid var(--border);
+            vertical-align: middle;
+        }
+
+        tr:hover td { background: var(--hover); }
+
+        .num {
+            text-align: right;
+            font-family: var(--font-mono);
+            font-variant-numeric: tabular-nums;
+        }
+
+        .style-tag {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.02em;
+        }
+
+        /* Narrative Styles */
+        .style-staccato { background: #fee2e2; color: #991b1b; }
+        .style-balanced { background: #dcfce7; color: #166534; }
+        .style-expansive { background: #fef9c3; color: #854d0e; }
+        .style-flowing { background: #dbeafe; color: #1e40af; }
+
+        .spark-cell { width: 220px; }
+        .dist-cell { width: 120px; }
+
+        .tooltip {
+            position: fixed;
+            pointer-events: none;
+            background: rgba(0, 0, 0, 0.85);
+            color: white;
+            padding: 6px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-family: var(--font-mono);
+            z-index: 1000;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+            opacity: 0;
+            transition: opacity 0.1s;
+        }
+
+        .longest-highlight {
+            font-weight: bold;
+            color: var(--accent);
+        }
+
+        .avg-col { font-weight: 600; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <header>
+        <h1>Sentence Rhythm</h1>
+        <p class="description">Structural analysis of 20 chapters across four narrative styles. Hover sparklines to identify the longest sentences.</p>
+    </header>
+
+    <div style="overflow-x: auto;">
+        <table id="viz-table">
+            <thead>
+                <tr>
+                    <th data-key="chapter">Ch<span class="sort-icon"></span></th>
+                    <th data-key="style">Style<span class="sort-icon"></span></th>
+                    <th data-key="wordCount" class="num">Words<span class="sort-icon"></span></th>
+                    <th style="cursor: default;">Rhythm Sparkline</th>
+                    <th style="cursor: default;">Distribution</th>
+                    <th data-key="avgLen" class="num active">Avg Len<span class="sort-icon"></span></th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+</div>
+
+<div id="tooltip" class="tooltip"></div>
+
+<script>
+    // --- Data Generation ---
+    const styles = {
+        staccato:  { mu: 8,  sig: 4,  min: 2,  max: 20, color: "#ef4444" },
+        balanced:  { mu: 16, sig: 6,  min: 3,  max: 35, color: "#22c55e" },
+        expansive: { mu: 32, sig: 12, min: 10, max: 70, color: "#eab308" },
+        flowing:   { mu: 22, sig: 8,  min: 5,  max: 50, color: "#3b82f6" }
+    };
+
+    function generateChapter(id) {
+        const styleKeys = Object.keys(styles);
+        const styleKey = styleKeys[Math.floor(Math.random() * styleKeys.length)];
+        const style = styles[styleKey];
+        const n = 60 + Math.floor(Math.random() * 40);
+        
+        const sentences = Array.from({ length: n }, () => {
+            // Box-Muller transform for normal distribution
+            let u = 0, v = 0;
+            while(u === 0) u = Math.random();
+            while(v === 0) v = Math.random();
+            let num = Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+            num = num * style.sig + style.mu;
+            return Math.max(style.min, Math.min(style.max, Math.round(num)));
+        });
+
+        // Add a few outliers
+        if (Math.random() > 0.7) {
+            sentences[Math.floor(Math.random() * n)] += Math.floor(Math.random() * 20) + 10;
+        }
+
+        const wordCount = d3.sum(sentences);
+        return {
+            chapter: id,
+            style: styleKey,
+            sentences: sentences,
+            wordCount: wordCount,
+            avgLen: +(wordCount / n).toFixed(1),
+            longest: d3.max(sentences)
+        };
+    }
+
+    const data = Array.from({ length: 20 }, (_, i) => generateChapter(i + 1));
+
+    // --- State Management ---
+    let currentSort = { key: 'avgLen', dir: -1 };
+    const tooltip = d3.select("#tooltip");
+
+    // --- Visualization Helpers ---
+    function kernelDensityEstimator(kernel, x) {
+        return function(sample) {
+            return x.map(v => [v, d3.mean(sample, d => kernel(v - d))]);
+        };
+    }
+    function kernelEpanechnikov(k) {
+        return function(v) {
+            return Math.abs(v /= k) <= 1 ? 0.75 * (1 - v * v) / k : 0;
+        };
+    }
+
+    // --- Rendering ---
+    function update() {
+        // Sort Data
+        const sortedData = [...data].sort((a, b) => {
+            const va = a[currentSort.key];
+            const vb = b[currentSort.key];
+            if (typeof va === 'string') {
+                return currentSort.dir * va.localeCompare(vb);
+            }
+            return currentSort.dir * (va - vb);
+        });
+
+        // Update Headers
+        d3.selectAll("th").each(function() {
+            const key = d3.select(this).attr("data-key");
+            const icon = d3.select(this).select(".sort-icon");
+            d3.select(this).classed("active", key === currentSort.key);
+            if (key === currentSort.key) {
+                icon.text(currentSort.dir === 1 ? "▲" : "▼");
+            } else {
+                icon.text("");
+            }
+        });
+
+        // Table Join
+        const tbody = d3.select("tbody");
+        const rows = tbody.selectAll("tr")
+            .data(sortedData, d => d.chapter)
+            .join("tr");
+
+        rows.each(function(d) {
+            const row = d3.select(this);
+            row.html(""); // Clear for simplicity in this small-scale demo
+
+            row.append("td").text(d.chapter);
+            row.append("td").append("span")
+                .attr("class", `style-tag style-${d.style}`)
+                .text(d.style);
+            row.append("td").attr("class", "num").text(d3.format(",")(d.wordCount));
+
+            // Sparkline cell
+            const sparkCell = row.append("td").attr("class", "spark-cell");
+            renderSparkline(sparkCell, d);
+
+            // Violin cell
+            const distCell = row.append("td").attr("class", "dist-cell");
+            renderViolin(distCell, d);
+
+            row.append("td").attr("class", "num avg-col").text(d.avgLen);
+        });
+    }
+
+    function renderSparkline(container, d) {
+        const width = 200, height = 30;
+        const svg = container.append("svg")
+            .attr("width", width)
+            .attr("height", height)
+            .style("display", "block");
+
+        const x = d3.scaleLinear()
+            .domain([0, d.sentences.length - 1])
+            .range([2, width - 2]);
+
+        const y = d3.scaleLinear()
+            .domain([0, d3.max(data, chapter => chapter.longest)]) // Shared Y scale
+            .range([height - 2, 2]);
+
+        const barWidth = (width - 4) / d.sentences.length;
+
+        const bars = svg.selectAll("rect")
+            .data(d.sentences)
+            .join("rect")
+            .attr("x", (_, i) => x(i))
+            .attr("y", s => y(s))
+            .attr("width", Math.max(0.5, barWidth - 0.5))
+            .attr("height", s => height - y(s) - 1)
+            .attr("fill", styles[d.style].color)
+            .attr("opacity", 0.6);
+
+        const maxVal = d.longest;
+
+        svg.on("mousemove", (event) => {
+            const [mx] = d3.pointer(event);
+            const idx = Math.min(d.sentences.length - 1, Math.max(0, Math.floor(x.invert(mx))));
+            const val = d.sentences[idx];
+
+            bars.attr("opacity", (_, i) => i === idx ? 1 : 0.3)
+                .attr("fill", (_, i) => d.sentences[i] === maxVal ? "#000" : styles[d.style].color);
+
+            tooltip
+                .style("opacity", 1)
+                .style("left", (event.clientX + 15) + "px")
+                .style("top", (event.clientY - 15) + "px")
+                .html(`Sentence ${idx + 1}: <b>${val}</b> words<br/>Longest in Ch: <span class="longest-highlight">${maxVal}</span>`);
+        }).on("mouseleave", () => {
+            bars.attr("opacity", 0.6).attr("fill", styles[d.style].color);
+            tooltip.style("opacity", 0);
+        });
+    }
+
+    function renderViolin(container, d) {
+        const width = 100, height = 30;
+        const svg = container.append("svg")
+            .attr("width", width)
+            .attr("height", height)
+            .style("display", "block");
+
+        const x = d3.scaleLinear()
+            .domain([0, d3.max(data, chapter => chapter.longest)])
+            .range([5, width - 5]);
+
+        const kde = kernelDensityEstimator(kernelEpanechnikov(7), x.ticks(40));
+        const density = kde(d.sentences);
+        const maxDensity = d3.max(density, p => p[1]);
+
+        const y = d3.scaleLinear()
+            .domain([0, maxDensity])
+            .range([0, height / 2 - 2]);
+
+        const area = d3.area()
+            .x(p => x(p[0]))
+            .y0(p => height / 2 - y(p[1]))
+            .y1(p => height / 2 + y(p[1]))
+            .curve(d3.curveBasis);
+
+        svg.append("path")
+            .datum(density)
+            .attr("fill", styles[d.style].color)
+            .attr("fill-opacity", 0.2)
+            .attr("stroke", styles[d.style].color)
+            .attr("stroke-width", 1)
+            .attr("d", area);
+
+        // Median line
+        const median = d3.median(d.sentences);
+        svg.append("line")
+            .attr("x1", x(median))
+            .attr("x2", x(median))
+            .attr("y1", 4)
+            .attr("y2", height - 4)
+            .attr("stroke", "#000")
+            .attr("stroke-width", 1.5)
+            .attr("stroke-dasharray", "2,1");
+    }
+
+    // --- Interactions ---
+    d3.selectAll("th").on("click", function() {
+        const key = d3.select(this).attr("data-key");
+        if (!key) return;
+
+        if (currentSort.key === key) {
+            currentSort.dir *= -1;
+        } else {
+            currentSort.key = key;
+            currentSort.dir = (key === 'chapter' || key === 'style') ? 1 : -1;
+        }
+        update();
+    });
+
+    update();
+</script>
+
+</body>
+</html>

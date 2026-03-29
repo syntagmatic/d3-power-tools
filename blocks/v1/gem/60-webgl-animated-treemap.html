@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebGL Animated Treemap - 5000 Leaves</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: #0a0a0a;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: #fff;
+    }
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+    #ui {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      z-index: 10;
+      background: rgba(0, 0, 0, 0.7);
+      padding: 15px;
+      border-radius: 8px;
+      border: 1px solid #333;
+      backdrop-filter: blur(5px);
+    }
+    button {
+      background: #333;
+      color: #fff;
+      border: 1px solid #555;
+      padding: 8px 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      transition: background 0.2s;
+    }
+    button:hover {
+      background: #444;
+    }
+    button:active {
+      background: #222;
+    }
+    .stats {
+      margin-top: 10px;
+      font-size: 12px;
+      color: #aaa;
+    }
+    .legend {
+      display: flex;
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+    }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+    }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <button id="toggle">Switch to Headcount</button>
+    <div class="stats">5,000 leaf nodes rendering at 60fps</div>
+    <div class="legend" id="legend"></div>
+  </div>
+  <canvas id="viz"></canvas>
+
+  <script id="vs" type="x-shader/x-vertex">#version 300 es
+    in vec2 a_unit_quad;
+    in vec4 a_pos_a;
+    in vec4 a_pos_b;
+    in vec3 a_color;
+
+    uniform float u_progress;
+    uniform vec2 u_resolution;
+
+    out vec3 v_color;
+
+    float cubicInOut(float t) {
+      return t < 0.5 ? 4.0 * t * t * t : 1.0 - pow(-2.0 * t + 2.0, 3.0) / 2.0;
+    }
+
+    void main() {
+      float t = cubicInOut(u_progress);
+      vec4 pos = mix(a_pos_a, a_pos_b, t);
+      
+      // pos: x, y, w, h
+      vec2 world_pos = pos.xy + (a_unit_quad * pos.zw);
+      vec2 clip = (world_pos / u_resolution) * 2.0 - 1.0;
+      
+      gl_Position = vec4(clip.x, 1.0 - clip.y, 0.0, 1.0);
+      v_color = a_color;
+    }
+  </script>
+
+  <script id="fs" type="x-shader/x-fragment">#version 300 es
+    precision highp float;
+    in vec3 v_color;
+    out vec4 fragColor;
+    void main() {
+      // Subtle darkening at edges
+      fragColor = vec4(v_color, 1.0);
+    }
+  </script>
+
+  <script>
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    const dpr = window.devicePixelRatio || 1;
+    const canvas = document.getElementById("viz");
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    const gl = canvas.getContext("webgl2");
+
+    if (!gl) {
+      alert("WebGL 2 not supported");
+    }
+
+    // --- Data Generation ---
+    const N = 5000;
+    const categories = ["Tech", "Finance", "Healthcare", "Retail", "Energy"];
+    const colors = ["#4e79a7", "#f28e2c", "#e15759", "#76b7b2", "#59a14f"];
+    const colorScale = d3.scaleOrdinal().domain(categories).range(colors);
+
+    // Legend
+    const legend = d3.select("#legend");
+    categories.forEach((cat, i) => {
+      const item = legend.append("div").attr("class", "legend-item");
+      item.append("div").attr("class", "dot").style("background", colors[i]);
+      item.append("span").text(cat);
+    });
+
+    const generateData = () => {
+      const data = { name: "root", children: [] };
+      const cats = categories.map(name => ({ name, children: [] }));
+      data.children = cats;
+
+      for (let i = 0; i < N; i++) {
+        const catIdx = Math.floor(Math.random() * cats.length);
+        cats[catIdx].children.push({
+          name: `Leaf ${i}`,
+          revenue: Math.random() * 1000 + 10,
+          headcount: Math.random() * 100 + 5,
+          category: categories[catIdx]
+        });
+      }
+      return data;
+    };
+
+    const rootData = generateData();
+
+    // --- Treemap Calculation ---
+    const tm = d3.treemap()
+      .size([width, height])
+      .padding(1)
+      .round(false)
+      .tile(d3.treemapResquarify);
+
+    const rootRevenue = d3.hierarchy(rootData)
+      .sum(d => d.revenue)
+      .sort((a, b) => b.value - a.value);
+
+    tm(rootRevenue);
+    const leavesRevenue = rootRevenue.leaves();
+
+    const rootHeadcount = d3.hierarchy(rootData)
+      .sum(d => d.headcount)
+      .sort((a, b) => b.value - a.value);
+
+    tm(rootHeadcount);
+    // Sort leaves to match order of Revenue leaves for correct interpolation
+    const leavesHeadcount = rootHeadcount.leaves();
+    
+    // Create a map for quick lookup to align leaves by their unique identity
+    // (though in this random generation, they are in the same order if hierarchy structure is identical)
+    // To be safe, we'll map them.
+    const leavesMap = new Map(leavesHeadcount.map(d => [d.data.name, d]));
+
+    const posA = new Float32Array(N * 4); // x, y, w, h
+    const posB = new Float32Array(N * 4);
+    const colorAttr = new Float32Array(N * 3);
+
+    leavesRevenue.forEach((d, i) => {
+      posA[i * 4 + 0] = d.x0;
+      posA[i * 4 + 1] = d.y0;
+      posA[i * 4 + 2] = d.x1 - d.x0;
+      posA[i * 4 + 3] = d.y1 - d.y0;
+
+      const d2 = leavesMap.get(d.data.name);
+      posB[i * 4 + 0] = d2.x0;
+      posB[i * 4 + 1] = d2.y0;
+      posB[i * 4 + 2] = d2.x1 - d2.x0;
+      posB[i * 4 + 3] = d2.y1 - d2.y0;
+
+      const c = d3.rgb(colorScale(d.data.category));
+      colorAttr[i * 3 + 0] = c.r / 255;
+      colorAttr[i * 3 + 1] = c.g / 255;
+      colorAttr[i * 3 + 2] = c.b / 255;
+    });
+
+    // --- WebGL Initialization ---
+    function createShader(gl, type, source) {
+      const shader = gl.createShader(type);
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(shader));
+        gl.deleteShader(shader);
+        return null;
+      }
+      return shader;
+    }
+
+    const vsSource = document.getElementById("vs").text;
+    const fsSource = document.getElementById("fs").text;
+    const vertexShader = createShader(gl, gl.VERTEX_SHADER, vsSource);
+    const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
+
+    const program = gl.createProgram();
+    gl.attachShader(program, vertexShader);
+    gl.attachShader(program, fragmentShader);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      console.error(gl.getProgramInfoLog(program));
+    }
+    gl.useProgram(program);
+
+    // Unit quad vertices (0,0 to 1,1)
+    const unitQuad = new Float32Array([
+      0, 0,
+      1, 0,
+      1, 1,
+      0, 0,
+      1, 1,
+      0, 1
+    ]);
+
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+
+    function setupAttrib(name, data, size, divisor = 0) {
+      const buffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+      gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+      const loc = gl.getAttribLocation(program, name);
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0);
+      if (divisor > 0) gl.vertexAttribDivisor(loc, divisor);
+      return buffer;
+    }
+
+    setupAttrib("a_unit_quad", unitQuad, 2);
+    setupAttrib("a_pos_a", posA, 4, 1);
+    setupAttrib("a_pos_b", posB, 4, 1);
+    setupAttrib("a_color", colorAttr, 3, 1);
+
+    const uProgress = gl.getUniformLocation(program, "u_progress");
+    const uResolution = gl.getUniformLocation(program, "u_resolution");
+
+    gl.uniform2f(uResolution, width, height);
+
+    // --- Animation State ---
+    let state = 0; // 0: Revenue, 1: Headcount
+    let targetState = 0;
+    let progress = 0;
+    let startTime = null;
+    const duration = 800;
+
+    const toggleBtn = document.getElementById("toggle");
+    toggleBtn.addEventListener("click", () => {
+      targetState = 1 - targetState;
+      toggleBtn.innerText = `Switch to ${targetState === 0 ? "Headcount" : "Revenue"}`;
+      startTime = performance.now();
+    });
+
+    function render(time) {
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.clearColor(0.04, 0.04, 0.04, 1.0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+
+      if (startTime !== null) {
+        const elapsed = time - startTime;
+        let t = Math.min(elapsed / duration, 1.0);
+        
+        if (targetState === 1) {
+          progress = t;
+        } else {
+          progress = 1.0 - t;
+        }
+
+        if (t === 1.0) {
+          startTime = null;
+          state = targetState;
+        }
+      }
+
+      gl.uniform1f(uProgress, progress);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, N);
+      
+      requestAnimationFrame(render);
+    }
+
+    requestAnimationFrame(render);
+
+    window.addEventListener("resize", () => {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      canvas.width = w * dpr;
+      canvas.height = h * dpr;
+      gl.uniform2f(uResolution, w, h);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Responsive Multi-Breakpoint Visualization</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg: #ffffff;
+            --text: #2d3436;
+            --grid: #dfe6e9;
+            --c1: #0984e3;
+            --c2: #00b894;
+            --c3: #6c5ce7;
+            --c4: #e17055;
+        }
+
+        body {
+            margin: 0;
+            padding: 24px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        #container {
+            width: 100%;
+            max-width: 1200px;
+            height: 600px;
+            background: #fff;
+            border: 1px solid var(--grid);
+            border-radius: 8px;
+            position: relative;
+            overflow: hidden; /* Prevent scrollbars during resize */
+        }
+
+        .controls {
+            margin-bottom: 16px;
+            text-align: center;
+        }
+
+        .label {
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            fill: #636e72;
+        }
+
+        .axis-label {
+            font-size: 14px;
+            fill: #2d3436;
+        }
+
+        .tick text {
+            fill: #636e72;
+            font-size: 11px;
+        }
+
+        .grid line {
+            stroke: var(--grid);
+            stroke-dasharray: 2,2;
+        }
+
+        .legend-item {
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+
+        .legend-item:hover {
+            opacity: 0.7;
+        }
+
+        .marginal-bar {
+            fill: #b2bec3;
+            fill-opacity: 0.4;
+        }
+
+        .box-plot rect {
+            fill: #f1f2f6;
+            stroke: #2d3436;
+            stroke-width: 1px;
+        }
+
+        .box-plot line {
+            stroke: #2d3436;
+            stroke-width: 1.5px;
+        }
+
+        .box-plot .median {
+            stroke: #d63031;
+            stroke-width: 2px;
+        }
+
+        .breakpoint-indicator {
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            padding: 4px 8px;
+            background: #eee;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: bold;
+            pointer-events: none;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="controls">
+        <h2 id="view-title">Responsive Statistical Explorer</h2>
+        <p id="view-desc">Resize the window to see layout transformations</p>
+    </div>
+
+    <div id="container">
+        <div id="indicator" class="breakpoint-indicator">WIDE</div>
+    </div>
+
+    <script>
+        // --- Data Generation ---
+        const categories = ["Alpha", "Beta", "Gamma", "Delta"];
+        const colors = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)"];
+        const colorScale = d3.scaleOrdinal().domain(categories).range(colors);
+
+        const n = 200;
+        const data = d3.range(n).map(i => {
+            const cat = categories[i % categories.length];
+            let x, y;
+            
+            // Give each category distinct distribution characteristics
+            if (cat === "Alpha") {
+                x = d3.randomNormal(40, 10)();
+                y = d3.randomNormal(60, 15)();
+            } else if (cat === "Beta") {
+                x = d3.randomNormal(70, 8)();
+                y = d3.randomNormal(40, 10)();
+            } else if (cat === "Gamma") {
+                x = d3.randomNormal(30, 15)();
+                y = d3.randomNormal(30, 12)();
+            } else {
+                x = d3.randomUniform(10, 90)();
+                y = d3.randomUniform(10, 90)();
+            }
+
+            return { id: i, category: cat, x, y, jitter: Math.random() - 0.5 };
+        });
+
+        // --- Setup ---
+        const container = d3.select("#container");
+        const svg = container.append("svg").style("width", "100%").style("height", "100%");
+        const indicator = d3.select("#indicator");
+
+        // Groups for layering
+        const gGrid = svg.append("g").attr("class", "grid-group");
+        const gMarginals = svg.append("g").attr("class", "marginal-group");
+        const gBoxPlots = svg.append("g").attr("class", "box-plot-group");
+        const gAxes = svg.append("g").attr("class", "axis-group");
+        const gPoints = svg.append("g").attr("class", "point-group");
+        const gLegend = svg.append("g").attr("class", "legend-group");
+
+        // Tooltip
+        const tooltip = d3.select("body").append("div")
+            .style("position", "absolute")
+            .style("visibility", "hidden")
+            .style("background", "rgba(0,0,0,0.8)")
+            .style("color", "#fff")
+            .style("padding", "4px 8px")
+            .style("border-radius", "4px")
+            .style("font-size", "12px")
+            .style("pointer-events", "none")
+            .style("z-index", "100");
+
+        // --- Render Function ---
+        function render(width, height) {
+            const isWide = width >= 1000;
+            const isMedium = width < 1000 && width >= 600;
+            const isNarrow = width < 600;
+
+            indicator.text(isWide ? "WIDE (≥1000px)" : isMedium ? "MEDIUM (600-1000px)" : "NARROW (<600px)");
+            
+            const margin = {
+                top: isWide ? 80 : 40,
+                right: isWide ? 100 : 40,
+                bottom: (isMedium || isNarrow) ? 80 : 60,
+                left: 60
+            };
+
+            const innerWidth = width - margin.left - margin.right;
+            const innerHeight = height - margin.top - margin.bottom;
+
+            const t = d3.transition().duration(750).ease(d3.easeCubicInOut);
+
+            // --- Scales ---
+            const xScale = d3.scaleLinear().domain([0, 100]).range([0, innerWidth]).nice();
+            
+            let yScale;
+            if (isNarrow) {
+                yScale = d3.scaleBand().domain(categories).range([0, innerHeight]).padding(0.2);
+            } else {
+                yScale = d3.scaleLinear().domain([0, 100]).range([innerHeight, 0]).nice();
+            }
+
+            // --- Axes ---
+            gAxes.selectAll(".x-axis").data([0]).join("g").attr("class", "x-axis")
+                .attr("transform", `translate(${margin.left}, ${margin.top + innerHeight})`)
+                .transition(t)
+                .call(d3.axisBottom(xScale).ticks(width / 100));
+
+            const yAxis = isNarrow ? d3.axisLeft(yScale) : d3.axisLeft(yScale).ticks(height / 80);
+            gAxes.selectAll(".y-axis").data([0]).join("g").attr("class", "y-axis")
+                .attr("transform", `translate(${margin.left}, ${margin.top})`)
+                .transition(t)
+                .call(yAxis);
+
+            // Labels
+            gAxes.selectAll(".x-label").data([0]).join("text").attr("class", "x-label label")
+                .attr("text-anchor", "middle")
+                .attr("x", margin.left + innerWidth / 2)
+                .attr("y", margin.top + innerHeight + 45)
+                .text("X Variable (Intensity)");
+
+            gAxes.selectAll(".y-label").data([0]).join("text").attr("class", "y-label label")
+                .attr("text-anchor", "middle")
+                .attr("transform", `translate(${margin.left - 45}, ${margin.top + innerHeight/2}) rotate(-90)`)
+                .text(isNarrow ? "Categories" : "Y Variable (Frequency)");
+
+            // --- Points ---
+            const points = gPoints.selectAll("circle")
+                .data(data, d => d.id)
+                .join(
+                    enter => enter.append("circle")
+                        .attr("r", 0)
+                        .attr("fill", d => colorScale(d.category))
+                        .attr("stroke", "#fff")
+                        .attr("stroke-width", 1)
+                        .attr("opacity", 0.8),
+                    update => update,
+                    exit => exit.remove()
+                );
+
+            points.transition(t)
+                .attr("cx", d => margin.left + xScale(d.x))
+                .attr("cy", d => {
+                    if (isNarrow) {
+                        return margin.top + yScale(d.category) + yScale.bandwidth() / 2 + (d.jitter * yScale.bandwidth() * 0.6);
+                    } else {
+                        return margin.top + yScale(d.y);
+                    }
+                })
+                .attr("r", isNarrow ? 4 : 5);
+
+            points
+                .on("mouseover", (e, d) => {
+                    tooltip.style("visibility", "visible")
+                        .html(`<strong>${d.category}</strong><br>X: ${d.x.toFixed(1)}<br>Y: ${d.y.toFixed(1)}`);
+                    d3.select(e.target).attr("stroke", "#000").attr("r", isNarrow ? 6 : 7);
+                })
+                .on("mousemove", (e) => {
+                    tooltip.style("top", (e.pageY - 10) + "px").style("left", (e.pageX + 10) + "px");
+                })
+                .on("mouseout", (e) => {
+                    tooltip.style("visibility", "hidden");
+                    d3.select(e.target).attr("stroke", "#fff").attr("r", isNarrow ? 4 : 5);
+                });
+
+            // --- Marginals (Wide Only) ---
+            if (isWide) {
+                gMarginals.transition(t).style("opacity", 1);
+                
+                const histX = d3.bin().domain(xScale.domain()).thresholds(xScale.ticks(20))(data.map(d => d.x));
+                const xHistScale = d3.scaleLinear()
+                    .domain([0, d3.max(histX, d => d.length)])
+                    .range([0, margin.top - 20]);
+
+                gMarginals.selectAll(".x-hist").data(histX)
+                    .join("rect")
+                    .attr("class", "x-hist marginal-bar")
+                    .transition(t)
+                    .attr("x", d => margin.left + xScale(d.x0) + 1)
+                    .attr("y", d => margin.top - 10 - xHistScale(d.length))
+                    .attr("width", d => Math.max(0, xScale(d.x1) - xScale(d.x0) - 1))
+                    .attr("height", d => xHistScale(d.length));
+
+                const histY = d3.bin().domain(yScale.domain()).thresholds(yScale.ticks(20))(data.map(d => d.y));
+                const yHistScale = d3.scaleLinear()
+                    .domain([0, d3.max(histY, d => d.length)])
+                    .range([0, margin.right - 20]);
+
+                gMarginals.selectAll(".y-hist").data(histY)
+                    .join("rect")
+                    .attr("class", "y-hist marginal-bar")
+                    .transition(t)
+                    .attr("x", margin.left + innerWidth + 10)
+                    .attr("y", d => margin.top + yScale(d.x1) + 1)
+                    .attr("height", d => Math.max(0, yScale(d.x0) - yScale(d.x1) - 1))
+                    .attr("width", d => yHistScale(d.length));
+            } else {
+                gMarginals.transition(t).style("opacity", 0);
+            }
+
+            // --- Box Plots (Narrow Only) ---
+            if (isNarrow) {
+                gBoxPlots.transition(t).style("opacity", 1);
+                
+                const stats = categories.map(cat => {
+                    const values = data.filter(d => d.category === cat).map(d => d.x).sort(d3.ascending);
+                    const q1 = d3.quantile(values, 0.25);
+                    const median = d3.quantile(values, 0.5);
+                    const q3 = d3.quantile(values, 0.75);
+                    const iqr = q3 - q1;
+                    const min = d3.min(values);
+                    const max = d3.max(values);
+                    return { cat, q1, median, q3, min, max };
+                });
+
+                const boxG = gBoxPlots.selectAll(".box-plot")
+                    .data(stats, d => d.cat)
+                    .join("g")
+                    .attr("class", "box-plot")
+                    .attr("transform", d => `translate(${margin.left}, ${margin.top + yScale(d.cat)})`);
+
+                boxG.selectAll("rect").data(d => [d]).join("rect")
+                    .transition(t)
+                    .attr("x", d => xScale(d.q1))
+                    .attr("y", 0)
+                    .attr("width", d => xScale(d.q3) - xScale(d.q1))
+                    .attr("height", yScale.bandwidth())
+                    .attr("fill-opacity", 0.2);
+
+                boxG.selectAll(".median").data(d => [d]).join("line")
+                    .attr("class", "median")
+                    .transition(t)
+                    .attr("x1", d => xScale(d.median))
+                    .attr("x2", d => xScale(d.median))
+                    .attr("y1", 0)
+                    .attr("y2", yScale.bandwidth());
+
+                boxG.selectAll(".whisker").data(d => [[d.min, d.q1], [d.q3, d.max]])
+                    .join("line")
+                    .attr("class", "whisker")
+                    .transition(t)
+                    .attr("x1", d => xScale(d[0]))
+                    .attr("x2", d => xScale(d[1]))
+                    .attr("y1", yScale.bandwidth() / 2)
+                    .attr("y2", yScale.bandwidth() / 2);
+            } else {
+                gBoxPlots.transition(t).style("opacity", 0);
+            }
+
+            // --- Legend ---
+            const legendX = isWide ? margin.left + innerWidth + 20 : margin.left;
+            const legendY = isWide ? margin.top : margin.top + innerHeight + 60;
+            const legendSpacing = isWide ? 20 : innerWidth / categories.length;
+
+            gLegend.transition(t)
+                .attr("transform", `translate(${legendX}, ${legendY})`);
+
+            const legendItems = gLegend.selectAll(".legend-item")
+                .data(categories)
+                .join("g")
+                .attr("class", "legend-item")
+                .attr("transform", (d, i) => isWide ? `translate(0, ${i * 25})` : `translate(${i * legendSpacing}, 0)`);
+
+            legendItems.selectAll("circle").data(d => [d]).join("circle")
+                .attr("r", 6)
+                .attr("fill", d => colorScale(d));
+
+            legendItems.selectAll("text").data(d => [d]).join("text")
+                .attr("x", 12)
+                .attr("y", 5)
+                .style("font-size", "12px")
+                .text(d => d);
+        }
+
+        // --- Resize Observer ---
+        let lastWidth = 0;
+        const ro = new ResizeObserver(entries => {
+            const { width, height } = entries[0].contentRect;
+            if (Math.abs(width - lastWidth) < 2) return; // Debounce minor changes
+            lastWidth = width;
+            render(width, height);
+        });
+        ro.observe(document.getElementById("container"));
+
+    </script>
+</body>
+</html>

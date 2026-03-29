@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Semantic Zoom Distributions | D3.js</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="https://d3js.org/d3-hexbin.v1.min.js"></script>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --panel: #ffffff;
+      --text: #1e293b;
+      --accent: #3b82f6;
+      --border: #e2e8f0;
+      --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+    }
+
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: 'Inter', -apple-system, system-ui, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      overflow: hidden;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .header {
+      padding: 1rem 1.5rem;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      z-index: 10;
+      box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+    }
+
+    .header-info h1 {
+      margin: 0;
+      font-size: 1.125rem;
+      font-weight: 700;
+      letter-spacing: -0.025em;
+    }
+
+    .header-info p {
+      margin: 0.25rem 0 0;
+      font-size: 0.75rem;
+      color: #64748b;
+    }
+
+    .controls {
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+    }
+
+    .badge {
+      padding: 0.25rem 0.625rem;
+      border-radius: 9999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      background: #eff6ff;
+      color: var(--accent);
+      border: 1px solid #dbeafe;
+      transition: all 0.2s ease;
+    }
+
+    #chart-container {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+      cursor: grab;
+    }
+
+    #chart-container:active {
+      cursor: grabbing;
+    }
+
+    .tooltip {
+      position: absolute;
+      padding: 0.5rem 0.75rem;
+      background: rgba(15, 23, 42, 0.9);
+      color: white;
+      border-radius: 0.375rem;
+      font-size: 0.75rem;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.1s;
+      z-index: 100;
+      box-shadow: var(--shadow);
+    }
+
+    svg {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+
+    .axis text {
+      font-size: 10px;
+      fill: #94a3b8;
+    }
+
+    .axis line, .axis path {
+      stroke: var(--border);
+    }
+
+    .contour-path {
+      stroke-linejoin: round;
+      fill-opacity: 0.6;
+    }
+
+    .hex-path {
+      stroke: #fff;
+      stroke-width: 0.5px;
+      transition: fill-opacity 0.2s;
+    }
+
+    .point {
+      stroke: #fff;
+      stroke-width: 0.5px;
+    }
+
+    .label {
+      pointer-events: none;
+      font-weight: 500;
+      text-shadow: 0 1px 2px rgba(255,255,255,0.8);
+    }
+
+    .legend {
+      position: absolute;
+      bottom: 1.5rem;
+      right: 1.5rem;
+      background: var(--panel);
+      padding: 0.75rem;
+      border-radius: 0.5rem;
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow);
+      font-size: 0.75rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .legend-color {
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+    }
+  </style>
+</head>
+<body>
+
+  <header class="header">
+    <div class="header-info">
+      <h1>Semantic Zoom Distributions</h1>
+      <p>Scroll to zoom: Contours &rarr; Hexbins &rarr; Points</p>
+    </div>
+    <div class="controls">
+      <span class="badge" id="zoom-badge">Zoom: 1.0x</span>
+      <span class="badge" id="mode-badge">Mode: Overview</span>
+    </div>
+  </header>
+
+  <div id="chart-container">
+    <div class="tooltip" id="tooltip"></div>
+    <div class="legend" id="legend">
+      <div class="legend-item">
+        <div class="legend-color" style="background: #3b82f6;"></div>
+        <span>Cluster Alpha</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-color" style="background: #ef4444;"></div>
+        <span>Cluster Beta</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-color" style="background: #10b981;"></div>
+        <span>Cluster Gamma</span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    /**
+     * Semantic Zoom Distributions
+     * 2000 points across 3 clusters
+     * LOD transitions with hysteresis:
+     * - Density Contours (k < 3)
+     * - Hexbins (3 < k < 8)
+     * - Individual Points (k > 8)
+     */
+
+    // --- Data Generation ---
+    const N = 2000;
+    const clusters = [
+      { name: "Alpha", color: "#3b82f6", x: 400, y: 300, rx: 120, ry: 90, count: 800 },
+      { name: "Beta",  color: "#ef4444", x: 700, y: 500, rx: 100, ry: 120, count: 700 },
+      { name: "Gamma", color: "#10b981", x: 600, y: 200, rx: 80, ry: 70, count: 500 }
+    ];
+
+    const randomNormal = d3.randomNormal(0, 1);
+    const data = [];
+    clusters.forEach((c, ci) => {
+      for (let i = 0; i < c.count; i++) {
+        data.push({
+          id: `p-${ci}-${i}`,
+          x: c.x + randomNormal() * c.rx,
+          y: c.y + randomNormal() * c.ry,
+          cluster: ci,
+          label: `${c.name} #${i+1}`
+        });
+      }
+    });
+
+    // --- Setup ---
+    const container = d3.select("#chart-container");
+    const tooltip = d3.select("#tooltip");
+    const zoomBadge = d3.select("#zoom-badge");
+    const modeBadge = d3.select("#mode-badge");
+
+    let width = container.node().clientWidth;
+    let height = container.node().clientHeight;
+
+    const svg = container.append("svg")
+      .attr("viewBox", [0, 0, width, height]);
+
+    const margin = { top: 20, right: 20, bottom: 40, left: 50 };
+    const iw = width - margin.left - margin.right;
+    const ih = height - margin.top - margin.bottom;
+
+    const g = svg.append("g")
+      .attr("transform", `translate(${margin.left},${margin.top})`);
+
+    // Base scales
+    const x = d3.scaleLinear()
+      .domain([0, 1000])
+      .range([0, iw]);
+
+    const y = d3.scaleLinear()
+      .domain([0, 800])
+      .range([ih, 0]);
+
+    // Layers
+    const gContours = g.append("g").attr("class", "layer-contours");
+    const gHex = g.append("g").attr("class", "layer-hex");
+    const gPoints = g.append("g").attr("class", "layer-points");
+
+    // Axes
+    const xAxisG = g.append("g")
+      .attr("class", "axis axis--x")
+      .attr("transform", `translate(0,${ih})`);
+
+    const yAxisG = g.append("g")
+      .attr("class", "axis axis--y");
+
+    const xAxis = d3.axisBottom(x).ticks(8).tickSizeOuter(0);
+    const yAxis = d3.axisLeft(y).ticks(6).tickSizeOuter(0);
+
+    // Zoom setup
+    const zoom = d3.zoom()
+      .scaleExtent([0.8, 40])
+      .extent([[0, 0], [width, height]])
+      .on("zoom", zoomed);
+
+    // Initial state
+    let currentK = 1;
+    let currentMode = "density"; // density | hex | points
+    const LOD_THRESHOLDS = {
+      densityToHex: 3.5,
+      hexToDensity: 2.8,
+      hexToPoints: 10,
+      pointsToHex: 7.5
+    };
+
+    function getMode(k) {
+      if (currentMode === "density") {
+        if (k >= LOD_THRESHOLDS.densityToHex) return "hex";
+      } else if (currentMode === "hex") {
+        if (k < LOD_THRESHOLDS.hexToDensity) return "density";
+        if (k >= LOD_THRESHOLDS.hexToPoints) return "points";
+      } else if (currentMode === "points") {
+        if (k < LOD_THRESHOLDS.pointsToHex) return "hex";
+      }
+      return currentMode;
+    }
+
+    const colorDensity = d3.scaleSequential(d3.interpolateBlues)
+      .domain([0, 0.05]); // Adjusted by bandwidth
+
+    const hexbin = d3.hexbin()
+      .extent([[0, 0], [iw, ih]])
+      .radius(16);
+
+    function zoomed({ transform }) {
+      const zx = transform.rescaleX(x);
+      const zy = transform.rescaleY(y);
+      currentK = transform.k;
+
+      xAxisG.call(xAxis.scale(zx));
+      yAxisG.call(yAxis.scale(zy));
+
+      const newMode = getMode(currentK);
+      const modeChanged = newMode !== currentMode;
+      currentMode = newMode;
+
+      // Update UI
+      zoomBadge.text(`Zoom: ${currentK.toFixed(1)}x`);
+      modeBadge.text(`Mode: ${currentMode.charAt(0).toUpperCase() + currentMode.slice(1)}`);
+
+      render(zx, zy, transform, modeChanged);
+    }
+
+    function render(zx, zy, transform, modeChanged) {
+      // Manage Layer Visibility
+      gContours.style("display", currentMode === "density" ? null : "none");
+      gHex.style("display", currentMode === "hex" ? null : "none");
+      gPoints.style("display", currentMode === "points" ? null : "none");
+
+      if (currentMode === "density") {
+        updateContours(zx, zy);
+      } else if (currentMode === "hex") {
+        updateHex(zx, zy);
+      } else {
+        updatePoints(zx, zy, transform);
+      }
+    }
+
+    function updateContours(zx, zy) {
+      // Density calculation is expensive, we could throttle but 2000 points is fast enough
+      const density = d3.contourDensity()
+        .x(d => zx(d.x))
+        .y(d => zy(d.y))
+        .size([iw, ih])
+        .bandwidth(30)
+        .thresholds(15)(data);
+
+      const paths = gContours.selectAll(".contour-path")
+        .data(density);
+
+      paths.enter().append("path")
+        .attr("class", "contour-path")
+        .merge(paths)
+        .attr("d", d3.geoPath())
+        .attr("fill", d => d3.interpolateBlues(d.value * 200)) // Scaled for visibility
+        .attr("stroke", d => d3.interpolateBlues(d.value * 200 + 0.2))
+        .attr("stroke-width", 0.5);
+
+      paths.exit().remove();
+    }
+
+    function updateHex(zx, zy) {
+      // Re-bin data based on current screen coordinates
+      const projected = data.map(d => {
+        const p = [zx(d.x), zy(d.y)];
+        p.cluster = d.cluster;
+        return p;
+      }).filter(p => p[0] >= 0 && p[0] <= iw && p[1] >= 0 && p[1] <= ih);
+
+      const bins = hexbin(projected);
+      const maxCount = d3.max(bins, d => d.length);
+      const colorHex = d3.scaleSequential(d3.interpolateBlues).domain([0, maxCount]);
+
+      const paths = gHex.selectAll(".hex-path")
+        .data(bins, d => `${d.x},${d.y}`);
+
+      paths.enter().append("path")
+        .attr("class", "hex-path")
+        .merge(paths)
+        .attr("transform", d => `translate(${d.x},${d.y})`)
+        .attr("d", hexbin.hexagon())
+        .attr("fill", d => colorHex(d.length))
+        .attr("fill-opacity", 0.9);
+
+      paths.exit().remove();
+    }
+
+    function updatePoints(zx, zy, transform) {
+      // Only render points that are in viewport to save performance
+      const visible = data.filter(d => {
+        const px = zx(d.x), py = zy(d.y);
+        return px >= -10 && px <= iw + 10 && py >= -10 && py <= ih + 10;
+      });
+
+      const points = gPoints.selectAll(".point")
+        .data(visible, d => d.id);
+
+      points.enter().append("circle")
+        .attr("class", "point")
+        .attr("r", 4)
+        .on("mouseenter", (event, d) => {
+          tooltip.style("opacity", 1)
+            .html(`<strong>${d.label}</strong><br>X: ${d.x.toFixed(1)}, Y: ${d.y.toFixed(1)}`);
+        })
+        .on("mousemove", (event) => {
+          tooltip.style("left", (event.pageX + 15) + "px")
+            .style("top", (event.pageY - 10) + "px");
+        })
+        .on("mouseleave", () => tooltip.style("opacity", 0))
+        .merge(points)
+        .attr("cx", d => zx(d.x))
+        .attr("cy", d => zy(d.y))
+        .attr("fill", d => clusters[d.cluster].color);
+
+      points.exit().remove();
+
+      // Labels at very high zoom
+      const labelVisible = transform.k > 15 ? visible : [];
+      const labels = gPoints.selectAll(".label")
+        .data(labelVisible, d => d.id);
+
+      labels.enter().append("text")
+        .attr("class", "label")
+        .attr("font-size", "10px")
+        .attr("dx", 8)
+        .attr("dy", 4)
+        .merge(labels)
+        .attr("x", d => zx(d.x))
+        .attr("y", d => zy(d.y))
+        .text(d => d.label)
+        .style("opacity", d => Math.min(1, (transform.k - 15) / 5));
+
+      labels.exit().remove();
+    }
+
+    // Initialize
+    svg.call(zoom);
+    container.call(zoom.transform, d3.zoomIdentity);
+
+    // Resize handler
+    window.addEventListener("resize", () => {
+      width = container.node().clientWidth;
+      height = container.node().clientHeight;
+      if (width === 0 || height === 0) return;
+
+      svg.attr("viewBox", [0, 0, width, height]);
+      
+      const iw_new = width - margin.left - margin.right;
+      const ih_new = height - margin.top - margin.bottom;
+      
+      x.range([0, iw_new]);
+      y.range([ih_new, 0]);
+      
+      xAxisG.attr("transform", `translate(0,${ih_new})`);
+      
+      // Update hexbin extent
+      hexbin.extent([[0, 0], [iw_new, ih_new]]);
+      
+      // Force redraw
+      const transform = d3.zoomTransform(svg.node());
+      zoomed({ transform });
+    });
+
+  </script>
+</body>
+</html>

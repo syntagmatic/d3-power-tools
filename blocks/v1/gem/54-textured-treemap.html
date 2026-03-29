@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bivariate Textured Treemap</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f8f9fa;
+            color: #212529;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        #container {
+            width: 100%;
+            max-width: 960px;
+            padding: 20px;
+        }
+        header {
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        h1 {
+            margin: 0;
+            font-size: 1.5rem;
+            font-weight: 600;
+        }
+        p {
+            margin: 5px 0 0;
+            font-size: 0.9rem;
+            color: #6c757d;
+        }
+        svg {
+            background-color: white;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+            border-radius: 4px;
+        }
+        .cell-rect {
+            stroke: #fff;
+            stroke-width: 1px;
+        }
+        .cell-label {
+            font-size: 10px;
+            fill: #000;
+            pointer-events: none;
+            font-weight: 500;
+            paint-order: stroke;
+            stroke: rgba(255,255,255,0.5);
+            stroke-width: 2px;
+        }
+        .legend {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+            margin-top: 20px;
+            padding: 15px;
+            background: #fff;
+            border-radius: 4px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+        .legend-section h3 {
+            margin: 0 0 10px;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #495057;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 5px;
+            font-size: 0.8rem;
+        }
+        .legend-swatch {
+            width: 16px;
+            height: 16px;
+            margin-right: 8px;
+            border: 1px solid #dee2e6;
+        }
+        .tooltip {
+            position: absolute;
+            padding: 8px;
+            background: rgba(0,0,0,0.8);
+            color: #fff;
+            border-radius: 4px;
+            font-size: 12px;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <header>
+            <h1>Bivariate Textured Treemap: Market Analysis</h1>
+            <p>Color = Category | Pattern = Subcategory | Density = Growth Rate (Dense = Negative)</p>
+        </header>
+        <div id="viz"></div>
+        <div class="legend" id="legend">
+            <div class="legend-section" id="legend-category">
+                <h3>Category (Hue)</h3>
+            </div>
+            <div class="legend-section" id="legend-subcategory">
+                <h3>Subcategory (Pattern)</h3>
+            </div>
+            <div class="legend-section" id="legend-growth">
+                <h3>Growth (Density)</h3>
+            </div>
+        </div>
+    </div>
+    <div class="tooltip" id="tooltip"></div>
+
+    <script>
+        const width = 920;
+        const height = 500;
+
+        // 1. Data Generation
+        const categories = [
+            { name: "Technology", color: "#4477AA" },
+            { name: "Healthcare", color: "#EE6677" },
+            { name: "Finance", color: "#228833" },
+            { name: "Energy", color: "#CCBB44" },
+            { name: "Consumer", color: "#66CCEE" },
+            { name: "Utilities", color: "#AA3377" }
+        ];
+
+        const subcategoryTypes = ["Growth", "Value", "Core", "Global", "Special"];
+        const patternTypes = ["hatch", "dots", "cross", "horiz", "vert"];
+
+        function generateData() {
+            const children = categories.map(cat => {
+                return {
+                    name: cat.name,
+                    children: subcategoryTypes.map((sub, i) => {
+                        return {
+                            name: sub,
+                            category: cat.name,
+                            subTypeIndex: i,
+                            value: 10 + Math.random() * 40,
+                            growth: -0.1 + Math.random() * 0.2 // -10% to +10%
+                        };
+                    })
+                };
+            });
+            return { name: "Market", children };
+        }
+
+        const data = generateData();
+
+        // 2. Scales
+        const colorScale = d3.scaleOrdinal()
+            .domain(categories.map(c => c.name))
+            .range(categories.map(c => c.color));
+
+        const spacingScale = d3.scaleQuantize()
+            .domain([-0.1, 0.1])
+            .range([3, 5, 8, 12, 18]); // Small = Dense (Negative), Large = Sparse (Positive)
+
+        // 3. Setup SVG
+        const svg = d3.select("#viz")
+            .append("svg")
+            .attr("width", width)
+            .attr("height", height)
+            .attr("viewBox", [0, 0, width, height]);
+
+        const defs = svg.append("defs");
+
+        // 4. Pattern Generation
+        function createPattern(id, type, spacing) {
+            const p = defs.append("pattern")
+                .attr("id", id)
+                .attr("width", spacing)
+                .attr("height", spacing)
+                .attr("patternUnits", "userSpaceOnUse");
+
+            const stroke = "rgba(0,0,0,0.25)";
+            const strokeWidth = 1.2;
+
+            if (type === "hatch") {
+                p.attr("patternTransform", "rotate(45)");
+                p.append("line")
+                    .attr("x1", 0).attr("y1", 0).attr("x2", 0).attr("y2", spacing)
+                    .attr("stroke", stroke).attr("stroke-width", strokeWidth);
+            } else if (type === "dots") {
+                p.append("circle")
+                    .attr("cx", spacing/2).attr("cy", spacing/2).attr("r", Math.max(0.5, spacing/5))
+                    .attr("fill", stroke);
+            } else if (type === "cross") {
+                p.append("line")
+                    .attr("x1", 0).attr("y1", spacing/2).attr("x2", spacing).attr("y2", spacing/2)
+                    .attr("stroke", stroke).attr("stroke-width", strokeWidth);
+                p.append("line")
+                    .attr("x1", spacing/2).attr("y1", 0).attr("x2", spacing/2).attr("y2", spacing)
+                    .attr("stroke", stroke).attr("stroke-width", strokeWidth);
+            } else if (type === "horiz") {
+                p.append("line")
+                    .attr("x1", 0).attr("y1", spacing/2).attr("x2", spacing).attr("y2", spacing/2)
+                    .attr("stroke", stroke).attr("stroke-width", strokeWidth);
+            } else if (type === "vert") {
+                p.append("line")
+                    .attr("x1", spacing/2).attr("y1", 0).attr("x2", spacing/2).attr("y2", spacing)
+                    .attr("stroke", stroke).attr("stroke-width", strokeWidth);
+            }
+        }
+
+        // Generate all possible patterns
+        const spacingValues = spacingScale.range();
+        patternTypes.forEach((type, tIdx) => {
+            spacingValues.forEach((spacing, sIdx) => {
+                createPattern(`p-${type}-${spacing}`, type, spacing);
+            });
+        });
+
+        // 5. Treemap Layout
+        const root = d3.hierarchy(data)
+            .sum(d => d.value)
+            .sort((a, b) => b.value - a.value);
+
+        d3.treemap()
+            .size([width, height])
+            .paddingInner(2)
+            .paddingOuter(4)
+            .paddingTop(14)
+            .round(true)
+            (root);
+
+        // 6. Rendering
+        const leaf = svg.selectAll("g")
+            .data(root.leaves())
+            .join("g")
+            .attr("transform", d => `translate(${d.x0},${d.y0})`);
+
+        // Background Rect (Color = Category)
+        leaf.append("rect")
+            .attr("class", "cell-rect")
+            .attr("width", d => d.x1 - d.x0)
+            .attr("height", d => d.y1 - d.y0)
+            .attr("fill", d => colorScale(d.data.category));
+
+        // Foreground Rect (Pattern = Subcategory + Growth)
+        leaf.append("rect")
+            .attr("width", d => d.x1 - d.x0)
+            .attr("height", d => d.y1 - d.y0)
+            .attr("fill", d => {
+                const type = patternTypes[d.data.subTypeIndex];
+                const spacing = spacingScale(d.data.growth);
+                return `url(#p-${type}-${spacing})`;
+            })
+            .on("mouseover", (event, d) => {
+                d3.select("#tooltip")
+                    .style("opacity", 1)
+                    .html(`
+                        <strong>${d.data.category} - ${d.data.name}</strong><br/>
+                        Size: ${d.data.value.toFixed(1)}<br/>
+                        Growth: ${(d.data.growth * 100).toFixed(1)}%
+                    `);
+            })
+            .on("mousemove", (event) => {
+                d3.select("#tooltip")
+                    .style("left", (event.pageX + 10) + "px")
+                    .style("top", (event.pageY - 10) + "px");
+            })
+            .on("mouseout", () => {
+                d3.select("#tooltip").style("opacity", 0);
+            });
+
+        // Labels
+        leaf.append("text")
+            .attr("class", "cell-label")
+            .attr("x", 4)
+            .attr("y", 12)
+            .text(d => d.data.name)
+            .attr("opacity", d => (d.x1 - d.x0 > 30 && d.y1 - d.y0 > 15) ? 1 : 0);
+
+        // Parent Labels
+        svg.selectAll(".parent-label")
+            .data(root.children)
+            .join("text")
+            .attr("class", "parent-label")
+            .attr("x", d => d.x0 + 4)
+            .attr("y", d => d.y0 + 10)
+            .attr("font-size", "10px")
+            .attr("font-weight", "bold")
+            .attr("fill", "#333")
+            .text(d => d.data.name);
+
+        // 7. Legends
+        // Category Legend
+        const catLegend = d3.select("#legend-category");
+        categories.forEach(cat => {
+            const item = catLegend.append("div").attr("class", "legend-item");
+            item.append("div")
+                .attr("class", "legend-swatch")
+                .style("background-color", cat.color);
+            item.append("span").text(cat.name);
+        });
+
+        // Subcategory Legend
+        const subLegend = d3.select("#legend-subcategory");
+        const legendSvgWidth = 160;
+        const legendSvgHeight = 100;
+        const lSvg = subLegend.append("svg")
+            .attr("width", legendSvgWidth)
+            .attr("height", legendSvgHeight);
+        
+        const lDefs = lSvg.append("defs");
+        // Reuse patterns in legend SVG if needed or just use references
+        
+        subcategoryTypes.forEach((sub, i) => {
+            const g = lSvg.append("g").attr("transform", `translate(0, ${i * 20})`);
+            g.append("rect")
+                .attr("width", 16).attr("height", 16)
+                .attr("fill", "#eee")
+                .attr("stroke", "#dee2e6");
+            g.append("rect")
+                .attr("width", 16).attr("height", 16)
+                .attr("fill", `url(#p-${patternTypes[i]}-8)`); // Use medium spacing
+            g.append("text")
+                .attr("x", 24).attr("y", 12)
+                .attr("font-size", "12px")
+                .text(sub);
+        });
+
+        // Growth Legend
+        const growthLegend = d3.select("#legend-growth");
+        const gSvg = growthLegend.append("svg")
+            .attr("width", 160)
+            .attr("height", 100);
+
+        const growthLabels = ["Declining (-10%)", "Stable (0%)", "Growing (+10%)"];
+        const growthSpacings = [3, 8, 18];
+        
+        growthLabels.forEach((label, i) => {
+            const g = gSvg.append("g").attr("transform", `translate(0, ${i * 20})`);
+            g.append("rect")
+                .attr("width", 16).attr("height", 16)
+                .attr("fill", "#eee")
+                .attr("stroke", "#dee2e6");
+            g.append("rect")
+                .attr("width", 16).attr("height", 16)
+                .attr("fill", `url(#p-hatch-${growthSpacings[i]})`);
+            g.append("text")
+                .attr("x", 24).attr("y", 12)
+                .attr("font-size", "12px")
+                .text(label);
+        });
+
+    </script>
+</body>
+</html>

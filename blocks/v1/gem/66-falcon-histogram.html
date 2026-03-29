@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Falcon Prefetch: 500K Event Histogram</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --surface: #1e293b;
+            --text: #f1f5f9;
+            --text-muted: #94a3b8;
+            --primary: #38bdf8;
+            --secondary: #818cf8;
+            --accent: #f472b6;
+            --danger: #ef4444;
+            --success: #22c55e;
+            --font: 'Inter', system-ui, -apple-system, sans-serif;
+        }
+
+        * { margin: 0; box-sizing: border-box; }
+        body { 
+            background: var(--bg); 
+            color: var(--text); 
+            font-family: var(--font);
+            line-height: 1.5;
+            overflow-x: hidden;
+        }
+
+        .container {
+            max-width: 1100px;
+            margin: 2rem auto;
+            padding: 0 1.5rem;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+            margin-bottom: 2rem;
+            border-bottom: 1px solid var(--surface);
+            padding-bottom: 1rem;
+        }
+
+        .title-area h1 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            letter-spacing: -0.025em;
+        }
+
+        .title-area p {
+            color: var(--text-muted);
+            font-size: 0.875rem;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .stat-card {
+            background: var(--surface);
+            padding: 1rem;
+            border-radius: 0.75rem;
+            border: 1px solid #ffffff05;
+        }
+
+        .stat-label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            margin-bottom: 0.25rem;
+        }
+
+        .stat-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1.25rem;
+            font-weight: 600;
+        }
+
+        .stat-value.latency-falcon { color: var(--success); }
+        .stat-value.latency-naive { color: var(--danger); }
+
+        .chart-container {
+            background: var(--surface);
+            padding: 1.5rem;
+            border-radius: 1rem;
+            margin-bottom: 1.5rem;
+            position: relative;
+            border: 1px solid #ffffff05;
+        }
+
+        .chart-title {
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            margin-bottom: 1rem;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        svg {
+            display: block;
+            width: 100%;
+            height: auto;
+            overflow: visible;
+        }
+
+        .axis text {
+            fill: var(--text-muted);
+            font-size: 11px;
+            font-family: var(--font);
+        }
+
+        .axis line, .axis path {
+            stroke: #334155;
+        }
+
+        .brush .selection {
+            fill: var(--primary);
+            fill-opacity: 0.15;
+            stroke: var(--primary);
+            stroke-width: 1;
+        }
+
+        .bar-bg { fill: #334155; }
+        .bar-fg { fill: var(--primary); transition: height 0.05s ease-out, y 0.05s ease-out; }
+
+        .line-overview {
+            fill: none;
+            stroke: var(--secondary);
+            stroke-width: 1.5;
+        }
+
+        .area-overview {
+            fill: var(--secondary);
+            fill-opacity: 0.1;
+        }
+
+        #speedup {
+            color: var(--accent);
+            font-weight: 800;
+        }
+
+        .loading-overlay {
+            position: fixed;
+            inset: 0;
+            background: var(--bg);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid var(--surface);
+            border-top-color: var(--primary);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 1rem;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .latency-bar-wrap {
+            height: 4px;
+            background: var(--bg);
+            border-radius: 2px;
+            margin-top: 0.5rem;
+            overflow: hidden;
+            display: flex;
+        }
+        #p-bar { height: 100%; background: var(--success); width: 0%; transition: width 0.2s; }
+        #n-bar { height: 100%; background: var(--danger); width: 0%; transition: width 0.2s; }
+
+    </style>
+</head>
+<body>
+
+<div id="loader" class="loading-overlay">
+    <div class="spinner"></div>
+    <p>Precomputing Falcon index for 500,000 events...</p>
+</div>
+
+<div class="container">
+    <header>
+        <div class="title-area">
+            <h1>Falcon Prefetch Explorer</h1>
+            <p>O(1) interactive brushing with constant-time precomputed histograms</p>
+        </div>
+        <button id="reset-btn" style="background: var(--surface); color: var(--text); border: 1px solid #ffffff10; padding: 0.5rem 1rem; border-radius: 0.5rem; cursor: pointer; font-size: 0.875rem;">Reset View</button>
+    </header>
+
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-label">Events Selected</div>
+            <div class="stat-value" id="selected-count">500,000</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Falcon Latency</div>
+            <div class="stat-value latency-falcon" id="lat-falcon">0.00ms</div>
+            <div class="latency-bar-wrap"><div id="p-bar"></div></div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Naive Latency</div>
+            <div class="stat-value latency-naive" id="lat-naive">0.00ms</div>
+            <div class="latency-bar-wrap"><div id="n-bar"></div></div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Performance Gain</div>
+            <div class="stat-value"><span id="speedup">1</span>x</div>
+        </div>
+    </div>
+
+    <div class="chart-container">
+        <div class="chart-title">
+            <span>Time Series Overview</span>
+            <span style="color: var(--text-muted); font-weight: normal;">Brush to filter</span>
+        </div>
+        <svg id="overview" width="1000" height="150"></svg>
+    </div>
+
+    <div class="chart-container">
+        <div class="chart-title">
+            <span>Value Distribution</span>
+            <span style="color: var(--text-muted); font-weight: normal;">Instant O(1) Updates</span>
+        </div>
+        <svg id="detail" width="1000" height="300"></svg>
+    </div>
+</div>
+
+<script>
+(async () => {
+    // --- Configuration ---
+    const N = 500000;
+    const NBINS = 60;
+    const NSLOTS = 256;
+    const TIME_RANGE = [0, 1000]; // arbitrary units
+
+    // --- Data Generation ---
+    const generateData = () => {
+        const timestamps = new Float32Array(N);
+        const values = new Float32Array(N);
+        const rng = d3.randomLcg(42);
+        
+        // Distribution parameters
+        const norm = d3.randomNormal.source(rng)(0, 1);
+        const lognorm1 = d3.randomLogNormal.source(rng)(Math.log(50), 0.5);
+        const lognorm2 = d3.randomLogNormal.source(rng)(Math.log(200), 0.3);
+
+        for (let i = 0; i < N; i++) {
+            // Time with some seasonality/cycles
+            const tBase = rng() * TIME_RANGE[1];
+            const seasonality = Math.sin(tBase * 0.1) * 20 + Math.sin(tBase * 0.01) * 50;
+            timestamps[i] = Math.max(0, Math.min(TIME_RANGE[1], tBase + seasonality * rng()));
+            
+            // Values: bimodal log-normal
+            values[i] = rng() < 0.6 ? lognorm1() : lognorm2();
+        }
+        return { timestamps, values };
+    };
+
+    const data = generateData();
+    const valExtent = [d3.min(data.values), d3.max(data.values)];
+    const logMin = Math.log(valExtent[0]);
+    const logMax = Math.log(valExtent[1]);
+    const logStep = (logMax - logMin) / NBINS;
+
+    const getBin = (v) => {
+        const b = Math.floor((Math.log(v) - logMin) / logStep);
+        return Math.max(0, Math.min(NBINS - 1, b));
+    };
+
+    // --- Falcon Precomputation ---
+    // 1. Sort by timestamp
+    const indices = new Int32Array(N);
+    for(let i=0; i<N; i++) indices[i] = i;
+    indices.sort((a, b) => data.timestamps[a] - data.timestamps[b]);
+
+    const sortedT = new Float32Array(N);
+    const sortedB = new Uint8Array(N);
+    for(let i=0; i<N; i++) {
+        sortedT[i] = data.timestamps[indices[i]];
+        sortedB[i] = getBin(data.values[indices[i]]);
+    }
+
+    // 2. Build cumulative histograms at 256 slots
+    const cumHist = new Array(NSLOTS + 1);
+    const fullHist = new Uint32Array(NBINS);
+    {
+        let ei = 0;
+        const running = new Uint32Array(NBINS);
+        for (let s = 0; s <= NSLOTS; s++) {
+            const threshold = (s / NSLOTS) * TIME_RANGE[1];
+            while (ei < N && sortedT[ei] <= threshold) {
+                running[sortedB[ei]]++;
+                ei++;
+            }
+            cumHist[s] = new Uint32Array(running);
+        }
+        fullHist.set(running);
+    }
+
+    // --- Query Functions ---
+    const falconQuery = (t0, t1) => {
+        const s0 = Math.max(0, Math.min(NSLOTS, Math.floor((t0 / TIME_RANGE[1]) * NSLOTS)));
+        const s1 = Math.max(0, Math.min(NSLOTS, Math.floor((t1 / TIME_RANGE[1]) * NSLOTS)));
+        const res = new Uint32Array(NBINS);
+        for (let b = 0; b < NBINS; b++) {
+            res[b] = cumHist[s1][b] - cumHist[s0][b];
+        }
+        return res;
+    };
+
+    const naiveQuery = (t0, t1) => {
+        const res = new Uint32Array(NBINS);
+        const ts = data.timestamps;
+        const vs = data.values;
+        for (let i = 0; i < N; i++) {
+            if (ts[i] >= t0 && ts[i] <= t1) {
+                res[getBin(vs[i])]++;
+            }
+        }
+        return res;
+    };
+
+    // Hide loader
+    document.getElementById('loader').style.display = 'none';
+
+    // --- Visualization ---
+    const width = 1000, margin = { top: 10, right: 20, bottom: 30, left: 50 };
+    const binEdges = d3.range(NBINS + 1).map(i => Math.exp(logMin + i * logStep));
+
+    // Overview Chart
+    const oSvg = d3.select("#overview");
+    const oW = width - margin.left - margin.right;
+    const oH = 150 - margin.top - margin.bottom;
+    const oG = oSvg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+    const oX = d3.scaleLinear().domain(TIME_RANGE).range([0, oW]);
+    const oY = d3.scaleLinear().range([oH, 0]);
+
+    // Aggregate for overview line
+    const overviewBins = 200;
+    const ovData = new Uint32Array(overviewBins);
+    for(let i=0; i<N; i++) ovData[Math.floor((data.timestamps[i]/TIME_RANGE[1])* (overviewBins-1))]++;
+    oY.domain([0, d3.max(ovData)]);
+
+    oG.append("path")
+        .datum(ovData)
+        .attr("class", "area-overview")
+        .attr("d", d3.area().x((d,i) => oX((i/(overviewBins-1))*TIME_RANGE[1])).y0(oH).y1(d => oY(d)));
+    
+    oG.append("path")
+        .datum(ovData)
+        .attr("class", "line-overview")
+        .attr("d", d3.line().x((d,i) => oX((i/(overviewBins-1))*TIME_RANGE[1])).y(d => oY(d)));
+
+    oG.append("g").attr("class", "axis").attr("transform", `translate(0,${oH})`).call(d3.axisBottom(oX).ticks(10));
+
+    // Brush
+    const brush = d3.brushX()
+        .extent([[0, 0], [oW, oH]])
+        .on("brush end", (event) => {
+            if (!event.sourceEvent) return;
+            if (event.selection) {
+                const [x0, x1] = event.selection.map(oX.invert);
+                update(x0, x1);
+            } else {
+                update(null, null);
+            }
+        });
+    oG.append("g").attr("class", "brush").call(brush);
+
+    // Detail Chart
+    const dSvg = d3.select("#detail");
+    const dW = width - margin.left - margin.right;
+    const dH = 300 - margin.top - margin.bottom;
+    const dG = dSvg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+    const dX = d3.scaleBand().domain(d3.range(NBINS)).range([0, dW]).padding(0.1);
+    const dY = d3.scaleLinear().domain([0, d3.max(fullHist)]).range([dH, 0]);
+
+    dG.append("g").attr("class", "axis").attr("transform", `translate(0,${dH})`)
+        .call(d3.axisBottom(dX).tickValues(d3.range(0, NBINS, 10)).tickFormat(i => Math.round(binEdges[i])));
+    
+    const yAxis = dG.append("g").attr("class", "axis").call(d3.axisLeft(dY).ticks(5).tickFormat(d3.format(".1s")));
+
+    const barsBg = dG.selectAll(".bar-bg").data(fullHist).enter().append("rect")
+        .attr("class", "bar-bg")
+        .attr("x", (d,i) => dX(i)).attr("width", dX.bandwidth())
+        .attr("y", d => dY(d)).attr("height", d => dH - dY(d));
+
+    const barsFg = dG.selectAll(".bar-fg").data(fullHist).enter().append("rect")
+        .attr("class", "bar-fg")
+        .attr("x", (d,i) => dX(i)).attr("width", dX.bandwidth())
+        .attr("y", d => dY(d)).attr("height", d => dH - dY(d));
+
+    // Update Logic
+    const update = (t0, t1) => {
+        let hist, total;
+        let pLat = 0, nLat = 0;
+
+        if (t0 === null) {
+            hist = fullHist;
+            total = N;
+            d3.select("#lat-falcon").text("0.00ms");
+            d3.select("#lat-naive").text("0.00ms");
+            d3.select("#speedup").text("1");
+            d3.select("#p-bar").style("width", "0%");
+            d3.select("#n-bar").style("width", "0%");
+        } else {
+            // Falcon Query
+            const tStartP = performance.now();
+            hist = falconQuery(t0, t1);
+            pLat = performance.now() - tStartP;
+
+            // Naive Query (only if brush ended or for demo sampling)
+            // To keep it responsive, we only run naive occasionally or just do it because we want to show the difference
+            const tStartN = performance.now();
+            naiveQuery(t0, t1); // We don't use the result, just for timing
+            nLat = performance.now() - tStartN;
+
+            total = d3.sum(hist);
+            
+            d3.select("#lat-falcon").text(pLat.toFixed(2) + "ms");
+            d3.select("#lat-naive").text(nLat.toFixed(2) + "ms");
+            d3.select("#speedup").text(Math.round(nLat / Math.max(0.01, pLat)));
+
+            const maxLat = Math.max(pLat, nLat, 10);
+            d3.select("#p-bar").style("width", (pLat / maxLat * 100) + "%");
+            d3.select("#n-bar").style("width", (nLat / maxLat * 100) + "%");
+        }
+
+        d3.select("#selected-count").text(total.toLocaleString());
+        
+        barsFg.data(hist)
+            .attr("y", d => dY(d))
+            .attr("height", d => dH - dY(d));
+    };
+
+    d3.select("#reset-btn").on("click", () => {
+        oG.select(".brush").call(brush.move, null);
+        update(null, null);
+    });
+
+})();
+</script>
+</body>
+</html>

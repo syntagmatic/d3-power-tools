@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Seasonal Energy Consumption - Small Multiples</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <link rel="stylesheet" href="../../style/d3-power-tools.css">
+    <style>
+        :root {
+            --bg-color: #ffffff;
+            --text-color: #1a1a1a;
+            --grid-color: #e0e0e0;
+            --panel-bg: #f9f9f9;
+            --year-1: #4e79a7;
+            --year-2: #f28e2c;
+            --year-3: #e15759;
+        }
+
+        [data-theme="dark"] {
+            --bg-color: #1a1a1a;
+            --text-color: #f0f0f0;
+            --grid-color: #333333;
+            --panel-bg: #252525;
+        }
+
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+        }
+
+        #container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            margin-bottom: 20px;
+        }
+
+        .header h1 {
+            margin: 0 0 8px 0;
+            font-size: 24px;
+            font-weight: 600;
+        }
+
+        .header p {
+            margin: 0;
+            opacity: 0.7;
+            font-size: 14px;
+        }
+
+        .legend {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 20px;
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .legend-swatch {
+            width: 12px;
+            height: 12px;
+            border-radius: 2px;
+        }
+
+        .viz-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+        }
+
+        .panel {
+            background: var(--panel-bg);
+            border-radius: 4px;
+            padding: 10px;
+            position: relative;
+        }
+
+        .panel-title {
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 8px;
+            text-align: center;
+            opacity: 0.8;
+        }
+
+        .chart-svg {
+            display: block;
+            width: 100%;
+            height: auto;
+            overflow: visible;
+        }
+
+        .axis text {
+            font-size: 10px;
+            fill: var(--text-color);
+            opacity: 0.6;
+        }
+
+        .axis line, .axis path {
+            stroke: var(--grid-color);
+        }
+
+        .grid-line {
+            stroke: var(--grid-color);
+            stroke-dasharray: 2,2;
+            pointer-events: none;
+        }
+
+        .line {
+            fill: none;
+            stroke-width: 1.5;
+            stroke-linejoin: round;
+            stroke-linecap: round;
+        }
+
+        .crosshair {
+            stroke: var(--text-color);
+            stroke-width: 1;
+            stroke-dasharray: 4,4;
+            pointer-events: none;
+        }
+
+        .tooltip {
+            position: absolute;
+            pointer-events: none;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 11px;
+            z-index: 100;
+            display: none;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            min-width: 120px;
+        }
+
+        .tooltip-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            margin-top: 4px;
+        }
+
+        .tooltip-val {
+            font-weight: 700;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div class="header">
+            <h1>Residential Energy Consumption Trends</h1>
+            <p>Daily kWh usage by month. Comparative analysis of 2023–2025.</p>
+        </div>
+
+        <div class="legend">
+            <div class="legend-item"><div class="legend-swatch" style="background: var(--year-1)"></div> 2023</div>
+            <div class="legend-item"><div class="legend-swatch" style="background: var(--year-2)"></div> 2024</div>
+            <div class="legend-item"><div class="legend-swatch" style="background: var(--year-3)"></div> 2025</div>
+        </div>
+
+        <div id="viz" class="viz-grid"></div>
+    </div>
+
+    <div id="global-tooltip" class="tooltip"></div>
+
+    <script>
+        // 1. Data Generation
+        const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+        const years = [2023, 2024, 2025];
+        
+        function generateData() {
+            const data = [];
+            years.forEach((year, yIdx) => {
+                months.forEach((month, mIdx) => {
+                    const daysInMonth = new Date(year, mIdx + 1, 0).getDate();
+                    
+                    // Seasonal profile: 
+                    // Winter peaks (Dec, Jan, Feb)
+                    // Summer peaks (Jun, Jul, Aug)
+                    let baseSeasonality = 15; // Base load
+                    const monthFactor = Math.sin((mIdx / 11) * Math.PI * 2 + Math.PI/2); // Peaks in Dec/Jan
+                    
+                    // Winter heating
+                    if (mIdx <= 1 || mIdx >= 11) baseSeasonality += 25 * Math.abs(monthFactor);
+                    // Summer AC
+                    if (mIdx >= 5 && mIdx <= 8) baseSeasonality += 30 * Math.sin((mIdx - 5) / 3 * Math.PI);
+                    
+                    // Year-over-year variation (slightly increasing)
+                    const yearBias = yIdx * 2;
+                    
+                    for (let day = 1; day <= daysInMonth; day++) {
+                        // Weekly pattern (higher on weekends)
+                        const date = new Date(year, mIdx, day);
+                        const isWeekend = date.getDay() === 0 || date.getDay() === 6;
+                        const weekFactor = isWeekend ? 5 : 0;
+                        
+                        // Random daily noise
+                        const noise = (Math.random() - 0.5) * 8;
+                        
+                        const value = Math.max(5, baseSeasonality + yearBias + weekFactor + noise);
+                        
+                        data.push({
+                            year,
+                            month: mIdx,
+                            day,
+                            value
+                        });
+                    }
+                });
+            });
+            return data;
+        }
+
+        const rawData = generateData();
+        const groupedData = d3.group(rawData, d => d.month);
+
+        // 2. Setup Dimensions
+        const margin = { top: 5, right: 10, bottom: 20, left: 30 };
+        const width = 280 - margin.left - margin.right;
+        const height = 180 - margin.top - margin.bottom;
+
+        // 3. Shared Scales
+        const x = d3.scaleLinear()
+            .domain([1, 31])
+            .range([0, width]);
+
+        const y = d3.scaleLinear()
+            .domain([0, d3.max(rawData, d => d.value) * 1.1])
+            .range([height, 0])
+            .nice();
+
+        const color = d3.scaleOrdinal()
+            .domain(years)
+            .range(['var(--year-1)', 'var(--year-2)', 'var(--year-3)']);
+
+        const line = d3.line()
+            .x(d => x(d.day))
+            .y(d => y(d.value))
+            .curve(d3.curveMonotoneX);
+
+        // 4. Render Panels
+        const vizContainer = d3.select("#viz");
+        const panels = [];
+
+        months.forEach((monthName, mIdx) => {
+            const monthPanel = vizContainer.append("div")
+                .attr("class", "panel")
+                .attr("data-month", mIdx);
+
+            monthPanel.append("div")
+                .attr("class", "panel-title")
+                .text(monthName);
+
+            const svg = monthPanel.append("svg")
+                .attr("viewBox", `0 0 ${width + margin.left + margin.right} ${height + margin.top + margin.bottom}`)
+                .attr("class", "chart-svg");
+
+            const g = svg.append("g")
+                .attr("transform", `translate(${margin.left},${margin.top})`);
+
+            // Add background grid
+            g.append("g")
+                .attr("class", "grid")
+                .call(d3.axisLeft(y)
+                    .ticks(5)
+                    .tickSize(-width)
+                    .tickFormat("")
+                )
+                .selectAll("line")
+                .attr("class", "grid-line");
+
+            // X Axis (only labels for bottom row in CSS or just all for clarity here)
+            g.append("g")
+                .attr("transform", `translate(0,${height})`)
+                .attr("class", "axis")
+                .call(d3.axisBottom(x).ticks(5).tickSizeOuter(0));
+
+            // Y Axis (only labels for leftmost column)
+            const yAxis = g.append("g")
+                .attr("class", "axis")
+                .call(d3.axisLeft(y).ticks(5).tickSizeOuter(0));
+            
+            if (mIdx % 4 !== 0) {
+                yAxis.selectAll("text").remove();
+            }
+
+            // Draw Lines
+            const monthData = groupedData.get(mIdx);
+            const yearGroups = d3.group(monthData, d => d.year);
+
+            yearGroups.forEach((values, year) => {
+                g.append("path")
+                    .datum(values.sort((a,b) => a.day - b.day))
+                    .attr("class", "line")
+                    .attr("stroke", color(year))
+                    .attr("d", line);
+            });
+
+            // Local Crosshair
+            const crosshair = g.append("line")
+                .attr("class", "crosshair")
+                .attr("y1", 0)
+                .attr("y2", height)
+                .style("display", "none");
+
+            panels.push({ g, crosshair, monthData });
+        });
+
+        // 5. Interaction - Synchronized Crosshair
+        const tooltip = d3.select("#global-tooltip");
+        const bisect = d3.bisector(d => d.day).left;
+
+        // Create a global overlay for mouse events
+        // Instead of a single overlay, we listen on all panels and broadcast
+        d3.selectAll(".panel").on("mousemove", function(event) {
+            const [mx, my] = d3.pointer(event);
+            const mIdx = +d3.select(this).attr("data-month");
+            
+            // Convert page mouse X to local chart X
+            const chartX = mx - 10 - margin.left;
+            
+            if (chartX < 0 || chartX > width) {
+                hideCrosshair();
+                return;
+            }
+
+            const dayVal = Math.round(x.invert(chartX));
+            updateCrosshair(dayVal, event.pageX, event.pageY, mIdx);
+        }).on("mouseleave", hideCrosshair);
+
+        function updateCrosshair(day, pageX, pageY, mIdx) {
+            const xPos = x(day);
+            
+            panels.forEach(p => {
+                p.crosshair
+                    .attr("x1", xPos)
+                    .attr("x2", xPos)
+                    .style("display", null);
+            });
+
+            // Update Tooltip
+            let tooltipHtml = `<strong>Day ${day}</strong>`;
+            
+            const mData = groupedData.get(mIdx);
+            
+            years.forEach(year => {
+                const yearData = mData.filter(d => d.year === year);
+                const d = yearData.find(v => v.day === day);
+                if (d) {
+                    tooltipHtml += `
+                        <div class="tooltip-row">
+                            <span><span style="color:${color(year)}">●</span> ${year}</span>
+                            <span class="tooltip-val">${d.value.toFixed(1)} kWh</span>
+                        </div>`;
+                }
+            });
+
+            tooltip
+                .style("display", "block")
+                .style("left", (pageX + 15) + "px")
+                .style("top", (pageY - 20) + "px")
+                .html(tooltipHtml);
+        }
+
+        function hideCrosshair() {
+            panels.forEach(p => p.crosshair.style("display", "none"));
+            tooltip.style("display", "none");
+        }
+
+    </script>
+</body>
+</html>

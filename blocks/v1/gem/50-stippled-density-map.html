@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>US Population Density Stipple Map</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
+<style>
+  :root {
+    --bg-color: #fdfcf9;
+    --text-main: #222;
+    --text-sub: #666;
+    --border-color: #999;
+    --accent-color: #444;
+  }
+  body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg-color);
+    font-family: "Ibarra Real Nova", serif;
+    color: var(--text-main);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  header {
+    text-align: center;
+    padding: 40px 20px 20px;
+    max-width: 800px;
+  }
+  h1 {
+    font-size: 32px;
+    font-weight: 400;
+    margin: 0 0 8px;
+    letter-spacing: -0.02em;
+  }
+  p.subtitle {
+    font-size: 16px;
+    color: var(--text-sub);
+    margin: 0;
+    font-style: italic;
+  }
+  #container {
+    position: relative;
+    width: 960px;
+    height: 600px;
+    margin: 20px auto;
+  }
+  canvas, svg {
+    position: absolute;
+    top: 0;
+    left: 0;
+  }
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: rgba(255, 255, 255, 0.96);
+    border: 0.5px solid #ccc;
+    padding: 8px 12px;
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 13px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+    display: none;
+    z-index: 10;
+  }
+  .legend {
+    position: absolute;
+    bottom: 40px;
+    left: 40px;
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 13px;
+    line-height: 1.6;
+    background: rgba(253, 252, 249, 0.8);
+    padding: 10px;
+    border-radius: 4px;
+  }
+  .legend-item { display: flex; align-items: center; gap: 8px; }
+  .dot-sample {
+    width: 3px;
+    height: 3px;
+    background: var(--accent-color);
+    border-radius: 50%;
+  }
+  footer {
+    margin-top: 20px;
+    font-size: 12px;
+    color: #888;
+    padding-bottom: 40px;
+  }
+</style>
+<link href="https://fonts.googleapis.com/css2?family=Ibarra+Real+Nova:ital,wght@0,400;1,400&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<header>
+  <h1>The Weight of Presence</h1>
+  <p class="subtitle">United States Population Density, 2020 Census. Each dot represents 10,000 residents.</p>
+</header>
+
+<div id="container">
+  <div class="legend" id="legend">
+    <div class="legend-item">
+      <div class="dot-sample"></div>
+      <span>1 dot = 10,000 people</span>
+    </div>
+    <div style="color: #888; font-size: 11px; margin-top: 4px;">
+      Rejection-sampled by state polygon.<br>
+      Approx. 33,000 total dots.
+    </div>
+  </div>
+  <div class="tooltip" id="tooltip"></div>
+</div>
+
+<footer>
+  Data: 2020 U.S. Census Bureau. Geometry: us-atlas.
+</footer>
+
+<script>
+async function init() {
+  const width = 960;
+  const height = 600;
+  const dpr = window.devicePixelRatio || 1;
+
+  const container = d3.select("#container");
+  
+  const canvas = container.append("canvas")
+    .attr("width", width * dpr)
+    .attr("height", height * dpr)
+    .style("width", width + "px")
+    .style("height", height + "px")
+    .node();
+  
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  const svg = container.append("svg")
+    .attr("width", width)
+    .attr("height", height);
+
+  const tooltip = d3.select("#tooltip");
+
+  // US States 2020 Population (Approximate)
+  const population = {
+    "01": 5024279, "02": 733391, "04": 7151502, "05": 3011524, "06": 39538223,
+    "08": 5773714, "09": 3605944, "10": 989948, "11": 689545, "12": 21538187,
+    "13": 10711908, "15": 1455271, "16": 1839106, "17": 12812508, "18": 6732219,
+    "19": 3190369, "20": 2937880, "21": 4505836, "22": 4657757, "23": 1362359,
+    "24": 6177224, "25": 7029917, "26": 10077331, "27": 5706494, "28": 2961279,
+    "29": 6154913, "30": 1084225, "31": 1961504, "32": 3104614, "33": 1377529,
+    "34": 9288994, "35": 2117522, "36": 20201249, "37": 10439388, "38": 779094,
+    "39": 11799448, "40": 3959353, "41": 4237256, "42": 13002700, "44": 1097379,
+    "45": 5118425, "46": 886667, "47": 6910840, "48": 29145505, "49": 3271616,
+    "50": 643077, "51": 8631393, "53": 7614893, "54": 1793716, "55": 5893718, "56": 576851
+  };
+
+  const us = await d3.json("https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json");
+  const states = topojson.feature(us, us.objects.states).features;
+  const nation = topojson.merge(us, us.objects.states.geometries);
+  const borders = topojson.mesh(us, us.objects.states, (a, b) => a !== b);
+
+  const projection = d3.geoAlbersUsa()
+    .fitSize([width - 80, height - 80], nation)
+    .translate([width / 2, height / 2]);
+  
+  const path = d3.geoPath(projection);
+
+  // Seeded PRNG for reproducibility
+  function mulberry32(a) {
+    return function() {
+      let t = a += 0x6D2B79F5;
+      t = Math.imul(t ^ t >>> 15, t | 1);
+      t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    }
+  }
+  const random = mulberry32(42);
+
+  const dotScale = 10000;
+  
+  ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+  
+  // Rejection sampling
+  states.forEach(state => {
+    const fips = state.id;
+    const pop = population[fips];
+    if (!pop) return;
+
+    const numDots = Math.round(pop / dotScale);
+    const bounds = path.bounds(state);
+    const x0 = bounds[0][0], y0 = bounds[0][1];
+    const x1 = bounds[1][0], y1 = bounds[1][1];
+    const dx = x1 - x0, dy = y1 - y0;
+
+    let placed = 0;
+    let attempts = 0;
+    const maxAttempts = numDots * 100; // Allow enough attempts for complex shapes
+
+    while (placed < numDots && attempts < maxAttempts) {
+      attempts++;
+      const x = x0 + random() * dx;
+      const y = y0 + random() * dy;
+      
+      const p = projection.invert([x, y]);
+      if (p && d3.geoContains(state, p)) {
+        ctx.beginPath();
+        ctx.arc(x, y, 0.75, 0, 2 * Math.PI);
+        ctx.fill();
+        placed++;
+      }
+    }
+  });
+
+  // SVG Layers
+  // State Mesh (Internal Borders)
+  svg.append("path")
+    .datum(borders)
+    .attr("d", path)
+    .attr("fill", "none")
+    .attr("stroke", "#ccc")
+    .attr("stroke-width", 0.5);
+
+  // National Outline
+  svg.append("path")
+    .datum(nation)
+    .attr("d", path)
+    .attr("fill", "none")
+    .attr("stroke", "#333")
+    .attr("stroke-width", 1);
+
+  // Interaction layer
+  svg.selectAll(".state-hitbox")
+    .data(states)
+    .join("path")
+    .attr("class", "state-hitbox")
+    .attr("d", path)
+    .attr("fill", "transparent")
+    .attr("stroke", "none")
+    .on("pointerenter", function(event, d) {
+      d3.select(this).attr("stroke", "#000").attr("stroke-width", 1.5);
+      const fips = d.id;
+      const name = d.properties.name;
+      const pop = population[fips];
+      const dots = Math.round(pop / dotScale);
+      
+      tooltip.style("display", "block")
+        .html(`
+          <div style="font-weight: bold; margin-bottom: 4px;">${name}</div>
+          <div>Population: ${d3.format(",")(pop)}</div>
+          <div style="color: #666; font-size: 11px;">Dots: ${d3.format(",")(dots)}</div>
+        `);
+    })
+    .on("pointermove", (event) => {
+      tooltip.style("left", (event.pageX + 15) + "px")
+        .style("top", (event.pageY - 10) + "px");
+    })
+    .on("pointerleave", function() {
+      d3.select(this).attr("stroke", "none");
+      tooltip.style("display", "none");
+    });
+}
+
+init();
+</script>
+
+</body>
+</html>

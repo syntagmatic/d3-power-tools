@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Server Metrics Dashboard - Animated Sparklines</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg: #f8fafc;
+            --card-bg: #ffffff;
+            --text: #1e293b;
+            --text-muted: #64748b;
+            --border: #e2e8f0;
+            --primary: #3b82f6;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+        }
+
+        [data-theme="dark"] {
+            --bg: #0f172a;
+            --card-bg: #1e293b;
+            --text: #f1f5f9;
+            --text-muted: #94a3b8;
+            --border: #334155;
+        }
+
+        body {
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            transition: background-color 0.3s, color 0.3s;
+            padding: 2rem;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .dashboard {
+            max-width: 1000px;
+            width: 100%;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 1.5rem;
+            font-weight: 700;
+        }
+
+        .controls {
+            display: flex;
+            gap: 0.75rem;
+        }
+
+        button {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.875rem;
+            font-weight: 500;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        button:hover {
+            border-color: var(--primary);
+            color: var(--primary);
+        }
+
+        button:active {
+            transform: translateY(1px);
+        }
+
+        .kpi-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2.5rem;
+        }
+
+        .kpi-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.25rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+
+        .kpi-label {
+            font-size: 0.875rem;
+            color: var(--text-muted);
+            margin-bottom: 0.5rem;
+        }
+
+        .kpi-value-row {
+            display: flex;
+            align-items: baseline;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .kpi-value {
+            font-size: 1.5rem;
+            font-weight: 700;
+        }
+
+        .kpi-delta {
+            font-size: 0.875rem;
+            font-weight: 600;
+        }
+
+        .kpi-delta.up { color: var(--success); }
+        .kpi-delta.down { color: var(--danger); }
+
+        .kpi-spark {
+            width: 100%;
+            height: 40px;
+        }
+
+        .table-container {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+        }
+
+        th {
+            background: var(--bg);
+            padding: 1rem;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            border-bottom: 1px solid var(--border);
+        }
+
+        td {
+            padding: 1rem;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.875rem;
+            vertical-align: middle;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        .server-name {
+            font-weight: 600;
+        }
+
+        .status-pill {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.25rem 0.5rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .status-pill.online { background: #dcfce7; color: #166534; }
+        .status-pill.warning { background: #fef3c7; color: #92400e; }
+        .status-pill.offline { background: #fee2e2; color: #991b1b; }
+
+        .spark-cell {
+            width: 120px;
+        }
+
+        .spark-container {
+            width: 100px;
+            height: 24px;
+        }
+
+        .val-label {
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-left: 8px;
+        }
+
+        @media (max-width: 768px) {
+            .table-container {
+                overflow-x: auto;
+            }
+            .spark-cell {
+                min-width: 100px;
+            }
+        }
+    </style>
+</head>
+<body>
+
+<div class="dashboard">
+    <header>
+        <h1>Server Metrics</h1>
+        <div class="controls">
+            <button id="replay">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"></path><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+                Replay Animation
+            </button>
+            <button id="theme-toggle">Theme</button>
+        </div>
+    </header>
+
+    <div class="kpi-grid">
+        <div class="kpi-card" id="kpi-cpu">
+            <div class="kpi-label">Avg CPU Load</div>
+            <div class="kpi-value-row">
+                <div class="kpi-value">42.5%</div>
+                <div class="kpi-delta up">▲ 2.4%</div>
+            </div>
+            <div class="kpi-spark"></div>
+        </div>
+        <div class="kpi-card" id="kpi-mem">
+            <div class="kpi-label">Memory Usage</div>
+            <div class="kpi-value-row">
+                <div class="kpi-value">68.1%</div>
+                <div class="kpi-delta down">▼ 0.8%</div>
+            </div>
+            <div class="kpi-spark"></div>
+        </div>
+        <div class="kpi-card" id="kpi-disk">
+            <div class="kpi-label">Disk Health (I/O)</div>
+            <div class="kpi-value-row">
+                <div class="kpi-value">Stable</div>
+            </div>
+            <div class="kpi-spark"></div>
+        </div>
+        <div class="kpi-card" id="kpi-net">
+            <div class="kpi-label">Network Load</div>
+            <div class="kpi-value-row">
+                <div class="kpi-value">842 Mb/s</div>
+            </div>
+            <div class="kpi-spark"></div>
+        </div>
+    </div>
+
+    <div class="table-container">
+        <table>
+            <thead>
+                <tr>
+                    <th>Server Instance</th>
+                    <th>Status</th>
+                    <th>CPU Load (1h)</th>
+                    <th>Memory (1h)</th>
+                    <th>Network (1h)</th>
+                </tr>
+            </thead>
+            <tbody id="metrics-body"></tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+    // Configuration
+    const SPARK_WIDTH = 100;
+    const SPARK_HEIGHT = 24;
+    const STAGGER_DELAY = 100;
+    const ANIM_DURATION = 800;
+
+    // Data Generation
+    const servers = [
+        { id: 'aws-us-east-1a', name: 'Web-01', status: 'online' },
+        { id: 'aws-us-east-1b', name: 'Web-02', status: 'online' },
+        { id: 'aws-us-east-2a', name: 'API-Gateway', status: 'online' },
+        { id: 'gcp-eu-west-1', name: 'DB-Primary', status: 'online' },
+        { id: 'gcp-eu-west-2', name: 'DB-Replica', status: 'warning' },
+        { id: 'azure-north-us', name: 'Worker-01', status: 'online' },
+        { id: 'azure-south-us', name: 'Worker-02', status: 'offline' },
+        { id: 'on-prem-01', name: 'Legacy-Proxy', status: 'online' }
+    ];
+
+    function generateTimeSeries(n, min, max, volatility) {
+        let val = Math.random() * (max - min) + min;
+        return Array.from({length: n}, () => {
+            val += (Math.random() - 0.5) * volatility;
+            val = Math.max(min, Math.min(max, val));
+            return val;
+        });
+    }
+
+    const metricsData = servers.map(s => ({
+        ...s,
+        cpu: generateTimeSeries(30, 10, 90, 15),
+        mem: generateTimeSeries(30, 40, 95, 10),
+        net: generateTimeSeries(30, 100, 1000, 200)
+    }));
+
+    // Rendering Helpers
+    function createSparkline(container, data, type = 'line', color = 'var(--primary)') {
+        const svg = d3.select(container).append('svg')
+            .attr('width', SPARK_WIDTH)
+            .attr('height', SPARK_HEIGHT)
+            .attr('class', 'spark-svg');
+
+        const x = d3.scaleLinear().domain([0, data.length - 1]).range([0, SPARK_WIDTH]);
+        const y = d3.scaleLinear().domain([0, 100]).range([SPARK_HEIGHT - 2, 2]);
+
+        // Clip path for animation
+        const clipId = `clip-${Math.random().toString(36).substr(2, 9)}`;
+        svg.append('defs').append('clipPath')
+            .attr('id', clipId)
+            .append('rect')
+            .attr('width', 0)
+            .attr('height', SPARK_HEIGHT);
+
+        const group = svg.append('g').attr('clip-path', `url(#${clipId})`);
+
+        if (type === 'line' || type === 'area') {
+            const line = d3.line()
+                .x((d, i) => x(i))
+                .y(d => y(d))
+                .curve(d3.curveMonotoneX);
+
+            if (type === 'area') {
+                const area = d3.area()
+                    .x((d, i) => x(i))
+                    .y0(SPARK_HEIGHT)
+                    .y1(d => y(d))
+                    .curve(d3.curveMonotoneX);
+                
+                group.append('path')
+                    .datum(data)
+                    .attr('d', area)
+                    .attr('fill', color)
+                    .attr('opacity', 0.2);
+            }
+
+            group.append('path')
+                .datum(data)
+                .attr('d', line)
+                .attr('fill', 'none')
+                .attr('stroke', color)
+                .attr('stroke-width', 1.5);
+
+            // Last point
+            group.append('circle')
+                .attr('cx', x(data.length - 1))
+                .attr('cy', y(data[data.length - 1]))
+                .attr('r', 2)
+                .attr('fill', color);
+        }
+
+        return { svg, clipId };
+    }
+
+    // KPI Renderers
+    function renderKPIs() {
+        // 1. CPU: Spark Bar
+        const cpuData = generateTimeSeries(20, 20, 80, 20);
+        const cpuSvg = d3.select('#kpi-cpu .kpi-spark').append('svg')
+            .attr('width', '100%')
+            .attr('height', 40)
+            .attr('viewBox', '0 0 200 40')
+            .attr('preserveAspectRatio', 'none');
+
+        const x = d3.scaleBand().domain(d3.range(cpuData.length)).range([0, 200]).padding(0.2);
+        const y = d3.scaleLinear().domain([0, 100]).range([40, 0]);
+
+        cpuSvg.selectAll('rect')
+            .data(cpuData)
+            .join('rect')
+            .attr('x', (d, i) => x(i))
+            .attr('y', 40)
+            .attr('width', x.bandwidth())
+            .attr('height', 0)
+            .attr('fill', 'var(--primary)')
+            .transition()
+            .duration(ANIM_DURATION)
+            .delay((d, i) => i * 30)
+            .attr('y', d => y(d))
+            .attr('height', d => 40 - y(d));
+
+        // 2. Memory: Spark Area
+        const memData = generateTimeSeries(40, 50, 90, 5);
+        const memSvg = d3.select('#kpi-mem .kpi-spark').append('svg')
+            .attr('width', '100%')
+            .attr('height', 40)
+            .attr('viewBox', '0 0 200 40')
+            .attr('preserveAspectRatio', 'none');
+
+        const mx = d3.scaleLinear().domain([0, memData.length - 1]).range([0, 200]);
+        const my = d3.scaleLinear().domain([0, 100]).range([40, 0]);
+
+        const area = d3.area().x((d, i) => mx(i)).y0(40).y1(d => my(d)).curve(d3.curveBasis);
+        const line = d3.line().x((d, i) => mx(i)).y(d => my(d)).curve(d3.curveBasis);
+
+        const memClipId = 'clip-mem';
+        memSvg.append('defs').append('clipPath').attr('id', memClipId)
+            .append('rect').attr('width', 0).attr('height', 40);
+
+        const mGroup = memSvg.append('g').attr('clip-path', `url(#${memClipId})`);
+        
+        mGroup.append('path').datum(memData).attr('d', area).attr('fill', 'var(--primary)').attr('opacity', 0.2);
+        mGroup.append('path').datum(memData).attr('d', line).attr('fill', 'none').attr('stroke', 'var(--primary)').attr('stroke-width', 2);
+
+        d3.select(`#${memClipId} rect`).transition().duration(ANIM_DURATION).attr('width', 200);
+
+        // 3. Disk: Win/Loss
+        const diskEvents = Array.from({length: 24}, () => Math.random() > 0.1 ? 1 : -1);
+        const diskSvg = d3.select('#kpi-disk .kpi-spark').append('svg')
+            .attr('width', '100%')
+            .attr('height', 40)
+            .attr('viewBox', '0 0 200 40')
+            .attr('preserveAspectRatio', 'none');
+
+        const dx = d3.scaleBand().domain(d3.range(diskEvents.length)).range([0, 200]).padding(0.3);
+        
+        diskSvg.selectAll('rect')
+            .data(diskEvents)
+            .join('rect')
+            .attr('x', (d, i) => dx(i))
+            .attr('y', 20)
+            .attr('width', dx.bandwidth())
+            .attr('height', 0)
+            .attr('fill', d => d > 0 ? 'var(--success)' : 'var(--danger)')
+            .transition()
+            .duration(500)
+            .delay((d, i) => i * 40)
+            .attr('y', d => d > 0 ? 10 : 20)
+            .attr('height', 10);
+
+        // 4. Network: Bullet Chart
+        const netValue = 842;
+        const netTarget = 950;
+        const netMax = 1000;
+        const netSvg = d3.select('#kpi-net .kpi-spark').append('svg')
+            .attr('width', '100%')
+            .attr('height', 40)
+            .attr('viewBox', '0 0 200 40');
+
+        const nx = d3.scaleLinear().domain([0, netMax]).range([0, 200]);
+
+        // Ranges
+        netSvg.append('rect').attr('width', nx(600)).attr('height', 40).attr('fill', 'var(--border)').attr('opacity', 0.3);
+        netSvg.append('rect').attr('x', nx(600)).attr('width', nx(300)).attr('height', 40).attr('fill', 'var(--border)').attr('opacity', 0.5);
+        netSvg.append('rect').attr('x', nx(900)).attr('width', nx(100)).attr('height', 40).attr('fill', 'var(--border)').attr('opacity', 0.8);
+
+        // Measure
+        netSvg.append('rect')
+            .attr('y', 14)
+            .attr('height', 12)
+            .attr('fill', 'var(--text)')
+            .attr('width', 0)
+            .transition()
+            .duration(ANIM_DURATION)
+            .attr('width', nx(netValue));
+
+        // Target
+        netSvg.append('line')
+            .attr('x1', nx(netTarget))
+            .attr('x2', nx(netTarget))
+            .attr('y1', 8)
+            .attr('y2', 32)
+            .attr('stroke', 'var(--danger)')
+            .attr('stroke-width', 3)
+            .style('opacity', 0)
+            .transition()
+            .delay(ANIM_DURATION)
+            .style('opacity', 1);
+    }
+
+    function renderTable() {
+        const tbody = d3.select('#metrics-body');
+        tbody.selectAll('*').remove();
+
+        const rows = tbody.selectAll('tr')
+            .data(metricsData)
+            .join('tr');
+
+        rows.append('td').append('div').attr('class', 'server-name').text(d => d.name);
+        
+        rows.append('td').append('span')
+            .attr('class', d => `status-pill ${d.status}`)
+            .text(d => d.status.toUpperCase());
+
+        // CPU Sparkline
+        rows.append('td').attr('class', 'spark-cell').each(function(d, i) {
+            const cell = d3.select(this).append('div').attr('class', 'spark-container');
+            const { clipId } = createSparkline(cell.node(), d.cpu, 'line', 'var(--primary)');
+            
+            d3.select(`#${clipId} rect`)
+                .transition()
+                .duration(ANIM_DURATION)
+                .delay(i * STAGGER_DELAY)
+                .attr('width', SPARK_WIDTH);
+
+            d3.select(this).append('span').attr('class', 'val-label').text(`${Math.round(d.cpu.at(-1))}%`);
+        });
+
+        // Mem Sparkline
+        rows.append('td').attr('class', 'spark-cell').each(function(d, i) {
+            const cell = d3.select(this).append('div').attr('class', 'spark-container');
+            const { clipId } = createSparkline(cell.node(), d.mem, 'area', 'var(--primary)');
+            
+            d3.select(`#${clipId} rect`)
+                .transition()
+                .duration(ANIM_DURATION)
+                .delay(i * STAGGER_DELAY + 200)
+                .attr('width', SPARK_WIDTH);
+
+            d3.select(this).append('span').attr('class', 'val-label').text(`${Math.round(d.mem.at(-1))}%`);
+        });
+
+        // Net Sparkline
+        rows.append('td').attr('class', 'spark-cell').each(function(d, i) {
+            const cell = d3.select(this).append('div').attr('class', 'spark-container');
+            // Normalize net data for 0-100 scale for sparkline helper
+            const normalizedNet = d.net.map(v => (v / 1200) * 100);
+            const { clipId } = createSparkline(cell.node(), normalizedNet, 'line', 'var(--text-muted)');
+            
+            d3.select(`#${clipId} rect`)
+                .transition()
+                .duration(ANIM_DURATION)
+                .delay(i * STAGGER_DELAY + 400)
+                .attr('width', SPARK_WIDTH);
+
+            d3.select(this).append('span').attr('class', 'val-label').text(`${Math.round(d.net.at(-1))}M`);
+        });
+    }
+
+    function init() {
+        d3.selectAll('.kpi-spark *').remove();
+        renderKPIs();
+        renderTable();
+    }
+
+    // Controls
+    document.getElementById('replay').addEventListener('click', init);
+    
+    document.getElementById('theme-toggle').addEventListener('click', () => {
+        const body = document.body;
+        const currentTheme = body.getAttribute('data-theme');
+        body.setAttribute('data-theme', currentTheme === 'dark' ? 'light' : 'dark');
+        init(); // Re-render to pick up new colors
+    });
+
+    // Run
+    init();
+
+</script>
+</body>
+</html>

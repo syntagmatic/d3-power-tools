@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>US GPS Density Hexbin Map</title>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <script src="https://cdn.jsdelivr.net/npm/d3-hexbin@0.2.2"></script>
+  <script src="https://cdn.jsdelivr.net/npm/topojson@3"></script>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --text: #f8fafc;
+      --panel: #1e293b;
+      --accent: #38bdf8;
+    }
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      height: 100vh;
+    }
+    #header {
+      width: 100%;
+      padding: 1.5rem;
+      background: var(--panel);
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+      z-index: 10;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    h1 {
+      margin: 0;
+      font-size: 1.25rem;
+      font-weight: 600;
+      letter-spacing: -0.025em;
+    }
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      background: rgba(15, 23, 42, 0.5);
+      padding: 0.5rem 1rem;
+      border-radius: 0.5rem;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .controls label {
+      font-size: 0.875rem;
+      font-weight: 500;
+      color: #94a3b8;
+    }
+    input[type=range] {
+      cursor: pointer;
+      width: 150px;
+    }
+    #viz-container {
+      position: relative;
+      flex: 1;
+      width: 100%;
+      max-width: 1200px;
+      margin-top: 1rem;
+    }
+    canvas, svg {
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+    svg {
+      pointer-events: none;
+    }
+    .state-boundary {
+      fill: none;
+      stroke: rgba(255, 255, 255, 0.2);
+      stroke-width: 0.5px;
+    }
+    .nation-boundary {
+      fill: none;
+      stroke: rgba(255, 255, 255, 0.4);
+      stroke-width: 1px;
+    }
+    #tooltip {
+      position: absolute;
+      background: rgba(15, 23, 42, 0.9);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      padding: 0.5rem 0.75rem;
+      border-radius: 0.25rem;
+      pointer-events: none;
+      font-size: 0.75rem;
+      display: none;
+      box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+      backdrop-filter: blur(4px);
+    }
+    .legend {
+      position: absolute;
+      bottom: 2rem;
+      right: 2rem;
+      background: var(--panel);
+      padding: 1rem;
+      border-radius: 0.5rem;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .legend-title {
+      font-size: 0.75rem;
+      color: #94a3b8;
+      margin-bottom: 0.5rem;
+    }
+    .legend-gradient {
+      width: 150px;
+      height: 10px;
+      border-radius: 2px;
+    }
+    .legend-labels {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 0.25rem;
+      font-size: 0.7rem;
+      color: #64748b;
+    }
+  </style>
+</head>
+<body>
+
+<div id="header">
+  <h1>US GPS Density <span style="color: var(--accent)">Hexbin Analysis</span></h1>
+  <div class="controls">
+    <label for="radius">Hex Radius: <span id="radius-val">8</span>px</label>
+    <input type="range" id="radius" min="4" max="16" value="8" step="0.5">
+  </div>
+</div>
+
+<div id="viz-container">
+  <canvas id="canvas"></canvas>
+  <svg id="svg"></svg>
+  <div id="tooltip"></div>
+  <div class="legend">
+    <div class="legend-title">Points per Hex</div>
+    <div class="legend-gradient" id="legend-gradient"></div>
+    <div class="legend-labels">
+      <span id="min-val">0</span>
+      <span id="max-val">100</span>
+    </div>
+  </div>
+</div>
+
+<script>
+  async function init() {
+    const width = 1200;
+    const height = 750;
+    const dpr = window.devicePixelRatio || 1;
+
+    const container = d3.select("#viz-container");
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+    
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    canvas.style.width = width + "px";
+    canvas.style.height = height + "px";
+    ctx.scale(dpr, dpr);
+
+    const svg = d3.select("#svg")
+      .attr("viewBox", [0, 0, width, height])
+      .attr("width", width)
+      .attr("height", height);
+
+    const tooltip = d3.select("#tooltip");
+    const radiusInput = document.getElementById("radius");
+    const radiusVal = document.getElementById("radius-val");
+
+    // Projection
+    const projection = d3.geoAlbersUsa()
+      .scale(width * 1.3)
+      .translate([width / 2, height / 2]);
+
+    const path = d3.geoPath(projection);
+
+    // Load GeoData
+    const us = await d3.json("https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json");
+    const states = topojson.feature(us, us.objects.states);
+    const nation = topojson.feature(us, us.objects.nation);
+
+    svg.append("path")
+      .datum(states)
+      .attr("class", "state-boundary")
+      .attr("d", path);
+
+    svg.append("path")
+      .datum(nation)
+      .attr("class", "nation-boundary")
+      .attr("d", path);
+
+    // Generate Data
+    const populationCenters = [
+      { name: "New York", lon: -74.006, lat: 40.7128, weight: 1 },
+      { name: "Los Angeles", lon: -118.2437, lat: 34.0522, weight: 0.8 },
+      { name: "Chicago", lon: -87.6298, lat: 41.8781, weight: 0.6 },
+      { name: "Houston", lon: -95.3698, lat: 29.7604, weight: 0.5 },
+      { name: "Phoenix", lon: -112.074, lat: 33.4484, weight: 0.4 },
+      { name: "Philadelphia", lon: -75.1652, lat: 39.9526, weight: 0.4 },
+      { name: "San Antonio", lon: -98.4936, lat: 29.4241, weight: 0.35 },
+      { name: "San Diego", lon: -117.1611, lat: 32.7157, weight: 0.35 },
+      { name: "Dallas", lon: -96.797, lat: 32.7767, weight: 0.35 },
+      { name: "San Jose", lon: -121.8863, lat: 37.3382, weight: 0.3 },
+      { name: "Austin", lon: -97.7431, lat: 30.2672, weight: 0.3 },
+      { name: "Jacksonville", lon: -81.6557, lat: 30.3322, weight: 0.25 },
+      { name: "San Francisco", lon: -122.4194, lat: 37.7749, weight: 0.3 },
+      { name: "Seattle", lon: -122.3321, lat: 47.6062, weight: 0.25 },
+      { name: "Denver", lon: -104.9903, lat: 39.7392, weight: 0.25 },
+      { name: "Washington DC", lon: -77.0369, lat: 38.9072, weight: 0.25 },
+      { name: "Boston", lon: -71.0589, lat: 42.3601, weight: 0.25 },
+      { name: "Atlanta", lon: -84.388, lat: 33.749, weight: 0.25 },
+      { name: "Miami", lon: -80.1918, lat: 25.7617, weight: 0.25 },
+      { name: "Las Vegas", lon: -115.1398, lat: 36.1699, weight: 0.2 },
+      { name: "Salt Lake City", lon: -111.891, lat: 40.7608, weight: 0.15 },
+      { name: "Portland", lon: -122.675, lat: 45.5051, weight: 0.2 },
+      { name: "Minneapolis", lon: -93.265, lat: 44.9778, weight: 0.2 },
+      { name: "Detroit", lon: -83.0458, lat: 42.3314, weight: 0.2 },
+    ];
+
+    const random = d3.randomLcg(0.42);
+    const normal = d3.randomNormal.source(random);
+    
+    const numPoints = 20000;
+    const points = [];
+    
+    for (let i = 0; i < numPoints; i++) {
+      // Pick a center based on weight
+      const r = random();
+      let cumWeight = 0;
+      let center = populationCenters[0];
+      const totalWeight = d3.sum(populationCenters, d => d.weight);
+      
+      let weightThreshold = r * totalWeight;
+      for (const c of populationCenters) {
+        cumWeight += c.weight;
+        if (weightThreshold <= cumWeight) {
+          center = c;
+          break;
+        }
+      }
+      
+      // Spread around center
+      // Cities have different spreads
+      const sigma = 1.5; 
+      const lon = normal(center.lon, sigma)();
+      const lat = normal(center.lat, sigma * 0.8)();
+      
+      const proj = projection([lon, lat]);
+      if (proj) {
+        points.push(proj);
+      }
+    }
+
+    const colorScale = d3.scaleSequential(d3.interpolateTurbo);
+
+    function update() {
+      const radius = +radiusInput.value;
+      radiusVal.textContent = radius;
+
+      const hexbin = d3.hexbin()
+        .extent([[0, 0], [width, height]])
+        .radius(radius);
+
+      const bins = hexbin(points);
+      const maxCount = d3.max(bins, d => d.length);
+      colorScale.domain([0, maxCount]);
+
+      ctx.clearRect(0, 0, width, height);
+      
+      bins.forEach(bin => {
+        ctx.fillStyle = colorScale(bin.length);
+        ctx.beginPath();
+        const hex = hexbin.hexagon();
+        // d3-hexbin hexagon() returns path string, we need to draw it manually on canvas
+        // or use the logic:
+        drawHexagon(ctx, bin.x, bin.y, radius);
+        ctx.fill();
+      });
+
+      // Update Legend
+      document.getElementById("max-val").textContent = maxCount;
+      const gradient = d3.select("#legend-gradient");
+      gradient.style("background", `linear-gradient(to right, ${colorScale(0)}, ${colorScale(maxCount/2)}, ${colorScale(maxCount)})`);
+      
+      // Store current state for interaction
+      window.currentBins = bins;
+      window.currentHexbin = hexbin;
+      window.currentMaxCount = maxCount;
+    }
+
+    function drawHexagon(ctx, x, y, r) {
+      const angle = Math.PI / 3;
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        // Pointy top
+        const px = x + r * Math.sin(i * angle);
+        const py = y - r * Math.cos(i * angle);
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+    }
+
+    radiusInput.addEventListener("input", update);
+
+    // Initial render
+    update();
+
+    // Interaction
+    canvas.addEventListener("mousemove", (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+
+      // Find bin
+      const hexbin = window.currentHexbin;
+      const bins = window.currentBins;
+      
+      // Simple distance check or re-calculate bin coords
+      const r = hexbin.radius();
+      const bx = Math.round(mx / (r * Math.sqrt(3)));
+      const by = Math.round(my / (r * 1.5));
+      
+      // Closest bin search (since hexbin layout is complex, iterate is safer)
+      let hovered = null;
+      let minDist = r;
+      for (const bin of bins) {
+        const dx = bin.x - mx;
+        const dy = bin.y - my;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        if (dist < minDist) {
+          hovered = bin;
+          minDist = dist;
+        }
+      }
+
+      if (hovered) {
+        tooltip
+          .style("display", "block")
+          .style("left", (e.clientX + 15) + "px")
+          .style("top", (e.clientY - 15) + "px")
+          .html(`<strong>Count:</strong> ${hovered.length}`);
+      } else {
+        tooltip.style("display", "none");
+      }
+    });
+
+    canvas.addEventListener("mouseleave", () => {
+      tooltip.style("display", "none");
+    });
+  }
+
+  init().catch(console.error);
+</script>
+
+</body>
+</html>

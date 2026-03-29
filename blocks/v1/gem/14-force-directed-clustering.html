@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Force-Directed Clustering</title>
+<style>
+  body { 
+    margin: 0; 
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
+    background: #f8f9fa; 
+    color: #212529;
+    overflow: hidden;
+  }
+  #chart-container { 
+    position: relative; 
+    width: 100vw; 
+    height: 100vh; 
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+  canvas { 
+    display: block;
+    cursor: crosshair;
+  }
+  #tooltip {
+    position: absolute;
+    pointer-events: none;
+    padding: 8px 12px;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 500;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    display: none;
+    z-index: 10;
+  }
+  .header {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    pointer-events: none;
+  }
+  .header h1 { margin: 0; font-size: 18px; font-weight: 600; color: #1a1a1a; }
+  .header p { margin: 4px 0 0; font-size: 13px; color: #666; }
+</style>
+</head>
+<body>
+
+<div id="chart-container">
+  <div class="header">
+    <h1>Clustered Force Network</h1>
+    <p>400 nodes, 7 clusters (~600 edges). Drag to reheat, hover to explore.</p>
+  </div>
+  <canvas id="network"></canvas>
+  <div id="tooltip"></div>
+</div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+/**
+ * Force-Directed Clustering v1
+ * Features: 400 nodes, 7 clusters, Canvas rendering, Quadtree hit detection, 
+ * Neighborhood highlighting, and Degree tooltips.
+ */
+
+const width = window.innerWidth;
+const height = window.innerHeight;
+const dpr = window.devicePixelRatio || 1;
+
+// --- Data Preparation ---
+const numNodes = 400;
+const numClusters = 7;
+const targetEdges = 600;
+const intraClusterRatio = 0.8;
+
+const rng = d3.randomLcg(123);
+const random = d3.randomUniform.source(rng)(0, 1);
+
+// Nodes sized by value (1-10) and colored by cluster
+const nodes = Array.from({ length: numNodes }, (_, i) => ({
+  id: i,
+  cluster: i % numClusters,
+  value: 2 + random() * 8,
+  r: 0, // placeholder for radius
+}));
+
+// Group nodes by cluster for efficient edge generation
+const clusters = d3.group(nodes, d => d.cluster);
+const clusterIds = Array.from(clusters.keys());
+
+const links = [];
+const intraEdges = Math.floor(targetEdges * intraClusterRatio);
+const interEdges = targetEdges - intraEdges;
+
+// 1. Generate intra-cluster edges (80%)
+for (let i = 0; i < intraEdges; i++) {
+  const cId = clusterIds[Math.floor(random() * numClusters)];
+  const cNodes = clusters.get(cId);
+  const source = cNodes[Math.floor(random() * cNodes.length)];
+  const target = cNodes[Math.floor(random() * cNodes.length)];
+  if (source.id !== target.id) links.push({ source: source.id, target: target.id });
+}
+
+// 2. Generate inter-cluster edges (20%)
+for (let i = 0; i < interEdges; i++) {
+  const cId1 = clusterIds[Math.floor(random() * numClusters)];
+  let cId2 = clusterIds[Math.floor(random() * numClusters)];
+  while (cId1 === cId2) cId2 = clusterIds[Math.floor(random() * numClusters)];
+  
+  const source = clusters.get(cId1)[Math.floor(random() * clusters.get(cId1).length)];
+  const target = clusters.get(cId2)[Math.floor(random() * clusters.get(cId2).length)];
+  links.push({ source: source.id, target: target.id });
+}
+
+// Deduplicate links and remove self-loops
+const linkMap = new Set();
+const finalLinks = [];
+links.forEach(l => {
+  const [s, t] = l.source < l.target ? [l.source, l.target] : [l.target, l.source];
+  const key = `${s}-${t}`;
+  if (s !== t && !linkMap.has(key)) {
+    linkMap.add(key);
+    finalLinks.push({ source: s, target: t });
+  }
+});
+
+// Adjacency list for degree and neighborhood highlighting
+const adj = new Map(nodes.map(n => [n.id, new Set()]));
+finalLinks.forEach(l => {
+  adj.get(l.source).add(l.target);
+  adj.get(l.target).add(l.source);
+});
+
+nodes.forEach(n => {
+  n.degree = adj.get(n.id).size;
+  // Map degree and value to radius
+  n.r = Math.sqrt(n.value * 2 + n.degree * 1.5) + 2;
+});
+
+// --- Visual Scales ---
+const color = d3.scaleOrdinal(d3.schemeObservable10);
+
+// --- Canvas Setup ---
+const canvas = d3.select("#network")
+  .attr("width", width * dpr)
+  .attr("height", height * dpr)
+  .style("width", `${width}px`)
+  .style("height", `${height}px`)
+  .node();
+
+const ctx = canvas.getContext("2d");
+ctx.scale(dpr, dpr);
+
+const tooltip = d3.select("#tooltip");
+
+// --- Simulation ---
+const simulation = d3.forceSimulation(nodes)
+  .force("link", d3.forceLink(finalLinks).id(d => d.id).distance(d => {
+    return d.source.cluster === d.target.cluster ? 25 : 120;
+  }).strength(0.7))
+  .force("charge", d3.forceManyBody().strength(-40).distanceMax(300))
+  .force("center", d3.forceCenter(width / 2, height / 2))
+  .force("collide", d3.forceCollide().radius(d => d.r + 1).iterations(2))
+  .force("x", d3.forceX(width / 2).strength(0.05))
+  .force("y", d3.forceY(height / 2).strength(0.05));
+
+// --- State ---
+let hoveredNode = null;
+let quadtree = null;
+
+// --- Rendering ---
+function draw() {
+  ctx.clearRect(0, 0, width, height);
+  
+  // Rebuild quadtree for hit detection every frame
+  quadtree = d3.quadtree()
+    .x(d => d.x)
+    .y(d => d.y)
+    .addAll(nodes);
+
+  const activeNeighbors = hoveredNode ? adj.get(hoveredNode.id) : null;
+
+  // 1. Draw Links
+  ctx.lineWidth = 0.8;
+  finalLinks.forEach(l => {
+    const isHighlighted = hoveredNode && 
+      (l.source.id === hoveredNode.id || l.target.id === hoveredNode.id);
+    
+    if (hoveredNode) {
+      if (isHighlighted) {
+        ctx.strokeStyle = "rgba(60, 60, 60, 0.6)";
+        ctx.lineWidth = 1.5;
+      } else {
+        ctx.strokeStyle = "rgba(200, 200, 200, 0.05)";
+        ctx.lineWidth = 0.5;
+      }
+    } else {
+      ctx.strokeStyle = "rgba(180, 180, 180, 0.2)";
+      ctx.lineWidth = 0.8;
+    }
+    
+    ctx.beginPath();
+    ctx.moveTo(l.source.x, l.source.y);
+    ctx.lineTo(l.target.x, l.target.y);
+    ctx.stroke();
+  });
+
+  // 2. Draw Nodes
+  nodes.forEach(d => {
+    const isHovered = hoveredNode && d.id === hoveredNode.id;
+    const isNeighbor = activeNeighbors && activeNeighbors.has(d.id);
+    
+    ctx.beginPath();
+    ctx.arc(d.x, d.y, d.r, 0, 2 * Math.PI);
+    
+    if (hoveredNode) {
+      if (isHovered || isNeighbor) {
+        ctx.fillStyle = color(d.cluster);
+        ctx.globalAlpha = 1;
+        if (isHovered) {
+          ctx.strokeStyle = "#000";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+      } else {
+        ctx.fillStyle = "#ddd";
+        ctx.globalAlpha = 0.15;
+      }
+    } else {
+      ctx.fillStyle = color(d.cluster);
+      ctx.globalAlpha = 0.85;
+    }
+    
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  });
+}
+
+simulation.on("tick", draw);
+
+// --- Interactions ---
+
+// Quadtree hit detection
+d3.select(canvas).on("mousemove", (event) => {
+  const [x, y] = d3.pointer(event);
+  const found = quadtree ? quadtree.find(x, y, 20) : null;
+  
+  if (found !== hoveredNode) {
+    hoveredNode = found;
+    if (hoveredNode) {
+      tooltip
+        .style("display", "block")
+        .style("left", `${x + 15}px`)
+        .style("top", `${y - 15}px`)
+        .html(`
+          <div style="color: ${color(hoveredNode.cluster)}; font-weight: bold; margin-bottom: 2px;">
+            Cluster ${hoveredNode.cluster + 1}
+          </div>
+          <div>Node ID: ${hoveredNode.id}</div>
+          <div>Degree: ${hoveredNode.degree}</div>
+        `);
+    } else {
+      tooltip.style("display", "none");
+    }
+    draw();
+  } else if (hoveredNode) {
+    tooltip
+      .style("left", `${x + 15}px`)
+      .style("top", `${y - 15}px`);
+  }
+});
+
+d3.select(canvas).on("mouseout", () => {
+  hoveredNode = null;
+  tooltip.style("display", "none");
+  draw();
+});
+
+// Dragging
+const drag = d3.drag()
+  .container(canvas)
+  .subject(event => quadtree.find(event.x, event.y, 30))
+  .on("start", (event) => {
+    if (!event.active) simulation.alphaTarget(0.3).restart();
+    event.subject.fx = event.subject.x;
+    event.subject.fy = event.subject.y;
+  })
+  .on("drag", (event) => {
+    event.subject.fx = event.x;
+    event.subject.fy = event.y;
+  })
+  .on("end", (event) => {
+    if (!event.active) simulation.alphaTarget(0);
+    event.subject.fx = null;
+    event.subject.fy = null;
+  });
+
+d3.select(canvas).call(drag);
+
+// Responsive resize
+window.addEventListener("resize", () => {
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  canvas.style.width = `${w}px`;
+  canvas.style.height = `${h}px`;
+  ctx.scale(dpr, dpr);
+  simulation.force("center", d3.forceCenter(w / 2, h / 2)).alpha(0.3).restart();
+});
+
+</script>
+</body>
+</html>

@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Textured Raincloud Plot | D3.js</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #fcfcfc;
+            --text-color: #333;
+            --accent-color: #555;
+            --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+        body {
+            margin: 0;
+            background: var(--bg-color);
+            color: var(--text-color);
+            font-family: var(--font-family);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .container {
+            width: 900px;
+            margin: 20px;
+            padding: 30px;
+            background: white;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.05);
+            border-radius: 8px;
+            position: relative;
+        }
+        h1 {
+            font-weight: 300;
+            margin: 0 0 10px 0;
+            color: #111;
+        }
+        p.description {
+            color: #666;
+            margin-bottom: 30px;
+            line-height: 1.5;
+            max-width: 700px;
+        }
+        .controls {
+            margin-bottom: 20px;
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            background: #f0f0f0;
+            padding: 12px 20px;
+            border-radius: 6px;
+        }
+        label {
+            font-weight: 600;
+            font-size: 0.9em;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .legend {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin-top: 20px;
+            font-size: 0.85em;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .legend-swatch {
+            width: 30px;
+            height: 20px;
+            border: 1px solid #ddd;
+        }
+        svg {
+            overflow: visible;
+        }
+        .axis-label {
+            font-size: 0.8em;
+            fill: #777;
+        }
+        .group-label {
+            font-size: 0.9em;
+            font-weight: 600;
+            fill: #444;
+        }
+        /* Colorblind Simulation Filter */
+        .deuteranopia-filter {
+            filter: url(#deuteranopia);
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Textured Raincloud Plots</h1>
+    <p class="description">
+        Raincloud plots combine half-violins (KDE), box plots, and jittered strips to provide a complete view of data distributions.
+        This implementation uses <strong>redundant encoding</strong>: each group is distinguished by both a Tol color and an SVG texture.
+        Toggle the simulation to see how textures maintain discriminability when color information is lost.
+    </p>
+
+    <div class="controls">
+        <label>
+            <input type="checkbox" id="toggle-cvd"> Simulate Deuteranopia (Red-Green Color Blindness)
+        </label>
+        <div style="font-size: 0.85em; color: #777;">
+            Total n = 600 (100 per group)
+        </div>
+    </div>
+
+    <div id="chart"></div>
+    <div id="legend" class="legend"></div>
+</div>
+
+<!-- SVG Filters for CVD Simulation and Textures -->
+<svg width="0" height="0" style="position:absolute">
+    <defs id="global-defs">
+        <!-- Deuteranopia Simulation Filter -->
+        <filter id="deuteranopia" color-interpolation-filters="linearRGB">
+            <feColorMatrix type="matrix" values="
+                0.29031, 0.70969, -0.00000, 0, 0
+                0.29031, 0.70969, -0.00000, 0, 0
+                -0.02179, 0.02179, 1.00000, 0, 0
+                0, 0, 0, 1, 0
+            "/>
+        </filter>
+    </defs>
+</svg>
+
+<script>
+/**
+ * Raincloud Plot Implementation
+ * Features:
+ * - Half-Violin (KDE)
+ * - Box Plot
+ * - Jittered Strip
+ * - Redundant Color + Texture Encoding
+ */
+
+// 1. Setup Data & Configuration
+const nGroups = 6;
+const nPerGroup = 100;
+const groupNames = ["Control", "Treatment A", "Treatment B", "Variant X", "Variant Y", "Variant Z"];
+
+// Tol Bright Palette (7 colors) - https://personal.sron.nl/~pault/
+const tolColors = ["#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE", "#AA3377"];
+
+// Pattern Definitions configuration
+const patterns = [
+    { id: "hatch-45", type: "hatch", angle: 45, spacing: 6 },
+    { id: "dots", type: "dots", spacing: 6, radius: 1.5 },
+    { id: "cross", type: "cross", spacing: 7 },
+    { id: "hatch-0", type: "hatch", angle: 0, spacing: 6 },
+    { id: "zigzag", type: "zigzag", spacing: 8 },
+    { id: "hatch-90", type: "hatch", angle: 90, spacing: 6 }
+];
+
+// Generate synthetic data
+const data = [];
+const random = d3.randomLcg(42);
+
+groupNames.forEach((name, i) => {
+    let generator;
+    // Create diverse distributions
+    if (i === 0) generator = d3.randomNormal(50, 8); // Normal
+    else if (i === 1) generator = d3.randomNormal(55, 12); // Wider Normal
+    else if (i === 2) {
+        // Bimodal
+        const g1 = d3.randomNormal(40, 5);
+        const g2 = d3.randomNormal(65, 5);
+        generator = () => random() > 0.5 ? g1() : g2();
+    }
+    else if (i === 3) {
+        // Skewed Right
+        const base = d3.randomNormal(45, 10);
+        generator = () => Math.abs(base()) + 30;
+    }
+    else if (i === 4) generator = d3.randomNormal(60, 6); // High Mean, Low Var
+    else if (i === 5) {
+        // Uniform
+        generator = () => random() * 40 + 30;
+    }
+
+    const values = Array.from({length: nPerGroup}, generator);
+    data.push({
+        group: name,
+        color: tolColors[i],
+        patternId: patterns[i].id,
+        values: values.sort((a, b) => a - b)
+    });
+});
+
+// 2. Build SVG Patterns
+const defs = d3.select("#global-defs");
+
+patterns.forEach((p, i) => {
+    const pattern = defs.append("pattern")
+        .attr("id", p.id)
+        .attr("width", p.spacing)
+        .attr("height", p.spacing)
+        .attr("patternUnits", "userSpaceOnUse");
+
+    // Add a background rectangle to hold the color
+    // We'll actually use the pattern as an overlay with opacity or fill shapes with pattern
+    // Best approach for clarity: Fill shape with color, overlay pattern
+    // In SVG, we can use multiple fills or a filter. Simplest: Use pattern for the "marks"
+    // and a separate path/rect for the solid color background.
+    
+    // Pattern marks (using a subtle dark or light based on the color's lightness)
+    const markColor = "rgba(0,0,0,0.25)";
+
+    if (p.type === "hatch") {
+        pattern.attr("patternTransform", `rotate(${p.angle})`);
+        pattern.append("line")
+            .attr("x1", 0).attr("y1", 0).attr("x2", 0).attr("y2", p.spacing)
+            .attr("stroke", markColor)
+            .attr("stroke-width", 1.5);
+    } else if (p.type === "dots") {
+        pattern.append("circle")
+            .attr("cx", p.spacing/2).attr("cy", p.spacing/2).attr("r", p.radius)
+            .attr("fill", markColor);
+    } else if (p.type === "cross") {
+        pattern.append("line")
+            .attr("x1", 0).attr("y1", p.spacing/2).attr("x2", p.spacing).attr("y2", p.spacing/2)
+            .attr("stroke", markColor).attr("stroke-width", 1.2);
+        pattern.append("line")
+            .attr("x1", p.spacing/2).attr("y1", 0).attr("x2", p.spacing/2).attr("y2", p.spacing)
+            .attr("stroke", markColor).attr("stroke-width", 1.2);
+    } else if (p.type === "zigzag") {
+        const s = p.spacing;
+        pattern.append("path")
+            .attr("d", `M 0 ${s/2} L ${s/4} ${s/4} L ${s/2} ${s/2} L ${3*s/4} ${3*s/4} L ${s} ${s/2}`)
+            .attr("fill", "none")
+            .attr("stroke", markColor)
+            .attr("stroke-width", 1.2);
+    }
+});
+
+// 3. Chart Dimensions & Scales
+const margin = {top: 20, right: 30, bottom: 50, left: 120};
+const width = 840 - margin.left - margin.right;
+const height = 540 - margin.top - margin.bottom;
+
+const svg = d3.select("#chart").append("svg")
+    .attr("width", width + margin.left + margin.right)
+    .attr("height", height + margin.top + margin.bottom)
+  .append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+const chartContent = svg.append("g").attr("id", "chart-content");
+
+const x = d3.scaleLinear()
+    .domain([20, 85])
+    .range([0, width]);
+
+const y = d3.scaleBand()
+    .domain(groupNames)
+    .range([0, height])
+    .padding(0.2);
+
+// 4. Statistical Helpers
+function computeStats(values) {
+    const q1 = d3.quantile(values, 0.25);
+    const median = d3.quantile(values, 0.5);
+    const q3 = d3.quantile(values, 0.75);
+    const iqr = q3 - q1;
+    const min = d3.min(values);
+    const max = d3.max(values);
+    const whiskerLow = d3.max([min, q1 - 1.5 * iqr]);
+    const whiskerHigh = d3.min([max, q3 + 1.5 * iqr]);
+    return {q1, median, q3, whiskerLow, whiskerHigh};
+}
+
+function kde(kernel, thresholds, data) {
+    return thresholds.map(t => [t, d3.mean(data, d => kernel(t - d))]);
+}
+
+function epanechnikov(bandwidth) {
+    return x => Math.abs(x /= bandwidth) <= 1 ? 0.75 * (1 - x * x) / bandwidth : 0;
+}
+
+const bandwidth = 3;
+const thresholds = x.ticks(100);
+const densityScale = d3.scaleLinear()
+    .range([0, y.bandwidth() * 0.8]); // Max height of violin
+
+// 5. Render Components
+data.forEach(d => {
+    const g = chartContent.append("g")
+        .attr("transform", `translate(0, ${y(d.group)})`);
+
+    const stats = computeStats(d.values);
+    const densities = kde(epanechnikov(bandwidth), thresholds, d.values);
+    const maxDensity = d3.max(densities, v => v[1]);
+    
+    // Density scale per group or shared? Per group shows shape better.
+    const groupDensityScale = d3.scaleLinear()
+        .domain([0, maxDensity])
+        .range([0, y.bandwidth() * 0.7]);
+
+    // --- Half-Violin (Top) ---
+    const violinG = g.append("g");
+    
+    // Background color
+    violinG.append("path")
+        .datum(densities)
+        .attr("fill", d.color)
+        .attr("d", d3.area()
+            .curve(d3.curveBasis)
+            .x(v => x(v[0]))
+            .y0(y.bandwidth() * 0.4)
+            .y1(v => y.bandwidth() * 0.4 - groupDensityScale(v[1]))
+        );
+
+    // Texture overlay
+    violinG.append("path")
+        .datum(densities)
+        .attr("fill", `url(#${d.patternId})`)
+        .attr("d", d3.area()
+            .curve(d3.curveBasis)
+            .x(v => x(v[0]))
+            .y0(y.bandwidth() * 0.4)
+            .y1(v => y.bandwidth() * 0.4 - groupDensityScale(v[1]))
+        );
+
+    // --- Box Plot (Middle) ---
+    const boxHeight = 10;
+    const boxY = y.bandwidth() * 0.5;
+
+    // Whisker line
+    g.append("line")
+        .attr("x1", x(stats.whiskerLow))
+        .attr("x2", x(stats.whiskerHigh))
+        .attr("y1", boxY)
+        .attr("y2", boxY)
+        .attr("stroke", "#000")
+        .attr("stroke-width", 1.5);
+
+    // Box
+    g.append("rect")
+        .attr("x", x(stats.q1))
+        .attr("y", boxY - boxHeight / 2)
+        .attr("width", x(stats.q3) - x(stats.q1))
+        .attr("height", boxHeight)
+        .attr("fill", "white")
+        .attr("stroke", "#000")
+        .attr("stroke-width", 1.5);
+
+    // Median line
+    g.append("line")
+        .attr("x1", x(stats.median))
+        .attr("x2", x(stats.median))
+        .attr("y1", boxY - boxHeight / 2)
+        .attr("y2", boxY + boxHeight / 2)
+        .attr("stroke", "#000")
+        .attr("stroke-width", 2.5);
+
+    // --- Jittered Strip (Bottom) ---
+    const rainY = y.bandwidth() * 0.75;
+    const jitterMax = y.bandwidth() * 0.15;
+
+    g.selectAll(".dot")
+        .data(d.values)
+        .enter().append("circle")
+        .attr("cx", v => x(v))
+        .attr("cy", () => rainY + (random() - 0.5) * jitterMax * 2)
+        .attr("r", 2.5)
+        .attr("fill", d.color)
+        .attr("fill-opacity", 0.6);
+});
+
+// 6. Axes & Labels
+svg.append("g")
+    .attr("transform", `translate(0, ${height})`)
+    .call(d3.axisBottom(x).tickSize(-height).tickPadding(10))
+    .call(g => g.select(".domain").remove())
+    .call(g => g.selectAll(".tick line").attr("stroke", "#eee"));
+
+svg.append("g")
+    .call(d3.axisLeft(y).tickSize(0).tickPadding(10))
+    .call(g => g.select(".domain").remove())
+    .selectAll("text")
+    .attr("class", "group-label");
+
+svg.append("text")
+    .attr("class", "axis-label")
+    .attr("x", width / 2)
+    .attr("y", height + 40)
+    .attr("text-anchor", "middle")
+    .text("Performance Score (Arbitrary Units)");
+
+// 7. Legend
+const legend = d3.select("#legend");
+data.forEach(d => {
+    const item = legend.append("div").attr("class", "legend-item");
+    
+    // Swatch with color and texture
+    const svgSwatch = item.append("svg")
+        .attr("width", 30)
+        .attr("height", 20);
+    
+    svgSwatch.append("rect")
+        .attr("width", 30).attr("height", 20)
+        .attr("fill", d.color);
+        
+    svgSwatch.append("rect")
+        .attr("width", 30).attr("height", 20)
+        .attr("fill", `url(#${d.patternId})`);
+    
+    item.append("span").text(d.group);
+});
+
+// 8. Interactivity
+d3.select("#toggle-cvd").on("change", function() {
+    d3.select("#chart-content").classed("deuteranopia-filter", this.checked);
+    d3.select("#legend").classed("deuteranopia-filter", this.checked);
+});
+
+</script>
+</body>
+</html>

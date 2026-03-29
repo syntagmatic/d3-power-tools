@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebGL Force Galaxy 50K</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  :root { --bg: #050508; --panel: rgba(15, 15, 25, 0.85); --accent: #4477AA; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { 
+    background: var(--bg); 
+    color: #ececec; 
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
+  #header {
+    padding: 1rem 1.5rem;
+    background: rgba(0,0,0,0.3);
+    border-bottom: 1px solid #222;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    z-index: 100;
+  }
+  h1 { font-size: 1.2rem; font-weight: 500; letter-spacing: -0.02em; }
+  .stats { font-size: 0.85rem; color: #888; display: flex; gap: 1.5rem; }
+  .stats strong { color: #ccc; }
+
+  #viz-container {
+    position: relative;
+    flex: 1;
+    width: 100%;
+    cursor: crosshair;
+  }
+  canvas, svg {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+  }
+  canvas { pointer-events: none; }
+  svg { z-index: 10; pointer-events: all; }
+
+  #controls {
+    position: absolute;
+    top: 1rem;
+    right: 1rem;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    pointer-events: none;
+  }
+  .control-group {
+    background: var(--panel);
+    backdrop-filter: blur(8px);
+    padding: 1rem;
+    border-radius: 8px;
+    border: 1px solid #333;
+    pointer-events: all;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+  }
+  button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    padding: 0.5rem 1rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 600;
+    width: 100%;
+    transition: filter 0.2s;
+  }
+  button:hover { filter: brightness(1.2); }
+  
+  .alpha-container { margin-top: 0.75rem; }
+  .alpha-label { font-size: 0.75rem; color: #888; margin-bottom: 0.25rem; display: flex; justify-content: space-between; }
+  .alpha-track { width: 100%; height: 4px; background: #222; border-radius: 2px; overflow: hidden; }
+  .alpha-fill { height: 100%; background: var(--accent); width: 0%; transition: width 0.1s linear; }
+
+  #tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: var(--panel);
+    border: 1px solid #444;
+    padding: 0.75rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    display: none;
+    z-index: 200;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    backdrop-filter: blur(4px);
+  }
+  .tt-comm { font-weight: 700; margin-bottom: 0.25rem; }
+  .tt-stat { color: #aaa; font-size: 0.75rem; }
+
+  .legend {
+    position: absolute;
+    bottom: 1.5rem;
+    left: 1.5rem;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    background: var(--panel);
+    padding: 0.75rem;
+    border-radius: 6px;
+    border: 1px solid #333;
+  }
+  .legend-item { display: flex; align-items: center; gap: 0.5rem; font-size: 0.75rem; color: #aaa; }
+  .legend-swatch { width: 10px; height: 10px; border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <h1>Force Galaxy WebGL</h1>
+  <div class="stats">
+    <span>Nodes: <strong>50,000</strong></span>
+    <span>Edges: <strong>~80,000</strong></span>
+    <span>Communities: <strong>8</strong></span>
+  </div>
+</div>
+
+<div id="viz-container">
+  <canvas id="glCanvas"></canvas>
+  <svg id="interactionLayer"></svg>
+  
+  <div id="controls">
+    <div class="control-group">
+      <button id="reheatBtn">Reheat Simulation</button>
+      <div class="alpha-container">
+        <div class="alpha-label">
+          <span>Simulation Heat</span>
+          <span id="alphaTxt">0.000</span>
+        </div>
+        <div class="alpha-track"><div id="alphaFill" class="alpha-fill"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="legend" class="legend"></div>
+  <div id="tooltip"></div>
+</div>
+
+<script>
+/**
+ * 56-webgl-force-galaxy.html
+ * 50K-node force simulation with WebGL 2 instanced rendering.
+ */
+(async () => {
+  const container = document.getElementById('viz-container');
+  const canvas = document.getElementById('glCanvas');
+  const svg = d3.select('#interactionLayer');
+  const tooltip = d3.select('#tooltip');
+  
+  let width = container.clientWidth;
+  let height = container.clientHeight;
+  const dpr = window.devicePixelRatio || 1;
+
+  const NODE_COUNT = 50000;
+  const COMM_COUNT = 8;
+  const EDGE_TARGET = 80000;
+
+  // Colors: Paul Tol's Vibrant
+  const colors = [
+    "#EE7733", "#0077BB", "#33BBEE", "#EE3377", 
+    "#CC3311", "#009988", "#BBBBBB", "#AA3377"
+  ];
+  
+  const legend = d3.select('#legend');
+  colors.forEach((c, i) => {
+    const item = legend.append('div').attr('class', 'legend-item');
+    item.append('div').attr('class', 'legend-swatch').style('background', c);
+    item.append('span').text(`Sector ${String.fromCharCode(65 + i)}`);
+  });
+
+  // Data Generation
+  const nodes = new Array(NODE_COUNT);
+  const commCenters = d3.range(COMM_COUNT).map(i => {
+    const angle = (i / COMM_COUNT) * Math.PI * 2;
+    const r = Math.min(width, height) * 0.35;
+    return {
+      x: width / 2 + Math.cos(angle) * r,
+      y: height / 2 + Math.sin(angle) * r
+    };
+  });
+
+  // Seeded PRNG
+  let seed = 42;
+  const random = () => {
+    seed = (seed * 1664525 + 1013904223) % 4294967296;
+    return seed / 4294967296;
+  };
+
+  const degrees = new Int32Array(NODE_COUNT);
+  for (let i = 0; i < NODE_COUNT; i++) {
+    const comm = Math.floor(random() * COMM_COUNT);
+    const center = commCenters[comm];
+    nodes[i] = {
+      id: i,
+      comm: comm,
+      x: center.x + (random() - 0.5) * 100,
+      y: center.y + (random() - 0.5) * 100,
+      r: 1.5 + random() * 2
+    };
+  }
+
+  const links = [];
+  for (let i = 0; i < EDGE_TARGET; i++) {
+    const source = Math.floor(random() * NODE_COUNT);
+    let target;
+    // 85% within community
+    if (random() < 0.85) {
+      do { target = Math.floor(random() * NODE_COUNT); } 
+      while (nodes[target].comm !== nodes[source].comm || target === source);
+    } else {
+      do { target = Math.floor(random() * NODE_COUNT); } 
+      while (target === source);
+    }
+    links.push({ source, target });
+    degrees[source]++;
+    degrees[target]++;
+  }
+
+  // Update radius based on degree
+  for (let i = 0; i < NODE_COUNT; i++) {
+    nodes[i].r = 1.0 + Math.sqrt(degrees[i]) * 0.8;
+  }
+
+  // WebGL 2 Setup
+  const gl = canvas.getContext('webgl2', { antialias: true, alpha: false });
+  if (!gl) {
+    alert("WebGL 2 not supported");
+    return;
+  }
+
+  const vs = `#version 300 es
+    layout(location = 0) in vec2 a_quad;
+    layout(location = 1) in vec2 a_offset;
+    layout(location = 2) in float a_radius;
+    layout(location = 3) in vec4 a_color;
+
+    uniform vec2 u_res;
+    uniform vec2 u_translate;
+    uniform float u_scale;
+    uniform float u_dpr;
+
+    out vec4 v_color;
+    out vec2 v_uv;
+
+    void main() {
+      // Apply zoom transform
+      vec2 pos = (a_offset * u_scale + u_translate);
+      
+      // Expand quad by radius
+      vec2 vertexPos = pos + a_quad * a_radius * u_scale;
+      
+      // Convert to clip space
+      vec2 clip = (vertexPos / u_res) * 2.0 - 1.0;
+      gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
+      
+      v_color = a_color;
+      v_uv = a_quad * 2.0; // [-1, 1] range for circle SDF
+    }
+  `;
+
+  const fs = `#version 300 es
+    precision highp float;
+    in vec4 v_color;
+    in vec2 v_uv;
+    out vec4 fragColor;
+
+    void main() {
+      float dist = length(v_uv);
+      if (dist > 1.0) discard;
+      
+      // Antialiased edge
+      float alpha = 1.0 - smoothstep(0.8, 1.0, dist);
+      fragColor = vec4(v_color.rgb, v_color.a * alpha);
+    }
+  `;
+
+  function createShader(gl, type, source) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      console.error(gl.getShaderInfoLog(shader));
+      gl.deleteShader(shader);
+      return null;
+    }
+    return shader;
+  }
+
+  const program = gl.createProgram();
+  gl.attachShader(program, createShader(gl, gl.VERTEX_SHADER, vs));
+  gl.attachShader(program, createShader(gl, gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(program);
+  gl.useProgram(program);
+
+  // Buffers
+  const quadData = new Float32Array([
+    -0.5, -0.5,  0.5, -0.5,  0.5,  0.5,
+    -0.5, -0.5,  0.5,  0.5, -0.5,  0.5
+  ]);
+  const offsetData = new Float32Array(NODE_COUNT * 2);
+  const radiusData = new Float32Array(NODE_COUNT);
+  const colorData = new Float32Array(NODE_COUNT * 4);
+
+  for (let i = 0; i < NODE_COUNT; i++) {
+    const c = d3.rgb(colors[nodes[i].comm]);
+    colorData[i * 4] = c.r / 255;
+    colorData[i * 4 + 1] = c.g / 255;
+    colorData[i * 4 + 2] = c.b / 255;
+    colorData[i * 4 + 3] = 0.8;
+    radiusData[i] = nodes[i].r;
+  }
+
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+
+  const quadBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, quadData, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+  const offsetBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, offsetBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, offsetData, gl.DYNAMIC_DRAW);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 0, 0);
+  gl.vertexAttribDivisor(1, 1);
+
+  const radiusBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, radiusBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, radiusData, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(2);
+  gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 0, 0);
+  gl.vertexAttribDivisor(2, 1);
+
+  const colorBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, colorBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, colorData, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(3);
+  gl.vertexAttribPointer(3, 4, gl.FLOAT, false, 0, 0);
+  gl.vertexAttribDivisor(3, 1);
+
+  const uRes = gl.getUniformLocation(program, 'u_res');
+  const uTranslate = gl.getUniformLocation(program, 'u_translate');
+  const uScale = gl.getUniformLocation(program, 'u_scale');
+  const uDpr = gl.getUniformLocation(program, 'u_dpr');
+
+  function resize() {
+    width = container.clientWidth;
+    height = container.clientHeight;
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    gl.viewport(0, 0, canvas.width, canvas.height);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // Force Simulation
+  const simulation = d3.forceSimulation(nodes)
+    .force('charge', d3.forceManyBody().strength(-8).distanceMax(200).theta(1.2))
+    .force('link', d3.forceLink(links).id(d => d.id).distance(20).strength(0.05))
+    .force('center', d3.forceCenter(width / 2, height / 2).strength(0.01))
+    .force('x', d3.forceX(d => commCenters[d.comm].x).strength(0.08))
+    .force('y', d3.forceY(d => commCenters[d.comm].y).strength(0.08))
+    .velocityDecay(0.4)
+    .alphaDecay(0.02)
+    .stop();
+
+  let transform = d3.zoomIdentity;
+  const zoom = d3.zoom()
+    .scaleExtent([0.1, 20])
+    .on('zoom', (e) => {
+      transform = e.transform;
+      render();
+    });
+  svg.call(zoom);
+
+  const alphaFill = document.getElementById('alphaFill');
+  const alphaTxt = document.getElementById('alphaTxt');
+
+  function updateBuffers() {
+    for (let i = 0; i < NODE_COUNT; i++) {
+      offsetData[i * 2] = nodes[i].x;
+      offsetData[i * 2 + 1] = nodes[i].y;
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, offsetBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, offsetData);
+  }
+
+  function render() {
+    gl.clearColor(0.02, 0.02, 0.03, 1.0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+    gl.useProgram(program);
+    gl.uniform2f(uRes, width, height);
+    gl.uniform2f(uTranslate, transform.x, transform.y);
+    gl.uniform1f(uScale, transform.k);
+    gl.uniform1f(uDpr, dpr);
+
+    gl.bindVertexArray(vao);
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, NODE_COUNT);
+  }
+
+  // Pre-simulate 50 ticks for initial layout
+  for (let i = 0; i < 50; i++) simulation.tick();
+  updateBuffers();
+  render();
+
+  function tick() {
+    if (simulation.alpha() > simulation.alphaMin()) {
+      simulation.tick();
+      updateBuffers();
+      
+      const a = simulation.alpha();
+      alphaFill.style.width = `${a * 100}%`;
+      alphaTxt.textContent = a.toFixed(3);
+    }
+    render();
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+
+  document.getElementById('reheatBtn').onclick = () => {
+    simulation.alpha(1).restart();
+  };
+
+  // Interaction: Quadtree Hover
+  let quadtree;
+  svg.on('pointermove', (e) => {
+    const [mx, my] = d3.pointer(e);
+    // Transform coordinates back to data space
+    const tx = (mx - transform.x) / transform.k;
+    const ty = (my - transform.y) / transform.k;
+
+    // Rebuild quadtree only if simulation is active or if we don't have one
+    if (!quadtree || simulation.alpha() > simulation.alphaMin()) {
+      quadtree = d3.quadtree()
+        .x(d => d.x)
+        .y(d => d.y)
+        .addAll(nodes);
+    }
+
+    const found = quadtree.find(tx, ty, 20 / transform.k);
+    if (found) {
+      tooltip
+        .style('display', 'block')
+        .style('left', (mx + 15) + 'px')
+        .style('top', (my + 15) + 'px')
+        .html(`
+          <div class="tt-comm" style="color:${colors[found.comm]}">Sector ${String.fromCharCode(65 + found.comm)}</div>
+          <div class="tt-stat">ID: ${found.id}</div>
+          <div class="tt-stat">Connections: ${degrees[found.id]}</div>
+          <div class="tt-stat">Size: ${found.r.toFixed(1)}</div>
+        `);
+    } else {
+      tooltip.style('display', 'none');
+    }
+  });
+
+  svg.on('pointerleave', () => {
+    tooltip.style('display', 'none');
+  });
+
+})();
+</script>
+</body>
+</html>

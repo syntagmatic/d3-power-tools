@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Interactive Rotating Globe</title>
+<style>
+  :root {
+    --bg: #05070a;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --border: #30363d;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    overflow: hidden;
+  }
+  #container {
+    position: relative;
+    width: 800px;
+    height: 800px;
+    cursor: grab;
+  }
+  #container:active { cursor: grabbing; }
+  canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    pointer-events: none;
+  }
+  /* The interaction layer canvas needs pointer events */
+  canvas#canvas-interaction {
+    pointer-events: auto;
+  }
+  #ui {
+    position: absolute;
+    top: 20px;
+    text-align: center;
+    pointer-events: none;
+    z-index: 10;
+  }
+  h1 { font-size: 20px; font-weight: 400; margin-bottom: 4px; color: var(--text); }
+  p { font-size: 14px; color: var(--muted); }
+  #tooltip {
+    position: absolute;
+    background: rgba(13, 17, 23, 0.9);
+    border: 1px solid var(--border);
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 13px;
+    pointer-events: none;
+    display: none;
+    z-index: 20;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  }
+</style>
+</head>
+<body>
+
+<div id="ui">
+  <h1>Interactive Global Explorer</h1>
+  <p>Drag to rotate • Pulse indicates major cities</p>
+</div>
+
+<div id="container">
+  <canvas id="canvas-ocean"></canvas>
+  <canvas id="canvas-land"></canvas>
+  <canvas id="canvas-graticule"></canvas>
+  <canvas id="canvas-terminator"></canvas>
+  <canvas id="canvas-cities"></canvas>
+  <canvas id="canvas-interaction"></canvas>
+  <div id="tooltip"></div>
+</div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+import * as topojson from "https://cdn.jsdelivr.net/npm/topojson-client@3/+esm";
+import versor from "https://cdn.jsdelivr.net/npm/versor@0.2/+esm";
+
+const width = 800, height = 800;
+const dpr = window.devicePixelRatio || 1;
+const radius = 320;
+
+const container = d3.select("#container");
+const tooltip = d3.select("#tooltip");
+
+// Multi-layer canvas setup
+const layers = ["ocean", "land", "graticule", "terminator", "cities", "interaction"];
+const contexts = {};
+layers.forEach(id => {
+  const canvas = d3.select(`#canvas-${id}`)
+    .attr("width", width * dpr)
+    .attr("height", height * dpr)
+    .style("width", `${width}px`)
+    .style("height", `${height}px`);
+  
+  const ctx = canvas.node().getContext("2d");
+  ctx.scale(dpr, dpr);
+  contexts[id] = ctx;
+});
+
+// Projection
+const projection = d3.geoOrthographic()
+  .scale(radius)
+  .translate([width / 2, height / 2])
+  .clipAngle(90)
+  .precision(0.1);
+
+const path = d3.geoPath(projection);
+
+// Data
+const world = await d3.json("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json");
+const land = topojson.feature(world, world.objects.land);
+const graticule = d3.geoGraticule()();
+const sphere = { type: "Sphere" };
+
+const continentColors = {
+  "N. America": "#4477AA",
+  "S. America": "#EE6677",
+  "Europe":     "#228833",
+  "Africa":     "#CCBB44",
+  "Asia":       "#66CCEE",
+  "Oceania":    "#AA3377"
+};
+
+const cities = [
+  { name: "New York", coords: [-74.006, 40.7128], continent: "N. America" },
+  { name: "London", coords: [-0.1278, 51.5074], continent: "Europe" },
+  { name: "Tokyo", coords: [139.6503, 35.6762], continent: "Asia" },
+  { name: "Paris", coords: [2.3522, 48.8566], continent: "Europe" },
+  { name: "Cairo", coords: [31.2357, 30.0444], continent: "Africa" },
+  { name: "Sydney", coords: [151.2093, -33.8688], continent: "Oceania" },
+  { name: "São Paulo", coords: [-46.6333, -23.5505], continent: "S. America" },
+  { name: "Moscow", coords: [37.6173, 55.7558], continent: "Europe" },
+  { name: "Mumbai", coords: [72.8777, 19.076], continent: "Asia" },
+  { name: "Beijing", coords: [116.4074, 39.9042], continent: "Asia" },
+  { name: "Los Angeles", coords: [-118.2437, 34.0522], continent: "N. America" },
+  { name: "Mexico City", coords: [-99.1332, 19.4326], continent: "N. America" },
+  { name: "Buenos Aires", coords: [-58.3816, -34.6037], continent: "S. America" },
+  { name: "Lagos", coords: [3.3792, 6.5244], continent: "Africa" },
+  { name: "Johannesburg", coords: [28.0473, -26.2041], continent: "Africa" },
+  { name: "Nairobi", coords: [36.8219, -1.2921], continent: "Africa" },
+  { name: "Berlin", coords: [13.405, 52.52], continent: "Europe" },
+  { name: "Rome", coords: [12.4964, 41.9028], continent: "Europe" },
+  { name: "Seoul", coords: [126.978, 37.5665], continent: "Asia" },
+  { name: "Bangkok", coords: [100.5018, 13.7563], continent: "Asia" },
+  { name: "Jakarta", coords: [106.8456, -6.2088], continent: "Asia" },
+  { name: "Manila", coords: [120.9842, 14.5995], continent: "Asia" },
+  { name: "Istanbul", coords: [28.9784, 41.0082], continent: "Europe" },
+  { name: "Karachi", coords: [67.0011, 24.8607], continent: "Asia" },
+  { name: "Shanghai", coords: [121.4737, 31.2304], continent: "Asia" },
+  { name: "Singapore", coords: [103.8198, 1.3521], continent: "Asia" },
+  { name: "Toronto", coords: [-79.3832, 43.6532], continent: "N. America" },
+  { name: "Dubai", coords: [55.2708, 25.2048], continent: "Asia" },
+  { name: "Melbourne", coords: [144.9631, -37.8136], continent: "Oceania" },
+  { name: "Auckland", coords: [174.7633, -36.8485], continent: "Oceania" }
+];
+
+// Solar Terminator Calculation
+function getSolarPosition() {
+  const now = new Date();
+  const dayOfYear = (now - new Date(now.getFullYear(), 0, 0)) / 864e5;
+  const utcHour = now.getUTCHours() + now.getUTCMinutes() / 60 + now.getUTCSeconds() / 3600;
+  
+  // Declination (approx)
+  const phi = 23.44 * Math.sin((2 * Math.PI * (dayOfYear - 80)) / 365.25);
+  // Longitude (approx)
+  const lambda = (12 - utcHour) * 15;
+  
+  return [lambda, phi];
+}
+
+// Render loop
+let rotation = [0, -20, 0];
+let autoRotate = true;
+let hoverCity = null;
+
+function draw() {
+  const time = performance.now();
+  
+  if (autoRotate) {
+    rotation[0] += 0.25;
+    projection.rotate(rotation);
+  }
+
+  // Layer 1: Ocean
+  const ctxO = contexts.ocean;
+  ctxO.clearRect(0, 0, width, height);
+  ctxO.beginPath();
+  path.context(ctxO)(sphere);
+  ctxO.fillStyle = "#0a121d";
+  ctxO.fill();
+  ctxO.strokeStyle = "#162335";
+  ctxO.lineWidth = 1;
+  ctxO.stroke();
+
+  // Layer 2: Land
+  const ctxL = contexts.land;
+  ctxL.clearRect(0, 0, width, height);
+  ctxL.beginPath();
+  path.context(ctxL)(land);
+  ctxL.fillStyle = "#1b2d41";
+  ctxL.fill();
+  ctxL.strokeStyle = "#2b4562";
+  ctxL.lineWidth = 0.5;
+  ctxL.stroke();
+
+  // Layer 3: Graticule
+  const ctxG = contexts.graticule;
+  ctxG.clearRect(0, 0, width, height);
+  ctxG.beginPath();
+  path.context(ctxG)(graticule);
+  ctxG.strokeStyle = "rgba(100, 150, 255, 0.08)";
+  ctxG.lineWidth = 0.5;
+  ctxG.stroke();
+
+  // Layer 4: Terminator
+  const ctxT = contexts.terminator;
+  ctxT.clearRect(0, 0, width, height);
+  const sunPos = getSolarPosition();
+  const nightPos = [sunPos[0] + 180, -sunPos[1]];
+  const nightHemisphere = d3.geoCircle().center(nightPos).radius(90)();
+  ctxT.beginPath();
+  path.context(ctxT)(nightHemisphere);
+  ctxT.fillStyle = "rgba(0, 0, 0, 0.45)";
+  ctxT.fill();
+
+  // Layer 5: Cities
+  const ctxC = contexts.cities;
+  ctxC.clearRect(0, 0, width, height);
+  cities.forEach(city => {
+    const coords = city.coords;
+    const p = projection(coords);
+    if (!p) return; // Back hemisphere
+
+    // Double check with geoDistance for clean clipping
+    const r = projection.rotate();
+    if (d3.geoDistance(coords, [-r[0], -r[1]]) > Math.PI / 2) return;
+
+    const pulse = Math.sin(time * 0.004 + coords[0] * 0.1) * 0.5 + 0.5;
+    const size = 2.5 + pulse * 2.5;
+    const color = continentColors[city.continent];
+
+    ctxC.beginPath();
+    ctxC.arc(p[0], p[1], size, 0, 2 * Math.PI);
+    ctxC.fillStyle = color;
+    ctxC.globalAlpha = 0.7 + pulse * 0.3;
+    ctxC.fill();
+    
+    ctxC.beginPath();
+    ctxC.arc(p[0], p[1], size + 2, 0, 2 * Math.PI);
+    ctxC.strokeStyle = color;
+    ctxC.lineWidth = 0.5;
+    ctxC.globalAlpha = 0.3 * (1 - pulse);
+    ctxC.stroke();
+    ctxC.globalAlpha = 1;
+  });
+
+  // Layer 6: Interaction (Hover highlights)
+  const ctxI = contexts.interaction;
+  ctxI.clearRect(0, 0, width, height);
+  if (hoverCity) {
+    const p = projection(hoverCity.coords);
+    if (p) {
+      ctxI.beginPath();
+      ctxI.arc(p[0], p[1], 8, 0, 2 * Math.PI);
+      ctxI.strokeStyle = "#fff";
+      ctxI.lineWidth = 1.5;
+      ctxI.stroke();
+    }
+  }
+
+  requestAnimationFrame(draw);
+}
+
+// Interaction: Versor Dragging
+let v0, q0, r0;
+
+const drag = d3.drag()
+  .on("start", (event) => {
+    autoRotate = false;
+    const [mx, my] = d3.pointer(event, contexts.interaction.canvas);
+    v0 = versor.cartesian(projection.invert([mx, my]));
+    r0 = projection.rotate();
+    q0 = versor(r0);
+    container.style("cursor", "grabbing");
+  })
+  .on("drag", (event) => {
+    const [mx, my] = d3.pointer(event, contexts.interaction.canvas);
+    const v1 = versor.cartesian(projection.rotate(r0).invert([mx, my]));
+    if (!v1) return;
+    const q1 = versor.multiply(q0, versor.delta(v0, v1));
+    rotation = versor.rotation(q1);
+    projection.rotate(rotation);
+  })
+  .on("end", () => {
+    container.style("cursor", "grab");
+    // Resume auto-rotate after a delay
+    d3.timeout(() => { autoRotate = true; }, 3000);
+  });
+
+d3.select(contexts.interaction.canvas).call(drag);
+
+// Hover detection
+d3.select(contexts.interaction.canvas).on("mousemove", (event) => {
+  const [mx, my] = d3.pointer(event);
+  const rot = projection.rotate();
+  const center = [-rot[0], -rot[1]];
+  
+  let closest = null;
+  let minDist = 15; // 15px hover radius
+
+  cities.forEach(city => {
+    const p = projection(city.coords);
+    if (!p) return;
+    if (d3.geoDistance(city.coords, center) > Math.PI / 2) return;
+
+    const d = Math.sqrt((p[0] - mx)**2 + (p[1] - my)**2);
+    if (d < minDist) {
+      minDist = d;
+      closest = city;
+    }
+  });
+
+  if (closest !== hoverCity) {
+    hoverCity = closest;
+    if (hoverCity) {
+      const p = projection(hoverCity.coords);
+      tooltip.style("display", "block")
+        .style("left", `${p[0] + 10}px`)
+        .style("top", `${p[1] - 10}px`)
+        .html(`<strong>${hoverCity.name}</strong><br/>${hoverCity.continent}`);
+    } else {
+      tooltip.style("display", "none");
+    }
+  } else if (hoverCity) {
+    const p = projection(hoverCity.coords);
+    tooltip.style("left", `${p[0] + 10}px`)
+      .style("top", `${p[1] - 10}px`);
+  }
+});
+
+d3.select(contexts.interaction.canvas).on("mouseleave", () => {
+  hoverCity = null;
+  tooltip.style("display", "none");
+});
+
+// Start animation
+draw();
+
+</script>
+</body>
+</html>

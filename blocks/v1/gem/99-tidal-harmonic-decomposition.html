@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tidal Harmonic Decomposition</title>
+<style>
+  :root {
+    --bg: #f8fafc;
+    --card: #ffffff;
+    --text: #0f172a;
+    --text-muted: #64748b;
+    --border: #e2e8f0;
+    --m2: #3b82f6;
+    --s2: #ef4444;
+    --k1: #10b981;
+    --o1: #f59e0b;
+    --composite: #1e293b;
+    --font: "Inter", system-ui, -apple-system, sans-serif;
+  }
+  
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    margin: 0;
+    padding: 2rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .container {
+    width: 100%;
+    max-width: 1000px;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 1.5rem;
+  }
+
+  header {
+    text-align: left;
+    width: 100%;
+    margin-bottom: 0.5rem;
+  }
+
+  h1 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin: 0;
+    color: var(--text);
+  }
+
+  .subtitle {
+    font-size: 0.9rem;
+    color: var(--text-muted);
+    margin-top: 0.25rem;
+  }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.5rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  }
+
+  .controls {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+    margin-bottom: 1rem;
+  }
+
+  .toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.8rem;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 500;
+    transition: all 0.2s;
+    background: white;
+  }
+
+  .toggle.active {
+    border-color: transparent;
+    color: white;
+  }
+
+  .toggle .swatch {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    background: currentColor;
+  }
+
+  .chart-title {
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    margin-bottom: 1rem;
+  }
+
+  svg {
+    width: 100%;
+    height: auto;
+    overflow: visible;
+  }
+
+  .axis-label {
+    font-size: 0.7rem;
+    fill: var(--text-muted);
+  }
+
+  .annotation text {
+    font-size: 11px;
+    font-weight: 600;
+    fill: var(--text-muted);
+  }
+
+  .annotation line {
+    stroke: var(--text-muted);
+    stroke-width: 1;
+    stroke-dasharray: 2,2;
+  }
+
+  .tooltip {
+    position: absolute;
+    background: rgba(15, 23, 42, 0.9);
+    color: white;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.2s;
+    z-index: 10;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+  }
+
+  .grid line {
+    stroke: var(--border);
+    stroke-opacity: 0.5;
+  }
+
+  .grid path {
+    display: none;
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <header>
+    <h1>Tidal Harmonic Decomposition</h1>
+    <p class="subtitle">Exploring how gravitational resonances combine to form complex tidal signals.</p>
+  </header>
+
+  <div class="card">
+    <div class="controls" id="constituent-toggles"></div>
+    <div class="chart-title">30-Day Signal Reconstruction</div>
+    <div id="timeseries-container"></div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;">
+    <div class="card">
+      <div class="chart-title">24-Hour Cycle Plot</div>
+      <div id="cycle-container"></div>
+    </div>
+    <div class="card">
+      <div class="chart-title">Constituent Amplitude Distribution</div>
+      <div id="ridgeline-container"></div>
+    </div>
+  </div>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// 1. Setup & Data Generation
+const constituents = [
+  { id: "M2", name: "Principal Lunar", period: 12.42, amp: 1.0, phase: 0, color: "var(--m2)", active: true },
+  { id: "S2", name: "Principal Solar", period: 12.00, amp: 0.46, phase: 0.5, color: "var(--s2)", active: true },
+  { id: "K1", name: "Lunisolar Diurnal", period: 23.93, amp: 0.38, phase: 1.2, color: "var(--k1)", active: true },
+  { id: "O1", name: "Lunar Diurnal", period: 25.82, amp: 0.18, phase: 2.1, color: "var(--o1)", active: true }
+];
+
+const hours = 720; // 30 days
+const dt = 0.25; // 15 min resolution
+const n = hours / dt;
+
+function generateData() {
+  const data = [];
+  for (let i = 0; i < n; i++) {
+    const t = i * dt;
+    const d = { t, total: 0, components: {} };
+    const noise = (Math.random() - 0.5) * 0.05;
+    
+    constituents.forEach(c => {
+      const val = c.amp * Math.cos(2 * Math.PI * t / c.period + c.phase);
+      d.components[c.id] = val;
+      if (c.active) d.total += val;
+    });
+    
+    d.total += noise;
+    data.push(d);
+  }
+  return data;
+}
+
+let data = generateData();
+
+// 2. Layout Parameters
+const width = 900;
+const margin = { top: 20, right: 30, bottom: 40, left: 40 };
+const innerWidth = width - margin.left - margin.right;
+
+// 3. Time Series Chart
+const tsHeight = 250;
+const tsSvg = d3.select("#timeseries-container").append("svg")
+  .attr("viewBox", [0, 0, width, tsHeight + margin.top + margin.bottom]);
+
+const tsG = tsSvg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+const xTs = d3.scaleLinear().domain([0, hours]).range([0, innerWidth]);
+const yTs = d3.scaleLinear().domain([-2.5, 2.5]).range([tsHeight, 0]);
+
+tsG.append("g")
+  .attr("class", "grid")
+  .call(d3.axisLeft(yTs).tickSize(-innerWidth).tickFormat(""));
+
+tsG.append("g")
+  .attr("transform", `translate(0, ${tsHeight})`)
+  .call(d3.axisBottom(xTs).ticks(10).tickFormat(d => `${d/24}d`))
+  .call(g => g.select(".domain").attr("stroke", "var(--border)"));
+
+tsG.append("g")
+  .call(d3.axisLeft(yTs).ticks(5))
+  .call(g => g.select(".domain").remove());
+
+const tsLine = d3.line().x(d => xTs(d.t)).y(d => yTs(d.v)).curve(d3.curveMonotoneX);
+
+const componentPaths = tsG.append("g").attr("class", "components");
+const compositePath = tsG.append("path")
+  .attr("fill", "none")
+  .attr("stroke", "var(--composite)")
+  .attr("stroke-width", 2.5);
+
+const annotationLayer = tsG.append("g").attr("class", "annotations");
+const tsHoverLine = tsG.append("line")
+  .attr("y1", 0).attr("y2", tsHeight)
+  .attr("stroke", "var(--text-muted)")
+  .attr("stroke-width", 1)
+  .attr("stroke-dasharray", "4,2")
+  .style("opacity", 0);
+
+// 4. Cycle Plot
+const cycleWidth = 450;
+const cycleHeight = 200;
+const cycleSvg = d3.select("#cycle-container").append("svg")
+  .attr("viewBox", [0, 0, cycleWidth, cycleHeight + margin.top + margin.bottom]);
+
+const cycleG = cycleSvg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+const xCycle = d3.scaleLinear().domain([0, 24]).range([0, cycleWidth - margin.left - margin.right]);
+const yCycle = d3.scaleLinear().domain([-2.5, 2.5]).range([cycleHeight, 0]);
+
+cycleG.append("g")
+  .attr("transform", `translate(0, ${cycleHeight})`)
+  .call(d3.axisBottom(xCycle).ticks(6).tickFormat(d => `${d}h`));
+
+cycleG.append("g")
+  .call(d3.axisLeft(yCycle).ticks(5));
+
+const dayLinesLayer = cycleG.append("g");
+const meanCyclePath = cycleG.append("path")
+  .attr("fill", "none")
+  .attr("stroke", "var(--composite)")
+  .attr("stroke-width", 2);
+
+// 5. Ridgeline Plot
+const ridgeWidth = 450;
+const ridgeHeight = 200;
+const ridgeSvg = d3.select("#ridgeline-container").append("svg")
+  .attr("viewBox", [0, 0, ridgeWidth, ridgeHeight + margin.top + margin.bottom]);
+
+const ridgeG = ridgeSvg.append("g").attr("transform", `translate(${margin.left + 20},${margin.top})`);
+const xRidge = d3.scaleLinear().domain([-1.2, 1.2]).range([0, ridgeWidth - margin.left - margin.right - 20]);
+const yRidge = d3.scaleBand().domain(constituents.map(c => c.id)).range([0, ridgeHeight]).paddingInner(0.2);
+
+ridgeG.append("g")
+  .attr("transform", `translate(0, ${ridgeHeight})`)
+  .call(d3.axisBottom(xRidge).ticks(5).tickFormat(d => `${d}m`));
+
+const ridgeKde = (data, bandwidth, extent) => {
+  const kernel = x => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+  const ticks = d3.ticks(...extent, 100);
+  return ticks.map(x => [x, d3.mean(data, v => kernel((x - v) / bandwidth)) / bandwidth]);
+};
+
+// 6. Interactive Updates
+function update() {
+  const activeData = data.filter((_, i) => i % 2 === 0); // Downsample for performance
+  
+  // Update Time Series
+  compositePath.datum(activeData)
+    .transition().duration(500)
+    .attr("d", d => tsLine(d.map(p => ({ t: p.t, v: p.total }))));
+
+  const paths = componentPaths.selectAll("path.component")
+    .data(constituents, d => d.id);
+
+  paths.join("path")
+    .attr("class", "component")
+    .attr("fill", "none")
+    .attr("stroke", d => d.color)
+    .attr("stroke-width", 1)
+    .attr("opacity", d => d.active ? 0.4 : 0)
+    .transition().duration(500)
+    .attr("d", c => tsLine(activeData.map(p => ({ t: p.t, v: p.components[c.id] }))));
+
+  // Annotations
+  updateAnnotations();
+
+  // Update Cycle Plot
+  updateCyclePlot();
+
+  // Update Ridgeline
+  updateRidgeline();
+}
+
+function updateAnnotations() {
+  annotationLayer.selectAll("*").remove();
+  
+  // Find local maxima of envelope (M2 + S2) to identify Spring/Neap
+  const springs = [];
+  const neaps = [];
+  
+  // Theoretical M2 + S2 envelope period: 1 / (1/12 - 1/12.42) approx 14.7 days
+  const envelopePeriod = 14.76 * 24; 
+  
+  for (let t = envelopePeriod/4; t < hours; t += envelopePeriod) {
+    // Spring tide check
+    const springT = Math.round(t / dt) * dt;
+    const d = data.find(p => Math.abs(p.t - springT) < dt/2);
+    if (d) {
+      springs.push({ t: d.t, v: d.total, label: "Spring Tide" });
+    }
+    
+    // Neap tide check (half period away)
+    const neapT = Math.round((t + envelopePeriod/2) / dt) * dt;
+    const dn = data.find(p => Math.abs(p.t - neapT) < dt/2);
+    if (dn && neapT < hours) {
+      neaps.push({ t: dn.t, v: dn.total, label: "Neap Tide" });
+    }
+  }
+
+  [...springs, ...neaps].forEach(a => {
+    const g = annotationLayer.append("g").attr("class", "annotation");
+    const x = xTs(a.t);
+    const y = yTs(a.v);
+    
+    g.append("line")
+      .attr("x1", x).attr("x2", x)
+      .attr("y1", y).attr("y2", y - 30);
+    
+    g.append("text")
+      .attr("x", x)
+      .attr("y", y - 35)
+      .attr("text-anchor", "middle")
+      .text(a.label);
+  });
+}
+
+function updateCyclePlot() {
+  const days = d3.range(0, 30);
+  const samplesPerDay = 24 / dt;
+  
+  const dayData = days.map(day => {
+    const start = day * samplesPerDay;
+    const end = start + samplesPerDay;
+    return data.slice(start, end).map(d => ({ t: d.t % 24, v: d.total }));
+  });
+
+  const line = d3.line().x(d => xCycle(d.t)).y(d => yCycle(d.v));
+
+  dayLinesLayer.selectAll("path")
+    .data(dayData)
+    .join("path")
+    .attr("fill", "none")
+    .attr("stroke", "#cbd5e1")
+    .attr("stroke-width", 0.5)
+    .attr("opacity", 0.3)
+    .attr("d", line);
+
+  // Mean Cycle
+  const hourBins = d3.range(0, 24, dt);
+  const meanData = hourBins.map(h => {
+    const vals = dayData.map(d => {
+      const point = d.find(p => Math.abs(p.t - h) < dt/2);
+      return point ? point.v : null;
+    }).filter(v => v !== null);
+    return { t: h, v: d3.mean(vals) };
+  });
+
+  meanCyclePath.transition().duration(500).attr("d", line(meanData));
+}
+
+function updateRidgeline() {
+  const overlap = 0.6;
+  
+  ridgeG.selectAll(".ridge").remove();
+  
+  constituents.forEach(c => {
+    const vals = data.map(d => d.components[c.id]);
+    const density = ridgeKde(vals, 0.1, [-1.2, 1.2]);
+    const maxDensity = d3.max(density, d => d[1]);
+    
+    const hScale = d3.scaleLinear().domain([0, maxDensity]).range([0, yRidge.bandwidth() * (1 + overlap)]);
+    
+    const area = d3.area()
+      .curve(d3.curveBasis)
+      .x(d => xRidge(d[0]))
+      .y0(yRidge.bandwidth())
+      .y1(d => yRidge.bandwidth() - hScale(d[1]));
+
+    const g = ridgeG.append("g")
+      .attr("class", "ridge")
+      .attr("transform", `translate(0, ${yRidge(c.id)})`);
+
+    g.append("path")
+      .datum(density)
+      .attr("fill", c.color)
+      .attr("fill-opacity", c.active ? 0.6 : 0.1)
+      .attr("stroke", c.color)
+      .attr("stroke-width", 1)
+      .transition().duration(500)
+      .attr("d", area);
+
+    g.append("text")
+      .attr("x", -5)
+      .attr("y", yRidge.bandwidth() - 5)
+      .attr("text-anchor", "end")
+      .attr("font-size", "10px")
+      .attr("fill", varName => c.active ? "var(--text)" : "var(--text-muted)")
+      .text(c.id);
+  });
+}
+
+// 7. Setup Toggles
+const toggleContainer = d3.select("#constituent-toggles");
+const toggles = toggleContainer.selectAll(".toggle")
+  .data(constituents)
+  .enter()
+  .append("div")
+  .attr("class", d => `toggle ${d.active ? 'active' : ''}`)
+  .style("background-color", d => d.active ? d.color : "white")
+  .style("color", d => d.active ? "white" : d.color)
+  .on("click", function(event, d) {
+    d.active = !d.active;
+    d3.select(this)
+      .classed("active", d.active)
+      .style("background-color", d.active ? d.color : "white")
+      .style("color", d.active ? "white" : d.color);
+    update();
+  });
+
+toggles.append("div").attr("class", "swatch");
+toggles.append("span").text(d => d.id);
+
+// 8. Tooltip & Coordination
+tsSvg.on("pointermove", function(event) {
+  const [mx] = d3.pointer(event, tsG.node());
+  if (mx < 0 || mx > innerWidth) {
+    tsHoverLine.style("opacity", 0);
+    d3.select("#tooltip").style("opacity", 0);
+    return;
+  }
+  
+  const t = xTs.invert(mx);
+  const d = data.find(p => Math.abs(p.t - t) < dt/2);
+  
+  if (d) {
+    tsHoverLine.attr("x1", mx).attr("x2", mx).style("opacity", 1);
+    
+    const tooltip = d3.select("#tooltip");
+    tooltip.style("opacity", 1)
+      .style("left", `${event.pageX + 15}px`)
+      .style("top", `${event.pageY - 15}px`)
+      .html(`
+        <div style="font-weight:700">Day ${(d.t/24).toFixed(2)}</div>
+        <div style="font-size:0.75rem">Tide Height: ${d.total.toFixed(2)}m</div>
+      `);
+      
+    // Coordination: Highlight day in cycle plot
+    const day = Math.floor(d.t / 24);
+    dayLinesLayer.selectAll("path")
+      .attr("stroke", (dd, i) => i === day ? "var(--text)" : "#cbd5e1")
+      .attr("stroke-width", (dd, i) => i === day ? 2 : 0.5)
+      .attr("opacity", (dd, i) => i === day ? 1 : 0.1);
+  }
+});
+
+tsSvg.on("pointerleave", () => {
+  tsHoverLine.style("opacity", 0);
+  d3.select("#tooltip").style("opacity", 0);
+  dayLinesLayer.selectAll("path")
+    .attr("stroke", "#cbd5e1")
+    .attr("stroke-width", 0.5)
+    .attr("opacity", 0.3);
+});
+
+// Initial Render
+update();
+
+</script>
+</body>
+</html>

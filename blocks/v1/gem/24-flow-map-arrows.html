@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>US Migration Flow Explorer</title>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <script src="https://cdn.jsdelivr.net/npm/topojson-client@3"></script>
+  <style>
+    :root {
+      --bg: #fcfcfc;
+      --text: #1a1a1a;
+      --muted: #666;
+      --border: #ddd;
+      --pos: #0077bb;
+      --neg: #ee3333;
+      --font: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      overflow-x: hidden;
+    }
+
+    header {
+      text-align: center;
+      padding: 2rem 1rem 1rem;
+      max-width: 800px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 1.8rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+
+    p {
+      margin: 0.5rem 0 0;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    #viz {
+      position: relative;
+      width: 960px;
+      height: 640px;
+    }
+
+    .nation {
+      fill: #f0f0f0;
+      stroke: #fff;
+      stroke-width: 1.5;
+    }
+
+    .states {
+      fill: none;
+      stroke: #fff;
+      stroke-width: 0.5;
+    }
+
+    .flow {
+      fill: none;
+      stroke-linecap: round;
+      pointer-events: none;
+      transition: stroke-opacity 0.2s, stroke-width 0.2s;
+    }
+
+    .flow.animated {
+      animation: flow-dash 3s linear infinite;
+    }
+
+    @keyframes flow-dash {
+      from { stroke-dashoffset: 40; }
+      to { stroke-dashoffset: 0; }
+    }
+
+    .city-node {
+      cursor: pointer;
+      stroke: #fff;
+      stroke-width: 1.5px;
+      transition: transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    }
+
+    .city-node:hover {
+      transform: scale(1.2);
+    }
+
+    .city-label {
+      font-size: 11px;
+      font-weight: 600;
+      fill: var(--text);
+      pointer-events: none;
+      text-shadow: 0 0 4px #fff, 0 0 2px #fff;
+    }
+
+    .tooltip {
+      position: absolute;
+      background: rgba(255, 255, 255, 0.96);
+      backdrop-filter: blur(4px);
+      border: 1px solid var(--border);
+      padding: 12px;
+      border-radius: 8px;
+      pointer-events: none;
+      font-size: 0.85rem;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+      opacity: 0;
+      transition: opacity 0.2s;
+      z-index: 10;
+      min-width: 180px;
+    }
+
+    .tooltip b {
+      display: block;
+      font-size: 1rem;
+      margin-bottom: 4px;
+    }
+
+    .tooltip .stat {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 4px;
+    }
+
+    .tooltip .net-pos { color: var(--pos); font-weight: bold; }
+    .tooltip .net-neg { color: var(--neg); font-weight: bold; }
+
+    .legend {
+      position: absolute;
+      bottom: 2rem;
+      left: 2rem;
+      background: rgba(255, 255, 255, 0.8);
+      padding: 1rem;
+      border-radius: 8px;
+      font-size: 0.75rem;
+      border: 1px solid var(--border);
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+
+    .legend-circle {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      margin-right: 8px;
+      border: 1px solid #fff;
+    }
+
+    .legend-line {
+      width: 24px;
+      height: 2px;
+      margin-right: 8px;
+      background: #888;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>US Migration Flow Explorer</h1>
+  <p>Visualizing annual domestic migration between 12 major metropolitan hubs.</p>
+</header>
+
+<div id="viz">
+  <div class="tooltip" id="tooltip"></div>
+  <div class="legend">
+    <div style="font-weight: bold; margin-bottom: 8px;">Net Migration</div>
+    <div class="legend-item"><div class="legend-circle" style="background: var(--pos);"></div> Growing City</div>
+    <div class="legend-item"><div class="legend-circle" style="background: var(--neg);"></div> Shrinking City</div>
+    <div style="font-weight: bold; margin-top: 12px; margin-bottom: 8px;">Flow Volume</div>
+    <div class="legend-item"><div class="legend-line" style="height: 1px;"></div> Low Volume</div>
+    <div class="legend-item"><div class="legend-line" style="height: 4px;"></div> High Volume</div>
+    <p style="font-size: 0.7rem; color: #999; margin-top: 8px;">Arrows indicate direction.</p>
+  </div>
+</div>
+
+<script>
+  const width = 960;
+  const height = 640;
+
+  const cities = [
+    { id: "NYC", name: "New York", lat: 40.7128, lon: -74.0060 },
+    { id: "LAX", name: "Los Angeles", lat: 34.0522, lon: -118.2437 },
+    { id: "CHI", name: "Chicago", lat: 41.8781, lon: -87.6298 },
+    { id: "HOU", name: "Houston", lat: 29.7604, lon: -95.3698 },
+    { id: "PHX", name: "Phoenix", lat: 33.4484, lon: -112.0740 },
+    { id: "PHI", name: "Philadelphia", lat: 39.9526, lon: -75.1652 },
+    { id: "SAT", name: "San Antonio", lat: 29.4241, lon: -98.4936 },
+    { id: "SAN", name: "San Diego", lat: 32.7157, lon: -117.1611 },
+    { id: "DAL", name: "Dallas", lat: 32.7767, lon: -96.7970 },
+    { id: "AUS", name: "Austin", lat: 30.2672, lon: -97.7431 },
+    { id: "SEA", name: "Seattle", lat: 47.6062, lon: -122.3321 },
+    { id: "MIA", name: "Miami", lat: 25.7617, lon: -80.1918 }
+  ];
+
+  // Plausible annual migration volumes (highly simplified)
+  const flows = [
+    { from: "NYC", to: "MIA", val: 42000 },
+    { from: "NYC", to: "LAX", val: 28000 },
+    { from: "NYC", to: "PHI", val: 22000 },
+    { from: "NYC", to: "HOU", val: 18000 },
+    { from: "NYC", to: "DAL", val: 15000 },
+    { from: "LAX", to: "PHX", val: 35000 },
+    { from: "LAX", to: "SEA", val: 24000 },
+    { from: "LAX", to: "AUS", val: 21000 },
+    { from: "LAX", to: "DAL", val: 18000 },
+    { from: "CHI", to: "PHX", val: 16000 },
+    { from: "CHI", to: "DAL", val: 14000 },
+    { from: "CHI", to: "HOU", val: 12000 },
+    { from: "CHI", to: "AUS", val: 11000 },
+    { from: "PHI", to: "NYC", val: 18000 },
+    { from: "HOU", to: "SAT", val: 26000 },
+    { from: "HOU", to: "DAL", val: 22000 },
+    { from: "DAL", to: "AUS", val: 24000 },
+    { from: "SEA", to: "AUS", val: 12000 },
+    { from: "PHX", to: "SAT", val: 9000 },
+    { from: "SAN", to: "PHX", val: 15000 },
+    { from: "AUS", to: "DAL", val: 14000 },
+    { from: "SAT", to: "AUS", val: 16000 },
+    { from: "MIA", to: "NYC", val: 12000 },
+    { from: "SAN", to: "LAX", val: 14000 },
+    { from: "SEA", to: "PHX", val: 11000 }
+  ];
+
+  const netMigration = {};
+  cities.forEach(c => netMigration[c.id] = 0);
+  flows.forEach(f => {
+    netMigration[f.from] -= f.val;
+    netMigration[f.to] += f.val;
+  });
+
+  const svg = d3.select("#viz").append("svg")
+    .attr("width", width)
+    .attr("height", height)
+    .attr("viewBox", [0, 0, width, height]);
+
+  const projection = d3.geoAlbersUsa()
+    .scale(1300)
+    .translate([width / 2, height / 2]);
+
+  const path = d3.geoPath(projection);
+  const tooltip = d3.select("#tooltip");
+
+  // Project city coordinates
+  cities.forEach(c => {
+    const [x, y] = projection([c.lon, c.lat]);
+    c.x = x;
+    c.y = y;
+  });
+
+  const rScale = d3.scaleSqrt()
+    .domain([0, d3.max(Object.values(netMigration), Math.abs)])
+    .range([4, 24]);
+
+  const strokeScale = d3.scaleSqrt()
+    .domain([0, d3.max(flows, d => d.val)])
+    .range([1, 8]);
+
+  async function init() {
+    const us = await d3.json("https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json");
+
+    // Draw Map
+    svg.append("path")
+      .datum(topojson.feature(us, us.objects.nation))
+      .attr("class", "nation")
+      .attr("d", path);
+
+    svg.append("path")
+      .datum(topojson.mesh(us, us.objects.states, (a, b) => a !== b))
+      .attr("class", "states")
+      .attr("d", path);
+
+    // Marker Defs
+    const defs = svg.append("defs");
+    
+    // Create arrows for flows
+    defs.append("marker")
+      .attr("id", "arrowhead")
+      .attr("viewBox", "0 -5 10 10")
+      .attr("refX", 8)
+      .attr("refY", 0)
+      .attr("orient", "auto")
+      .attr("markerWidth", 5)
+      .attr("markerHeight", 5)
+      .append("path")
+      .attr("d", "M0,-5L10,0L0,5")
+      .attr("fill", "#999");
+
+    // Flow Paths
+    const flowG = svg.append("g").attr("class", "flows-layer");
+    
+    const flowLinks = flowG.selectAll(".flow")
+      .data(flows)
+      .enter().append("path")
+      .attr("class", "flow animated")
+      .attr("d", d => {
+        const s = cities.find(c => c.id === d.from);
+        const t = cities.find(c => c.id === d.to);
+        const dx = t.x - s.x;
+        const dy = t.y - s.y;
+        const dr = Math.sqrt(dx * dx + dy * dy) * 1.5; // Curvature
+        return `M${s.x},${s.y}A${dr},${dr} 0 0,1 ${t.x},${t.y}`;
+      })
+      .style("stroke", "#999")
+      .style("stroke-width", d => strokeScale(d.val))
+      .style("stroke-opacity", 0.3)
+      .style("stroke-dasharray", "8, 12")
+      .attr("marker-end", "url(#arrowhead)");
+
+    // City Nodes
+    const cityG = svg.append("g").attr("class", "cities-layer");
+
+    const cityNodes = cityG.selectAll(".city-node")
+      .data(cities)
+      .enter().append("circle")
+      .attr("class", "city-node")
+      .attr("cx", d => d.x)
+      .attr("cy", d => d.y)
+      .attr("r", d => rScale(Math.abs(netMigration[d.id])))
+      .attr("fill", d => netMigration[d.id] > 0 ? "var(--pos)" : "var(--neg)")
+      .on("mouseover", function(event, d) {
+        const net = netMigration[d.id];
+        const fmt = d3.format(",");
+        
+        tooltip.style("opacity", 1)
+          .html(`
+            <b>${d.name}</b>
+            <div class="stat">Net Migration: <span class="${net > 0 ? 'net-pos' : 'net-neg'}">${net > 0 ? '+' : ''}${fmt(net)}</span></div>
+            <div style="margin-top: 8px; font-size: 0.75rem; color: #888;">Flows highlighted</div>
+          `);
+
+        // Highlight flows
+        flowLinks
+          .style("stroke", f => f.from === d.id ? "var(--neg)" : f.to === d.id ? "var(--pos)" : "#999")
+          .style("stroke-opacity", f => (f.from === d.id || f.to === d.id) ? 0.8 : 0.05)
+          .style("stroke-width", f => (f.from === d.id || f.to === d.id) ? strokeScale(f.val) * 1.5 : strokeScale(f.val));
+          
+        cityNodes.style("opacity", c => (c.id === d.id || flows.some(f => (f.from === d.id && f.to === c.id) || (f.to === d.id && f.from === c.id))) ? 1 : 0.2);
+      })
+      .on("mousemove", (event) => {
+        tooltip.style("left", (event.pageX + 15) + "px")
+          .style("top", (event.pageY - 28) + "px");
+      })
+      .on("mouseout", function() {
+        tooltip.style("opacity", 0);
+        flowLinks
+          .style("stroke", "#999")
+          .style("stroke-opacity", 0.3)
+          .style("stroke-width", d => strokeScale(d.val));
+        cityNodes.style("opacity", 1);
+      });
+
+    // Labels
+    cityG.selectAll(".city-label")
+      .data(cities)
+      .enter().append("text")
+      .attr("class", "city-label")
+      .attr("x", d => d.x)
+      .attr("y", d => d.y - rScale(Math.abs(netMigration[d.id])) - 5)
+      .attr("text-anchor", "middle")
+      .text(d => d.name);
+  }
+
+  init();
+</script>
+
+</body>
+</html>

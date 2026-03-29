@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Letter-Value Plot & Table Toggle</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg: #ffffff;
+            --fg: #1a1a1a;
+            --accent: #2563eb;
+            --border: #e5e7eb;
+            --surface: #f9fafb;
+            --text-muted: #6b7280;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #111827;
+                --fg: #f9fafb;
+                --accent: #60a5fa;
+                --border: #374151;
+                --surface: #1f2937;
+                --text-muted: #9ca3af;
+            }
+        }
+
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: system-ui, -apple-system, sans-serif;
+            background-color: var(--bg);
+            color: var(--fg);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 900px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 10px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        h1 {
+            font-size: 1.25rem;
+            margin: 0;
+            font-weight: 600;
+        }
+
+        .toggle-group {
+            display: flex;
+            background: var(--surface);
+            padding: 4px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+        }
+
+        .toggle-btn {
+            padding: 6px 16px;
+            border: none;
+            background: transparent;
+            color: var(--text-muted);
+            font-size: 0.875rem;
+            font-weight: 500;
+            cursor: pointer;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }
+
+        .toggle-btn.active {
+            background: var(--bg);
+            color: var(--fg);
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+
+        #chart-container, #table-container {
+            width: 100%;
+            background: var(--bg);
+            min-height: 500px;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        /* Table Styles */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.875rem;
+        }
+
+        th {
+            text-align: left;
+            padding: 12px;
+            border-bottom: 2px solid var(--border);
+            color: var(--text-muted);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        td {
+            padding: 12px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        tr:hover td {
+            background-color: var(--surface);
+        }
+
+        .num {
+            font-variant-numeric: tabular-nums;
+            text-align: right;
+        }
+
+        /* Chart Styles */
+        .axis-label {
+            font-size: 0.75rem;
+            fill: var(--text-muted);
+        }
+
+        .lv-box {
+            stroke: var(--bg);
+            stroke-width: 1px;
+        }
+
+        .median-line {
+            stroke: var(--fg);
+            stroke-width: 2px;
+            stroke-linecap: round;
+        }
+
+        .outlier {
+            fill: var(--text-muted);
+            opacity: 0.4;
+        }
+
+        /* Forced Colors Support */
+        @media (forced-colors: active) {
+            .lv-box {
+                stroke: CanvasText;
+            }
+            .median-line {
+                stroke: Highlight;
+                stroke-width: 3px;
+            }
+            .outlier {
+                fill: CanvasText;
+                opacity: 1;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="controls">
+            <h1>Letter-Value Distribution</h1>
+            <div class="toggle-group" role="radiogroup" aria-label="View Toggle">
+                <button id="btn-chart" class="toggle-btn active" role="radio" aria-checked="true">Chart</button>
+                <button id="btn-table" class="toggle-btn" role="radio" aria-checked="false">Table</button>
+            </div>
+        </div>
+
+        <div id="chart-container"></div>
+        <div id="table-container" class="hidden">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Group</th>
+                        <th class="num">N</th>
+                        <th class="num">1/16</th>
+                        <th class="num">1/8</th>
+                        <th class="num">1/4</th>
+                        <th class="num">Median</th>
+                        <th class="num">3/4</th>
+                        <th class="num">7/8</th>
+                        <th class="num">15/16</th>
+                    </tr>
+                </thead>
+                <tbody id="table-body"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        // 1. Data Generation
+        const groups = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"];
+        const n = 1000;
+        const seed = d3.randomLcg(0.42);
+        
+        const data = groups.flatMap((group, i) => {
+            const mean = 40 + i * 15 + (seed() - 0.5) * 10;
+            const std = 8 + i * 2;
+            const gen = d3.randomNormal.source(seed)(mean, std);
+            return Array.from({length: n}, () => ({
+                group,
+                value: gen()
+            }));
+        });
+
+        // 2. Stats Computation
+        function computeLVStats(values) {
+            const sorted = values.map(d => d.value).sort(d3.ascending);
+            const getQ = p => d3.quantile(sorted, p);
+            
+            const stats = {
+                m: getQ(0.5),
+                f: [getQ(0.25), getQ(0.75)],
+                e: [getQ(0.125), getQ(0.875)],
+                d: [getQ(0.0625), getQ(0.9375)],
+                outliers: sorted.filter(v => v < getQ(0.0625) || v > getQ(0.9375))
+            };
+            return stats;
+        }
+
+        const groupStats = d3.groups(data, d => d.group).map(([name, values]) => ({
+            name,
+            n: values.length,
+            stats: computeLVStats(values)
+        }));
+
+        // 3. Pattern Definitions
+        function addPatterns(defs) {
+            const angles = [45, 45, 45, 45];
+            const spacings = [12, 8, 5, 3]; // Increasing density
+            const ids = ["hatch-f", "hatch-e", "hatch-d"];
+
+            ids.forEach((id, i) => {
+                const size = spacings[i+1];
+                const pattern = defs.append("pattern")
+                    .attr("id", id)
+                    .attr("width", size)
+                    .attr("height", size)
+                    .attr("patternUnits", "userSpaceOnUse")
+                    .attr("patternTransform", `rotate(45)`);
+
+                pattern.append("rect")
+                    .attr("width", size)
+                    .attr("height", size)
+                    .attr("fill", "none");
+
+                pattern.append("line")
+                    .attr("x1", 0).attr("y1", 0)
+                    .attr("x2", 0).attr("y2", size)
+                    .attr("stroke", "currentColor")
+                    .attr("stroke-width", 1);
+            });
+        }
+
+        // 4. Chart Rendering
+        const chartContainer = d3.select("#chart-container");
+        let width, height;
+
+        function renderChart() {
+            width = chartContainer.node().clientWidth;
+            height = 500;
+            chartContainer.selectAll("*").remove();
+
+            const margin = {top: 40, right: 30, bottom: 40, left: 50};
+            const innerWidth = width - margin.left - margin.right;
+            const innerHeight = height - margin.top - margin.bottom;
+
+            const svg = chartContainer.append("svg")
+                .attr("width", width)
+                .attr("height", height);
+
+            const defs = svg.append("defs");
+            addPatterns(defs);
+
+            const x = d3.scaleBand()
+                .domain(groups)
+                .range([0, innerWidth])
+                .padding(0.3);
+
+            const y = d3.scaleLinear()
+                .domain([
+                    d3.min(data, d => d.value) - 5,
+                    d3.max(data, d => d.value) + 5
+                ])
+                .nice()
+                .range([innerHeight, 0]);
+
+            const g = svg.append("g")
+                .attr("transform", `translate(${margin.left},${margin.top})`);
+
+            // Axes
+            g.append("g")
+                .attr("transform", `translate(0,${innerHeight})`)
+                .call(d3.axisBottom(x))
+                .call(g => g.select(".domain").attr("stroke", "var(--border)"))
+                .call(g => g.selectAll(".tick line").attr("stroke", "var(--border)"))
+                .call(g => g.selectAll("text").attr("fill", "var(--text-muted)"));
+
+            g.append("g")
+                .call(d3.axisLeft(y).ticks(8))
+                .call(g => g.select(".domain").attr("stroke", "var(--border)"))
+                .call(g => g.selectAll(".tick line").attr("stroke", "var(--border)"))
+                .call(g => g.selectAll("text").attr("fill", "var(--text-muted)"));
+
+            // Grid
+            g.append("g")
+                .attr("class", "grid")
+                .selectAll("line")
+                .data(y.ticks(8))
+                .join("line")
+                .attr("x1", 0)
+                .attr("x2", innerWidth)
+                .attr("y1", d => y(d))
+                .attr("y2", d => y(d))
+                .attr("stroke", "var(--border)")
+                .attr("stroke-dasharray", "2,2");
+
+            const colors = d3.scaleOrdinal()
+                .domain([0, 1, 2])
+                .range(d3.schemeBlues[4].slice(1));
+
+            const groupG = g.selectAll(".group")
+                .data(groupStats)
+                .join("g")
+                .attr("transform", d => `translate(${x(d.name)},0)`);
+
+            const bw = x.bandwidth();
+
+            groupG.each(function(d) {
+                const s = d.stats;
+                const el = d3.select(this);
+
+                // Outliers
+                el.selectAll(".outlier")
+                    .data(s.outliers)
+                    .join("circle")
+                    .attr("class", "outlier")
+                    .attr("cx", bw / 2 + (Math.random() - 0.5) * bw * 0.2)
+                    .attr("cy", v => y(v))
+                    .attr("r", 2);
+
+                // D level (1/16th)
+                el.append("rect")
+                    .attr("class", "lv-box")
+                    .attr("x", bw * 0.375)
+                    .attr("y", y(s.d[1]))
+                    .attr("width", bw * 0.25)
+                    .attr("height", y(s.d[0]) - y(s.d[1]))
+                    .attr("fill", colors(2))
+                    .style("fill", window.matchMedia("(forced-colors: active)").matches ? "url(#hatch-d)" : null);
+
+                // E level (1/8th)
+                el.append("rect")
+                    .attr("class", "lv-box")
+                    .attr("x", bw * 0.25)
+                    .attr("y", y(s.e[1]))
+                    .attr("width", bw * 0.5)
+                    .attr("height", y(s.e[0]) - y(s.e[1]))
+                    .attr("fill", colors(1))
+                    .style("fill", window.matchMedia("(forced-colors: active)").matches ? "url(#hatch-e)" : null);
+
+                // F level (1/4th)
+                el.append("rect")
+                    .attr("class", "lv-box")
+                    .attr("x", 0)
+                    .attr("y", y(s.f[1]))
+                    .attr("width", bw)
+                    .attr("height", y(s.f[0]) - y(s.f[1]))
+                    .attr("fill", colors(0))
+                    .style("fill", window.matchMedia("(forced-colors: active)").matches ? "url(#hatch-f)" : null);
+
+                // Median
+                el.append("line")
+                    .attr("class", "median-line")
+                    .attr("x1", 0)
+                    .attr("x2", bw)
+                    .attr("y1", y(s.m))
+                    .attr("y2", y(s.m));
+            });
+        }
+
+        // 5. Table Rendering
+        function renderTable() {
+            const f = d3.format(".2f");
+            d3.select("#table-body")
+                .selectAll("tr")
+                .data(groupStats)
+                .join("tr")
+                .html(d => `
+                    <td>${d.name}</td>
+                    <td class="num">${d.n}</td>
+                    <td class="num">${f(d.stats.d[0])}</td>
+                    <td class="num">${f(d.stats.e[0])}</td>
+                    <td class="num">${f(d.stats.f[0])}</td>
+                    <td class="num"><strong>${f(d.stats.m)}</strong></td>
+                    <td class="num">${f(d.stats.f[1])}</td>
+                    <td class="num">${f(d.stats.e[1])}</td>
+                    <td class="num">${f(d.stats.d[1])}</td>
+                `);
+        }
+
+        // 6. Interaction & Lifecycle
+        const btnChart = document.getElementById("btn-chart");
+        const btnTable = document.getElementById("btn-table");
+        const chartDiv = document.getElementById("chart-container");
+        const tableDiv = document.getElementById("table-container");
+
+        btnChart.onclick = () => {
+            btnChart.classList.add("active");
+            btnTable.classList.remove("active");
+            btnChart.setAttribute("aria-checked", "true");
+            btnTable.setAttribute("aria-checked", "false");
+            chartDiv.classList.remove("hidden");
+            tableDiv.classList.add("hidden");
+            renderChart();
+        };
+
+        btnTable.onclick = () => {
+            btnTable.classList.add("active");
+            btnChart.classList.remove("active");
+            btnTable.setAttribute("aria-checked", "true");
+            btnChart.setAttribute("aria-checked", "false");
+            tableDiv.classList.remove("hidden");
+            chartDiv.classList.add("hidden");
+            renderTable();
+        };
+
+        const ro = new ResizeObserver(entries => {
+            if (!chartDiv.classList.contains("hidden")) {
+                renderChart();
+            }
+        });
+        ro.observe(chartDiv);
+
+        // Initial render
+        renderChart();
+        renderTable();
+        
+        // Listen for forced-colors change to re-render patterns if needed
+        window.matchMedia("(forced-colors: active)").addListener(renderChart);
+
+    </script>
+</body>
+</html>

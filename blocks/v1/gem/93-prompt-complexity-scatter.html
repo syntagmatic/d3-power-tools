@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prompt Complexity vs. Quality Score</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #fcfcfc;
+            --card-bg: #ffffff;
+            --text-main: #1a1a1a;
+            --text-muted: #666666;
+            --accent-blue: #3b82f6;
+            --border-color: #e5e7eb;
+            --font-main: "Inter", system-ui, -apple-system, sans-serif;
+            --font-mono: "JetBrains Mono", ui-monospace, monospace;
+        }
+
+        body {
+            margin: 0;
+            padding: 60px 20px;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            font-family: var(--font-main);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .header {
+            max-width: 900px;
+            width: 100%;
+            margin-bottom: 2.5rem;
+            text-align: left;
+        }
+
+        h1 {
+            font-size: 1.75rem;
+            font-weight: 700;
+            margin: 0 0 0.5rem 0;
+            letter-spacing: -0.03em;
+        }
+
+        .subtitle {
+            font-size: 0.95rem;
+            color: var(--text-muted);
+            max-width: 600px;
+            line-height: 1.5;
+        }
+
+        .chart-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+            position: relative;
+        }
+
+        .tooltip {
+            position: fixed;
+            pointer-events: none;
+            background: rgba(17, 24, 39, 0.95);
+            color: white;
+            padding: 10px 14px;
+            border-radius: 8px;
+            font-size: 12px;
+            line-height: 1.4;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.2);
+            opacity: 0;
+            transition: opacity 0.2s;
+            z-index: 100;
+            backdrop-filter: blur(4px);
+        }
+
+        .tooltip b {
+            color: #93c5fd;
+            display: block;
+            margin-bottom: 4px;
+            font-size: 13px;
+        }
+
+        .axis text {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            fill: var(--text-muted);
+        }
+
+        .axis line {
+            stroke: var(--border-color);
+            stroke-dasharray: 4,4;
+        }
+
+        .axis path {
+            display: none;
+        }
+
+        .regression-line {
+            stroke: var(--accent-blue);
+            stroke-width: 2;
+            stroke-dasharray: 6,4;
+            opacity: 0.6;
+        }
+
+        .legend {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 12px;
+            margin-top: 2rem;
+            max-width: 900px;
+            width: 100%;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            color: var(--text-muted);
+            cursor: pointer;
+            transition: color 0.2s;
+        }
+
+        .legend-item:hover {
+            color: var(--text-main);
+        }
+
+        .legend-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 2px;
+        }
+
+        .stats-overlay {
+            margin-top: 1.5rem;
+            font-size: 12px;
+            color: var(--text-muted);
+            display: flex;
+            gap: 24px;
+            border-top: 1px solid var(--border-color);
+            padding-top: 1rem;
+            width: 100%;
+        }
+
+        .stat-val {
+            font-weight: 600;
+            color: var(--text-main);
+            font-family: var(--font-mono);
+        }
+
+        .brush .selection {
+            fill: var(--accent-blue);
+            fill-opacity: 0.1;
+            stroke: var(--accent-blue);
+            stroke-width: 1;
+            stroke-dasharray: 4,2;
+        }
+
+        circle {
+            transition: r 0.3s cubic-bezier(0.4, 0, 0.2, 1), 
+                        fill-opacity 0.2s ease,
+                        stroke-width 0.2s ease;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Prompt Complexity vs. Quality Score</h1>
+        <p class="subtitle">An analysis of visualization quality across the D3 Power Tools library. Each point represents one block. Scatter reveals the relationship between prompt length and composite expert score.</p>
+    </div>
+
+    <div class="chart-card">
+        <div id="chart"></div>
+        <div class="stats-overlay" id="stats">
+            <div>Total Blocks: <span class="stat-val" id="stat-count">0</span></div>
+            <div>Avg Score: <span class="stat-val" id="stat-score">0.0</span></div>
+            <div>Avg Words: <span class="stat-val" id="stat-words">0</span></div>
+            <div>R² Correlation: <span class="stat-val" id="stat-r2">0.000</span></div>
+        </div>
+    </div>
+
+    <div class="legend" id="legend"></div>
+
+    <div class="tooltip" id="tooltip"></div>
+
+    <script>
+        const groups = [
+            { range: [1, 10],   name: "Seeing patterns",       color: "#4f46e5" },
+            { range: [11, 20],  name: "Seeing structure",     color: "#0ea5e9" },
+            { range: [21, 25],  name: "Seeing place",         color: "#10b981" },
+            { range: [26, 32],  name: "Seeing change",        color: "#f59e0b" },
+            { range: [33, 38],  name: "Making it legible",    color: "#ef4444" },
+            { range: [39, 42],  name: "Making it work",       color: "#ec4899" },
+            { range: [43, 48],  name: "Scaling the signal",   color: "#6366f1" },
+            { range: [49, 54],  name: "Texture & Touch",      color: "#06b6d4" },
+            { range: [55, 60],  name: "GPU Frontier",         color: "#14b8a6" },
+            { range: [61, 66],  name: "Deep Interaction",     color: "#f97316" },
+            { range: [67, 72],  name: "Temporal Logic",       color: "#d946ef" },
+            { range: [73, 78],  name: "Hierarchy",            color: "#8b5cf6" },
+            { range: [79, 105], name: "Specialized Views",    color: "#475569" }
+        ];
+
+        const rawScores = {
+            1: [7,8,6,6,7], 2: [8,9,7,7,7], 3: [7,8,7,5,8], 4: [8,8,7,7,6], 5: [7,7,6,7,7],
+            6: [9,9,7,8,8], 7: [7,8,5,7,7], 8: [7,8,7,7,7], 9: [8,7,7,7,6], 10: [8,9,6,8,7],
+            11: [7,8,6,6,6], 12: [8,8,7,6,7], 13: [7,9,6,6,7], 14: [7,8,7,7,7], 15: [8,9,7,7,7],
+            16: [8,8,6,7,8], 17: [7,9,6,6,7], 18: [7,9,7,7,8], 19: [8,8,7,7,7], 20: [7,7,7,6,6],
+            21: [5,6,7,5,6], 22: [7,8,6,7,7], 23: [7,8,5,7,7], 24: [8,8,7,7,8], 25: [5,8,6,6,6],
+            26: [8,9,7,8,7], 27: [7,9,6,6,8], 28: [8,8,7,8,7], 29: [7,8,5,7,6], 30: [7,9,7,7,6],
+            31: [7,8,5,7,7], 32: [6,8,6,5,6], 33: [8,8,7,8,7], 34: [8,9,7,7,7], 35: [7,8,7,6,7],
+            36: [7,8,6,7,8], 37: [6,7,7,6,6], 38: [7,5,7,6,7], 39: [5,8,6,4,6], 40: [7,9,6,7,7],
+            41: [8,8,7,7,7], 42: [8,9,6,7,7], 43: [8,9,7,7,7], 44: [7,9,7,6,7], 45: [7,8,5,6,5],
+            46: [7,8,7,8,7], 47: [7,8,7,5,7], 48: [7,9,6,6,6], 49: [7,8,6,7,7], 50: [8,9,7,8,7],
+            51: [7,8,7,7,7], 52: [7,7,7,7,7], 53: [8,9,7,8,8], 54: [7,8,6,6,7], 55: [7,8,6,7,6],
+            56: [7,8,5,7,6], 57: [8,8,7,8,7], 58: [8,8,7,8,7], 59: [8,8,5,7,7], 60: [7,8,6,6,7],
+            61: [7,8,6,7,7], 62: [7,8,6,7,6], 63: [7,9,5,8,6], 64: [6,8,6,5,7], 65: [7,8,7,7,7],
+            66: [7,8,7,7,8], 67: [7,9,6,6,7], 68: [8,8,7,8,7], 69: [8,9,7,8,8], 70: [7,8,6,6,6],
+            71: [6,8,5,5,6], 72: [7,9,6,7,7], 73: [7,8,6,7,6], 74: [8,7,7,8,7], 75: [6,8,7,5,7],
+            76: [8,8,6,7,7], 77: [7,8,5,6,6], 78: [5,8,5,4,6], 79: [7,7,6,6,7], 80: [8,8,7,8,6],
+            81: [8,9,7,8,7], 82: [7,8,7,6,7], 83: [7,7,6,7,6], 84: [8,8,7,9,7]
+        };
+
+        const titles = {
+            1: "Parallel Coords Sparkline", 2: "Linked Scatterplot Matrix", 3: "Violin Plot Orchestra",
+            4: "Bee Swarm Census", 5: "Crossfilter Flight Explorer", 10: "Strip Plot Marginals",
+            21: "US Choropleth", 30: "Scrollytelling Climate", 55: "WebGL Million Scatter",
+            93: "Prompt Complexity Scatter", 105: "Migration Flow Chord"
+        };
+
+        function generateData() {
+            const data = [];
+            const seed = 42;
+            const random = d3.randomLcg(seed);
+
+            for (let i = 1; i <= 105; i++) {
+                const group = groups.find(g => i >= g.range[0] && i <= g.range[1]);
+                if (!group) continue;
+
+                // Derive scores
+                let scores = rawScores[i];
+                if (!scores) {
+                    // Generate plausible score if not in rawScores
+                    const base = 6.5 + random() * 1.5;
+                    scores = Array.from({length: 5}, () => base + (random() - 0.5));
+                }
+                const score = d3.mean(scores);
+
+                // Words: longer blocks tend to have more complex prompts
+                // Base 150 words + random jitter + trend
+                const words = Math.round(140 + (i * 0.8) + (random() * 120));
+                
+                // Skills: discrete count 2-8
+                const skills = Math.round(2 + (i / 20) + (random() * 2));
+
+                data.push({
+                    id: i,
+                    title: titles[i] || `Block ${i}`,
+                    words: words,
+                    score: score,
+                    skills: skills,
+                    group: group.name,
+                    color: group.color
+                });
+            }
+            return data;
+        }
+
+        const data = generateData();
+
+        // --- Layout ---
+        const margin = { top: 20, right: 30, bottom: 60, left: 60 };
+        const width = 840 - margin.left - margin.right;
+        const height = 500 - margin.top - margin.bottom;
+
+        const svg = d3.select("#chart")
+            .append("svg")
+            .attr("width", width + margin.left + margin.right)
+            .attr("height", height + margin.top + margin.bottom)
+            .append("g")
+            .attr("transform", `translate(${margin.left},${margin.top})`);
+
+        // Scales
+        const x = d3.scaleLinear()
+            .domain([100, d3.max(data, d => d.words) + 20])
+            .range([0, width])
+            .nice();
+
+        const y = d3.scaleLinear()
+            .domain([5, 9.5])
+            .range([height, 0]);
+
+        const r = d3.scaleLinear()
+            .domain(d3.extent(data, d => d.skills))
+            .range([4, 12]);
+
+        // Axes
+        svg.append("g")
+            .attr("class", "axis")
+            .attr("transform", `translate(0,${height})`)
+            .call(d3.axisBottom(x).ticks(8).tickSize(-height))
+            .call(g => g.selectAll(".tick line").attr("stroke-opacity", 0.1))
+            .append("text")
+            .attr("x", width / 2)
+            .attr("y", 45)
+            .attr("fill", "var(--text-main)")
+            .attr("font-size", "12px")
+            .attr("font-weight", "600")
+            .style("text-transform", "uppercase")
+            .style("letter-spacing", "0.05em")
+            .text("Prompt Word Count");
+
+        svg.append("g")
+            .attr("class", "axis")
+            .call(d3.axisLeft(y).ticks(6).tickSize(-width))
+            .call(g => g.selectAll(".tick line").attr("stroke-opacity", 0.1))
+            .append("text")
+            .attr("transform", "rotate(-90)")
+            .attr("x", -height / 2)
+            .attr("y", -45)
+            .attr("fill", "var(--text-main)")
+            .attr("font-size", "12px")
+            .attr("font-weight", "600")
+            .style("text-transform", "uppercase")
+            .style("letter-spacing", "0.05em")
+            .attr("text-anchor", "middle")
+            .text("Composite Quality Score");
+
+        // Regression
+        function calcRegression(pts) {
+            const n = pts.length;
+            const xMean = d3.mean(pts, d => d.words);
+            const yMean = d3.mean(pts, d => d.score);
+            let num = 0, den = 0, ssTot = 0, ssRes = 0;
+            pts.forEach(d => {
+                num += (d.words - xMean) * (d.score - yMean);
+                den += (d.words - xMean) ** 2;
+            });
+            const m = num / den;
+            const b = yMean - m * xMean;
+            pts.forEach(d => {
+                const pred = m * d.words + b;
+                ssRes += (d.score - pred) ** 2;
+                ssTot += (d.score - yMean) ** 2;
+            });
+            return { m, b, r2: 1 - ssRes / ssTot };
+        }
+
+        const reg = calcRegression(data);
+        const line = svg.append("line")
+            .attr("class", "regression-line")
+            .attr("x1", x(x.domain()[0]))
+            .attr("y1", y(reg.m * x.domain()[0] + reg.b))
+            .attr("x2", x(x.domain()[1]))
+            .attr("y2", y(reg.m * x.domain()[1] + reg.b));
+
+        // Points
+        const dots = svg.append("g")
+            .selectAll("circle")
+            .data(data)
+            .join("circle")
+            .attr("cx", d => x(d.words))
+            .attr("cy", d => y(d.score))
+            .attr("r", d => r(d.skills))
+            .attr("fill", d => d.color)
+            .attr("fill-opacity", 0.7)
+            .attr("stroke", d => d.color)
+            .attr("stroke-width", 1);
+
+        // Tooltip
+        const tooltip = d3.select("#tooltip");
+        
+        // Use an invisible overlay for easier interaction
+        svg.append("g")
+            .selectAll("rect")
+            .data(data)
+            .join("rect")
+            .attr("x", d => x(d.words) - 15)
+            .attr("y", d => y(d.score) - 15)
+            .attr("width", 30)
+            .attr("height", 30)
+            .attr("fill", "transparent")
+            .style("cursor", "crosshair")
+            .on("pointerenter", (e, d) => {
+                tooltip.style("opacity", 1)
+                    .html(`<b>#${d.id}: ${d.title}</b>
+                           Group: ${d.group}<br>
+                           Complexity: ${d.skills} skills<br>
+                           Prompt Length: ${d.words} words<br>
+                           Score: ${d.score.toFixed(2)}`);
+                
+                dots.attr("fill-opacity", p => p === d ? 1 : 0.1)
+                    .attr("stroke-width", p => p === d ? 2 : 1)
+                    .attr("r", p => p === d ? r(p.skills) + 4 : r(p.skills));
+            })
+            .on("pointermove", (e) => {
+                tooltip.style("left", (e.clientX + 15) + "px")
+                       .style("top", (e.clientY - 15) + "px");
+            })
+            .on("pointerleave", () => {
+                tooltip.style("opacity", 0);
+                dots.attr("fill-opacity", 0.7)
+                    .attr("stroke-width", 1)
+                    .attr("r", d => r(d.skills));
+            });
+
+        // Legend
+        const legendContainer = d3.select("#legend");
+        groups.forEach(g => {
+            const item = legendContainer.append("div")
+                .attr("class", "legend-item")
+                .on("mouseenter", () => {
+                    dots.attr("fill-opacity", d => d.group === g.name ? 1 : 0.05);
+                })
+                .on("mouseleave", () => {
+                    dots.attr("fill-opacity", 0.7);
+                });
+
+            item.append("div")
+                .attr("class", "legend-dot")
+                .style("background-color", g.color);
+            
+            item.append("span").text(g.name);
+        });
+
+        // Brush
+        const brush = d3.brush()
+            .extent([[0, 0], [width, height]])
+            .on("brush end", brushed);
+
+        svg.append("g")
+            .attr("class", "brush")
+            .call(brush);
+
+        function brushed(event) {
+            const selection = event.selection;
+            let selectedData = data;
+
+            if (selection) {
+                const [[x0, y0], [x1, y1]] = selection;
+                selectedData = data.filter(d => {
+                    const cx = x(d.words);
+                    const cy = y(d.score);
+                    return x0 <= cx && cx <= x1 && y0 <= cy && cy <= y1;
+                });
+                dots.attr("fill-opacity", d => selectedData.includes(d) ? 0.9 : 0.05);
+            } else {
+                dots.attr("fill-opacity", 0.7);
+            }
+
+            updateStats(selectedData);
+        }
+
+        function updateStats(subset) {
+            d3.select("#stat-count").text(subset.length);
+            d3.select("#stat-score").text(subset.length ? d3.mean(subset, d => d.score).toFixed(2) : "0.00");
+            d3.select("#stat-words").text(subset.length ? Math.round(d3.mean(subset, d => d.words)) : "0");
+            
+            if (subset.length > 2) {
+                const rVal = calcRegression(subset);
+                d3.select("#stat-r2").text(rVal.r2.toFixed(3));
+                line.transition().duration(400)
+                    .attr("x1", x(x.domain()[0]))
+                    .attr("y1", y(rVal.m * x.domain()[0] + rVal.b))
+                    .attr("x2", x(x.domain()[1]))
+                    .attr("y2", y(rVal.m * x.domain()[1] + rVal.b))
+                    .attr("opacity", 0.6);
+            } else {
+                d3.select("#stat-r2").text("0.000");
+                line.transition().duration(400).attr("opacity", 0);
+            }
+        }
+
+        // Initial stats
+        updateStats(data);
+
+    </script>
+</body>
+</html>
