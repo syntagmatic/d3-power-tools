@@ -231,6 +231,19 @@ def run_block(idx, block, defaults):
         "elapsed_s": round(elapsed, 1),
     }
 
+    # Parse stream for cost/token data (all outcomes)
+    report = parse_stream_report(result.stdout)
+    result_info = report.get("result") or {}
+    if result_info.get("cost_usd") is not None:
+        record["cost_usd"] = result_info["cost_usd"]
+    if result_info.get("duration_ms") is not None:
+        record["duration_ms"] = result_info["duration_ms"]
+    if result_info.get("total_tokens_in") is not None:
+        record["tokens_in"] = result_info["total_tokens_in"]
+    if result_info.get("total_tokens_out") is not None:
+        record["tokens_out"] = result_info["total_tokens_out"]
+    record["turn_count"] = report.get("turn_count", 0)
+
     # Check output file
     if outfile.exists() and outfile.stat().st_size > 100:
         content = outfile.read_text()
@@ -239,12 +252,12 @@ def run_block(idx, block, defaults):
             lines = len(content.splitlines())
             record["status"] = "pass"
             record["lines"] = lines
-            print(f"[{idx}] PASS {bid} ({lines} lines, {elapsed:.0f}s, read: {triggered})")
+            cost_str = f", ${record['cost_usd']:.3f}" if "cost_usd" in record else ""
+            print(f"[{idx}] PASS {bid} ({lines} lines, {elapsed:.0f}s, read: {triggered}{cost_str})")
             return record
         else:
             record["status"] = "fail"
             record["error"] = "invalid html"
-            report = parse_stream_report(result.stdout)
             _save_failure_report(bid, "invalid html", report, skills_list)
             print(f"[{idx}] FAIL {bid} (not valid HTML)")
             outfile.unlink()
@@ -263,7 +276,6 @@ def run_block(idx, block, defaults):
                 except (json.JSONDecodeError, ValueError):
                     pass
         record["error"] = err_content or "no output"
-        report = parse_stream_report(result.stdout)
         _save_failure_report(bid, record["error"], report, skills_list)
         print(f"[{idx}] FAIL {bid} (no output file)")
         return record
@@ -329,12 +341,14 @@ def main():
         gen = {"model": model_id, "cli": "claude", "version": VERSION,
                "skill_mode": skill_mode, "block_count": 0, "blocks": {}}
     for r in records:
-        if r["status"] == "pass":
-            entry = {"status": "pass", "lines": r.get("lines"),
-                     "skills_triggered": r.get("skills_triggered", []),
-                     "elapsed_s": r.get("elapsed_s")}
-            gen["blocks"][r["bid"]] = entry
-    gen["block_count"] = len(gen["blocks"])
+        entry = {"status": r["status"]}
+        for field in ("lines", "elapsed_s", "cost_usd", "duration_ms",
+                      "tokens_in", "tokens_out", "turn_count",
+                      "skills_triggered", "skills_missed", "error"):
+            if r.get(field) is not None:
+                entry[field] = r[field]
+        gen["blocks"][r["bid"]] = entry
+    gen["block_count"] = sum(1 for b in gen["blocks"].values() if b.get("status") == "pass")
     gen_file.write_text(json.dumps(gen, indent=2, ensure_ascii=False) + "\n")
 
     print(f"\n=== DONE ===")
