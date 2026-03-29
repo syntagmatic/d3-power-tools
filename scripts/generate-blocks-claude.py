@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate blocks using Claude Code CLI. Reads manifest.json, outputs to blocks/{version}/."""
+"""Generate blocks using Claude Code CLI. Reads manifest.json, outputs to blocks/{version}-{model}/."""
 import json
 import subprocess
 import sys
@@ -17,7 +17,8 @@ MAX_PARALLEL = 5
 # Parse args
 args = sys.argv[1:]
 all_skills = "--all-skills" in args
-args = [a for a in args if a != "--all-skills"]
+no_skills = "--no-skills" in args
+args = [a for a in args if a not in ("--all-skills", "--no-skills")]
 MODEL = None
 for i, a in enumerate(args):
     if a == "--model" and i + 1 < len(args):
@@ -52,15 +53,17 @@ def run_block(idx, block, defaults):
         f"Write the complete file to {abs_outpath}"
     )
 
-    staging = create_staging_dir(bid, block["skills"], PROJ, all_skills=all_skills)
-    print(f"[{idx}] START {bid} (skills: {', '.join(block['skills'])})")
+    skills_list = [] if no_skills else block["skills"]
+    staging = create_staging_dir(bid, skills_list, PROJ, all_skills=all_skills, prefix=VERSION)
+    print(f"[{idx}] START {bid} (skills: {', '.join(skills_list) or 'none'})")
     t0 = time.time()
 
     try:
         cmd = [
             "claude", "-p", prompt,
             "--allowedTools", "Write,Read",
-            "--max-turns", "5",
+            "--disallowedTools", "Bash,Glob,Grep,Agent",
+            "--max-turns", "25",
             "--output-format", "stream-json",
             "--verbose",
         ]
@@ -135,7 +138,7 @@ def main():
 
     # Filter to only missing blocks
     missing = [b for b in blocks if not (OUTDIR / f"{b['id']}.html").exists()]
-    mode = "all skills" if all_skills else "manifest skills"
+    mode = "no skills" if no_skills else "all skills" if all_skills else "manifest skills"
     print(f"{len(missing)} blocks to generate (of {len(blocks)} selected), {mode}, up to {MAX_PARALLEL} parallel\n")
 
     if not missing:
@@ -174,6 +177,24 @@ def main():
 
     LOGFILE.parent.mkdir(parents=True, exist_ok=True)
     LOGFILE.write_text(json.dumps(report, indent=2) + "\n")
+
+    # Update generation.json in the output directory
+    gen_file = OUTDIR / "generation.json"
+    if gen_file.exists():
+        gen = json.loads(gen_file.read_text())
+    else:
+        model_id = MODEL or "claude-opus-4-6"
+        skill_mode = "none" if no_skills else "all" if all_skills else "manifest"
+        gen = {"model": model_id, "cli": "claude", "version": VERSION,
+               "skill_mode": skill_mode, "block_count": 0, "blocks": {}}
+    for r in records:
+        if r["status"] == "pass":
+            entry = {"status": "pass", "lines": r.get("lines"),
+                     "skills_triggered": r.get("skills_triggered", []),
+                     "elapsed_s": r.get("elapsed_s")}
+            gen["blocks"][r["bid"]] = entry
+    gen["block_count"] = len(gen["blocks"])
+    gen_file.write_text(json.dumps(gen, indent=2, ensure_ascii=False) + "\n")
 
     print(f"\n=== DONE ===")
     print(f"Pass: {counts.get('pass', 0)}  Fail: {counts.get('fail', 0)}")

@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Score Delta Waterfall — Calibration Impact</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    padding: 1rem;
+  }
+  #chart {
+    background: #fff;
+    border-radius: 6px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    max-width: 960px;
+    width: 100%;
+  }
+</style>
+</head>
+<body>
+<div id="chart"></div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// Synthetic calibration data: score deltas per audit dimension
+// Simulates a calibrate-tool run where blind evaluation shifted scores
+const dimensions = [
+  { name: "Starting Score",      delta: 72, type: "start" },
+  { name: "visual_critic",       delta: +6,  note: "Color harmony underweighted" },
+  { name: "encoding_integrity",  delta: -3,  note: "Lie factor check too strict" },
+  { name: "cognitive_load",      delta: +8,  note: "Spaghetti threshold miscalibrated" },
+  { name: "stress_test",         delta: -2,  note: null },
+  { name: "annotation",          delta: +4,  note: null },
+  { name: "color",               delta: -5,  note: "CVD penalty doubled" },
+  { name: "scales",              delta: +3,  note: null },
+  { name: "responsive",          delta: +1,  note: null },
+  { name: "force",               delta: -4,  note: "Overlap tolerance raised" },
+  { name: "hierarchy_layouts",   delta: +5,  note: null },
+  { name: "data_gathering",      delta: +2,  note: null },
+  { name: "canvas",              delta: -1,  note: null },
+  { name: "linked_views",        delta: +7,  note: "Cross-filter bonus added" },
+  { name: "Final Score",         delta: null, type: "total" },
+];
+
+// Compute running totals
+let running = 0;
+const data = dimensions.map(d => {
+  if (d.type === "start") {
+    const item = { ...d, start: 0, end: d.delta, value: d.delta };
+    running = d.delta;
+    return item;
+  }
+  if (d.type === "total") {
+    return { ...d, start: 0, end: running, value: running };
+  }
+  const item = { ...d, start: running, end: running + d.delta, value: d.delta };
+  running += d.delta;
+  return item;
+});
+
+const totalDelta = data[data.length - 1].value - data[0].value;
+
+// Dimensions
+const width = 960, height = 520;
+const margin = { top: 72, right: 40, bottom: 100, left: 56 };
+const innerW = width - margin.left - margin.right;
+const innerH = height - margin.top - margin.bottom;
+
+const svg = d3.select("#chart")
+  .append("svg")
+  .attr("viewBox", [0, 0, width, height])
+  .attr("width", "100%")
+  .attr("height", "auto");
+
+// Scales
+const x = d3.scaleBand()
+  .domain(data.map(d => d.name))
+  .range([margin.left, width - margin.right])
+  .padding(0.25);
+
+const yExtent = [0, d3.max(data, d => Math.max(d.start, d.end)) + 10];
+const y = d3.scaleLinear()
+  .domain(yExtent)
+  .range([height - margin.bottom, margin.top])
+  .nice();
+
+// Color: positive = teal, negative = coral, totals = slate
+const barColor = d => {
+  if (d.type === "start" || d.type === "total") return "#4a5568";
+  return d.delta >= 0 ? "#2b907f" : "#e06c5a";
+};
+
+const g = svg.append("g");
+
+// Connector lines between bars
+data.forEach((d, i) => {
+  if (i === 0 || d.type === "total") return;
+  const prev = data[i - 1];
+  const prevEnd = prev.type === "total" ? prev.end : prev.end;
+  g.append("line")
+    .attr("x1", x(prev.name) + x.bandwidth())
+    .attr("x2", x(d.name))
+    .attr("y1", y(prev.end))
+    .attr("y2", y(prev.end))
+    .attr("stroke", "#cbd5e0")
+    .attr("stroke-width", 1)
+    .attr("stroke-dasharray", "3,2");
+});
+
+// Bars
+g.selectAll("rect.bar")
+  .data(data)
+  .join("rect")
+    .attr("class", "bar")
+    .attr("x", d => x(d.name))
+    .attr("width", x.bandwidth())
+    .attr("y", d => y(Math.max(d.start, d.end)))
+    .attr("height", d => Math.abs(y(d.start) - y(d.end)))
+    .attr("fill", barColor)
+    .attr("rx", 2);
+
+// Value labels on bars
+g.selectAll("text.value")
+  .data(data)
+  .join("text")
+    .attr("class", "value")
+    .attr("x", d => x(d.name) + x.bandwidth() / 2)
+    .attr("y", d => {
+      if (d.type === "start" || d.type === "total") return y(d.end) - 6;
+      return d.delta >= 0 ? y(d.end) - 6 : y(d.end) + 14;
+    })
+    .attr("text-anchor", "middle")
+    .attr("font-size", 11)
+    .attr("font-weight", 600)
+    .attr("font-family", "system-ui, sans-serif")
+    .attr("fill", d => {
+      if (d.type === "start" || d.type === "total") return "#2d3748";
+      return d.delta >= 0 ? "#22705f" : "#c23a2a";
+    })
+    .text(d => {
+      if (d.type === "start" || d.type === "total") return d.value;
+      return (d.delta >= 0 ? "+" : "") + d.delta;
+    });
+
+// Axes
+const xAxis = svg.append("g")
+  .attr("transform", `translate(0,${height - margin.bottom})`)
+  .call(d3.axisBottom(x).tickSize(0))
+  .call(g => g.select(".domain").remove());
+
+xAxis.selectAll("text")
+  .attr("transform", "rotate(-40)")
+  .attr("text-anchor", "end")
+  .attr("dx", "-0.5em")
+  .attr("dy", "0.3em")
+  .attr("font-size", 11)
+  .attr("font-family", "system-ui, sans-serif")
+  .attr("fill", d => {
+    const item = data.find(v => v.name === d);
+    return (item && (item.type === "start" || item.type === "total")) ? "#2d3748" : "#718096";
+  })
+  .attr("font-weight", d => {
+    const item = data.find(v => v.name === d);
+    return (item && (item.type === "start" || item.type === "total")) ? 700 : 400;
+  });
+
+svg.append("g")
+  .attr("transform", `translate(${margin.left},0)`)
+  .call(d3.axisLeft(y).ticks(6))
+  .call(g => g.select(".domain").remove())
+  .call(g => g.selectAll(".tick line")
+    .clone()
+    .attr("x2", innerW)
+    .attr("stroke", "#edf2f7")
+    .attr("stroke-width", 0.5))
+  .call(g => g.selectAll("text")
+    .attr("font-size", 11)
+    .attr("font-family", "system-ui, sans-serif")
+    .attr("fill", "#718096"));
+
+// Annotations for notable deltas
+const annotated = data.filter(d => d.note);
+annotated.forEach(d => {
+  const cx = x(d.name) + x.bandwidth() / 2;
+  const top = y(Math.max(d.start, d.end));
+  const noteY = d.delta >= 0 ? top - 28 : top - 22;
+
+  svg.append("text")
+    .attr("x", cx)
+    .attr("y", noteY)
+    .attr("text-anchor", "middle")
+    .attr("font-size", 8.5)
+    .attr("font-family", "system-ui, sans-serif")
+    .attr("fill", "#a0aec0")
+    .attr("font-style", "italic")
+    .text(d.note)
+    .each(function() {
+      // Clamp within SVG bounds
+      const box = this.getBBox();
+      if (box.x < margin.left) d3.select(this).attr("x", margin.left + box.width / 2);
+      if (box.x + box.width > width - margin.right)
+        d3.select(this).attr("x", width - margin.right - box.width / 2);
+    });
+});
+
+// Title + subtitle
+svg.append("text")
+  .attr("x", margin.left)
+  .attr("y", 28)
+  .attr("font-size", 18)
+  .attr("font-weight", 700)
+  .attr("font-family", "system-ui, sans-serif")
+  .attr("fill", "#1a202c")
+  .text("Composite Score After Calibration");
+
+svg.append("text")
+  .attr("x", margin.left)
+  .attr("y", 48)
+  .attr("font-size", 13)
+  .attr("font-family", "system-ui, sans-serif")
+  .attr("fill", "#718096")
+  .text(`Blind evaluation shifted the composite by ${totalDelta >= 0 ? "+" : ""}${totalDelta} points across ${data.length - 2} audit dimensions`);
+
+// Legend
+const legend = svg.append("g").attr("transform", `translate(${width - margin.right - 220}, 18)`);
+const legendItems = [
+  { label: "Positive delta", color: "#2b907f" },
+  { label: "Negative delta", color: "#e06c5a" },
+  { label: "Total", color: "#4a5568" },
+];
+legendItems.forEach((item, i) => {
+  const lg = legend.append("g").attr("transform", `translate(${i * 95}, 0)`);
+  lg.append("rect")
+    .attr("width", 10).attr("height", 10).attr("rx", 2)
+    .attr("fill", item.color);
+  lg.append("text")
+    .attr("x", 14).attr("y", 9)
+    .attr("font-size", 11)
+    .attr("font-family", "system-ui, sans-serif")
+    .attr("fill", "#4a5568")
+    .text(item.label);
+});
+
+// Source line
+svg.append("text")
+  .attr("x", width - margin.right)
+  .attr("y", height - 4)
+  .attr("text-anchor", "end")
+  .attr("font-size", 9)
+  .attr("font-family", "system-ui, sans-serif")
+  .attr("fill", "#a0aec0")
+  .text("Synthetic calibration data · D3 Power Tools");
+</script>
+</body>
+</html>

@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Daily Temperature Departures — Calendar Heatmap</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: #fafafa;
+    color: #333;
+    display: flex;
+    justify-content: center;
+    padding: 24px 16px;
+  }
+  .container { max-width: 960px; width: 100%; }
+  h1 { font-size: 20px; font-weight: 600; margin-bottom: 2px; }
+  .subtitle { font-size: 13px; color: #666; margin-bottom: 20px; }
+  .city-label {
+    font-size: 14px;
+    font-weight: 600;
+    fill: #333;
+  }
+  .month-label {
+    font-size: 11px;
+    fill: #666;
+  }
+  .day-label {
+    font-size: 9px;
+    fill: #999;
+  }
+  .annotation-line {
+    stroke: #333;
+    stroke-width: 1;
+    fill: none;
+  }
+  .annotation-text {
+    font-size: 10px;
+    fill: #333;
+  }
+  .legend-label {
+    font-size: 11px;
+    fill: #555;
+  }
+  .legend-title {
+    font-size: 12px;
+    fill: #333;
+    font-weight: 600;
+  }
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: rgba(255,255,255,0.96);
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 12px;
+    line-height: 1.5;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Daily Temperature Departures from Normal (2024)</h1>
+  <p class="subtitle">Departure in °C from 30-year average daily temperature — Helsinki, New York, Singapore</p>
+  <svg id="chart"></svg>
+  <div class="tooltip" id="tooltip"></div>
+</div>
+<script type="module">
+
+// --- Synthetic data generation ---
+const cities = [
+  { name: "Helsinki", baseline: [-6,-6,-2,4,10,15,18,16,11,6,1,-4], volatility: 5.5 },
+  { name: "New York", baseline: [1,2,7,13,18,24,27,26,22,16,9,4], volatility: 4.0 },
+  { name: "Singapore", baseline: [27,27,28,28,28,28,28,28,27,27,27,27], volatility: 0.8 }
+];
+
+function seededRandom(seed) {
+  let s = seed;
+  return () => {
+    s = (s * 1664525 + 1013904223) & 0xffffffff;
+    return (s >>> 0) / 0xffffffff;
+  };
+}
+
+function generateDepartures(city, year, seed) {
+  const rng = seededRandom(seed);
+  const gauss = () => {
+    let u, v, s;
+    do { u = rng() * 2 - 1; v = rng() * 2 - 1; s = u * u + v * v; } while (s >= 1 || s === 0);
+    return u * Math.sqrt(-2 * Math.log(s) / s);
+  };
+
+  const data = [];
+  const startDate = new Date(year, 0, 1);
+  const endDate = new Date(year, 11, 31);
+  let d = new Date(startDate);
+  let prev = 0;
+
+  while (d <= endDate) {
+    const month = d.getMonth();
+    // Autocorrelated departures for realistic weather persistence
+    const raw = gauss() * city.volatility;
+    const departure = prev * 0.4 + raw * 0.6;
+    prev = departure;
+
+    data.push({
+      date: new Date(d),
+      month,
+      day: d.getDate(),
+      dayOfWeek: d.getDay(),
+      departure: Math.round(departure * 10) / 10,
+      baseline: city.baseline[month]
+    });
+    d.setDate(d.getDate() + 1);
+  }
+
+  // Inject cold snap for Helsinki (late Jan)
+  for (let i = 22; i <= 28; i++) {
+    data[i].departure = -(7 + Math.abs(gauss()) * 3);
+    data[i].departure = Math.round(data[i].departure * 10) / 10;
+  }
+  // Inject heat wave for New York (mid July)
+  if (city.name === "New York") {
+    for (let i = 195; i <= 203; i++) {
+      data[i].departure = 5 + Math.abs(gauss()) * 3;
+      data[i].departure = Math.round(data[i].departure * 10) / 10;
+    }
+  }
+
+  return data;
+}
+
+const allData = cities.map((city, ci) => ({
+  city: city.name,
+  volatility: city.volatility,
+  data: generateDepartures(city, 2024, 42 + ci * 1000)
+}));
+
+// --- Layout ---
+const margin = { top: 60, right: 30, bottom: 80, left: 90 };
+const cellSize = 14;
+const cellPad = 2;
+const panelGap = 36;
+const daysInRow = 31;
+const monthsInCol = 12;
+const panelW = daysInRow * (cellSize + cellPad);
+const panelH = monthsInCol * (cellSize + cellPad);
+const totalW = margin.left + panelW + margin.right;
+const totalH = margin.top + cities.length * (panelH + panelGap) - panelGap + margin.bottom;
+
+const svg = d3.select("#chart")
+  .attr("width", totalW)
+  .attr("height", totalH)
+  .attr("viewBox", `0 0 ${totalW} ${totalH}`);
+
+// --- Diverging color scale ---
+const maxDep = d3.max(allData, c => d3.max(c.data, d => Math.abs(d.departure)));
+const colorScale = d3.scaleDiverging([-maxDep, 0, maxDep], d3.interpolateRdBu)
+  .interpolator(t => d3.interpolateRdBu(1 - t)); // flip so blue=cold, red=hot
+
+// --- Month labels ---
+const monthNames = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+// --- Tooltip ---
+const tooltip = d3.select("#tooltip");
+
+// --- Draw each city panel ---
+allData.forEach((cityData, ci) => {
+  const yOffset = margin.top + ci * (panelH + panelGap);
+  const g = svg.append("g").attr("transform", `translate(${margin.left},${yOffset})`);
+
+  // City label
+  g.append("text")
+    .attr("class", "city-label")
+    .attr("x", -12)
+    .attr("y", panelH / 2)
+    .attr("text-anchor", "end")
+    .attr("dominant-baseline", "middle")
+    .text(cityData.city);
+
+  // Month labels (y-axis)
+  monthNames.forEach((m, mi) => {
+    g.append("text")
+      .attr("class", "month-label")
+      .attr("x", -6)
+      .attr("y", mi * (cellSize + cellPad) + cellSize / 2)
+      .attr("text-anchor", "end")
+      .attr("dominant-baseline", "middle")
+      .text(m);
+  });
+
+  // Day labels (x-axis, first panel only)
+  if (ci === 0) {
+    [1, 5, 10, 15, 20, 25, 31].forEach(d => {
+      g.append("text")
+        .attr("class", "day-label")
+        .attr("x", (d - 1) * (cellSize + cellPad) + cellSize / 2)
+        .attr("y", -6)
+        .attr("text-anchor", "middle")
+        .text(d);
+    });
+  }
+
+  // Heatmap cells
+  g.selectAll("rect.cell")
+    .data(cityData.data)
+    .join("rect")
+      .attr("class", "cell")
+      .attr("x", d => (d.day - 1) * (cellSize + cellPad))
+      .attr("y", d => d.month * (cellSize + cellPad))
+      .attr("width", cellSize)
+      .attr("height", cellSize)
+      .attr("rx", 2)
+      .attr("fill", d => colorScale(d.departure))
+      .attr("stroke", "none")
+      .on("pointerenter", (event, d) => {
+        d3.select(event.currentTarget).attr("stroke", "#333").attr("stroke-width", 1.5);
+        const sign = d.departure > 0 ? "+" : "";
+        tooltip
+          .style("opacity", 1)
+          .html(`<strong>${cityData.city}</strong><br>
+            ${d3.timeFormat("%b %d, %Y")(d.date)}<br>
+            Departure: <strong style="color:${d.departure > 0 ? '#c0392b' : d.departure < 0 ? '#2471a3' : '#333'}">${sign}${d.departure}°C</strong><br>
+            Normal: ${d.baseline}°C`);
+      })
+      .on("pointermove", (event) => {
+        tooltip
+          .style("left", (event.pageX + 12) + "px")
+          .style("top", (event.pageY - 28) + "px");
+      })
+      .on("pointerleave", (event) => {
+        d3.select(event.currentTarget).attr("stroke", "none");
+        tooltip.style("opacity", 0);
+      });
+});
+
+// --- Annotations ---
+const annotations = [
+  {
+    city: 0, // Helsinki
+    month: 0, day: 25,
+    label: "Cold snap",
+    detail: "7-day streak, −7 to −12°C below normal",
+    dx: 60, dy: -24
+  },
+  {
+    city: 1, // New York
+    month: 6, day: 16,
+    label: "Heat wave",
+    detail: "9 days, +5 to +9°C above normal",
+    dx: 60, dy: -20
+  },
+  {
+    city: 2, // Singapore
+    label: "Narrow annual range",
+    detail: "Departures rarely exceed ±2°C",
+    month: 5, day: 28,
+    dx: 50, dy: -28
+  }
+];
+
+annotations.forEach(a => {
+  const yOffset = margin.top + a.city * (panelH + panelGap);
+  const cx = margin.left + (a.day - 1) * (cellSize + cellPad) + cellSize / 2;
+  const cy = yOffset + a.month * (cellSize + cellPad) + cellSize / 2;
+  const tx = cx + a.dx;
+  const ty = cy + a.dy;
+
+  const ag = svg.append("g").attr("class", "annotation");
+
+  // Elbow connector
+  ag.append("path")
+    .attr("class", "annotation-line")
+    .attr("d", `M${cx},${cy} L${cx},${ty} L${tx},${ty}`);
+
+  // Circle marker
+  ag.append("circle")
+    .attr("cx", cx).attr("cy", cy).attr("r", 3)
+    .attr("fill", "none").attr("stroke", "#333").attr("stroke-width", 1.2);
+
+  // Label
+  ag.append("text")
+    .attr("class", "annotation-text")
+    .attr("x", tx + 4).attr("y", ty - 3)
+    .attr("font-weight", 600)
+    .text(a.label);
+  ag.append("text")
+    .attr("class", "annotation-text")
+    .attr("x", tx + 4).attr("y", ty + 9)
+    .style("fill", "#666")
+    .text(a.detail);
+});
+
+// --- Legend ---
+const legendW = 240;
+const legendH = 12;
+const legendX = margin.left;
+const legendY = totalH - margin.bottom + 30;
+const legendG = svg.append("g").attr("transform", `translate(${legendX},${legendY})`);
+
+legendG.append("text")
+  .attr("class", "legend-title")
+  .attr("x", 0).attr("y", -8)
+  .text("Temperature departure (°C)");
+
+const legendScale = d3.scaleLinear().domain([-maxDep, maxDep]).range([0, legendW]);
+const legendAxis = d3.axisBottom(legendScale)
+  .tickValues([-maxDep, -maxDep/2, 0, maxDep/2, maxDep].map(v => Math.round(v)))
+  .tickSize(4);
+
+// Gradient
+const defs = svg.append("defs");
+const grad = defs.append("linearGradient").attr("id", "legend-grad");
+const nStops = 11;
+for (let i = 0; i <= nStops; i++) {
+  const t = i / nStops;
+  const val = -maxDep + t * 2 * maxDep;
+  grad.append("stop")
+    .attr("offset", `${(t * 100).toFixed(1)}%`)
+    .attr("stop-color", colorScale(val));
+}
+
+legendG.append("rect")
+  .attr("width", legendW).attr("height", legendH)
+  .attr("rx", 2)
+  .style("fill", "url(#legend-grad)");
+
+legendG.append("g")
+  .attr("transform", `translate(0,${legendH})`)
+  .call(legendAxis)
+  .call(g => g.select(".domain").remove())
+  .selectAll("text").attr("class", "legend-label");
+
+</script>
+</body>
+</html>

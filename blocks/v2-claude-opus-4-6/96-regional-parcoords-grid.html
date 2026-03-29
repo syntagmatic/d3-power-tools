@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Regional Parallel Coordinates Grid</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; font-family: system-ui, sans-serif; color: #e0e0e0; }
+h1 { text-align: center; padding: 18px 0 4px; font-size: 20px; font-weight: 500; letter-spacing: 0.5px; }
+.subtitle { text-align: center; font-size: 12px; color: #888; margin-bottom: 10px; }
+#grid { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 6px; padding: 0 12px 12px; height: calc(100vh - 70px); }
+.panel { position: relative; background: #16213e; border-radius: 6px; overflow: hidden; }
+.panel-title { position: absolute; top: 6px; left: 12px; font-size: 13px; font-weight: 600; z-index: 3; pointer-events: none; }
+canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
+svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+.axis text { font-size: 10px; fill: #aaa; }
+.axis line, .axis path { stroke: #444; }
+.axis .domain { display: none; }
+.axis-label { font-size: 10px; fill: #ccc; font-weight: 600; text-anchor: middle; }
+.brush .selection { fill-opacity: 0.25; stroke-width: 1.5; }
+</style>
+</head>
+<body>
+<h1>Car Performance by Region</h1>
+<p class="subtitle">Brush any axis to select — highlights propagate across all panels</p>
+<div id="grid"></div>
+<script type="module">
+
+// --- Synthetic data ---
+const regions = ['North America', 'Europe', 'Asia', 'South America'];
+const regionColors = { 'North America': '#4fc3f7', 'Europe': '#aed581', 'Asia': '#ffb74d', 'South America': '#f48fb1' };
+const dims = ['Horsepower', 'Weight', 'MPG', 'Displacement', 'Acceleration', 'Cylinders'];
+
+const rng = d3.randomLcg(42);
+const rand = d3.randomNormal.source(rng);
+
+function genCar(region, id) {
+  const profiles = {
+    'North America':   { hp: [220, 60], wt: [3800, 500], mpg: [22, 5], disp: [300, 80], acc: [13, 2], cyl: [6.5, 1.5] },
+    'Europe':          { hp: [160, 40], wt: [3000, 400], mpg: [30, 6], disp: [200, 60], acc: [10, 2], cyl: [4.5, 1] },
+    'Asia':            { hp: [140, 35], wt: [2800, 350], mpg: [33, 5], disp: [180, 50], acc: [11, 1.5], cyl: [4, 0.8] },
+    'South America':   { hp: [130, 45], wt: [2900, 450], mpg: [27, 7], disp: [220, 70], acc: [12, 2.5], cyl: [5, 1.2] }
+  };
+  const p = profiles[region];
+  const r = (k) => rand(p[k][0], p[k][1])();
+  return {
+    id, region,
+    Horsepower: Math.max(60, Math.round(r('hp'))),
+    Weight: Math.max(1800, Math.round(r('wt'))),
+    MPG: Math.max(8, +(r('mpg')).toFixed(1)),
+    Displacement: Math.max(70, Math.round(r('disp'))),
+    Acceleration: Math.max(5, +(r('acc')).toFixed(1)),
+    Cylinders: Math.max(3, Math.min(12, Math.round(r('cyl'))))
+  };
+}
+
+const data = [];
+for (let i = 0; i < 200; i++) {
+  data.push(genCar(regions[i % 4], i));
+}
+
+// --- Shared state ---
+const brushFilters = new Map(); // dim -> [min, max] in data space
+let selectedIndices = null; // null = all selected
+
+// --- Global domains (shared scales) ---
+const globalDomains = {};
+for (const dim of dims) {
+  globalDomains[dim] = d3.extent(data, d => d[dim]);
+}
+
+// --- Build panels ---
+const grid = document.getElementById('grid');
+const panels = [];
+
+for (const region of regions) {
+  const div = document.createElement('div');
+  div.className = 'panel';
+  grid.appendChild(div);
+
+  const regionData = data.filter(d => d.region === region);
+  const panel = { div, region, regionData, color: regionColors[region] };
+  panels.push(panel);
+}
+
+function layoutPanels() {
+  for (const panel of panels) {
+    const rect = panel.div.getBoundingClientRect();
+    const w = rect.width;
+    const h = rect.height;
+    const margin = { top: 30, right: 16, bottom: 18, left: 16 };
+    const innerW = w - margin.left - margin.right;
+    const innerH = h - margin.top - margin.bottom;
+    const dpr = devicePixelRatio || 1;
+
+    // Remove old elements
+    panel.div.querySelectorAll('canvas, svg').forEach(el => el.remove());
+
+    // Background canvas
+    const bgCanvas = document.createElement('canvas');
+    bgCanvas.width = w * dpr;
+    bgCanvas.height = h * dpr;
+    bgCanvas.style.width = w + 'px';
+    bgCanvas.style.height = h + 'px';
+    panel.div.appendChild(bgCanvas);
+    const bgCtx = bgCanvas.getContext('2d');
+    bgCtx.scale(dpr, dpr);
+
+    // Foreground canvas
+    const fgCanvas = document.createElement('canvas');
+    fgCanvas.width = w * dpr;
+    fgCanvas.height = h * dpr;
+    fgCanvas.style.width = w + 'px';
+    fgCanvas.style.height = h + 'px';
+    panel.div.appendChild(fgCanvas);
+    const fgCtx = fgCanvas.getContext('2d');
+    fgCtx.scale(dpr, dpr);
+
+    // SVG overlay
+    const svg = d3.select(panel.div).append('svg')
+      .attr('width', w).attr('height', h);
+
+    const g = svg.append('g').attr('transform', `translate(${margin.left},${margin.top})`);
+
+    // Scales per dimension (shared domains)
+    const yScales = {};
+    for (const dim of dims) {
+      yScales[dim] = d3.scaleLinear()
+        .domain(globalDomains[dim])
+        .range([innerH, 0])
+        .nice();
+    }
+
+    const xScale = d3.scalePoint()
+      .domain(dims)
+      .range([0, innerW]);
+
+    // Draw axes
+    for (const dim of dims) {
+      const x = xScale(dim);
+      const axisG = g.append('g')
+        .attr('class', 'axis')
+        .attr('transform', `translate(${x},0)`)
+        .call(d3.axisLeft(yScales[dim]).ticks(5).tickSize(-4));
+
+      axisG.append('text')
+        .attr('class', 'axis-label')
+        .attr('y', -14)
+        .text(dim);
+
+      // Brush
+      const brush = d3.brushY()
+        .extent([[-12, 0], [12, innerH]])
+        .on('brush end', function(event) {
+          if (event.sourceEvent === null) return; // programmatic
+          if (event.selection) {
+            const [y0, y1] = event.selection;
+            const lo = yScales[dim].invert(y1);
+            const hi = yScales[dim].invert(y0);
+            brushFilters.set(dim, [lo, hi]);
+          } else {
+            brushFilters.delete(dim);
+          }
+          updateSelection();
+          renderAll();
+        });
+
+      axisG.append('g')
+        .attr('class', 'brush')
+        .call(brush);
+    }
+
+    // Title
+    svg.append('text')
+      .attr('class', 'panel-title')
+      .attr('x', 12).attr('y', 18)
+      .attr('fill', panel.color)
+      .text(panel.region);
+
+    // Store references
+    Object.assign(panel, { bgCtx, fgCtx, yScales, xScale, margin, innerW, innerH, w, h });
+  }
+}
+
+function updateSelection() {
+  if (brushFilters.size === 0) {
+    selectedIndices = null;
+    return;
+  }
+  selectedIndices = new Set();
+  for (const d of data) {
+    let pass = true;
+    for (const [dim, [lo, hi]] of brushFilters) {
+      if (d[dim] < lo || d[dim] > hi) { pass = false; break; }
+    }
+    if (pass) selectedIndices.add(d.id);
+  }
+}
+
+function drawLine(ctx, d, panel) {
+  const { xScale, yScales, margin } = panel;
+  ctx.beginPath();
+  for (let i = 0; i < dims.length; i++) {
+    const x = margin.left + xScale(dims[i]);
+    const y = margin.top + yScales[dims[i]](d[dims[i]]);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+function renderPanel(panel) {
+  const { bgCtx, fgCtx, regionData, color, w, h } = panel;
+  const dpr = devicePixelRatio || 1;
+
+  // Clear
+  bgCtx.save(); bgCtx.setTransform(1,0,0,1,0,0); bgCtx.clearRect(0, 0, w * dpr, h * dpr); bgCtx.restore();
+  fgCtx.save(); fgCtx.setTransform(1,0,0,1,0,0); fgCtx.clearRect(0, 0, w * dpr, h * dpr); fgCtx.restore();
+
+  const hasSelection = selectedIndices !== null;
+
+  // Background: all lines, dimmed
+  bgCtx.strokeStyle = color;
+  bgCtx.lineWidth = 1;
+  bgCtx.globalAlpha = hasSelection ? 0.06 : 0.35;
+  for (const d of regionData) drawLine(bgCtx, d, panel);
+
+  // Foreground: selected lines
+  if (hasSelection) {
+    fgCtx.strokeStyle = color;
+    fgCtx.lineWidth = 1.5;
+    fgCtx.globalAlpha = 0.7;
+    for (const d of regionData) {
+      if (selectedIndices.has(d.id)) drawLine(fgCtx, d, panel);
+    }
+  }
+}
+
+function renderAll() {
+  for (const panel of panels) renderPanel(panel);
+}
+
+// --- Init ---
+layoutPanels();
+renderAll();
+
+// --- Resize ---
+const ro = new ResizeObserver(() => { layoutPanels(); renderAll(); });
+ro.observe(grid);
+
+</script>
+</body>
+</html>

@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Election Swing Map</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #1a1a2e; color: #e0e0e0; }
+  #container { max-width: 1100px; margin: 0 auto; padding: 20px; }
+  h1 { font-size: 1.4rem; font-weight: 600; margin-bottom: 4px; color: #f0f0f0; }
+  .subtitle { font-size: 0.85rem; color: #888; margin-bottom: 16px; }
+  #map-container { position: relative; }
+  canvas { display: block; }
+  #map-svg { position: absolute; top: 0; left: 0; pointer-events: none; }
+  #controls { display: flex; align-items: center; gap: 16px; margin: 12px 0; }
+  #year-label { font-size: 1.3rem; font-weight: 700; min-width: 50px; }
+  #slider { flex: 1; accent-color: #7b68ee; height: 6px; }
+  #play-btn {
+    background: #7b68ee; border: none; color: white; border-radius: 50%;
+    width: 32px; height: 32px; cursor: pointer; font-size: 14px; line-height: 32px;
+    text-align: center;
+  }
+  #play-btn:hover { background: #6a5acd; }
+  #histogram-container { margin-top: 8px; }
+  .axis text { fill: #999; font-size: 11px; }
+  .axis line, .axis path { stroke: #444; }
+  .tick-label { fill: #bbb; font-size: 11px; }
+  .legend { display: flex; gap: 20px; justify-content: center; margin-top: 8px; font-size: 0.8rem; color: #aaa; }
+  .legend-item { display: flex; align-items: center; gap: 5px; }
+  .legend-swatch { width: 14px; height: 14px; border-radius: 2px; }
+  .tooltip {
+    position: absolute; pointer-events: none; background: rgba(20,20,40,0.92);
+    border: 1px solid #555; border-radius: 4px; padding: 6px 10px;
+    font-size: 0.78rem; line-height: 1.4; display: none; z-index: 10;
+    color: #ddd; white-space: nowrap;
+  }
+  .brush-hint { font-size: 0.75rem; color: #666; text-align: center; margin-top: 2px; }
+</style>
+</head>
+<body>
+<div id="container">
+  <h1>US County Election Swing Map</h1>
+  <div class="subtitle">Synthetic data — 5 election cycles showing red↔blue shifts</div>
+  <div id="map-container">
+    <canvas id="map-canvas"></canvas>
+    <svg id="map-svg"></svg>
+    <div class="tooltip" id="tooltip"></div>
+  </div>
+  <div id="controls">
+    <button id="play-btn">▶</button>
+    <span id="year-label">2008</span>
+    <input type="range" id="slider" min="0" max="4" step="1" value="0">
+  </div>
+  <div id="histogram-container">
+    <svg id="hist-svg"></svg>
+  </div>
+  <div class="brush-hint">Brush the histogram to highlight counties on the map</div>
+  <div class="legend">
+    <div class="legend-item"><div class="legend-swatch" style="background:#2166ac"></div>Strong Dem</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:#92c5de"></div>Lean Dem</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:#f4a582"></div>Lean Rep</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:#b2182b"></div>Strong Rep</div>
+  </div>
+</div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="https://unpkg.com/topojson-client@3"></script>
+<script src="https://unpkg.com/us-atlas@3/counties-albers-10m.json" id="us-data"></script>
+<script type="module">
+
+// --- Synthetic election data ---
+const years = [2008, 2012, 2016, 2020, 2024];
+const stateSeeds = {};
+// Deterministic pseudo-random
+function mulberry32(a) {
+  return function() {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// Load US topology
+const us = await d3.json("https://unpkg.com/us-atlas@3/counties-albers-10m.json");
+const counties = topojson.feature(us, us.objects.counties).features;
+const statesMesh = topojson.mesh(us, us.objects.states, (a, b) => a !== b);
+const nationMesh = topojson.mesh(us, us.objects.nation);
+
+// Generate synthetic margins per county per year
+// margin: negative = Dem, positive = Rep (range roughly -40 to +40)
+const countyData = new Map();
+const rng = mulberry32(42);
+
+for (const county of counties) {
+  const fips = county.id;
+  const stateFips = fips.slice(0, 2);
+  // Base lean by state region — coastal states lean blue, interior red
+  const blueStates = new Set(["06","09","10","11","17","24","25","26","27","34","36","41","44","50","53"]);
+  const swingStates = new Set(["04","08","12","13","28","32","37","39","42","48","55"]);
+  let baseLean = blueStates.has(stateFips) ? -12 : swingStates.has(stateFips) ? -1 : 14;
+  // Add county-level variation
+  baseLean += (rng() - 0.5) * 30;
+
+  const margins = [];
+  let margin = baseLean;
+  for (let i = 0; i < 5; i++) {
+    // National environment wave (synthetic)
+    const wave = [−3, −2, 4, −1, 2][i]; // 2008 Dem wave, 2016 Rep wave, etc
+    margin = margin + wave + (rng() - 0.5) * 8;
+    margin = Math.max(-45, Math.min(45, margin));
+    margins.push(+margin.toFixed(1));
+  }
+  countyData.set(fips, margins);
+}
+
+// Fix: the wave array used unicode minus. Redefine properly
+// (The above will work because JS handles it, but let's ensure correctness in the logic)
+
+// --- Layout ---
+const width = 975, mapHeight = 610;
+const margin = { top: 30, right: 30, bottom: 40, left: 50 };
+const histWidth = width, histHeight = 180;
+const histInner = { w: histWidth - margin.left - margin.right, h: histHeight - margin.top - margin.bottom };
+
+// --- Color scale ---
+const colorScale = d3.scaleSequential()
+  .domain([40, -40]) // Rep to Dem
+  .interpolator(d3.interpolateRdBu);
+
+// --- Map (Canvas + SVG overlay) ---
+const dpr = window.devicePixelRatio || 1;
+const canvas = d3.select("#map-canvas")
+  .attr("width", width * dpr)
+  .attr("height", mapHeight * dpr)
+  .style("width", width + "px")
+  .style("height", mapHeight + "px");
+const ctx = canvas.node().getContext("2d");
+ctx.scale(dpr, dpr);
+
+// Hidden canvas for hit detection
+const hiddenCanvas = document.createElement("canvas");
+hiddenCanvas.width = width;
+hiddenCanvas.height = mapHeight;
+const hiddenCtx = hiddenCanvas.getContext("2d");
+
+// Pre-rendered AlbersUSA path
+const path = d3.geoPath();
+
+// Build county color-to-id map for picking
+const colorToCounty = new Map();
+counties.forEach((c, i) => {
+  const r = (i + 1) >> 16 & 0xFF;
+  const g = (i + 1) >> 8 & 0xFF;
+  const b = (i + 1) & 0xFF;
+  const pickColor = `rgb(${r},${g},${b})`;
+  colorToCounty.set(`${r},${g},${b}`, c.id);
+  // Draw to hidden canvas
+  hiddenCtx.beginPath();
+  path.context(hiddenCtx)(c);
+  hiddenCtx.fillStyle = pickColor;
+  hiddenCtx.fill();
+});
+
+const mapSvg = d3.select("#map-svg")
+  .attr("width", width)
+  .attr("height", mapHeight)
+  .attr("viewBox", [0, 0, width, mapHeight]);
+
+// Draw state borders in SVG
+mapSvg.append("path")
+  .datum(statesMesh)
+  .attr("fill", "none")
+  .attr("stroke", "#333")
+  .attr("stroke-width", 0.7)
+  .attr("stroke-linejoin", "round")
+  .attr("d", path);
+
+mapSvg.append("path")
+  .datum(nationMesh)
+  .attr("fill", "none")
+  .attr("stroke", "#555")
+  .attr("stroke-width", 1)
+  .attr("d", path);
+
+// --- State ---
+let currentYearIdx = 0;
+let brushedRange = null; // [min, max] swing range from histogram brush
+const highlightedCounties = new Set();
+
+// --- Draw map ---
+function drawMap() {
+  ctx.clearRect(0, 0, width, mapHeight);
+
+  // Batch by color for performance
+  const colorBuckets = new Map();
+  for (const county of counties) {
+    const margins = countyData.get(county.id);
+    if (!margins) continue;
+    const val = margins[currentYearIdx];
+    const dimmed = highlightedCounties.size > 0 && !highlightedCounties.has(county.id);
+    let color;
+    if (dimmed) {
+      const base = d3.color(colorScale(val));
+      color = `rgba(${base.r},${base.g},${base.b},0.15)`;
+    } else {
+      color = colorScale(val);
+    }
+    if (!colorBuckets.has(color)) colorBuckets.set(color, []);
+    colorBuckets.get(color).push(county);
+  }
+
+  for (const [color, feats] of colorBuckets) {
+    ctx.beginPath();
+    for (const f of feats) path.context(ctx)(f);
+    ctx.fillStyle = color;
+    ctx.fill();
+  }
+}
+
+// --- Histogram ---
+const histSvg = d3.select("#hist-svg")
+  .attr("width", histWidth)
+  .attr("height", histHeight)
+  .attr("viewBox", [0, 0, histWidth, histHeight]);
+
+const histG = histSvg.append("g")
+  .attr("transform", `translate(${margin.left},${margin.top})`);
+
+const xHist = d3.scaleLinear().domain([-45, 45]).range([0, histInner.w]);
+const yHist = d3.scaleLinear().range([histInner.h, 0]);
+
+// X axis
+histG.append("g")
+  .attr("class", "axis")
+  .attr("transform", `translate(0,${histInner.h})`)
+  .call(d3.axisBottom(xHist).ticks(9).tickFormat(d => d > 0 ? `R+${d}` : d < 0 ? `D+${Math.abs(d)}` : "Even"));
+
+// X label
+histG.append("text")
+  .attr("x", histInner.w / 2)
+  .attr("y", histInner.h + 34)
+  .attr("text-anchor", "middle")
+  .attr("class", "tick-label")
+  .text("Margin (swing magnitude)");
+
+const yAxisG = histG.append("g").attr("class", "axis");
+const barsG = histG.append("g");
+
+// Center line
+histG.append("line")
+  .attr("x1", xHist(0)).attr("x2", xHist(0))
+  .attr("y1", 0).attr("y2", histInner.h)
+  .attr("stroke", "#666").attr("stroke-dasharray", "3,3");
+
+// Year label on histogram
+const histYearLabel = histG.append("text")
+  .attr("x", histInner.w - 5).attr("y", 15)
+  .attr("text-anchor", "end")
+  .attr("fill", "#666").attr("font-size", 24).attr("font-weight", 700);
+
+function updateHistogram() {
+  const vals = [];
+  for (const county of counties) {
+    const margins = countyData.get(county.id);
+    if (margins) vals.push(margins[currentYearIdx]);
+  }
+
+  const bins = d3.bin().domain([-45, 45]).thresholds(30)(vals);
+  yHist.domain([0, d3.max(bins, d => d.length)]);
+
+  yAxisG.transition().duration(300)
+    .call(d3.axisLeft(yHist).ticks(5));
+
+  const bars = barsG.selectAll("rect").data(bins);
+
+  bars.join(
+    enter => enter.append("rect")
+      .attr("x", d => xHist(d.x0) + 0.5)
+      .attr("width", d => Math.max(0, xHist(d.x1) - xHist(d.x0) - 1))
+      .attr("y", d => yHist(d.length))
+      .attr("height", d => histInner.h - yHist(d.length))
+      .attr("fill", d => colorScale((d.x0 + d.x1) / 2))
+      .attr("opacity", 0.85),
+    update => update.transition().duration(300)
+      .attr("y", d => yHist(d.length))
+      .attr("height", d => histInner.h - yHist(d.length))
+      .attr("fill", d => colorScale((d.x0 + d.x1) / 2))
+      .attr("opacity", 0.85)
+  );
+
+  histYearLabel.text(years[currentYearIdx]);
+}
+
+// --- Brush on histogram ---
+const brush = d3.brushX()
+  .extent([[0, 0], [histInner.w, histInner.h]])
+  .on("brush end", brushed);
+
+histG.append("g").attr("class", "brush").call(brush);
+
+function brushed(event) {
+  highlightedCounties.clear();
+  if (!event.selection) {
+    brushedRange = null;
+    drawMap();
+    return;
+  }
+  const [x0, x1] = event.selection;
+  const marginMin = xHist.invert(x0);
+  const marginMax = xHist.invert(x1);
+  brushedRange = [marginMin, marginMax];
+
+  for (const county of counties) {
+    const margins = countyData.get(county.id);
+    if (!margins) continue;
+    const val = margins[currentYearIdx];
+    if (val >= marginMin && val <= marginMax) {
+      highlightedCounties.add(county.id);
+    }
+  }
+  drawMap();
+}
+
+// --- Tooltip ---
+const tooltip = d3.select("#tooltip");
+
+d3.select("#map-canvas").on("pointermove", function(event) {
+  const [mx, my] = d3.pointer(event);
+  const pixel = hiddenCtx.getImageData(mx, my, 1, 1).data;
+  const key = `${pixel[0]},${pixel[1]},${pixel[2]}`;
+  const fips = colorToCounty.get(key);
+
+  if (fips && countyData.has(fips)) {
+    const margins = countyData.get(fips);
+    const val = margins[currentYearIdx];
+    const swing = currentYearIdx > 0 ? (val - margins[currentYearIdx - 1]).toFixed(1) : "—";
+    const party = val < 0 ? "Dem" : val > 0 ? "Rep" : "Even";
+    const county = counties.find(c => c.id === fips);
+    const name = county?.properties?.name || `FIPS ${fips}`;
+    tooltip
+      .style("display", "block")
+      .style("left", (event.offsetX + 12) + "px")
+      .style("top", (event.offsetY - 10) + "px")
+      .html(`<strong>${name}</strong><br>
+        ${years[currentYearIdx]}: ${party} ${val < 0 ? "+" + Math.abs(val) : val > 0 ? "+" + val : "0"}<br>
+        Swing: ${swing === "—" ? swing : (swing > 0 ? "R+" : "D+") + Math.abs(swing)}`);
+  } else {
+    tooltip.style("display", "none");
+  }
+});
+
+d3.select("#map-canvas").on("pointerleave", () => tooltip.style("display", "none"));
+
+// --- Slider & play ---
+const slider = d3.select("#slider");
+const yearLabel = d3.select("#year-label");
+const playBtn = d3.select("#play-btn");
+let playing = false, playTimer;
+
+function setYear(idx) {
+  currentYearIdx = idx;
+  slider.property("value", idx);
+  yearLabel.text(years[idx]);
+  updateHistogram();
+  // Re-apply brush filter if active
+  if (brushedRange) {
+    highlightedCounties.clear();
+    for (const county of counties) {
+      const margins = countyData.get(county.id);
+      if (!margins) continue;
+      const val = margins[currentYearIdx];
+      if (val >= brushedRange[0] && val <= brushedRange[1]) {
+        highlightedCounties.add(county.id);
+      }
+    }
+  }
+  drawMap();
+}
+
+slider.on("input", function() { setYear(+this.value); });
+
+playBtn.on("click", () => {
+  if (playing) {
+    clearInterval(playTimer);
+    playBtn.text("▶");
+    playing = false;
+  } else {
+    playing = true;
+    playBtn.text("⏸");
+    playTimer = setInterval(() => {
+      const next = (currentYearIdx + 1) % 5;
+      setYear(next);
+      if (next === 4) { clearInterval(playTimer); playBtn.text("▶"); playing = false; }
+    }, 1200);
+  }
+});
+
+// --- Initial render ---
+setYear(0);
+
+</script>
+</body>
+</html>

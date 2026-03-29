@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Bee Swarm Census — Income by Education</title>
+<style>
+  body { margin: 0; font-family: 'Helvetica Neue', sans-serif; background: #fafafa; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+  .tooltip { position: absolute; pointer-events: none; opacity: 0; background: white; border: 1px solid #ccc; border-radius: 4px; padding: 6px 10px; font-size: 12px; box-shadow: 0 2px 6px rgba(0,0,0,0.12); line-height: 1.5; }
+</style>
+</head>
+<body>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data ---
+const random = d3.randomLcg(42);
+const rNorm = d3.randomNormal.source(d3.randomLcg(7))();
+
+const educationLevels = ["High School", "Some College", "Bachelor's", "Graduate"];
+const eduColors = ["#e69f00", "#56b4e9", "#009e73", "#cc79a7"]; // Tol colorblind-safe
+
+// Log-normal income correlated with education
+const data = Array.from({ length: 400 }, (_, i) => {
+  // Assign education with income correlation via base log-mean
+  const eduRoll = random();
+  let eduIdx;
+  if (eduRoll < 0.25) eduIdx = 0;
+  else if (eduRoll < 0.50) eduIdx = 1;
+  else if (eduRoll < 0.75) eduIdx = 2;
+  else eduIdx = 3;
+
+  // Log-normal parameters shift with education
+  const logMeans = [10.3, 10.6, 10.9, 11.3]; // ~30K, ~40K, ~55K, ~80K median
+  const logSds   = [0.55, 0.50, 0.50, 0.55];
+  const logIncome = d3.randomNormal.source(d3.randomLcg(i * 13 + 5))(logMeans[eduIdx], logSds[eduIdx])();
+  let income = Math.exp(logIncome);
+  income = Math.max(15000, Math.min(500000, income));
+
+  const names = ["Alex","Jordan","Morgan","Casey","Riley","Taylor","Quinn","Avery","Peyton","Drew","Sam","Jamie","Chris","Pat","Dakota","Hayden","Reese","Skyler","Sage","Cameron"];
+  return {
+    id: i,
+    name: names[i % names.length] + " " + String.fromCharCode(65 + (i % 26)) + ".",
+    income,
+    education: educationLevels[eduIdx],
+    eduIdx,
+  };
+});
+
+// --- Layout ---
+const margin = { top: 60, right: 50, bottom: 80, left: 80 };
+const boxPlotHeight = 40;
+const swarmAreaHeight = 420;
+const totalHeight = margin.top + swarmAreaHeight + 30 + boxPlotHeight + margin.bottom;
+const width = 960;
+const innerWidth = width - margin.left - margin.right;
+
+const svg = d3.select("body").append("svg")
+  .attr("width", width).attr("height", totalHeight)
+  .attr("viewBox", `0 0 ${width} ${totalHeight}`)
+  .style("max-width", "100%").style("height", "auto");
+
+// --- Scales ---
+const xScale = d3.scaleLog()
+  .domain([14000, 550000])
+  .range([margin.left, width - margin.right]);
+
+const colorScale = d3.scaleOrdinal()
+  .domain(educationLevels)
+  .range(eduColors);
+
+// --- Force-based bee swarm (pre-computed) ---
+const swarmCenterY = margin.top + swarmAreaHeight / 2;
+const radius = 3.5;
+
+const nodes = data.map(d => ({
+  ...d,
+  x: xScale(d.income),
+  y: swarmCenterY,
+}));
+
+const simulation = d3.forceSimulation(nodes)
+  .force("x", d3.forceX(d => xScale(d.income)).strength(0.9))
+  .force("y", d3.forceY(swarmCenterY).strength(0.07))
+  .force("collide", d3.forceCollide(radius + 0.8).iterations(3))
+  .stop();
+
+for (let i = 0; i < 300; i++) simulation.tick();
+
+// Clamp to swarm area
+nodes.forEach(d => {
+  d.y = Math.max(margin.top + radius, Math.min(margin.top + swarmAreaHeight - radius, d.y));
+});
+
+// --- Axis ---
+const xAxis = d3.axisBottom(xScale)
+  .tickValues([15000, 25000, 50000, 100000, 200000, 500000])
+  .tickFormat(d => d >= 1000 ? `$${d / 1000}K` : `$${d}`);
+
+const axisY = margin.top + swarmAreaHeight + 5;
+
+svg.append("g")
+  .attr("transform", `translate(0,${axisY})`)
+  .call(xAxis)
+  .call(g => g.select(".domain").attr("stroke", "#999"))
+  .call(g => g.selectAll(".tick line").attr("stroke", "#bbb"))
+  .call(g => g.selectAll(".tick text").attr("fill", "#555").style("font-size", "11px"));
+
+svg.append("text")
+  .attr("x", margin.left + innerWidth / 2).attr("y", axisY + 38)
+  .attr("text-anchor", "middle").attr("fill", "#333")
+  .style("font-size", "13px").text("Annual Income");
+
+// --- Title ---
+svg.append("text")
+  .attr("x", margin.left).attr("y", margin.top - 30)
+  .attr("fill", "#222").style("font-size", "18px").style("font-weight", "600")
+  .text("Income Distribution by Education Level");
+
+svg.append("text")
+  .attr("x", margin.left).attr("y", margin.top - 12)
+  .attr("fill", "#777").style("font-size", "12px")
+  .text("400 synthetic individuals — log-normal incomes, correlated with education");
+
+// --- Percentile lines ---
+const incomes = data.map(d => d.income).sort(d3.ascending);
+const percentiles = [25, 50, 75, 90];
+const percentileVals = percentiles.map(p => d3.quantile(incomes, p / 100));
+
+const percGroup = svg.append("g").attr("class", "percentiles");
+
+percentiles.forEach((p, i) => {
+  const xPos = xScale(percentileVals[i]);
+  percGroup.append("line")
+    .attr("x1", xPos).attr("x2", xPos)
+    .attr("y1", margin.top - 5).attr("y2", axisY)
+    .attr("stroke", "#888").attr("stroke-width", 1)
+    .attr("stroke-dasharray", p === 50 ? "none" : "4,3")
+    .attr("opacity", 0.6);
+
+  percGroup.append("text")
+    .attr("x", xPos).attr("y", margin.top - 8)
+    .attr("text-anchor", "middle").attr("fill", "#666")
+    .style("font-size", "10px")
+    .text(`P${p}: $${Math.round(percentileVals[i] / 1000)}K`);
+});
+
+// --- Swarm dots ---
+const tooltip = d3.select("body").append("div").attr("class", "tooltip");
+
+svg.append("g").attr("class", "swarm")
+  .selectAll("circle")
+  .data(nodes)
+  .join("circle")
+    .attr("cx", d => d.x).attr("cy", d => d.y)
+    .attr("r", radius)
+    .attr("fill", d => colorScale(d.education))
+    .attr("stroke", "white").attr("stroke-width", 0.4)
+    .attr("opacity", 0.85)
+    .on("pointerenter", (event, d) => {
+      tooltip.html(`<strong>${d.name}</strong><br>${d.education}<br>$${d3.format(",.0f")(d.income)}`)
+        .style("opacity", 1);
+    })
+    .on("pointermove", (event) => {
+      const tw = tooltip.node().offsetWidth;
+      tooltip.style("left", `${Math.min(event.pageX + 12, window.innerWidth - tw - 8)}px`)
+        .style("top", `${event.pageY - 50}px`);
+    })
+    .on("pointerleave", () => tooltip.style("opacity", 0));
+
+// --- Leader-line callouts for top earners ---
+const topEarners = [...nodes].sort((a, b) => b.income - a.income).slice(0, 5);
+
+const calloutGroup = svg.append("g").attr("class", "callouts");
+
+topEarners.forEach((d, i) => {
+  // Stagger callout positions above/below
+  const above = i % 2 === 0;
+  const dy = above ? -35 - i * 18 : 30 + i * 14;
+  const dx = -20 + i * 15;
+  const noteX = d.x + dx;
+  const noteY = d.y + dy;
+
+  // Curved leader line
+  calloutGroup.append("path")
+    .attr("d", `M${d.x},${d.y} Q${d.x + dx * 0.4},${noteY} ${noteX},${noteY}`)
+    .attr("fill", "none").attr("stroke", "#999").attr("stroke-width", 0.8);
+
+  // Dot at anchor
+  calloutGroup.append("circle")
+    .attr("cx", d.x).attr("cy", d.y).attr("r", 2.5)
+    .attr("fill", "none").attr("stroke", "#666").attr("stroke-width", 1.2);
+
+  // Label
+  calloutGroup.append("text")
+    .attr("x", noteX + 4).attr("y", noteY + 4)
+    .attr("fill", "#444").style("font-size", "10px")
+    .text(`${d.name} — $${d3.format(",.0f")(d.income)}`);
+});
+
+// --- Marginal box plot ---
+const boxY = axisY + 45;
+const boxH = boxPlotHeight;
+
+const sorted = Float64Array.from(incomes);
+const q1 = d3.quantile(sorted, 0.25), med = d3.quantile(sorted, 0.5), q3 = d3.quantile(sorted, 0.75);
+const iqr = q3 - q1;
+const whiskerLow = d3.min(sorted.filter(v => v >= q1 - 1.5 * iqr));
+const whiskerHigh = d3.max(sorted.filter(v => v <= q3 + 1.5 * iqr));
+const outliers = sorted.filter(v => v < whiskerLow || v > whiskerHigh);
+
+const boxGroup = svg.append("g").attr("class", "boxplot");
+
+// Whisker line
+boxGroup.append("line")
+  .attr("x1", xScale(whiskerLow)).attr("x2", xScale(whiskerHigh))
+  .attr("y1", boxY + boxH / 2).attr("y2", boxY + boxH / 2)
+  .attr("stroke", "#555").attr("stroke-width", 1);
+
+// Whisker caps
+[whiskerLow, whiskerHigh].forEach(v => {
+  boxGroup.append("line")
+    .attr("x1", xScale(v)).attr("x2", xScale(v))
+    .attr("y1", boxY + boxH * 0.25).attr("y2", boxY + boxH * 0.75)
+    .attr("stroke", "#555").attr("stroke-width", 1);
+});
+
+// IQR box
+boxGroup.append("rect")
+  .attr("x", xScale(q1)).attr("width", xScale(q3) - xScale(q1))
+  .attr("y", boxY + boxH * 0.15).attr("height", boxH * 0.7)
+  .attr("fill", "#dde4ec").attr("stroke", "#555").attr("stroke-width", 1)
+  .attr("rx", 2);
+
+// Median line
+boxGroup.append("line")
+  .attr("x1", xScale(med)).attr("x2", xScale(med))
+  .attr("y1", boxY + boxH * 0.15).attr("y2", boxY + boxH * 0.85)
+  .attr("stroke", "#222").attr("stroke-width", 2);
+
+// Outlier dots
+boxGroup.selectAll(".outlier")
+  .data(outliers)
+  .join("circle")
+    .attr("cx", d => xScale(d)).attr("cy", boxY + boxH / 2)
+    .attr("r", 2.5)
+    .attr("fill", "none").attr("stroke", "#888").attr("stroke-width", 0.8);
+
+// Box plot label
+boxGroup.append("text")
+  .attr("x", margin.left - 8).attr("y", boxY + boxH / 2 + 4)
+  .attr("text-anchor", "end").attr("fill", "#555").style("font-size", "11px")
+  .text("Overall");
+
+// --- Legend ---
+const legend = svg.append("g")
+  .attr("transform", `translate(${width - margin.right - 150}, ${margin.top})`);
+
+educationLevels.forEach((edu, i) => {
+  const g = legend.append("g").attr("transform", `translate(0, ${i * 20})`);
+  g.append("circle").attr("cx", 0).attr("cy", 0).attr("r", 5).attr("fill", eduColors[i]);
+  g.append("text").attr("x", 12).attr("y", 4).attr("fill", "#444").style("font-size", "11px").text(edu);
+});
+</script>
+</body>
+</html>

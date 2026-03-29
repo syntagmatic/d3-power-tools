@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Book Sentence Rhythm</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Inter", system-ui, sans-serif; background: #fafaf8; color: #1a1a1a; padding: 32px 40px; }
+  h1 { font-size: 22px; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { font-size: 13px; color: #777; margin-bottom: 20px; }
+  table { border-collapse: collapse; width: 100%; max-width: 960px; }
+  thead th {
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
+    color: #888; border-bottom: 2px solid #ddd; padding: 6px 10px; text-align: left; cursor: pointer; user-select: none;
+  }
+  thead th:hover { color: #333; }
+  thead th .arrow { font-size: 9px; margin-left: 3px; color: #bbb; }
+  thead th.active .arrow { color: #333; }
+  tbody td { padding: 5px 10px; border-bottom: 1px solid #eee; font-size: 13px; vertical-align: middle; }
+  tbody tr:hover { background: #f5f4f0; }
+  .chapter-name { font-weight: 500; min-width: 160px; }
+  .num { font-variant-numeric: tabular-nums; text-align: right; color: #555; min-width: 60px; }
+  .spark-cell { padding: 4px 6px; }
+  .spark-cell svg { display: block; }
+  .violin-cell svg { display: block; }
+  .tooltip {
+    position: fixed; pointer-events: none; background: #333; color: #fff; font-size: 11px;
+    padding: 4px 8px; border-radius: 4px; white-space: nowrap; display: none; z-index: 10;
+  }
+</style>
+</head>
+<body>
+<h1>Book Sentence Rhythm</h1>
+<p class="subtitle">20 chapters — sentence-length sparkline, mini violin, sortable by avg sentence length. Hover sparkline for longest sentence.</p>
+<table><thead><tr></tr></thead><tbody></tbody></table>
+<div class="tooltip" id="tip"></div>
+<script type="module">
+
+// --- Synthetic data: 20 chapters with realistic sentence-length distributions ---
+const chapterNames = [
+  "The Summons", "Before Dawn", "Crossroads", "The Manuscript", "Salt Water",
+  "Inheritance", "Under Glass", "Night Market", "The Cartographer", "Loose Threads",
+  "Burning Fields", "Tidepool", "The Forger", "Quiet Hours", "Iron Gate",
+  "Meridian", "The Collector", "Winter Light", "Unraveling", "Homecoming"
+];
+
+const rng = d3.randomLcg(42);
+const randNorm = d3.randomNormal.source(rng);
+const randUnif = d3.randomUniform.source(rng);
+
+const chapters = chapterNames.map((name, i) => {
+  // Each chapter has a different "style" — mean and spread of sentence lengths
+  const baseMean = 12 + randUnif()() * 18;       // 12–30 words avg
+  const baseStd = 3 + randUnif()() * 8;          // 3–11 std
+  const nSentences = 40 + Math.floor(randUnif()() * 120); // 40–160 sentences
+  const gen = randNorm(baseMean, baseStd);
+  const sentences = Array.from({ length: nSentences }, () => Math.max(2, Math.round(gen())));
+  const wordCount = d3.sum(sentences);
+  const avgLen = d3.mean(sentences);
+  const maxLen = d3.max(sentences);
+  const maxIdx = sentences.indexOf(maxLen);
+  return { name, idx: i + 1, sentences, wordCount, avgLen, maxLen, maxIdx };
+});
+
+// --- Layout constants ---
+const sparkW = 180, sparkH = 28;
+const violinW = 60, violinH = 28;
+const pad = 1;
+
+// Shared scales
+const globalSentenceExtent = [0, d3.max(chapters, d => d3.max(d.sentences))];
+const ySparkScale = d3.scaleLinear().domain(globalSentenceExtent).range([sparkH - pad, pad]);
+const yViolinScale = d3.scaleLinear().domain(globalSentenceExtent).range([violinH - pad, pad]);
+
+// --- KDE ---
+const gaussian = x => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+function kde(bandwidth, values) {
+  const lo = d3.min(values), hi = d3.max(values);
+  const ticks = d3.range(lo, hi + 0.5, 0.5);
+  return ticks.map(t => [t, d3.mean(values, v => gaussian((t - v) / bandwidth)) / bandwidth]);
+}
+
+// --- Table ---
+const columns = [
+  { key: "idx", label: "#", type: "num", accessor: d => d.idx },
+  { key: "name", label: "Chapter", type: "text", accessor: d => d.name },
+  { key: "wordCount", label: "Words", type: "num", accessor: d => d.wordCount },
+  { key: "avgLen", label: "Avg Sentence", type: "num", accessor: d => d.avgLen },
+  { key: "sparkline", label: "Sentence Lengths", type: "spark" },
+  { key: "violin", label: "Distribution", type: "violin" }
+];
+
+let sortKey = "idx", sortAsc = true;
+const tip = d3.select("#tip");
+
+function render() {
+  const sorted = [...chapters].sort((a, b) => {
+    const va = columns.find(c => c.key === sortKey).accessor?.(a) ?? a[sortKey];
+    const vb = columns.find(c => c.key === sortKey).accessor?.(b) ?? b[sortKey];
+    return sortAsc ? d3.ascending(va, vb) : d3.descending(va, vb);
+  });
+
+  // Header
+  const ths = d3.select("thead tr").selectAll("th").data(columns, d => d.key);
+  ths.join("th")
+    .classed("active", d => d.key === sortKey)
+    .html(d => {
+      const arrow = d.key === sortKey ? (sortAsc ? "▲" : "▼") : "▲";
+      return d.accessor || d.key === "idx"
+        ? `${d.label} <span class="arrow">${arrow}</span>` : d.label;
+    })
+    .style("cursor", d => (d.accessor || d.key === "idx") ? "pointer" : "default")
+    .on("click", (event, d) => {
+      if (!d.accessor && d.key !== "idx") return;
+      if (sortKey === d.key) sortAsc = !sortAsc;
+      else { sortKey = d.key; sortAsc = true; }
+      render();
+    });
+
+  // Rows
+  const rows = d3.select("tbody").selectAll("tr").data(sorted, d => d.idx);
+  rows.exit().remove();
+  const enter = rows.enter().append("tr");
+  const all = enter.merge(rows).order();
+
+  // Cells
+  all.each(function(chapter) {
+    const tr = d3.select(this);
+    let tds = tr.selectAll("td").data(columns, d => d.key);
+    const tdEnter = tds.enter().append("td");
+    tds = tdEnter.merge(tds);
+
+    tds.each(function(col) {
+      const td = d3.select(this);
+      td.attr("class", "");
+
+      if (col.type === "num") {
+        td.classed("num", true);
+        const v = col.accessor(chapter);
+        td.text(col.key === "avgLen" ? v.toFixed(1) : d3.format(",")(v));
+      } else if (col.type === "text") {
+        td.classed("chapter-name", true).text(chapter.name);
+      } else if (col.type === "spark") {
+        td.classed("spark-cell", true);
+        if (td.select("svg").empty()) {
+          drawSparkline(td, chapter);
+        }
+      } else if (col.type === "violin") {
+        td.classed("violin-cell", true);
+        if (td.select("svg").empty()) {
+          drawViolin(td, chapter);
+        }
+      }
+    });
+  });
+}
+
+function drawSparkline(td, chapter) {
+  const { sentences, maxIdx, maxLen } = chapter;
+  const xScale = d3.scaleLinear([0, sentences.length - 1], [2, sparkW - 2]);
+  const line = d3.line()
+    .x((d, i) => xScale(i))
+    .y(d => ySparkScale(d))
+    .curve(d3.curveMonotoneX);
+
+  const svg = td.append("svg").attr("width", sparkW).attr("height", sparkH);
+
+  svg.append("path")
+    .datum(sentences)
+    .attr("d", line)
+    .attr("fill", "none")
+    .attr("stroke", "#4a7c91")
+    .attr("stroke-width", 1.2);
+
+  // Longest sentence dot
+  svg.append("circle")
+    .attr("cx", xScale(maxIdx))
+    .attr("cy", ySparkScale(maxLen))
+    .attr("r", 2.5)
+    .attr("fill", "#c44e52")
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 0.8);
+
+  // Hover overlay
+  svg.append("rect")
+    .attr("width", sparkW).attr("height", sparkH)
+    .attr("fill", "none").attr("pointer-events", "all")
+    .on("pointerenter", () => tip.style("display", "block"))
+    .on("pointermove", function(event) {
+      const [mx] = d3.pointer(event, this);
+      const i = Math.round(xScale.invert(mx));
+      const ci = Math.max(0, Math.min(sentences.length - 1, i));
+      const val = sentences[ci];
+      const isMax = ci === maxIdx;
+      tip.html(`Sentence ${ci + 1}: <b>${val} words</b>${isMax ? " (longest)" : ""}`)
+        .style("left", (event.clientX + 12) + "px")
+        .style("top", (event.clientY - 28) + "px")
+        .style("display", "block");
+    })
+    .on("pointerleave", () => tip.style("display", "none"));
+}
+
+function drawViolin(td, chapter) {
+  const { sentences } = chapter;
+  const sorted = Float64Array.from(sentences).sort();
+  const std = d3.deviation(sentences);
+  const iqr = d3.quantile(sorted, 0.75) - d3.quantile(sorted, 0.25);
+  const bw = Math.max(1, 0.9 * Math.min(std, iqr / 1.34) * Math.pow(sentences.length, -0.2));
+
+  const density = kde(bw, sentences);
+  const maxDensity = d3.max(density, d => d[1]);
+  const dScale = d3.scaleLinear([0, maxDensity], [0, violinW / 2 - 2]);
+  const cx = violinW / 2;
+
+  const area = d3.area()
+    .x0(d => cx - dScale(d[1]))
+    .x1(d => cx + dScale(d[1]))
+    .y(d => yViolinScale(d[0]))
+    .curve(d3.curveBasis);
+
+  const svg = td.append("svg").attr("width", violinW).attr("height", violinH);
+
+  svg.append("path")
+    .datum(density)
+    .attr("d", area)
+    .attr("fill", "#4a7c91")
+    .attr("fill-opacity", 0.35)
+    .attr("stroke", "#4a7c91")
+    .attr("stroke-width", 0.8);
+
+  // Median line
+  const med = d3.median(sentences);
+  svg.append("line")
+    .attr("x1", cx - 6).attr("x2", cx + 6)
+    .attr("y1", yViolinScale(med)).attr("y2", yViolinScale(med))
+    .attr("stroke", "#333").attr("stroke-width", 1.5);
+}
+
+render();
+</script>
+</body>
+</html>

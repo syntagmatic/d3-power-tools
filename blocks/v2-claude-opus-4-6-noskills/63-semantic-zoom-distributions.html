@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Semantic Zoom Distributions</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0a1a; color: #e0e0e0; font-family: system-ui, sans-serif; overflow: hidden; }
+#container { position: relative; width: 100vw; height: 100vh; }
+canvas { position: absolute; top: 0; left: 0; }
+svg { position: absolute; top: 0; left: 0; }
+#info {
+  position: absolute; top: 16px; left: 16px;
+  background: rgba(10,10,26,0.85); border: 1px solid #334; border-radius: 8px;
+  padding: 12px 16px; font-size: 13px; line-height: 1.5; pointer-events: none;
+  z-index: 10;
+}
+#info .mode { color: #7af; font-weight: 600; font-size: 15px; }
+#info .hint { color: #889; font-size: 12px; }
+#zoom-indicator {
+  position: absolute; bottom: 20px; right: 20px;
+  background: rgba(10,10,26,0.85); border: 1px solid #334; border-radius: 8px;
+  padding: 8px 14px; font-size: 12px; z-index: 10; pointer-events: none;
+}
+#zoom-indicator .level { color: #7af; font-weight: 600; }
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="canvas"></canvas>
+  <svg id="svg"></svg>
+  <div id="info">
+    <div class="mode" id="mode-label">Density Contours</div>
+    <div class="hint">Scroll to zoom · Drag to pan</div>
+  </div>
+  <div id="zoom-indicator">Zoom: <span class="level" id="zoom-level">1.0×</span></div>
+</div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="https://d3js.org/d3-contour.v4.min.js"></script>
+<script type="module">
+
+const width = window.innerWidth;
+const height = window.innerHeight;
+const margin = { top: 40, right: 40, bottom: 50, left: 60 };
+const innerW = width - margin.left - margin.right;
+const innerH = height - margin.top - margin.bottom;
+
+// --- Synthetic data: 2000 points from 5 clusters ---
+const rng = d3.randomLcg(42);
+const normal = () => d3.randomNormal.source(rng)(0, 1)();
+const clusters = [
+  { cx: 0.3, cy: 0.7, sx: 0.08, sy: 0.06, n: 500, label: "Alpha" },
+  { cx: 0.7, cy: 0.3, sx: 0.07, sy: 0.09, n: 500, label: "Beta" },
+  { cx: 0.5, cy: 0.5, sx: 0.12, sy: 0.12, n: 400, label: "Gamma" },
+  { cx: 0.2, cy: 0.25, sx: 0.06, sy: 0.05, n: 300, label: "Delta" },
+  { cx: 0.8, cy: 0.75, sx: 0.05, sy: 0.07, n: 300, label: "Epsilon" },
+];
+
+const data = [];
+let id = 0;
+for (const c of clusters) {
+  for (let i = 0; i < c.n; i++) {
+    data.push({
+      id: id++,
+      x: c.cx + normal() * c.sx,
+      y: c.cy + normal() * c.sy,
+      cluster: c.label,
+    });
+  }
+}
+
+// --- Scales ---
+const xExtent = d3.extent(data, d => d.x);
+const yExtent = d3.extent(data, d => d.y);
+const pad = 0.05;
+const x0 = d3.scaleLinear()
+  .domain([xExtent[0] - pad, xExtent[1] + pad])
+  .range([margin.left, width - margin.right]);
+const y0 = d3.scaleLinear()
+  .domain([yExtent[0] - pad, yExtent[1] + pad])
+  .range([height - margin.bottom, margin.top]);
+
+let xScale = x0.copy();
+let yScale = y0.copy();
+
+const clusterColor = d3.scaleOrdinal()
+  .domain(clusters.map(c => c.label))
+  .range(["#4fc3f7", "#ab47bc", "#66bb6a", "#ffa726", "#ef5350"]);
+
+// --- Canvas setup ---
+const canvas = document.getElementById("canvas");
+canvas.width = width * devicePixelRatio;
+canvas.height = height * devicePixelRatio;
+canvas.style.width = width + "px";
+canvas.style.height = height + "px";
+const ctx = canvas.getContext("2d");
+ctx.scale(devicePixelRatio, devicePixelRatio);
+
+// --- SVG setup ---
+const svg = d3.select("#svg")
+  .attr("width", width)
+  .attr("height", height);
+
+const axisG = svg.append("g").attr("class", "axes");
+const xAxisG = axisG.append("g").attr("transform", `translate(0,${height - margin.bottom})`);
+const yAxisG = axisG.append("g").attr("transform", `translate(${margin.left},0)`);
+const labelG = svg.append("g").attr("class", "labels");
+const zoomRect = svg.append("rect")
+  .attr("width", width).attr("height", height)
+  .attr("fill", "none")
+  .attr("pointer-events", "all");
+
+// --- LOD thresholds with hysteresis ---
+const CONTOUR_TO_HEX = 3.5;
+const HEX_TO_CONTOUR = 2.8;
+const HEX_TO_POINTS = 12;
+const POINTS_TO_HEX = 9;
+
+let currentMode = "contour"; // "contour" | "hex" | "points"
+let currentTransform = d3.zoomIdentity;
+
+function getMode(k, prevMode) {
+  if (prevMode === "contour") {
+    return k >= CONTOUR_TO_HEX ? "hex" : "contour";
+  } else if (prevMode === "hex") {
+    if (k <= HEX_TO_CONTOUR) return "contour";
+    if (k >= HEX_TO_POINTS) return "points";
+    return "hex";
+  } else {
+    return k <= POINTS_TO_HEX ? "hex" : "points";
+  }
+}
+
+// --- Axes ---
+function drawAxes() {
+  const xAxis = d3.axisBottom(xScale).ticks(Math.floor(innerW / 80));
+  const yAxis = d3.axisLeft(yScale).ticks(Math.floor(innerH / 60));
+  xAxisG.call(xAxis);
+  yAxisG.call(yAxis);
+  axisG.selectAll("line, path").attr("stroke", "#445");
+  axisG.selectAll("text").attr("fill", "#889").attr("font-size", "11px");
+}
+
+// --- Contour rendering (Canvas) ---
+function drawContours() {
+  ctx.clearRect(0, 0, width, height);
+
+  const contourData = d3.contourDensity()
+    .x(d => xScale(d.x))
+    .y(d => yScale(d.y))
+    .size([width, height])
+    .bandwidth(25)
+    .thresholds(15)(data);
+
+  const maxVal = d3.max(contourData, d => d.value) || 1;
+  const colorScale = d3.scaleSequential(d3.interpolateViridis).domain([0, maxVal]);
+
+  ctx.save();
+  ctx.globalAlpha = 0.8;
+  for (const contour of contourData) {
+    ctx.beginPath();
+    const path = d3.geoPath()(contour);
+    const p = new Path2D(path);
+    ctx.fillStyle = colorScale(contour.value);
+    ctx.fill(p);
+  }
+  // Contour outlines
+  ctx.globalAlpha = 0.4;
+  for (const contour of contourData) {
+    ctx.beginPath();
+    const path = d3.geoPath()(contour);
+    const p = new Path2D(path);
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 0.5;
+    ctx.stroke(p);
+  }
+  ctx.restore();
+}
+
+// --- Hexbin rendering (Canvas) ---
+function drawHexbins() {
+  ctx.clearRect(0, 0, width, height);
+
+  const k = currentTransform.k;
+  const hexRadius = Math.max(8, 30 / Math.sqrt(k));
+  const points = data.map(d => [xScale(d.x), yScale(d.y)]);
+
+  // Manual hexbin
+  const dx = hexRadius * 2 * Math.sin(Math.PI / 3);
+  const dy = hexRadius * 1.5;
+  const bins = new Map();
+
+  for (const [px, py] of points) {
+    if (px < margin.left || px > width - margin.right || py < margin.top || py > height - margin.bottom) continue;
+    const col = Math.round(px / dx);
+    const row = Math.round((py - (col & 1 ? dy / 2 : 0)) / dy);
+    const key = `${col},${row}`;
+    if (!bins.has(key)) bins.set(key, { cx: col * dx, cy: row * dy + (col & 1 ? dy / 2 : 0), count: 0 });
+    bins.get(key).count++;
+  }
+
+  const maxCount = d3.max(Array.from(bins.values()), d => d.count) || 1;
+  const colorScale = d3.scaleSequential(d3.interpolateViridis).domain([0, maxCount]);
+  const radiusScale = d3.scaleSqrt().domain([0, maxCount]).range([2, hexRadius]);
+
+  ctx.save();
+  for (const bin of bins.values()) {
+    const r = radiusScale(bin.count);
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) {
+      const angle = (Math.PI / 3) * i - Math.PI / 6;
+      const hx = bin.cx + r * Math.cos(angle);
+      const hy = bin.cy + r * Math.sin(angle);
+      i === 0 ? ctx.moveTo(hx, hy) : ctx.lineTo(hx, hy);
+    }
+    ctx.closePath();
+    ctx.fillStyle = colorScale(bin.count);
+    ctx.globalAlpha = 0.85;
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.15)";
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// --- Points rendering (Canvas + SVG labels) ---
+function drawPoints() {
+  ctx.clearRect(0, 0, width, height);
+
+  const visibleData = data.filter(d => {
+    const px = xScale(d.x), py = yScale(d.y);
+    return px >= margin.left && px <= width - margin.right && py >= margin.top && py <= height - margin.bottom;
+  });
+
+  ctx.save();
+  for (const d of visibleData) {
+    const px = xScale(d.x);
+    const py = yScale(d.y);
+    ctx.beginPath();
+    ctx.arc(px, py, 3, 0, Math.PI * 2);
+    ctx.fillStyle = clusterColor(d.cluster);
+    ctx.globalAlpha = 0.8;
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.3)";
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // SVG labels for visible points (subsample if too many)
+  const maxLabels = 60;
+  let labeled = visibleData;
+  if (labeled.length > maxLabels) {
+    // Pick evenly spaced subset
+    const step = Math.ceil(labeled.length / maxLabels);
+    labeled = labeled.filter((_, i) => i % step === 0);
+  }
+
+  const labels = labelG.selectAll("text").data(labeled, d => d.id);
+  labels.exit().remove();
+  const enter = labels.enter().append("text")
+    .attr("font-size", "10px")
+    .attr("fill", d => clusterColor(d.cluster))
+    .attr("pointer-events", "none")
+    .attr("dy", -6)
+    .attr("text-anchor", "middle");
+  enter.merge(labels)
+    .attr("x", d => xScale(d.x))
+    .attr("y", d => yScale(d.y))
+    .text(d => `${d.cluster}-${d.id}`);
+}
+
+function clearLabels() {
+  labelG.selectAll("text").remove();
+}
+
+// --- Main render ---
+function render() {
+  const newMode = getMode(currentTransform.k, currentMode);
+  if (newMode !== currentMode) {
+    currentMode = newMode;
+    if (currentMode !== "points") clearLabels();
+  }
+
+  document.getElementById("mode-label").textContent =
+    currentMode === "contour" ? "Density Contours" :
+    currentMode === "hex" ? "Hexagonal Bins" : "Individual Points";
+  document.getElementById("zoom-level").textContent = currentTransform.k.toFixed(1) + "×";
+
+  drawAxes();
+
+  if (currentMode === "contour") {
+    clearLabels();
+    drawContours();
+  } else if (currentMode === "hex") {
+    clearLabels();
+    drawHexbins();
+  } else {
+    drawPoints();
+  }
+}
+
+// --- Zoom behavior ---
+const zoom = d3.zoom()
+  .scaleExtent([0.5, 80])
+  .on("zoom", (event) => {
+    currentTransform = event.transform;
+    xScale = event.transform.rescaleX(x0);
+    yScale = event.transform.rescaleY(y0);
+    render();
+  });
+
+zoomRect.call(zoom);
+
+// --- Initial render ---
+render();
+
+// --- Resize ---
+window.addEventListener("resize", () => {
+  location.reload();
+});
+
+</script>
+</body>
+</html>

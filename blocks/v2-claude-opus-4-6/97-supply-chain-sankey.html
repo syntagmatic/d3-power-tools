@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Supply Chain Sankey</title>
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0e17;
+    color: #c8d0df;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    overflow: hidden;
+  }
+  h1 {
+    position: absolute;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 18px;
+    font-weight: 600;
+    color: #e0e6f0;
+    letter-spacing: 0.5px;
+  }
+  .legend {
+    position: absolute;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 12px;
+    color: #7a8599;
+  }
+  svg { display: block; }
+  .node rect {
+    cursor: pointer;
+    transition: opacity 0.3s;
+  }
+  .node text {
+    font-size: 11px;
+    fill: #c8d0df;
+    pointer-events: none;
+  }
+  .link {
+    fill: none;
+    stroke-opacity: 0.25;
+    transition: stroke-opacity 0.3s;
+  }
+  .link.faded {
+    stroke-opacity: 0.04;
+  }
+  .link.highlighted {
+    stroke-opacity: 0.7;
+  }
+  .node.faded rect {
+    opacity: 0.15;
+  }
+  .node.faded text {
+    opacity: 0.2;
+  }
+</style>
+</head>
+<body>
+<h1>Global Supply Chain Flow</h1>
+<div class="legend">Hover a node to trace its supply chain backward</div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+import {sankey as d3Sankey, sankeyLinkHorizontal} from "https://cdn.jsdelivr.net/npm/d3-sankey@0.12/+esm";
+
+// ── Synthetic data ──────────────────────────────────────────────────
+const materials = [
+  "Iron Ore", "Copper", "Lithium", "Rare Earth",
+  "Silicon", "Aluminum", "Cobalt", "Nickel"
+];
+const components = [
+  "Battery Cells", "Circuit Boards", "Chassis", "Motors",
+  "Displays", "Sensors", "Wiring", "Capacitors",
+  "Heat Sinks", "Connectors", "Housings", "Optics"
+];
+const products = [
+  "Electric Vehicles", "Smartphones", "Laptops", "Solar Panels",
+  "Wind Turbines", "Medical Devices", "Robotics", "Satellites"
+];
+const markets = [
+  "North America", "Europe", "East Asia", "Southeast Asia", "South America"
+];
+
+const nodes = [
+  ...materials.map(name => ({name, layer: 0})),
+  ...components.map(name => ({name, layer: 1})),
+  ...products.map(name => ({name, layer: 2})),
+  ...markets.map(name => ({name, layer: 3})),
+];
+const nameToIdx = new Map(nodes.map((d, i) => [d.name, i]));
+
+// Deterministic seeded random
+let seed = 42;
+const rand = () => { seed = (seed * 16807 + 0) % 2147483647; return (seed - 1) / 2147483646; };
+
+const links = [];
+
+// Materials → Components (each material feeds 3-5 components)
+for (const mat of materials) {
+  const shuffled = components.slice().sort(() => rand() - 0.5);
+  const count = 3 + Math.floor(rand() * 3);
+  for (let i = 0; i < count; i++) {
+    links.push({
+      source: nameToIdx.get(mat),
+      target: nameToIdx.get(shuffled[i]),
+      value: 20 + Math.floor(rand() * 80)
+    });
+  }
+}
+
+// Components → Products (each component feeds 2-4 products)
+for (const comp of components) {
+  const shuffled = products.slice().sort(() => rand() - 0.5);
+  const count = 2 + Math.floor(rand() * 3);
+  for (let i = 0; i < count; i++) {
+    links.push({
+      source: nameToIdx.get(comp),
+      target: nameToIdx.get(shuffled[i]),
+      value: 15 + Math.floor(rand() * 60)
+    });
+  }
+}
+
+// Products → Markets (each product goes to 2-4 markets)
+for (const prod of products) {
+  const shuffled = markets.slice().sort(() => rand() - 0.5);
+  const count = 2 + Math.floor(rand() * 3);
+  for (let i = 0; i < count; i++) {
+    links.push({
+      source: nameToIdx.get(prod),
+      target: nameToIdx.get(shuffled[i]),
+      value: 30 + Math.floor(rand() * 120)
+    });
+  }
+}
+
+const graph = {nodes: nodes.map(d => ({...d})), links: links.map(d => ({...d}))};
+
+// ── Layout ──────────────────────────────────────────────────────────
+const width = 1100, height = 640;
+const margin = {top: 60, right: 30, bottom: 50, left: 30};
+
+const sankeyLayout = d3Sankey()
+  .nodeId(d => d.index)
+  .nodeWidth(14)
+  .nodePadding(10)
+  .nodeSort(null)
+  .extent([
+    [margin.left, margin.top],
+    [width - margin.right, height - margin.bottom]
+  ]);
+
+const {nodes: sNodes, links: sLinks} = sankeyLayout(graph);
+
+// ── Layer colors ────────────────────────────────────────────────────
+const layerColors = [
+  d3.scaleOrdinal(materials, d3.quantize(t => d3.interpolateWarm(0.2 + t * 0.3), materials.length)),
+  d3.scaleOrdinal(components, d3.quantize(t => d3.interpolateCool(0.25 + t * 0.5), components.length)),
+  d3.scaleOrdinal(products, d3.quantize(t => d3.interpolateViridis(0.3 + t * 0.55), products.length)),
+  d3.scaleOrdinal(markets, d3.quantize(t => d3.interpolatePlasma(0.2 + t * 0.5), markets.length))
+];
+const nodeColor = d => layerColors[d.layer](d.name);
+
+// ── SVG ─────────────────────────────────────────────────────────────
+const svg = d3.select("body").append("svg")
+  .attr("width", width)
+  .attr("height", height)
+  .attr("viewBox", [0, 0, width, height]);
+
+// Layer labels
+const layerLabels = ["Raw Materials", "Components", "Products", "Markets"];
+const layerX = d3.groups(sNodes, d => d.layer).map(([, g]) => d3.mean(g, d => (d.x0 + d.x1) / 2));
+svg.append("g").selectAll("text")
+  .data(layerLabels)
+  .join("text")
+    .attr("x", (_, i) => layerX[i])
+    .attr("y", margin.top - 12)
+    .attr("text-anchor", "middle")
+    .attr("fill", "#5a6478")
+    .attr("font-size", 11)
+    .attr("font-weight", 600)
+    .text(d => d);
+
+// Links
+const linkG = svg.append("g").attr("fill", "none");
+const linkSel = linkG.selectAll("path")
+  .data(sLinks)
+  .join("path")
+    .attr("class", "link")
+    .attr("d", sankeyLinkHorizontal())
+    .attr("stroke", d => nodeColor(d.source))
+    .attr("stroke-width", d => Math.max(1, d.width));
+
+// Nodes
+const nodeG = svg.append("g");
+const nodeSel = nodeG.selectAll("g")
+  .data(sNodes)
+  .join("g")
+    .attr("class", "node");
+
+nodeSel.append("rect")
+  .attr("x", d => d.x0)
+  .attr("y", d => d.y0)
+  .attr("height", d => Math.max(1, d.y1 - d.y0))
+  .attr("width", d => d.x1 - d.x0)
+  .attr("fill", d => nodeColor(d))
+  .attr("rx", 2);
+
+nodeSel.append("text")
+  .attr("x", d => d.layer < 2 ? d.x1 + 6 : d.x0 - 6)
+  .attr("y", d => (d.y0 + d.y1) / 2)
+  .attr("dy", "0.35em")
+  .attr("text-anchor", d => d.layer < 2 ? "start" : "end")
+  .text(d => d.name);
+
+// ── Backward trace on hover ─────────────────────────────────────────
+// Build adjacency: for each node, find all upstream nodes recursively
+function traceBackward(node) {
+  const visited = new Set([node.index]);
+  const queue = [node];
+  const traceLinks = new Set();
+  while (queue.length) {
+    const current = queue.shift();
+    for (const link of current.targetLinks || []) {
+      traceLinks.add(link);
+      if (!visited.has(link.source.index)) {
+        visited.add(link.source.index);
+        queue.push(link.source);
+      }
+    }
+  }
+  return {nodes: visited, links: traceLinks};
+}
+
+function traceForward(node) {
+  const visited = new Set([node.index]);
+  const queue = [node];
+  const traceLinks = new Set();
+  while (queue.length) {
+    const current = queue.shift();
+    for (const link of current.sourceLinks || []) {
+      traceLinks.add(link);
+      if (!visited.has(link.target.index)) {
+        visited.add(link.target.index);
+        queue.push(link.target);
+      }
+    }
+  }
+  return {nodes: visited, links: traceLinks};
+}
+
+nodeSel.on("mouseenter", (event, d) => {
+  const back = traceBackward(d);
+  const fwd = traceForward(d);
+  const activeNodes = new Set([...back.nodes, ...fwd.nodes]);
+  const activeLinks = new Set([...back.links, ...fwd.links]);
+
+  linkSel
+    .classed("faded", l => !activeLinks.has(l))
+    .classed("highlighted", l => activeLinks.has(l));
+  nodeSel
+    .classed("faded", n => !activeNodes.has(n.index));
+}).on("mouseleave", () => {
+  linkSel.classed("faded", false).classed("highlighted", false);
+  nodeSel.classed("faded", false);
+});
+
+// ── Animated flow particles (Canvas overlay) ────────────────────────
+const canvas = d3.select("body").append("canvas")
+  .style("position", "absolute")
+  .style("top", "0")
+  .style("left", "50%")
+  .style("transform", "translateX(-50%)")
+  .style("pointer-events", "none")
+  .attr("width", width)
+  .attr("height", height);
+
+const ctx = canvas.node().getContext("2d");
+
+// Generate particles along each link path
+const particles = [];
+const PARTICLE_DENSITY = 0.008; // particles per pixel of link width per unit length
+
+for (const link of sLinks) {
+  const count = Math.max(1, Math.round(link.width * PARTICLE_DENSITY * (link.target.x0 - link.source.x1)));
+  for (let i = 0; i < count; i++) {
+    particles.push({
+      link,
+      offset: rand(),
+      speed: 0.002 + rand() * 0.003,
+      size: 1 + rand() * 1.5,
+      color: nodeColor(link.source)
+    });
+  }
+}
+
+// Evaluate the sankey link path at parameter t (0-1)
+function linkPoint(link, t) {
+  const x0 = link.source.x1;
+  const x1 = link.target.x0;
+  const xi = d3.interpolateNumber(x0, x1);
+  const x = xi(t);
+  const xMid = xi(0.5);
+
+  // Cubic bezier control points matching sankeyLinkHorizontal
+  const y0 = link.y0;
+  const y1 = link.y1;
+
+  // Approximate the horizontal link as cubic bezier: (x0,y0) (xMid,y0) (xMid,y1) (x1,y1)
+  const u = t;
+  const u2 = u * u, u3 = u2 * u;
+  const mu = 1 - u, mu2 = mu * mu, mu3 = mu2 * mu;
+  const py = mu3 * y0 + 3 * mu2 * u * y0 + 3 * mu * u2 * y1 + u3 * y1;
+
+  return [x, py];
+}
+
+function animateParticles() {
+  ctx.clearRect(0, 0, width, height);
+
+  // Center the canvas content like the SVG
+  for (const p of particles) {
+    p.offset += p.speed;
+    if (p.offset > 1) p.offset -= 1;
+
+    const [x, y] = linkPoint(p.link, p.offset);
+    // Jitter within link width
+    const jitter = (rand() - 0.5) * p.link.width * 0.6;
+
+    ctx.beginPath();
+    ctx.arc(x, y + jitter, p.size, 0, Math.PI * 2);
+    ctx.fillStyle = p.color;
+    ctx.globalAlpha = 0.6;
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  requestAnimationFrame(animateParticles);
+}
+
+// Position canvas to align with SVG
+const svgEl = svg.node();
+const positionCanvas = () => {
+  const rect = svgEl.getBoundingClientRect();
+  canvas.node().style.left = rect.left + "px";
+  canvas.node().style.top = rect.top + "px";
+  canvas.node().style.transform = "none";
+};
+positionCanvas();
+window.addEventListener("resize", positionCanvas);
+
+animateParticles();
+</script>
+</body>
+</html>

@@ -150,7 +150,7 @@ def run_one_audit(bid, tool, skill_path, ss_path, html_path, out_path, model):
     try:
         subprocess.run(
             [CLAUDE_BIN, "-p", prompt, "--allowedTools", "Read,Write",
-             "--max-turns", "3", "--model", model, "--permission-mode", "bypassPermissions"],
+             "--max-turns", "25", "--model", model, "--permission-mode", "bypassPermissions"],
             capture_output=True, text=True, timeout=120, cwd=bare)
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return None
@@ -409,7 +409,7 @@ draw(runs.length - 1);
 def main():
     ap = argparse.ArgumentParser(description="Audit pipeline")
     ap.add_argument("--blocks", default="85-93")
-    ap.add_argument("--block-set", default="v1", help="v0, v0/gem, or v1")
+    ap.add_argument("--block-set", default="v1", help="e.g. v1-claude-sonnet-4-6")
     ap.add_argument("--model", default="sonnet", help="sonnet, opus, or haiku")
     ap.add_argument("--parallel", type=int, default=4)
     ap.add_argument("--skip-render", action="store_true")

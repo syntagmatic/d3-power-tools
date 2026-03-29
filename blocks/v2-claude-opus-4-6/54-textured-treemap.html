@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bivariate Textured Treemap</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; font-family: system-ui, -apple-system, sans-serif; color: #e0e0e0; display: flex; flex-direction: column; align-items: center; min-height: 100vh; padding: 24px; }
+  h1 { font-size: 18px; font-weight: 600; margin-bottom: 4px; color: #f0f0f0; }
+  .subtitle { font-size: 13px; color: #999; margin-bottom: 16px; }
+  #chart { position: relative; }
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 16px; justify-content: center; }
+  .legend-section { display: flex; flex-direction: column; gap: 6px; }
+  .legend-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: #888; margin-bottom: 2px; }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #ccc; }
+  .legend-swatch { width: 20px; height: 20px; border-radius: 2px; flex-shrink: 0; }
+  .growth-legend { display: flex; align-items: center; gap: 4px; margin-top: 4px; }
+  .growth-label { font-size: 11px; color: #999; }
+  .tooltip { position: absolute; pointer-events: none; background: rgba(20,20,40,0.95); border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; padding: 8px 12px; font-size: 12px; line-height: 1.5; opacity: 0; transition: opacity 0.15s; backdrop-filter: blur(8px); }
+  .tooltip .name { font-weight: 600; color: #fff; }
+  .tooltip .detail { color: #aaa; }
+  .tooltip .value { color: #ddd; }
+</style>
+</head>
+<body>
+<h1>Market Sectors — Bivariate Treemap</h1>
+<p class="subtitle">Color = category · Pattern = subcategory · Pattern spacing = growth rate</p>
+<div id="chart"></div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data ---
+const categories = [
+  { name: "Technology", color: "#4e79a7", subs: [
+    { name: "Software", value: 320, growth: 12 },
+    { name: "Hardware", value: 180, growth: -3 },
+    { name: "Cloud", value: 260, growth: 18 },
+    { name: "Semiconductors", value: 140, growth: 5 },
+  ]},
+  { name: "Healthcare", color: "#59a14f", subs: [
+    { name: "Pharma", value: 280, growth: 7 },
+    { name: "Biotech", value: 150, growth: 15 },
+    { name: "Devices", value: 110, growth: -2 },
+    { name: "Services", value: 90, growth: 3 },
+  ]},
+  { name: "Finance", color: "#f28e2b", subs: [
+    { name: "Banking", value: 240, growth: -1 },
+    { name: "Insurance", value: 160, growth: 2 },
+    { name: "Fintech", value: 120, growth: 22 },
+    { name: "Asset Mgmt", value: 100, growth: 4 },
+  ]},
+  { name: "Energy", color: "#e15759", subs: [
+    { name: "Oil & Gas", value: 200, growth: -8 },
+    { name: "Renewables", value: 170, growth: 25 },
+    { name: "Utilities", value: 130, growth: 1 },
+    { name: "Nuclear", value: 60, growth: 10 },
+  ]},
+  { name: "Consumer", color: "#b07aa1", subs: [
+    { name: "Retail", value: 190, growth: -4 },
+    { name: "Food & Bev", value: 150, growth: 3 },
+    { name: "Luxury", value: 80, growth: 8 },
+    { name: "E-commerce", value: 130, growth: 16 },
+  ]},
+  { name: "Industrial", color: "#76b7b2", subs: [
+    { name: "Aerospace", value: 140, growth: 6 },
+    { name: "Automotive", value: 170, growth: -5 },
+    { name: "Construction", value: 120, growth: 2 },
+    { name: "Logistics", value: 90, growth: 9 },
+  ]},
+];
+
+// Build hierarchy
+const root = d3.hierarchy({
+  name: "Market",
+  children: categories.map(c => ({
+    name: c.name,
+    color: c.color,
+    children: c.subs.map(s => ({ name: s.name, value: s.value, growth: s.growth, catColor: c.color, catName: c.name }))
+  }))
+}).sum(d => d.value).sort((a, b) => b.value - a.value);
+
+const width = 900, height = 560;
+
+const treemap = d3.treemap()
+  .size([width, height])
+  .paddingOuter(3)
+  .paddingInner(2)
+  .paddingTop(20)
+  .tile(d3.treemapSquarify);
+
+treemap(root);
+
+const container = d3.select("#chart");
+const svg = container.append("svg")
+  .attr("width", width)
+  .attr("height", height)
+  .attr("viewBox", `0 0 ${width} ${height}`);
+
+const defs = svg.append("defs");
+
+// --- Pattern types for subcategories ---
+// Each subcategory index (0-3) gets a distinct pattern type
+const patternTypes = ["hatch", "dots", "crosshatch", "waves"];
+
+// Growth rate → pattern spacing: negative growth = dense (small spacing), positive = sparse (large spacing)
+// Range: growth from -10 to +25 maps to spacing 3 to 14
+const growthExtent = [-10, 25];
+const spacingScale = d3.scaleLinear().domain(growthExtent).range([3, 14]).clamp(true);
+
+// Create patterns for each leaf
+const leaves = root.leaves();
+leaves.forEach((leaf, i) => {
+  const d = leaf.data;
+  const subIndex = leaf.parent.children.indexOf(leaf);
+  const patternType = patternTypes[subIndex];
+  const spacing = spacingScale(d.growth);
+  const patId = `pat-${i}`;
+  leaf.patternId = patId;
+  leaf.patternType = patternType;
+
+  // Determine mark color based on background lightness
+  const lab = d3.lab(d.catColor);
+  const markColor = lab.l > 55 ? "rgba(0,0,0,0.25)" : "rgba(255,255,255,0.35)";
+
+  const pat = defs.append("pattern")
+    .attr("id", patId)
+    .attr("width", spacing)
+    .attr("height", spacing)
+    .attr("patternUnits", "userSpaceOnUse");
+
+  if (patternType === "hatch") {
+    pat.attr("patternTransform", "rotate(45)");
+    pat.append("line")
+      .attr("x1", 0).attr("y1", 0).attr("x2", 0).attr("y2", spacing)
+      .attr("stroke", markColor).attr("stroke-width", 1.5);
+  } else if (patternType === "dots") {
+    pat.append("circle")
+      .attr("cx", spacing / 2).attr("cy", spacing / 2)
+      .attr("r", Math.max(0.8, spacing * 0.15))
+      .attr("fill", markColor);
+  } else if (patternType === "crosshatch") {
+    pat.attr("patternTransform", "rotate(45)");
+    pat.append("line")
+      .attr("x1", 0).attr("y1", 0).attr("x2", 0).attr("y2", spacing)
+      .attr("stroke", markColor).attr("stroke-width", 1.2);
+    pat.append("line")
+      .attr("x1", 0).attr("y1", 0).attr("x2", spacing).attr("y2", 0)
+      .attr("stroke", markColor).attr("stroke-width", 1.2);
+  } else if (patternType === "waves") {
+    const a = spacing * 0.3;
+    pat.append("path")
+      .attr("d", `M0,${spacing/2} Q${spacing/4},${spacing/2 - a} ${spacing/2},${spacing/2} Q${spacing*3/4},${spacing/2 + a} ${spacing},${spacing/2}`)
+      .attr("fill", "none").attr("stroke", markColor).attr("stroke-width", 1.3);
+  }
+});
+
+// --- Render category groups (depth 1) ---
+const groups = root.children;
+const catGroup = svg.selectAll(".cat-group")
+  .data(groups)
+  .join("g")
+    .attr("class", "cat-group");
+
+// Category headers
+catGroup.append("rect")
+  .attr("x", d => d.x0)
+  .attr("y", d => d.y0)
+  .attr("width", d => d.x1 - d.x0)
+  .attr("height", d => d.y1 - d.y0)
+  .attr("fill", "none")
+  .attr("rx", 2);
+
+catGroup.append("text")
+  .attr("x", d => d.x0 + 5)
+  .attr("y", d => d.y0 + 14)
+  .attr("fill", d => d.data.color)
+  .attr("font-size", "11px")
+  .attr("font-weight", 700)
+  .text(d => d.data.name);
+
+// --- Render leaves ---
+const tooltip = container.append("div").attr("class", "tooltip");
+
+const leafGroup = svg.selectAll(".leaf")
+  .data(leaves)
+  .join("g")
+    .attr("class", "leaf");
+
+// Color fill
+leafGroup.append("rect")
+  .attr("x", d => d.x0)
+  .attr("y", d => d.y0)
+  .attr("width", d => d.x1 - d.x0)
+  .attr("height", d => d.y1 - d.y0)
+  .attr("fill", d => d.data.catColor)
+  .attr("rx", 1);
+
+// Pattern overlay
+leafGroup.append("rect")
+  .attr("x", d => d.x0)
+  .attr("y", d => d.y0)
+  .attr("width", d => d.x1 - d.x0)
+  .attr("height", d => d.y1 - d.y0)
+  .attr("fill", d => `url(#${d.patternId})`)
+  .attr("rx", 1);
+
+// Hover rect
+leafGroup.append("rect")
+  .attr("x", d => d.x0)
+  .attr("y", d => d.y0)
+  .attr("width", d => d.x1 - d.x0)
+  .attr("height", d => d.y1 - d.y0)
+  .attr("fill", "transparent")
+  .attr("stroke", "transparent")
+  .attr("stroke-width", 2)
+  .attr("rx", 1)
+  .on("pointerenter", function(event, d) {
+    d3.select(this).attr("stroke", "#fff");
+    const sign = d.data.growth > 0 ? "+" : "";
+    tooltip.style("opacity", 1).html(
+      `<div class="name">${d.data.name}</div>` +
+      `<div class="detail">${d.data.catName}</div>` +
+      `<div class="value">Value: $${d.data.value}B</div>` +
+      `<div class="value">Growth: ${sign}${d.data.growth}%</div>` +
+      `<div class="detail">Pattern: ${d.patternType}</div>`
+    );
+  })
+  .on("pointermove", function(event) {
+    const [mx, my] = d3.pointer(event, container.node());
+    tooltip.style("left", (mx + 14) + "px").style("top", (my - 10) + "px");
+  })
+  .on("pointerleave", function() {
+    d3.select(this).attr("stroke", "transparent");
+    tooltip.style("opacity", 0);
+  });
+
+// Labels
+leafGroup.append("text")
+  .attr("x", d => d.x0 + 4)
+  .attr("y", d => d.y0 + 14)
+  .attr("fill", d => {
+    const lab = d3.lab(d.data.catColor);
+    return lab.l > 55 ? "#111" : "#f0f0f0";
+  })
+  .attr("font-size", "11px")
+  .attr("font-weight", 500)
+  .text(d => d.data.name)
+  .each(function(d) {
+    const cellW = d.x1 - d.x0 - 8, cellH = d.y1 - d.y0;
+    if (cellH < 18 || cellW < 20) { d3.select(this).remove(); return; }
+    let text = d.data.name;
+    while (this.getComputedTextLength() > cellW && text.length > 1) {
+      text = text.slice(0, -1);
+      d3.select(this).text(text + "…");
+    }
+    if (text.length <= 1) d3.select(this).remove();
+  });
+
+// Growth label
+leafGroup.append("text")
+  .attr("x", d => d.x0 + 4)
+  .attr("y", d => d.y0 + 26)
+  .attr("fill", d => {
+    const lab = d3.lab(d.data.catColor);
+    const base = lab.l > 55 ? "#333" : "#ccc";
+    return base;
+  })
+  .attr("font-size", "10px")
+  .text(d => {
+    const sign = d.data.growth > 0 ? "+" : "";
+    return `${sign}${d.data.growth}%`;
+  })
+  .each(function(d) {
+    const cellW = d.x1 - d.x0 - 8, cellH = d.y1 - d.y0;
+    if (cellH < 30 || cellW < 30) d3.select(this).remove();
+  });
+
+// --- Legend ---
+const legend = container.append("div").attr("class", "legend");
+
+// Category colors
+const colorLeg = legend.append("div").attr("class", "legend-section");
+colorLeg.append("div").attr("class", "legend-title").text("Category (color)");
+categories.forEach(c => {
+  const item = colorLeg.append("div").attr("class", "legend-item");
+  item.append("div").attr("class", "legend-swatch").style("background", c.color);
+  item.append("span").text(c.name);
+});
+
+// Pattern types
+const patLeg = legend.append("div").attr("class", "legend-section");
+patLeg.append("div").attr("class", "legend-title").text("Subcategory (pattern)");
+const patLabels = ["1st sub — diagonal hatch", "2nd sub — dots", "3rd sub — cross-hatch", "4th sub — waves"];
+const patSvgSize = 20;
+patLabels.forEach((label, i) => {
+  const item = patLeg.append("div").attr("class", "legend-item");
+  const sw = item.append("svg").attr("width", patSvgSize).attr("height", patSvgSize);
+  const swDefs = sw.append("defs");
+  const pId = `legend-pat-${i}`;
+  const sp = 7;
+  const mc = "rgba(60,60,60,0.5)";
+
+  const pat = swDefs.append("pattern").attr("id", pId).attr("width", sp).attr("height", sp).attr("patternUnits", "userSpaceOnUse");
+
+  if (i === 0) {
+    pat.attr("patternTransform", "rotate(45)");
+    pat.append("line").attr("x1",0).attr("y1",0).attr("x2",0).attr("y2",sp).attr("stroke",mc).attr("stroke-width",1.5);
+  } else if (i === 1) {
+    pat.append("circle").attr("cx",sp/2).attr("cy",sp/2).attr("r",1.2).attr("fill",mc);
+  } else if (i === 2) {
+    pat.attr("patternTransform", "rotate(45)");
+    pat.append("line").attr("x1",0).attr("y1",0).attr("x2",0).attr("y2",sp).attr("stroke",mc).attr("stroke-width",1.2);
+    pat.append("line").attr("x1",0).attr("y1",0).attr("x2",sp).attr("y2",0).attr("stroke",mc).attr("stroke-width",1.2);
+  } else {
+    const a = sp*0.3;
+    pat.append("path").attr("d",`M0,${sp/2} Q${sp/4},${sp/2-a} ${sp/2},${sp/2} Q${sp*3/4},${sp/2+a} ${sp},${sp/2}`).attr("fill","none").attr("stroke",mc).attr("stroke-width",1.3);
+  }
+
+  sw.append("rect").attr("width",patSvgSize).attr("height",patSvgSize).attr("fill","#ddd").attr("rx",2);
+  sw.append("rect").attr("width",patSvgSize).attr("height",patSvgSize).attr("fill",`url(#${pId})`).attr("rx",2);
+  item.append("span").text(label);
+});
+
+// Growth spacing
+const growthLeg = legend.append("div").attr("class", "legend-section");
+growthLeg.append("div").attr("class", "legend-title").text("Growth rate (spacing)");
+const growthSamples = [
+  { label: "−10% (dense)", growth: -10 },
+  { label: "0%", growth: 0 },
+  { label: "+10%", growth: 10 },
+  { label: "+25% (sparse)", growth: 25 },
+];
+growthSamples.forEach((s, i) => {
+  const item = growthLeg.append("div").attr("class", "legend-item");
+  const sw = item.append("svg").attr("width", patSvgSize).attr("height", patSvgSize);
+  const swDefs = sw.append("defs");
+  const sp = spacingScale(s.growth);
+  const gId = `legend-growth-${i}`;
+  const pat = swDefs.append("pattern").attr("id", gId).attr("width", sp).attr("height", sp).attr("patternUnits", "userSpaceOnUse").attr("patternTransform", "rotate(45)");
+  pat.append("line").attr("x1",0).attr("y1",0).attr("x2",0).attr("y2",sp).attr("stroke","rgba(60,60,60,0.5)").attr("stroke-width",1.5);
+  sw.append("rect").attr("width",patSvgSize).attr("height",patSvgSize).attr("fill","#ddd").attr("rx",2);
+  sw.append("rect").attr("width",patSvgSize).attr("height",patSvgSize).attr("fill",`url(#${gId})`).attr("rx",2);
+  item.append("span").text(s.label);
+});
+</script>
+</body>
+</html>

@@ -8,14 +8,14 @@ Each block combines 2–4 skills from this repo. The skills contain the judgment
 
 Read `blocks/manifest.json`. For each block:
 
-1. **Skip** if `blocks/{version}/{id}.html` already exists (version is `v0`, `v1`, etc.).
+1. **Skip** if `blocks/{version}-{model}/{id}.html` already exists.
 2. **Read the skills.** For each skill listed in the block entry, read `skills/{skill}/SKILL.md`. These encode the tradeoffs, failure modes, and perceptual reasoning behind each technique. The block should embody that knowledge, not just use the API. Pay attention to:
    - "When not to use this" — respect the boundaries
    - Pitfall sections — avoid the documented traps
    - Architecture patterns — Canvas+SVG layering, hit detection, state management
    - Interaction patterns — brush semantics, hover timing, transition choreography
-3. **Write** `blocks/{version}/{id}.html` following the prompt and the standards below.
-4. **Test**: `python3 scripts/test-viz.py blocks/{version}/{id}.html --wait-for {wait_for} --out temp/blocks/{id}.png --timeout 15000`
+3. **Write** `blocks/{version}-{model}/{id}.html` following the prompt and the standards below.
+4. **Test**: `python3 scripts/test-viz.py blocks/{version}-{model}/{id}.html --wait-for {wait_for} --out temp/blocks/{id}.png --timeout 15000`
 5. **If the test fails**, read the error, fix the HTML, re-test. Up to 2 fix attempts.
 6. **Running tally** after each: `[N/42] PASS/FAIL/SKIP — block name`
 

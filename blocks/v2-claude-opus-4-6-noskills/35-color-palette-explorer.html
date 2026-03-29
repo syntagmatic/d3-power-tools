@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Color Palette Explorer</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #1a1a2e; color: #e0e0e0; padding: 24px; }
+  h1 { font-size: 1.4rem; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { font-size: 0.85rem; color: #999; margin-bottom: 20px; }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 24px; }
+  .controls button {
+    padding: 8px 16px; border: 2px solid #444; border-radius: 6px;
+    background: #252540; color: #ccc; cursor: pointer; font-size: 0.82rem;
+    transition: all 0.2s;
+  }
+  .controls button.active { border-color: #7c83ff; color: #fff; background: #2e2e55; }
+  .controls button:hover { border-color: #666; }
+  .section-title { font-size: 0.95rem; font-weight: 600; margin: 20px 0 10px; color: #bbb; }
+  #bar-chart { width: 100%; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 8px; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  #contrast-matrix svg { font-size: 11px; }
+  .cvd-section { margin-top: 20px; }
+  .cvd-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .cvd-label { width: 110px; font-size: 0.8rem; color: #999; flex-shrink: 0; }
+  .cvd-strip { display: flex; height: 32px; border-radius: 4px; overflow: hidden; flex: 1; }
+  .cvd-strip div { flex: 1; }
+  .pass { font-weight: 700; }
+</style>
+</head>
+<body>
+<h1>Color Palette Explorer</h1>
+<p class="subtitle">Compare palettes for data visualization — contrast ratios & color vision deficiency simulation</p>
+<div class="controls" id="controls"></div>
+
+<div class="section-title">Bar Chart Preview</div>
+<div id="bar-chart"></div>
+
+<div class="grid">
+  <div>
+    <div class="section-title">WCAG Contrast Matrix</div>
+    <div id="contrast-matrix"></div>
+  </div>
+  <div>
+    <div class="section-title">CVD Simulation</div>
+    <div class="cvd-section" id="cvd-section"></div>
+  </div>
+</div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+const palettes = {
+  "Tol Bright":   ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377","#BBBBBB"],
+  "Tol Vibrant":  ["#EE7733","#0077BB","#33BBEE","#EE3377","#CC3311","#009988","#BBBBBB"],
+  "Tol Muted":    ["#CC6677","#332288","#DDCC77","#117733","#88CCEE","#882255","#44AA99","#999933","#AA4499"],
+  "Tol Light":    ["#77AADD","#EE8866","#EEDD88","#FFAABB","#99DDFF","#44BB99","#BBCC33","#AAAA00","#DDDDDD"],
+  "Tableau 10":   ["#4e79a7","#f28e2b","#e15759","#76b7b2","#59a14f","#edc948","#b07aa1","#ff9da7","#9c755f","#bab0ac"],
+  "Category 10":  ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf"]
+};
+
+const categories = ["Electronics","Clothing","Food","Home","Sports","Books","Toys","Health","Auto"];
+const data = categories.map((c, i) => ({ category: c, value: 20 + Math.sin(i * 1.7) * 15 + Math.random() * 10 }));
+
+// CVD simulation matrices (Brettel/Viénot approximations in linear RGB)
+function srgbToLinear(c) { return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }
+function linearToSrgb(c) { return c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1/2.4) - 0.055; }
+
+function simulateCVD(hex, type) {
+  const rgb = d3.color(hex);
+  let r = srgbToLinear(rgb.r / 255), g = srgbToLinear(rgb.g / 255), b = srgbToLinear(rgb.b / 255);
+  let R, G, B;
+  if (type === "protanopia") {
+    R = 0.152286 * r + 1.052583 * g - 0.204868 * b;
+    G = 0.114503 * r + 0.786281 * g + 0.099216 * b;
+    B = -0.003882 * r - 0.048116 * g + 1.051998 * b;
+  } else if (type === "deuteranopia") {
+    R = 0.367322 * r + 0.860646 * g - 0.227968 * b;
+    G = 0.280085 * r + 0.672501 * g + 0.047413 * b;
+    B = -0.011820 * r + 0.042940 * g + 0.968881 * b;
+  } else {
+    R = 1.255528 * r - 0.076749 * g - 0.178779 * b;
+    G = -0.078411 * r + 0.930809 * g + 0.147602 * b;
+    B = 0.004733 * r + 0.691367 * g + 0.303900 * b;
+  }
+  const clamp = v => Math.max(0, Math.min(1, v));
+  return d3.rgb(
+    Math.round(linearToSrgb(clamp(R)) * 255),
+    Math.round(linearToSrgb(clamp(G)) * 255),
+    Math.round(linearToSrgb(clamp(B)) * 255)
+  ).formatHex();
+}
+
+// Relative luminance per WCAG 2.1
+function luminance(hex) {
+  const c = d3.color(hex);
+  const [rs, gs, bs] = [c.r/255, c.g/255, c.b/255].map(srgbToLinear);
+  return 0.2126 * rs + 0.7152 * gs + 0.0722 * bs;
+}
+
+function contrastRatio(hex1, hex2) {
+  const l1 = luminance(hex1), l2 = luminance(hex2);
+  const lighter = Math.max(l1, l2), darker = Math.min(l1, l2);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+let current = "Tol Bright";
+
+// Controls
+const controlsDiv = d3.select("#controls");
+Object.keys(palettes).forEach(name => {
+  controlsDiv.append("button")
+    .text(name)
+    .classed("active", name === current)
+    .on("click", function() {
+      current = name;
+      controlsDiv.selectAll("button").classed("active", false);
+      d3.select(this).classed("active", true);
+      update();
+    });
+});
+
+// Bar chart
+const margin = { top: 12, right: 16, bottom: 28, left: 48 };
+const barW = Math.min(800, window.innerWidth - 64);
+const barH = 200;
+const svgBar = d3.select("#bar-chart").append("svg")
+  .attr("width", barW).attr("height", barH);
+
+const x = d3.scaleBand().domain(data.map(d => d.category)).range([margin.left, barW - margin.right]).padding(0.2);
+const y = d3.scaleLinear().domain([0, d3.max(data, d => d.value) * 1.1]).range([barH - margin.bottom, margin.top]);
+
+svgBar.append("g").attr("transform", `translate(0,${barH - margin.bottom})`)
+  .call(d3.axisBottom(x).tickSize(0)).select(".domain").remove();
+svgBar.selectAll(".tick text").attr("fill", "#888").style("font-size", "10px");
+
+svgBar.append("g").attr("transform", `translate(${margin.left},0)`)
+  .call(d3.axisLeft(y).ticks(4).tickSize(-barW + margin.left + margin.right))
+  .call(g => g.select(".domain").remove())
+  .call(g => g.selectAll(".tick line").attr("stroke", "#333"))
+  .call(g => g.selectAll(".tick text").attr("fill", "#888"));
+
+const bars = svgBar.selectAll(".bar").data(data).join("rect")
+  .attr("class", "bar")
+  .attr("x", d => x(d.category))
+  .attr("width", x.bandwidth())
+  .attr("y", d => y(d.value))
+  .attr("height", d => barH - margin.bottom - y(d.value))
+  .attr("rx", 3);
+
+// Contrast matrix
+function drawMatrix(colors) {
+  const n = colors.length;
+  const cellSize = Math.min(44, (Math.min(barW, 500) - 20) / (n + 1));
+  const mW = cellSize * (n + 1) + 4;
+  const mH = cellSize * (n + 1) + 4;
+
+  d3.select("#contrast-matrix").selectAll("*").remove();
+  const svgM = d3.select("#contrast-matrix").append("svg")
+    .attr("width", mW).attr("height", mH);
+
+  // Column headers
+  colors.forEach((c, i) => {
+    svgM.append("rect")
+      .attr("x", (i + 1) * cellSize + 2).attr("y", 2)
+      .attr("width", cellSize - 2).attr("height", cellSize - 2)
+      .attr("fill", c).attr("rx", 3);
+  });
+
+  // Row headers
+  colors.forEach((c, i) => {
+    svgM.append("rect")
+      .attr("x", 2).attr("y", (i + 1) * cellSize + 2)
+      .attr("width", cellSize - 2).attr("height", cellSize - 2)
+      .attr("fill", c).attr("rx", 3);
+  });
+
+  // Cells
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      if (i === j) continue;
+      const ratio = contrastRatio(colors[i], colors[j]);
+      const pass = ratio >= 3;
+      svgM.append("rect")
+        .attr("x", (j + 1) * cellSize + 2).attr("y", (i + 1) * cellSize + 2)
+        .attr("width", cellSize - 2).attr("height", cellSize - 2)
+        .attr("fill", pass ? "#1a2e1a" : "#2e1a1a").attr("rx", 2);
+      svgM.append("text")
+        .attr("x", (j + 1) * cellSize + cellSize / 2)
+        .attr("y", (i + 1) * cellSize + cellSize / 2 + 1)
+        .attr("text-anchor", "middle").attr("dominant-baseline", "middle")
+        .attr("fill", pass ? "#6f6" : "#f66")
+        .attr("font-size", cellSize < 34 ? "8px" : "10px")
+        .attr("font-weight", pass ? 700 : 400)
+        .text(ratio.toFixed(1));
+    }
+  }
+}
+
+// CVD strips
+function drawCVD(colors) {
+  const section = d3.select("#cvd-section");
+  section.selectAll("*").remove();
+
+  const types = [
+    { key: "normal", label: "Normal vision" },
+    { key: "protanopia", label: "Protanopia" },
+    { key: "deuteranopia", label: "Deuteranopia" },
+    { key: "tritanopia", label: "Tritanopia" }
+  ];
+
+  types.forEach(({ key, label }) => {
+    const row = section.append("div").attr("class", "cvd-row");
+    row.append("div").attr("class", "cvd-label").text(label);
+    const strip = row.append("div").attr("class", "cvd-strip");
+    colors.forEach(c => {
+      const simulated = key === "normal" ? c : simulateCVD(c, key);
+      strip.append("div").style("background", simulated);
+    });
+  });
+}
+
+function update() {
+  const colors = palettes[current];
+  const colorScale = d3.scaleOrdinal().domain(data.map(d => d.category)).range(colors);
+
+  bars.transition().duration(400)
+    .attr("fill", d => colorScale(d.category));
+
+  drawMatrix(colors);
+  drawCVD(colors);
+}
+
+update();
+</script>
+</body>
+</html>

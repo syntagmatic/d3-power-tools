@@ -64,14 +64,17 @@ Examples live in `skills/*/examples/` and double as test fixtures. Add new test 
 Example visualizations live in `blocks/`. Each version is a generation run against the manifest.
 
 - `blocks/manifest.json` — prompts and skill lists (always current)
-- `blocks/v0/` — v0 Claude-generated blocks (105)
-- `blocks/v0/gem/` — v0 Gemini-generated blocks (105), same prompts and skills
+- `blocks/{version}-{model}/` — generated blocks, one dir per version+model combo
+- `blocks/{version}-{model}/generation.json` — provenance: model, per-block status
 
-**Generating Gemini blocks:**
+**Directory naming:** `v{N}-{model-id}`, e.g. `v0-claude-opus-4-6`, `v1-gemini-3-flash-preview`.
+
+**Generating blocks:**
 ```bash
-python3 scripts/generate-blocks-gemini.py v1   # version arg, defaults to v0
+python3 scripts/generate-blocks-claude.py v2-claude-opus-4-6          # Claude
+python3 scripts/generate-blocks-gemini.py v2-gemini-3-flash-preview   # Gemini
 ```
-Reads manifest, runs `gemini -p --sandbox --yolo` with 5 parallel workers. Skips existing files, so safe to re-run for retries.
+Both read manifest, run 5 parallel workers, skip existing files. Safe to re-run for retries.
 
 ## Multi-Session Coordination
 

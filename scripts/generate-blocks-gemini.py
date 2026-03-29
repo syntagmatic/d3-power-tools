@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate blocks using Gemini CLI. Reads manifest.json, outputs to blocks/{version}/gem/."""
+"""Generate blocks using Gemini CLI. Reads manifest.json, outputs to blocks/{version}-{model}/."""
 import json
 import os
 import shutil
@@ -18,7 +18,8 @@ MAX_PARALLEL = 5
 # Parse args
 args = sys.argv[1:]
 all_skills = "--all-skills" in args
-args = [a for a in args if a != "--all-skills"]
+no_skills = "--no-skills" in args
+args = [a for a in args if a not in ("--all-skills", "--no-skills")]
 MODEL = None
 for i, a in enumerate(args):
     if a == "--model" and i + 1 < len(args):
@@ -29,7 +30,7 @@ for i, a in enumerate(args):
 VERSION = args[0] if args else "v0"
 ONLY_IDS = set(args[1:]) if len(args) > 1 else None
 
-OUTDIR = PROJ / "blocks" / VERSION / "gem"
+OUTDIR = PROJ / "blocks" / VERSION
 LOGFILE = PROJ / "temp" / f"generate-blocks-gemini-{VERSION}.log"
 
 OUTDIR.mkdir(parents=True, exist_ok=True)
@@ -42,7 +43,8 @@ def run_block(idx, block):
         print(f"[{idx}] SKIP {bid} (exists)")
         return ("skip", bid)
 
-    staging = create_staging_dir(bid, block["skills"], PROJ, all_skills=all_skills)
+    skills_list = [] if no_skills else block["skills"]
+    staging = create_staging_dir(bid, skills_list, PROJ, all_skills=all_skills, prefix=VERSION)
 
     # Write to staging dir, then copy out (Gemini sandbox blocks symlinks)
     staging_outfile = staging / f"{bid}.html"
@@ -108,7 +110,7 @@ def main():
     if ONLY_IDS:
         blocks = [b for b in blocks if b["id"] in ONLY_IDS]
 
-    mode = "all skills" if all_skills else "manifest skills"
+    mode = "no skills" if no_skills else "all skills" if all_skills else "manifest skills"
     print(f"Generating {len(blocks)} blocks ({mode}) with up to {MAX_PARALLEL} parallel jobs\n")
 
     results = {"pass": 0, "fail": 0, "skip": 0, "throttle": 0}

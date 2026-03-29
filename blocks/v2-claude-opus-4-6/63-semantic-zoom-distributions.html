@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Semantic Zoom Distributions</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #0a0a0f; color: #e0e0e0; font-family: system-ui, sans-serif; overflow: hidden; }
+  #container { position: relative; width: 100vw; height: 100vh; }
+  canvas { position: absolute; top: 0; left: 0; }
+  svg { position: absolute; top: 0; left: 0; }
+  .mode-badge {
+    position: absolute; top: 16px; right: 16px;
+    padding: 6px 14px; border-radius: 4px;
+    font-size: 13px; font-weight: 600; letter-spacing: 0.5px;
+    pointer-events: none; transition: background 0.3s, color 0.3s;
+  }
+  .mode-density { background: #1a3a5c; color: #6bb8ff; }
+  .mode-hexbin { background: #2a4a2a; color: #7ddb7d; }
+  .mode-points { background: #4a2a3a; color: #e88aaf; }
+  .zoom-hint {
+    position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+    font-size: 12px; color: #666; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="canvas"></canvas>
+  <svg id="svg"></svg>
+  <div class="mode-badge" id="badge">DENSITY CONTOURS</div>
+  <div class="zoom-hint">Scroll to zoom · Drag to pan</div>
+</div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+import {hexbin as d3Hexbin} from "https://cdn.jsdelivr.net/npm/d3-hexbin@0.2/+esm";
+import * as d3Contour from "https://cdn.jsdelivr.net/npm/d3-contour@4/+esm";
+
+// --- Synthetic data: 2000 points in 5 clusters ---
+const rng = d3.randomLcg(42);
+const randN = d3.randomNormal.source(rng);
+const clusters = [
+  { cx: 200, cy: 300, sx: 60, sy: 50, n: 500, label: "Alpha" },
+  { cx: 600, cy: 200, sx: 80, sy: 40, n: 450, label: "Beta" },
+  { cx: 400, cy: 500, sx: 50, sy: 70, n: 400, label: "Gamma" },
+  { cx: 750, cy: 550, sx: 45, sy: 55, n: 350, label: "Delta" },
+  { cx: 150, cy: 600, sx: 65, sy: 35, n: 300, label: "Epsilon" },
+];
+
+const data = [];
+let id = 0;
+for (const c of clusters) {
+  const rx = randN(c.cx, c.sx), ry = randN(c.cy, c.sy);
+  for (let i = 0; i < c.n; i++) {
+    data.push({ x: rx(), y: ry(), cluster: c.label, id: id++ });
+  }
+}
+
+// --- Layout ---
+const margin = { top: 40, right: 40, bottom: 50, left: 60 };
+const W = window.innerWidth, H = window.innerHeight;
+const width = W - margin.left - margin.right;
+const height = H - margin.top - margin.bottom;
+
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const dpr = window.devicePixelRatio || 1;
+canvas.width = W * dpr; canvas.height = H * dpr;
+canvas.style.width = W + "px"; canvas.style.height = H + "px";
+ctx.scale(dpr, dpr);
+
+const svg = d3.select("#svg").attr("width", W).attr("height", H);
+
+const xScale = d3.scaleLinear().domain(d3.extent(data, d => d.x)).nice().range([margin.left, W - margin.right]);
+const yScale = d3.scaleLinear().domain(d3.extent(data, d => d.y)).nice().range([margin.top, H - margin.bottom]);
+
+const clusterColor = d3.scaleOrdinal()
+  .domain(clusters.map(c => c.label))
+  .range(["#6bb8ff", "#7ddb7d", "#e88aaf", "#f0c050", "#b895e8"]);
+
+// --- Axes (SVG) ---
+const xAxisG = svg.append("g").attr("transform", `translate(0,${H - margin.bottom})`);
+const yAxisG = svg.append("g").attr("transform", `translate(${margin.left},0)`);
+const xAxis = g => g.call(d3.axisBottom(xScale).ticks(8)).call(g => g.selectAll("text,line,path").attr("stroke", "#444").attr("fill", "#888"));
+const yAxis = g => g.call(d3.axisLeft(yScale).ticks(8)).call(g => g.selectAll("text,line,path").attr("stroke", "#444").attr("fill", "#888"));
+xAxisG.call(xAxis); yAxisG.call(yAxis);
+
+// --- LOD state machine with hysteresis ---
+const LOD_STATES = [
+  { name: "density",  enterAbove: 0,   exitBelow: 0 },
+  { name: "hexbin",   enterAbove: 3.0, exitBelow: 2.2 },
+  { name: "points",   enterAbove: 7.0, exitBelow: 5.5 },
+];
+let lodIndex = 0;
+function updateLOD(k) {
+  while (lodIndex < LOD_STATES.length - 1 && k >= LOD_STATES[lodIndex + 1].enterAbove) lodIndex++;
+  while (lodIndex > 0 && k < LOD_STATES[lodIndex].exitBelow) lodIndex--;
+  return LOD_STATES[lodIndex].name;
+}
+
+const badge = document.getElementById("badge");
+const badgeLabels = { density: "DENSITY CONTOURS", hexbin: "HEXBIN GRID", points: "LABELED POINTS" };
+
+// --- Contour density ---
+function drawDensity(zx, zy, alpha) {
+  const contourGen = d3Contour.contourDensity()
+    .x(d => zx(d.x)).y(d => zy(d.y))
+    .size([W, H])
+    .bandwidth(30)
+    .thresholds(12);
+
+  const contours = contourGen(data);
+  const colorScale = d3.scaleSequential(d3.interpolateViridis).domain([0, d3.max(contours, c => c.value)]);
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.beginPath();
+  ctx.rect(margin.left, margin.top, width, height);
+  ctx.clip();
+
+  for (const contour of contours) {
+    ctx.beginPath();
+    const path = d3.geoPath().context(ctx);
+    path(contour);
+    ctx.fillStyle = colorScale(contour.value);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// --- Hexbin ---
+function drawHexbin(zx, zy, alpha) {
+  const radius = 18;
+  const hexbinGen = d3Hexbin()
+    .x(d => zx(d.x)).y(d => zy(d.y))
+    .radius(radius)
+    .extent([[margin.left, margin.top], [W - margin.right, H - margin.bottom]]);
+
+  const bins = hexbinGen(data);
+  const maxCount = d3.max(bins, b => b.length) || 1;
+  const colorScale = d3.scaleSequential(d3.interpolateYlGnBu).domain([0, maxCount]);
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.beginPath();
+  ctx.rect(margin.left, margin.top, width, height);
+  ctx.clip();
+
+  for (const bin of bins) {
+    if (bin.x < margin.left - radius || bin.x > W - margin.right + radius) continue;
+    if (bin.y < margin.top - radius || bin.y > H - margin.bottom + radius) continue;
+    ctx.beginPath();
+    const hex = hexbinGen.hexagon();
+    const p = new Path2D();
+    // hexagon centered at bin.x, bin.y
+    const corners = 6;
+    for (let i = 0; i < corners; i++) {
+      const angle = (Math.PI / 3) * i - Math.PI / 6;
+      const hx = bin.x + radius * Math.cos(angle);
+      const hy = bin.y + radius * Math.sin(angle);
+      if (i === 0) ctx.moveTo(hx, hy); else ctx.lineTo(hx, hy);
+    }
+    ctx.closePath();
+    ctx.fillStyle = colorScale(bin.length);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.15)";
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// --- Points + labels ---
+function drawPoints(zx, zy, alpha, showLabels) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.beginPath();
+  ctx.rect(margin.left, margin.top, width, height);
+  ctx.clip();
+
+  const [xMin, xMax] = zx.domain();
+  const [yMin, yMax] = zy.domain();
+
+  for (const d of data) {
+    if (d.x < xMin || d.x > xMax || d.y < yMin || d.y > yMax) continue;
+    const px = zx(d.x), py = zy(d.y);
+    ctx.beginPath();
+    ctx.arc(px, py, 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = clusterColor(d.cluster);
+    ctx.fill();
+  }
+
+  if (showLabels) {
+    ctx.font = "10px system-ui";
+    ctx.textBaseline = "bottom";
+    for (const d of data) {
+      if (d.x < xMin || d.x > xMax || d.y < yMin || d.y > yMax) continue;
+      const px = zx(d.x), py = zy(d.y);
+      ctx.fillStyle = "rgba(255,255,255,0.75)";
+      ctx.fillText(`${d.cluster}-${d.id}`, px + 5, py - 2);
+    }
+  }
+  ctx.restore();
+}
+
+// --- Main render ---
+function render(transform) {
+  const zx = transform.rescaleX(xScale);
+  const zy = transform.rescaleY(yScale);
+  const k = transform.k;
+  const mode = updateLOD(k);
+
+  // Update axes
+  xAxisG.call(d3.axisBottom(zx).ticks(8)).call(g => g.selectAll("text,line,path").attr("stroke", "#444").attr("fill", "#888"));
+  yAxisG.call(d3.axisLeft(zy).ticks(8)).call(g => g.selectAll("text,line,path").attr("stroke", "#444").attr("fill", "#888"));
+
+  // Clear
+  ctx.clearRect(0, 0, W, H);
+
+  // Cross-fade zones for smooth LOD transitions
+  if (mode === "density") {
+    // Check if close to hexbin threshold — cross-fade
+    const fadeStart = LOD_STATES[1].exitBelow;
+    const fadeEnd = LOD_STATES[1].enterAbove;
+    if (k > fadeStart) {
+      const t = (k - fadeStart) / (fadeEnd - fadeStart);
+      drawDensity(zx, zy, 1 - t);
+      drawHexbin(zx, zy, t);
+    } else {
+      drawDensity(zx, zy, 1);
+    }
+  } else if (mode === "hexbin") {
+    const fadeStart = LOD_STATES[2].exitBelow;
+    const fadeEnd = LOD_STATES[2].enterAbove;
+    if (k > fadeStart) {
+      const t = (k - fadeStart) / (fadeEnd - fadeStart);
+      drawHexbin(zx, zy, 1 - t);
+      drawPoints(zx, zy, t, false);
+    } else {
+      drawHexbin(zx, zy, 1);
+    }
+  } else {
+    drawPoints(zx, zy, 1, true);
+  }
+
+  // Badge
+  badge.textContent = badgeLabels[mode];
+  badge.className = `mode-badge mode-${mode}`;
+}
+
+// --- Zoom ---
+const zoom = d3.zoom()
+  .scaleExtent([1, 40])
+  .translateExtent([[0, 0], [W, H]])
+  .extent([[margin.left, margin.top], [W - margin.right, H - margin.bottom]])
+  .on("zoom", ({ transform }) => render(transform));
+
+svg.append("rect")
+  .attr("width", W).attr("height", H)
+  .attr("fill", "none")
+  .attr("pointer-events", "all");
+
+svg.call(zoom);
+svg.style("touch-action", "none");
+
+// Initial render
+render(d3.zoomIdentity);
+</script>
+</body>
+</html>

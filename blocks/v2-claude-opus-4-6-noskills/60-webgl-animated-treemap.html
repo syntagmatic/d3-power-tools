@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebGL Animated Treemap — Revenue vs Headcount</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0f; color: #e0e0e0; font-family: system-ui, -apple-system, sans-serif; overflow: hidden; }
+  #container { position: relative; width: 100vw; height: 100vh; }
+  canvas { display: block; width: 100%; height: 100%; }
+  #controls {
+    position: absolute; top: 16px; left: 16px; z-index: 10;
+    display: flex; gap: 10px; align-items: center;
+  }
+  button {
+    background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.25);
+    color: #fff; padding: 8px 18px; border-radius: 6px; cursor: pointer;
+    font-size: 14px; font-weight: 500; backdrop-filter: blur(8px);
+    transition: background 0.15s;
+  }
+  button:hover { background: rgba(255,255,255,0.2); }
+  button.active { background: rgba(100,140,255,0.35); border-color: rgba(100,140,255,0.6); }
+  #info {
+    position: absolute; bottom: 16px; left: 16px; z-index: 10;
+    font-size: 12px; color: rgba(255,255,255,0.5);
+  }
+  #tooltip {
+    position: absolute; pointer-events: none; z-index: 20;
+    background: rgba(10,10,20,0.92); border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 6px; padding: 8px 12px; font-size: 13px;
+    display: none; backdrop-filter: blur(6px);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+  }
+  #tooltip .label { font-weight: 600; margin-bottom: 3px; }
+  #tooltip .value { color: rgba(255,255,255,0.7); font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="canvas"></canvas>
+  <div id="controls">
+    <button id="btnRevenue" class="active">Revenue</button>
+    <button id="btnHeadcount">Headcount</button>
+  </div>
+  <div id="tooltip"><div class="label"></div><div class="value"></div></div>
+  <div id="info">5,000 leaves · WebGL instanced quads · 800ms cubicInOut</div>
+</div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data: 5000 leaves in a 3-level hierarchy ---
+const sectors = [
+  "Technology", "Healthcare", "Finance", "Energy", "Consumer",
+  "Industrial", "Materials", "Telecom", "Utilities", "Real Estate"
+];
+const subSectors = {};
+const rng = d3.randomLcg(42);
+const rand = d3.randomUniform.source(rng);
+const randNorm = d3.randomNormal.source(rng);
+
+sectors.forEach(s => {
+  const n = 4 + Math.floor(rand(0, 6)());
+  subSectors[s] = Array.from({length: n}, (_, i) => `${s}-${String.fromCharCode(65 + i)}`);
+});
+
+const leaves = [];
+let id = 0;
+for (const sector of sectors) {
+  for (const sub of subSectors[sector]) {
+    const count = 30 + Math.floor(rand(0, 80)());
+    for (let i = 0; i < count; i++) {
+      const rev = Math.max(1, Math.abs(randNorm(50, 40)()));
+      const hc = Math.max(1, Math.abs(randNorm(30, 25)()));
+      leaves.push({ id: id++, sector, sub, name: `Co-${id}`, revenue: rev, headcount: hc });
+    }
+  }
+}
+// Trim or pad to exactly 5000
+while (leaves.length > 5000) leaves.pop();
+while (leaves.length < 5000) {
+  const l = leaves[leaves.length % 1000];
+  leaves.push({ ...l, id: id++, name: `Co-${id}`, revenue: l.revenue * rand(0.5, 1.5)(), headcount: l.headcount * rand(0.5, 1.5)() });
+}
+
+// --- Build hierarchy ---
+function buildHierarchy(valueField) {
+  const grouped = d3.group(leaves, d => d.sector, d => d.sub);
+  const root = d3.hierarchy(
+    { name: "root", children: Array.from(grouped, ([sector, subs]) => ({
+      name: sector,
+      children: Array.from(subs, ([sub, items]) => ({
+        name: sub,
+        children: items.map(d => ({ name: d.name, leafId: d.id, value: d[valueField], data: d }))
+      }))
+    })) },
+    d => d.children
+  ).sum(d => d.value || 0);
+  return root;
+}
+
+// --- Treemap layout ---
+const canvas = document.getElementById("canvas");
+const container = document.getElementById("container");
+let W, H, dpr;
+
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  W = container.clientWidth;
+  H = container.clientHeight;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + "px";
+  canvas.style.height = H + "px";
+}
+resize();
+
+function computeLayout(valueField) {
+  const root = buildHierarchy(valueField);
+  const treemap = d3.treemap()
+    .size([W, H])
+    .padding(1)
+    .paddingOuter(2)
+    .round(true)
+    .tile(d3.treemapSquarify.ratio(1.2));
+  treemap(root);
+
+  const positions = new Map();
+  for (const leaf of root.leaves()) {
+    positions.set(leaf.data.leafId, {
+      x0: leaf.x0, y0: leaf.y0, x1: leaf.x1, y1: leaf.y1,
+      sector: leaf.parent.parent.data.name
+    });
+  }
+  return positions;
+}
+
+let layoutA = computeLayout("revenue");
+let layoutB = computeLayout("headcount");
+
+// --- Color scheme ---
+const sectorColor = new Map();
+const palette = d3.schemeTableau10;
+sectors.forEach((s, i) => sectorColor.set(s, d3.color(palette[i % palette.length])));
+
+// Build per-leaf color array
+const leafColors = new Float32Array(5000 * 3);
+leaves.forEach((leaf, i) => {
+  const c = sectorColor.get(leaf.sector);
+  leafColors[i * 3] = c.r / 255;
+  leafColors[i * 3 + 1] = c.g / 255;
+  leafColors[i * 3 + 2] = c.b / 255;
+});
+
+// --- WebGL Setup ---
+const gl = canvas.getContext("webgl2", { antialias: false, alpha: false });
+if (!gl) { document.body.innerHTML = "<p style='color:red;padding:40px'>WebGL 2 not supported</p>"; throw new Error("No WebGL2"); }
+
+const vsSource = `#version 300 es
+  precision highp float;
+
+  // Per-vertex (unit quad)
+  in vec2 a_quad;
+
+  // Per-instance
+  in vec4 a_rectFrom;  // x0, y0, x1, y1 (source layout)
+  in vec4 a_rectTo;    // x0, y0, x1, y1 (target layout)
+  in vec3 a_color;
+
+  uniform float u_t;        // animation progress 0..1
+  uniform vec2 u_resolution;
+
+  out vec3 v_color;
+  out vec2 v_uv;
+
+  void main() {
+    vec4 rect = mix(a_rectFrom, a_rectTo, u_t);
+    float x = mix(rect.x, rect.z, a_quad.x);
+    float y = mix(rect.y, rect.w, a_quad.y);
+
+    // To clip space
+    vec2 pos = (vec2(x, y) / u_resolution) * 2.0 - 1.0;
+    pos.y = -pos.y;
+    gl_Position = vec4(pos, 0.0, 1.0);
+
+    v_color = a_color;
+    v_uv = a_quad;
+  }
+`;
+
+const fsSource = `#version 300 es
+  precision highp float;
+
+  in vec3 v_color;
+  in vec2 v_uv;
+  out vec4 fragColor;
+
+  void main() {
+    // Subtle gradient: slightly brighter at top
+    float brightness = 0.85 + 0.15 * (1.0 - v_uv.y);
+    // Edge darkening
+    vec2 edge = smoothstep(vec2(0.0), vec2(0.02), min(v_uv, 1.0 - v_uv));
+    float edgeFactor = edge.x * edge.y;
+    fragColor = vec4(v_color * brightness * mix(0.6, 1.0, edgeFactor), 1.0);
+  }
+`;
+
+function compileShader(type, source) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    console.error(gl.getShaderInfoLog(shader));
+    gl.deleteShader(shader);
+    return null;
+  }
+  return shader;
+}
+
+const vs = compileShader(gl.VERTEX_SHADER, vsSource);
+const fs = compileShader(gl.FRAGMENT_SHADER, fsSource);
+const program = gl.createProgram();
+gl.attachShader(program, vs);
+gl.attachShader(program, fs);
+gl.linkProgram(program);
+if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+  console.error(gl.getProgramInfoLog(program));
+}
+gl.useProgram(program);
+
+const aQuad = gl.getAttribLocation(program, "a_quad");
+const aRectFrom = gl.getAttribLocation(program, "a_rectFrom");
+const aRectTo = gl.getAttribLocation(program, "a_rectTo");
+const aColor = gl.getAttribLocation(program, "a_color");
+const uT = gl.getUniformLocation(program, "u_t");
+const uResolution = gl.getUniformLocation(program, "u_resolution");
+
+// Unit quad (two triangles)
+const quadVerts = new Float32Array([0,0, 1,0, 1,1, 0,0, 1,1, 0,1]);
+const quadBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+gl.bufferData(gl.ARRAY_BUFFER, quadVerts, gl.STATIC_DRAW);
+
+// Instance buffers
+const N = 5000;
+const rectFromData = new Float32Array(N * 4);
+const rectToData = new Float32Array(N * 4);
+
+function fillRectBuffer(arr, layoutMap) {
+  for (let i = 0; i < N; i++) {
+    const leaf = leaves[i];
+    const r = layoutMap.get(leaf.id);
+    if (r) {
+      arr[i * 4] = r.x0 * dpr;
+      arr[i * 4 + 1] = r.y0 * dpr;
+      arr[i * 4 + 2] = r.x1 * dpr;
+      arr[i * 4 + 3] = r.y1 * dpr;
+    }
+  }
+}
+
+fillRectBuffer(rectFromData, layoutA);
+fillRectBuffer(rectToData, layoutA); // Start at same position
+
+const rectFromBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, rectFromBuf);
+gl.bufferData(gl.ARRAY_BUFFER, rectFromData, gl.DYNAMIC_DRAW);
+
+const rectToBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, rectToBuf);
+gl.bufferData(gl.ARRAY_BUFFER, rectToData, gl.DYNAMIC_DRAW);
+
+const colorBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, colorBuf);
+gl.bufferData(gl.ARRAY_BUFFER, leafColors, gl.STATIC_DRAW);
+
+// VAO
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+
+// Quad vertices
+gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+gl.enableVertexAttribArray(aQuad);
+gl.vertexAttribPointer(aQuad, 2, gl.FLOAT, false, 0, 0);
+
+// Instance: rectFrom (vec4)
+gl.bindBuffer(gl.ARRAY_BUFFER, rectFromBuf);
+gl.enableVertexAttribArray(aRectFrom);
+gl.vertexAttribPointer(aRectFrom, 4, gl.FLOAT, false, 0, 0);
+gl.vertexAttribDivisor(aRectFrom, 1);
+
+// Instance: rectTo (vec4)
+gl.bindBuffer(gl.ARRAY_BUFFER, rectToBuf);
+gl.enableVertexAttribArray(aRectTo);
+gl.vertexAttribPointer(aRectTo, 4, gl.FLOAT, false, 0, 0);
+gl.vertexAttribDivisor(aRectTo, 1);
+
+// Instance: color (vec3)
+gl.bindBuffer(gl.ARRAY_BUFFER, colorBuf);
+gl.enableVertexAttribArray(aColor);
+gl.vertexAttribPointer(aColor, 3, gl.FLOAT, false, 0, 0);
+gl.vertexAttribDivisor(aColor, 1);
+
+gl.bindVertexArray(null);
+
+// --- Animation state ---
+let currentLayout = "revenue";
+let animating = false;
+let animStart = 0;
+const ANIM_DURATION = 800;
+
+function cubicInOut(t) {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+function startTransition(targetLayout) {
+  if (targetLayout === currentLayout && !animating) return;
+
+  const targetMap = targetLayout === "revenue" ? layoutA : layoutB;
+  const sourceMap = currentLayout === "revenue" ? layoutA : layoutB;
+
+  // If mid-animation, capture current interpolated positions as new source
+  if (animating) {
+    const elapsed = performance.now() - animStart;
+    const rawT = Math.min(1, elapsed / ANIM_DURATION);
+    const easedT = cubicInOut(rawT);
+    // Interpolate current positions into rectFromData
+    for (let i = 0; i < N * 4; i++) {
+      rectFromData[i] = rectFromData[i] + (rectToData[i] - rectFromData[i]) * easedT;
+    }
+  } else {
+    fillRectBuffer(rectFromData, sourceMap);
+  }
+  fillRectBuffer(rectToData, targetMap);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, rectFromBuf);
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, rectFromData);
+  gl.bindBuffer(gl.ARRAY_BUFFER, rectToBuf);
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, rectToData);
+
+  currentLayout = targetLayout;
+  animStart = performance.now();
+  animating = true;
+
+  document.getElementById("btnRevenue").classList.toggle("active", targetLayout === "revenue");
+  document.getElementById("btnHeadcount").classList.toggle("active", targetLayout === "headcount");
+}
+
+// --- Render loop ---
+function render() {
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clearColor(0.04, 0.04, 0.06, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  gl.useProgram(program);
+  gl.uniform2f(uResolution, canvas.width, canvas.height);
+
+  let t = 1;
+  if (animating) {
+    const elapsed = performance.now() - animStart;
+    const rawT = Math.min(1, elapsed / ANIM_DURATION);
+    t = cubicInOut(rawT);
+    if (rawT >= 1) animating = false;
+  }
+  gl.uniform1f(uT, t);
+
+  gl.bindVertexArray(vao);
+  gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, N);
+  gl.bindVertexArray(null);
+
+  requestAnimationFrame(render);
+}
+requestAnimationFrame(render);
+
+// --- Controls ---
+document.getElementById("btnRevenue").addEventListener("click", () => startTransition("revenue"));
+document.getElementById("btnHeadcount").addEventListener("click", () => startTransition("headcount"));
+
+// Keyboard toggle
+window.addEventListener("keydown", e => {
+  if (e.key === " " || e.key === "t" || e.key === "T") {
+    e.preventDefault();
+    startTransition(currentLayout === "revenue" ? "headcount" : "revenue");
+  }
+});
+
+// --- Tooltip (CPU picking via layout) ---
+const tooltip = document.getElementById("tooltip");
+const ttLabel = tooltip.querySelector(".label");
+const ttValue = tooltip.querySelector(".value");
+const fmt = d3.format(",.1f");
+const fmtInt = d3.format(",");
+
+function getActiveLayout() {
+  return currentLayout === "revenue" ? layoutA : layoutB;
+}
+
+canvas.addEventListener("pointermove", e => {
+  if (animating) { tooltip.style.display = "none"; return; }
+  const x = e.offsetX, y = e.offsetY;
+  const layout = getActiveLayout();
+  let hit = null;
+  for (let i = 0; i < N; i++) {
+    const leaf = leaves[i];
+    const r = layout.get(leaf.id);
+    if (r && x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1) {
+      hit = { leaf, r };
+    }
+  }
+  if (hit) {
+    ttLabel.textContent = `${hit.leaf.name} (${hit.leaf.sub})`;
+    ttValue.textContent = `Revenue: $${fmt(hit.leaf.revenue)}M · Headcount: ${fmtInt(Math.round(hit.leaf.headcount))}`;
+    const tx = Math.min(e.pageX + 14, W - 250);
+    const ty = Math.min(e.pageY + 14, H - 60);
+    tooltip.style.left = tx + "px";
+    tooltip.style.top = ty + "px";
+    tooltip.style.display = "block";
+  } else {
+    tooltip.style.display = "none";
+  }
+});
+
+canvas.addEventListener("pointerleave", () => { tooltip.style.display = "none"; });
+
+// --- Resize handling ---
+window.addEventListener("resize", () => {
+  resize();
+  layoutA = computeLayout("revenue");
+  layoutB = computeLayout("headcount");
+  const active = currentLayout === "revenue" ? layoutA : layoutB;
+  fillRectBuffer(rectFromData, active);
+  fillRectBuffer(rectToData, active);
+  gl.bindBuffer(gl.ARRAY_BUFFER, rectFromBuf);
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, rectFromData);
+  gl.bindBuffer(gl.ARRAY_BUFFER, rectToBuf);
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, rectToData);
+  animating = false;
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Arc Diagram — Character Co-occurrences</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; color: #e0e0e0; font-family: system-ui, sans-serif; display: flex; flex-direction: column; align-items: center; min-height: 100vh; padding: 24px; }
+  h1 { font-size: 18px; font-weight: 500; margin-bottom: 4px; color: #ccc; }
+  .subtitle { font-size: 13px; color: #888; margin-bottom: 16px; }
+  svg { overflow: visible; }
+  .node-label { font-size: 10px; fill: #999; cursor: default; }
+  .node-label.highlighted { fill: #fff; font-weight: 600; }
+  .node-circle { cursor: pointer; }
+  .arc-path { fill: none; stroke-linecap: round; mix-blend-mode: screen; }
+  .arc-path.dimmed { opacity: 0.04; }
+  .arc-path.highlighted { opacity: 1; }
+  .brush-info { font-size: 12px; fill: #888; }
+  .chapter-tick text { fill: #666; font-size: 9px; }
+  .chapter-tick line { stroke: #333; }
+</style>
+</head>
+<body>
+<h1>Character Co-occurrences in <em>The Glass Meridian</em></h1>
+<p class="subtitle">30 characters · arcs sized by co-occurrence weight · brush the chapter axis to filter</p>
+<svg id="viz"></svg>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data generation ---
+const rng = d3.randomLcg(42);
+const rand = d3.randomUniform.source(rng)(0, 1);
+const randInt = (lo, hi) => Math.floor(rand() * (hi - lo)) + lo;
+
+const names = [
+  "Elara","Caspian","Maren","Theron","Liora","Dorian","Sable","Emeric",
+  "Yuna","Hadrian","Celeste","Rowan","Isolde","Kael","Petra","Silas",
+  "Neve","Alaric","Veda","Lysander","Freya","Orin","Callista","Riven",
+  "Talia","Fenwick","Daphne","Mordecai","Sylvie","Jasper"
+];
+
+const totalChapters = 24;
+
+// Assign first-appearance chapter for each character
+const characters = names.map((name, i) => ({
+  id: i,
+  name,
+  firstAppearance: i < 3 ? 1 : randInt(1, Math.min(i + 2, totalChapters)),
+})).sort((a, b) => a.firstAppearance - b.firstAppearance || a.id - b.id);
+
+// Generate co-occurrence links with chapter-level detail
+const links = [];
+const linkMap = new Map();
+for (let ch = 1; ch <= totalChapters; ch++) {
+  const active = characters.filter(c => c.firstAppearance <= ch);
+  // Pick some pairs to co-occur this chapter
+  const numPairs = randInt(3, Math.min(active.length, 12));
+  for (let p = 0; p < numPairs; p++) {
+    const a = active[randInt(0, active.length)];
+    const b = active[randInt(0, active.length)];
+    if (a.id === b.id) continue;
+    const key = a.id < b.id ? `${a.id}-${b.id}` : `${b.id}-${a.id}`;
+    if (!linkMap.has(key)) {
+      linkMap.set(key, { source: Math.min(a.id, b.id), target: Math.max(a.id, b.id), weight: 0, chapters: [] });
+    }
+    const link = linkMap.get(key);
+    if (!link.chapters.includes(ch)) {
+      link.chapters.push(ch);
+      link.weight++;
+    }
+  }
+}
+links.push(...linkMap.values());
+
+// --- Layout ---
+const margin = { top: 160, right: 40, bottom: 80, left: 40 };
+const width = 960;
+const nodeSpacing = (width - margin.left - margin.right) / (characters.length - 1);
+const maxArcHeight = margin.top - 20;
+
+const xScale = d3.scalePoint()
+  .domain(characters.map(c => c.id))
+  .range([margin.left, width - margin.right]);
+
+const maxWeight = d3.max(links, d => d.weight);
+const strokeScale = d3.scaleLinear().domain([1, maxWeight]).range([0.8, 4]);
+const heightScale = d3.scaleSqrt().domain([1, maxWeight]).range([20, maxArcHeight]);
+
+// Color by first-appearance chapter
+const colorScale = d3.scaleSequential(d3.interpolatePlasma)
+  .domain([1, totalChapters]);
+
+const height = margin.top + margin.bottom + 20;
+const svg = d3.select("#viz")
+  .attr("width", width)
+  .attr("height", height)
+  .attr("viewBox", `0 0 ${width} ${height}`);
+
+const axisY = margin.top;
+
+// Chapter brush axis at bottom
+const chapterScale = d3.scaleLinear()
+  .domain([1, totalChapters])
+  .range([margin.left, width - margin.right]);
+
+// --- Draw arcs ---
+const arcGroup = svg.append("g").attr("class", "arcs");
+
+function arcPath(d) {
+  const x1 = xScale(d.source);
+  const x2 = xScale(d.target);
+  const dx = Math.abs(x2 - x1);
+  const h = heightScale(d.weight);
+  // Elliptical arc above the axis
+  return `M${x1},${axisY} A${dx / 2},${h} 0 0,1 ${x2},${axisY}`;
+}
+
+const arcPaths = arcGroup.selectAll("path")
+  .data(links)
+  .join("path")
+    .attr("class", "arc-path")
+    .attr("d", arcPath)
+    .attr("stroke", d => {
+      const srcChar = characters.find(c => c.id === d.source);
+      return colorScale(srcChar.firstAppearance);
+    })
+    .attr("stroke-width", d => strokeScale(d.weight))
+    .attr("opacity", 0.5);
+
+// --- Draw nodes ---
+const nodeGroup = svg.append("g").attr("class", "nodes");
+
+const nodes = nodeGroup.selectAll("g")
+  .data(characters)
+  .join("g")
+    .attr("transform", d => `translate(${xScale(d.id)},${axisY})`);
+
+nodes.append("circle")
+  .attr("class", "node-circle")
+  .attr("r", d => {
+    const degree = links.filter(l => l.source === d.id || l.target === d.id).length;
+    return Math.max(3, Math.sqrt(degree) * 2);
+  })
+  .attr("fill", d => colorScale(d.firstAppearance))
+  .attr("stroke", "#1a1a2e")
+  .attr("stroke-width", 1.5);
+
+nodes.append("text")
+  .attr("class", "node-label")
+  .attr("y", 14)
+  .attr("text-anchor", "start")
+  .attr("transform", "rotate(45)")
+  .text(d => d.name);
+
+// --- Hover interaction ---
+let brushedChapters = null;
+
+function getVisibleLinks() {
+  if (!brushedChapters) return links;
+  const [lo, hi] = brushedChapters;
+  return links.map(l => {
+    const filteredCh = l.chapters.filter(ch => ch >= lo && ch <= hi);
+    return filteredCh.length > 0 ? { ...l, weight: filteredCh.length, chapters: filteredCh } : null;
+  }).filter(Boolean);
+}
+
+function highlightCharacter(charId) {
+  const visible = getVisibleLinks();
+  const connected = new Set();
+  visible.forEach(l => {
+    if (l.source === charId) connected.add(l.target);
+    if (l.target === charId) connected.add(l.source);
+  });
+  connected.add(charId);
+
+  arcPaths.each(function(d) {
+    const vis = visible.find(v => v.source === d.source && v.target === d.target);
+    const isConn = d.source === charId || d.target === charId;
+    d3.select(this)
+      .classed("dimmed", !isConn || !vis)
+      .classed("highlighted", isConn && !!vis)
+      .attr("opacity", isConn && vis ? 0.9 : 0.04);
+  });
+
+  nodes.select("circle")
+    .attr("opacity", d => connected.has(d.id) ? 1 : 0.15);
+  nodes.select("text")
+    .classed("highlighted", d => connected.has(d.id))
+    .attr("opacity", d => connected.has(d.id) ? 1 : 0.2);
+}
+
+function resetHighlight() {
+  updateArcsForBrush();
+}
+
+nodes.on("mouseenter", (event, d) => highlightCharacter(d.id))
+  .on("mouseleave", () => resetHighlight());
+
+// --- Chapter brush ---
+const brushY = axisY + 50;
+const brushHeight = 30;
+
+// Chapter axis
+const chapterAxis = d3.axisBottom(chapterScale)
+  .ticks(totalChapters)
+  .tickFormat(d => Number.isInteger(d) ? `Ch ${d}` : "");
+
+svg.append("g")
+  .attr("class", "chapter-tick")
+  .attr("transform", `translate(0,${brushY + brushHeight})`)
+  .call(chapterAxis)
+  .call(g => g.select(".domain").attr("stroke", "#444"));
+
+// Chapter occurrence mini-bars
+const chapterCounts = d3.rollup(
+  links.flatMap(l => l.chapters.map(ch => ch)),
+  v => v.length,
+  ch => ch
+);
+const maxCount = d3.max(chapterCounts.values());
+const miniBarScale = d3.scaleLinear().domain([0, maxCount]).range([0, brushHeight - 2]);
+
+svg.append("g").selectAll("rect")
+  .data(d3.range(1, totalChapters + 1))
+  .join("rect")
+    .attr("x", ch => chapterScale(ch) - 3)
+    .attr("y", ch => brushY + brushHeight - miniBarScale(chapterCounts.get(ch) || 0))
+    .attr("width", 6)
+    .attr("height", ch => miniBarScale(chapterCounts.get(ch) || 0))
+    .attr("fill", "#444")
+    .attr("rx", 1);
+
+// Brush
+const brush = d3.brushX()
+  .extent([[margin.left, brushY], [width - margin.right, brushY + brushHeight]])
+  .on("brush end", brushed);
+
+const brushGroup = svg.append("g")
+  .attr("class", "brush")
+  .call(brush);
+
+// Style brush overlay
+brushGroup.select(".overlay").attr("fill", "transparent");
+brushGroup.select(".selection").attr("fill", "#4477AA").attr("fill-opacity", 0.25).attr("stroke", "#4477AA");
+
+const brushLabel = svg.append("text")
+  .attr("class", "brush-info")
+  .attr("x", width / 2)
+  .attr("y", brushY - 6)
+  .attr("text-anchor", "middle")
+  .text("Drag below to filter by chapter range");
+
+function brushed({ selection }) {
+  if (!selection) {
+    brushedChapters = null;
+    brushLabel.text("Drag below to filter by chapter range");
+  } else {
+    const [x0, x1] = selection;
+    const ch0 = Math.round(chapterScale.invert(x0));
+    const ch1 = Math.round(chapterScale.invert(x1));
+    brushedChapters = [Math.max(1, ch0), Math.min(totalChapters, ch1)];
+    brushLabel.text(`Chapters ${brushedChapters[0]}–${brushedChapters[1]}`);
+  }
+  updateArcsForBrush();
+}
+
+function updateArcsForBrush() {
+  const visible = getVisibleLinks();
+  const visibleSet = new Set(visible.map(l => `${l.source}-${l.target}`));
+  const visibleMap = new Map(visible.map(l => [`${l.source}-${l.target}`, l]));
+
+  // Track which nodes have visible connections
+  const activeNodes = new Set();
+
+  arcPaths
+    .classed("dimmed", false)
+    .classed("highlighted", false)
+    .attr("opacity", d => {
+      const key = `${d.source}-${d.target}`;
+      if (visibleSet.has(key)) {
+        activeNodes.add(d.source);
+        activeNodes.add(d.target);
+        return 0.5;
+      }
+      return brushedChapters ? 0.03 : 0.5;
+    })
+    .attr("stroke-width", d => {
+      const key = `${d.source}-${d.target}`;
+      const vis = visibleMap.get(key);
+      return strokeScale(vis ? vis.weight : d.weight);
+    });
+
+  if (brushedChapters) {
+    nodes.select("circle").attr("opacity", d => activeNodes.has(d.id) ? 1 : 0.15);
+    nodes.select("text").attr("opacity", d => activeNodes.has(d.id) ? 1 : 0.2);
+  } else {
+    nodes.select("circle").attr("opacity", 1);
+    nodes.select("text").attr("opacity", 1);
+  }
+}
+</script>
+</body>
+</html>

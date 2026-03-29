@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Test Coverage Heatmap</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif;
+    background: #0d1117;
+    color: #c9d1d9;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 32px 16px;
+  }
+  h1 {
+    font-size: 20px;
+    font-weight: 600;
+    margin-bottom: 4px;
+    color: #e6edf3;
+  }
+  .subtitle {
+    font-size: 13px;
+    color: #8b949e;
+    margin-bottom: 24px;
+  }
+  #chart { width: 100%; max-width: 960px; }
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #c9d1d9;
+    opacity: 0;
+    transition: opacity 0.15s;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  }
+  .tooltip .skill { color: #e6edf3; font-weight: 600; }
+  .tooltip .dim { color: #8b949e; }
+  .tooltip .val { font-size: 14px; font-weight: 600; }
+  .tooltip .val.high { color: #3fb950; }
+  .tooltip .val.mid { color: #d29922; }
+  .tooltip .val.low { color: #f85149; }
+  .legend-label { font-size: 11px; fill: #8b949e; }
+</style>
+</head>
+<body>
+<h1>Test Coverage Across Skills &amp; Dimensions</h1>
+<p class="subtitle">Synthetic test coverage data — darker cells indicate gaps</p>
+<div id="chart"></div>
+<div class="tooltip" id="tip"></div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data ---
+const skills = [
+  "parallel-coords", "brushing", "linked-views", "distributions",
+  "hierarchy-layouts", "hierarchy-interact", "edge-bundling", "force",
+  "network", "cartography", "time-series", "motion", "shape-morphing",
+  "scales", "color", "visual-texture", "annotation", "data-table",
+  "canvas-a11y", "canvas", "webgl", "navigation", "responsive",
+  "data-gathering", "sparkcharts", "small-multiples"
+];
+
+const dimensions = [
+  "Renders", "No JS errors", "Axes correct", "Color legible",
+  "Responsive", "Interaction", "A11y", "Perf (1K)", "Perf (10K)", "Edge cases"
+];
+
+// Seed a deterministic pseudo-random generator
+const mulberry32 = (a) => () => {
+  a |= 0; a = a + 0x6D2B79F5 | 0;
+  let t = Math.imul(a ^ a >>> 15, 1 | a);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+};
+const rand = mulberry32(42);
+
+const data = [];
+for (const skill of skills) {
+  // Each skill has a baseline "maturity" that biases its scores
+  const maturity = 0.4 + rand() * 0.55;
+  for (const dim of dimensions) {
+    // Some dimensions are harder — bias them lower
+    const dimDifficulty = dim.startsWith("Perf") ? -0.15
+      : dim === "A11y" ? -0.2
+      : dim === "Edge cases" ? -0.18
+      : dim === "Interaction" ? -0.08
+      : 0.05;
+    const raw = maturity + dimDifficulty + (rand() - 0.5) * 0.4;
+    const value = Math.max(0, Math.min(100, Math.round(raw * 100)));
+    data.push({ skill, dimension: dim, value });
+  }
+}
+
+// --- Layout ---
+const container = document.getElementById("chart");
+const fullWidth = Math.min(960, container.clientWidth);
+const margin = { top: 120, right: 30, bottom: 20, left: 150 };
+const cellPad = 1.5;
+const cellW = (fullWidth - margin.left - margin.right) / dimensions.length;
+const cellH = 22;
+const fullHeight = margin.top + margin.bottom + skills.length * cellH;
+
+const svg = d3.select("#chart").append("svg")
+  .attr("viewBox", `0 0 ${fullWidth} ${fullHeight}`)
+  .attr("width", fullWidth)
+  .attr("height", fullHeight);
+
+// --- Scales ---
+const x = d3.scaleBand()
+  .domain(dimensions)
+  .range([margin.left, fullWidth - margin.right])
+  .padding(0.08);
+
+const y = d3.scaleBand()
+  .domain(skills)
+  .range([margin.top, fullHeight - margin.bottom])
+  .padding(0.12);
+
+// Green-to-red via OKLab for perceptual uniformity on dark bg
+const color = d3.scaleSequential()
+  .domain([0, 100])
+  .interpolator(t => d3.interpolateRgbBasis(["#1a0e0e", "#6e2c1a", "#d29922", "#56d364", "#3fb950"])(t));
+
+// --- Axes ---
+// Top axis — rotated dimension labels
+svg.append("g")
+  .attr("transform", `translate(0,${margin.top - 6})`)
+  .call(d3.axisTop(x).tickSize(0))
+  .call(g => g.select(".domain").remove())
+  .selectAll("text")
+    .attr("transform", "rotate(-45)")
+    .attr("text-anchor", "start")
+    .attr("dx", "0.3em")
+    .attr("dy", "0.2em")
+    .style("fill", "#8b949e")
+    .style("font-size", "11px");
+
+// Left axis — skill names
+svg.append("g")
+  .attr("transform", `translate(${margin.left - 6},0)`)
+  .call(d3.axisLeft(y).tickSize(0))
+  .call(g => g.select(".domain").remove())
+  .selectAll("text")
+    .style("fill", "#c9d1d9")
+    .style("font-size", "11px");
+
+// --- Cells ---
+const tip = d3.select("#tip");
+
+const cells = svg.append("g")
+  .selectAll("rect")
+  .data(data)
+  .join("rect")
+    .attr("x", d => x(d.dimension) + cellPad)
+    .attr("y", d => y(d.skill) + cellPad)
+    .attr("width", x.bandwidth() - cellPad * 2)
+    .attr("height", y.bandwidth() - cellPad * 2)
+    .attr("rx", 3)
+    .attr("fill", d => color(d.value))
+    .attr("stroke", "none")
+    .style("cursor", "pointer");
+
+// --- Cell labels ---
+svg.append("g")
+  .selectAll("text")
+  .data(data)
+  .join("text")
+    .attr("x", d => x(d.dimension) + x.bandwidth() / 2)
+    .attr("y", d => y(d.skill) + y.bandwidth() / 2)
+    .attr("text-anchor", "middle")
+    .attr("dominant-baseline", "central")
+    .attr("font-size", "9px")
+    .attr("font-weight", 500)
+    .attr("fill", d => d.value > 55 ? "#0d1117" : "#c9d1d9")
+    .attr("pointer-events", "none")
+    .text(d => d.value);
+
+// --- Tooltip ---
+cells
+  .on("pointerenter", (event, d) => {
+    const cls = d.value >= 75 ? "high" : d.value >= 45 ? "mid" : "low";
+    tip.html(`
+      <div class="skill">${d.skill}</div>
+      <div class="dim">${d.dimension}</div>
+      <div class="val ${cls}">${d.value}%</div>
+    `);
+    tip.style("opacity", 1);
+  })
+  .on("pointermove", (event) => {
+    tip
+      .style("left", (event.pageX + 14) + "px")
+      .style("top", (event.pageY - 14) + "px");
+  })
+  .on("pointerleave", () => {
+    tip.style("opacity", 0);
+  });
+
+// --- Row/column highlight on hover ---
+cells
+  .on("pointerenter.highlight", (event, d) => {
+    cells
+      .transition().duration(80)
+      .attr("opacity", c =>
+        c.skill === d.skill || c.dimension === d.dimension ? 1 : 0.3
+      );
+  })
+  .on("pointerleave.highlight", () => {
+    cells.transition().duration(200).attr("opacity", 1);
+  });
+
+// --- Legend ---
+const legendW = 200, legendH = 10;
+const legendX = fullWidth - margin.right - legendW;
+const legendY = 14;
+
+const defs = svg.append("defs");
+const grad = defs.append("linearGradient").attr("id", "legend-grad");
+d3.range(0, 1.01, 0.1).forEach(t => {
+  grad.append("stop")
+    .attr("offset", `${t * 100}%`)
+    .attr("stop-color", color(t * 100));
+});
+
+const lg = svg.append("g").attr("transform", `translate(${legendX},${legendY})`);
+
+lg.append("rect")
+  .attr("width", legendW).attr("height", legendH)
+  .attr("rx", 3)
+  .attr("fill", "url(#legend-grad)");
+
+lg.append("text").attr("x", 0).attr("y", -4)
+  .attr("class", "legend-label").text("0%");
+lg.append("text").attr("x", legendW).attr("y", -4)
+  .attr("class", "legend-label").attr("text-anchor", "end").text("100%");
+lg.append("text").attr("x", legendW / 2).attr("y", -4)
+  .attr("class", "legend-label").attr("text-anchor", "middle").text("Coverage");
+
+// --- Summary row ---
+const avgByDim = dimensions.map(dim => {
+  const vals = data.filter(d => d.dimension === dim).map(d => d.value);
+  return { dimension: dim, value: Math.round(d3.mean(vals)) };
+});
+
+const summaryY = fullHeight - margin.bottom + 6;
+
+svg.append("g")
+  .selectAll("rect")
+  .data(avgByDim)
+  .join("rect")
+    .attr("x", d => x(d.dimension) + cellPad)
+    .attr("y", summaryY)
+    .attr("width", x.bandwidth() - cellPad * 2)
+    .attr("height", 14)
+    .attr("rx", 2)
+    .attr("fill", d => color(d.value))
+    .attr("opacity", 0.85);
+
+svg.append("g")
+  .selectAll("text")
+  .data(avgByDim)
+  .join("text")
+    .attr("x", d => x(d.dimension) + x.bandwidth() / 2)
+    .attr("y", summaryY + 7)
+    .attr("text-anchor", "middle")
+    .attr("dominant-baseline", "central")
+    .attr("font-size", "8px")
+    .attr("font-weight", 600)
+    .attr("fill", d => d.value > 55 ? "#0d1117" : "#c9d1d9")
+    .text(d => `μ${d.value}`);
+
+svg.append("text")
+  .attr("x", margin.left - 6)
+  .attr("y", summaryY + 7)
+  .attr("text-anchor", "end")
+  .attr("dominant-baseline", "central")
+  .attr("font-size", "10px")
+  .attr("font-weight", 600)
+  .attr("fill", "#8b949e")
+  .text("avg");
+</script>
+</body>
+</html>

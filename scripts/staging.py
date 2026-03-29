@@ -34,6 +34,7 @@ def create_staging_dir(
     proj: Path,
     *,
     all_skills: bool = False,
+    prefix: str = "",
 ) -> Path:
     """Create a staging directory with copied skills.
 
@@ -43,11 +44,14 @@ def create_staging_dir(
         proj: Project root path.
         all_skills: If True, include all skills (for trigger testing).
                     If False, include only the manifest-listed skills.
+        prefix: Optional prefix to avoid collisions when running multiple
+                configs for the same block in parallel.
 
     Returns:
         Path to the staging directory.
     """
-    staging = proj / "temp" / "staging" / bid
+    dirname = f"{prefix}-{bid}" if prefix else bid
+    staging = proj / "temp" / "staging" / dirname
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True)

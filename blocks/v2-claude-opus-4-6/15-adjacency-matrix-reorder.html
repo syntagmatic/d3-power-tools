@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Adjacency Matrix Reorder</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Helvetica Neue", sans-serif; background: #1a1a2e; color: #e0e0e0; display: flex; justify-content: center; padding: 24px; }
+  .container { display: flex; gap: 24px; align-items: flex-start; }
+  .controls { display: flex; gap: 8px; margin-bottom: 12px; }
+  .controls button {
+    padding: 6px 14px; border: 1px solid #444; border-radius: 4px;
+    background: #2a2a4a; color: #ccc; cursor: pointer; font-size: 13px;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .controls button:hover { background: #3a3a5a; }
+  .controls button.active { background: #4a4a8a; border-color: #7a7aff; color: #fff; }
+  .matrix-label { font-size: 12px; fill: #aaa; }
+  .matrix-label.highlighted { fill: #fff; font-weight: 600; }
+  .bar-label { font-size: 11px; fill: #aaa; }
+  h3 { font-size: 13px; color: #888; margin-bottom: 6px; font-weight: 500; }
+</style>
+</head>
+<body>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Generate synthetic data ---
+const n = 35;
+const communities = [0, 1, 2, 3, 4];
+const communityNames = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"];
+const communitySizes = [8, 7, 7, 7, 6];
+const rng = d3.randomLcg(42);
+const rand = d3.randomUniform.source(rng)(0, 1);
+
+const nodes = [];
+let ci = 0;
+for (const [k, size] of communitySizes.entries()) {
+  for (let i = 0; i < size; i++) {
+    nodes.push({ id: ci, name: `N${String(ci).padStart(2, "0")}`, community: k });
+    ci++;
+  }
+}
+
+const edges = [];
+const edgeSet = new Set();
+for (let i = 0; i < n; i++) {
+  for (let j = i + 1; j < n; j++) {
+    const sameCommunity = nodes[i].community === nodes[j].community;
+    const prob = sameCommunity ? 0.45 : 0.06;
+    if (rand() < prob) {
+      const weight = sameCommunity
+        ? Math.ceil(rand() * 8 + 2)
+        : Math.ceil(rand() * 4 + 1);
+      edges.push({ source: i, target: j, weight });
+      edgeSet.add(`${i}-${j}`);
+    }
+  }
+}
+
+// Compute degree
+for (const node of nodes) node.degree = 0;
+for (const e of edges) {
+  nodes[e.source].degree++;
+  nodes[e.target].degree++;
+}
+
+// Build adjacency map
+const adj = new Map();
+for (const e of edges) {
+  adj.set(`${e.source}-${e.target}`, e.weight);
+  adj.set(`${e.target}-${e.source}`, e.weight);
+}
+
+// --- Layout ---
+const cellSize = 16;
+const matrixSize = n * cellSize;
+const margin = { top: 120, right: 20, bottom: 20, left: 120 };
+const barWidth = 140;
+const barGap = 24;
+
+const container = d3.select("body").append("div").attr("class", "container");
+const leftPanel = container.append("div");
+const rightPanel = container.append("div");
+
+// Controls
+const controls = leftPanel.append("div").attr("class", "controls");
+const orders = ["community", "name", "degree"];
+let currentOrder = "community";
+
+// Matrix SVG
+const svgW = margin.left + matrixSize + margin.right;
+const svgH = margin.top + matrixSize + margin.bottom;
+const svg = leftPanel.append("svg").attr("width", svgW).attr("height", svgH);
+const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+// Bar chart
+rightPanel.append("h3").text("Node Degree");
+const barH = margin.top + matrixSize + margin.bottom;
+const barSvg = rightPanel.append("svg").attr("width", barWidth).attr("height", barH);
+const barG = barSvg.append("g").attr("transform", `translate(0,${margin.top})`);
+
+// --- Scales ---
+const colorScale = d3.scaleSequential(d3.interpolateYlOrRd)
+  .domain([0, d3.max(edges, d => d.weight)]);
+
+const communityColor = d3.scaleOrdinal()
+  .domain(communities)
+  .range(["#6366f1", "#22d3ee", "#f59e0b", "#ef4444", "#10b981"]);
+
+const xBar = d3.scaleLinear()
+  .domain([0, d3.max(nodes, d => d.degree)])
+  .range([0, barWidth - 40]);
+
+// --- Ordering functions ---
+function getOrder(type) {
+  const indices = d3.range(n);
+  if (type === "name") {
+    indices.sort((a, b) => d3.ascending(nodes[a].name, nodes[b].name));
+  } else if (type === "degree") {
+    indices.sort((a, b) => d3.descending(nodes[a].degree, nodes[b].degree));
+  } else {
+    indices.sort((a, b) =>
+      d3.ascending(nodes[a].community, nodes[b].community)
+      || d3.descending(nodes[a].degree, nodes[b].degree)
+    );
+  }
+  const pos = new Array(n);
+  indices.forEach((nodeIdx, rank) => { pos[nodeIdx] = rank; });
+  return pos;
+}
+
+let position = getOrder("community");
+
+// --- Build matrix cells ---
+const cells = [];
+for (const e of edges) {
+  cells.push({ row: e.source, col: e.target, weight: e.weight });
+  cells.push({ row: e.target, col: e.source, weight: e.weight });
+}
+
+// Background
+g.append("rect")
+  .attr("width", matrixSize)
+  .attr("height", matrixSize)
+  .attr("fill", "#0f0f1e");
+
+// Grid lines
+g.append("g").selectAll("line")
+  .data(d3.range(n + 1))
+  .join("line")
+  .attr("x1", d => d * cellSize).attr("x2", d => d * cellSize)
+  .attr("y1", 0).attr("y2", matrixSize)
+  .attr("stroke", "#222").attr("stroke-width", 0.5);
+
+g.append("g").selectAll("line")
+  .data(d3.range(n + 1))
+  .join("line")
+  .attr("y1", d => d * cellSize).attr("y2", d => d * cellSize)
+  .attr("x1", 0).attr("x2", matrixSize)
+  .attr("stroke", "#222").attr("stroke-width", 0.5);
+
+// Cell rects
+const cellRects = g.append("g").selectAll("rect")
+  .data(cells)
+  .join("rect")
+  .attr("width", cellSize - 1)
+  .attr("height", cellSize - 1)
+  .attr("x", d => position[d.col] * cellSize + 0.5)
+  .attr("y", d => position[d.row] * cellSize + 0.5)
+  .attr("fill", d => colorScale(d.weight))
+  .attr("rx", 1);
+
+// Row labels
+const rowLabels = g.append("g").selectAll("text")
+  .data(nodes)
+  .join("text")
+  .attr("class", "matrix-label")
+  .attr("x", -6)
+  .attr("y", d => position[d.id] * cellSize + cellSize / 2)
+  .attr("text-anchor", "end")
+  .attr("dominant-baseline", "middle")
+  .text(d => d.name);
+
+// Column labels
+const colLabels = g.append("g").selectAll("text")
+  .data(nodes)
+  .join("text")
+  .attr("class", "matrix-label")
+  .attr("x", d => position[d.id] * cellSize + cellSize / 2)
+  .attr("y", -6)
+  .attr("text-anchor", "start")
+  .attr("dominant-baseline", "middle")
+  .attr("transform", d => `rotate(-90, ${position[d.id] * cellSize + cellSize / 2}, -6)`)
+  .text(d => d.name);
+
+// Highlight overlays
+const rowHighlight = g.append("rect")
+  .attr("width", matrixSize).attr("height", cellSize)
+  .attr("fill", "white").attr("opacity", 0).attr("pointer-events", "none");
+const colHighlight = g.append("rect")
+  .attr("height", matrixSize).attr("width", cellSize)
+  .attr("fill", "white").attr("opacity", 0).attr("pointer-events", "none");
+
+// Hover detection overlay
+const hoverRects = g.append("g").selectAll("rect")
+  .data(cells)
+  .join("rect")
+  .attr("width", cellSize)
+  .attr("height", cellSize)
+  .attr("x", d => position[d.col] * cellSize)
+  .attr("y", d => position[d.row] * cellSize)
+  .attr("fill", "transparent")
+  .on("mouseover", (event, d) => highlight(d.row, d.col))
+  .on("mouseout", clearHighlight);
+
+// Full-area hover detection
+g.append("rect")
+  .attr("width", matrixSize).attr("height", matrixSize)
+  .attr("fill", "transparent")
+  .lower()
+  .on("mousemove", function(event) {
+    const [mx, my] = d3.pointer(event);
+    const col = Math.floor(mx / cellSize);
+    const row = Math.floor(my / cellSize);
+    if (row >= 0 && row < n && col >= 0 && col < n) {
+      // Find node indices from positions
+      const rowNode = nodes.find(nd => position[nd.id] === row);
+      const colNode = nodes.find(nd => position[nd.id] === col);
+      if (rowNode && colNode) highlight(rowNode.id, colNode.id);
+    }
+  })
+  .on("mouseout", clearHighlight);
+
+// --- Bar chart ---
+const bars = barG.selectAll("g")
+  .data(nodes)
+  .join("g")
+  .attr("transform", d => `translate(0, ${position[d.id] * cellSize})`);
+
+bars.append("rect")
+  .attr("x", 0)
+  .attr("y", 1)
+  .attr("width", d => xBar(d.degree))
+  .attr("height", cellSize - 2)
+  .attr("fill", d => communityColor(d.community))
+  .attr("rx", 2)
+  .attr("opacity", 0.8);
+
+bars.append("text")
+  .attr("class", "bar-label")
+  .attr("x", d => xBar(d.degree) + 4)
+  .attr("y", cellSize / 2)
+  .attr("dominant-baseline", "middle")
+  .text(d => d.degree);
+
+// --- Highlight ---
+let highlightedRow = -1, highlightedCol = -1;
+
+function highlight(row, col) {
+  highlightedRow = row;
+  highlightedCol = col;
+
+  rowHighlight
+    .attr("y", position[row] * cellSize)
+    .attr("opacity", 0.06);
+  colHighlight
+    .attr("x", position[col] * cellSize)
+    .attr("opacity", 0.06);
+
+  rowLabels.classed("highlighted", d => d.id === row);
+  colLabels.classed("highlighted", d => d.id === col);
+
+  bars.select("rect")
+    .attr("opacity", d => d.id === row ? 1 : 0.4);
+}
+
+function clearHighlight() {
+  highlightedRow = highlightedCol = -1;
+  rowHighlight.attr("opacity", 0);
+  colHighlight.attr("opacity", 0);
+  rowLabels.classed("highlighted", false);
+  colLabels.classed("highlighted", false);
+  bars.select("rect").attr("opacity", 0.8);
+}
+
+// --- Reorder ---
+function reorder(type) {
+  currentOrder = type;
+  position = getOrder(type);
+  const t = d3.transition().duration(600).ease(d3.easeCubicInOut);
+
+  cellRects.transition(t)
+    .attr("x", d => position[d.col] * cellSize + 0.5)
+    .attr("y", d => position[d.row] * cellSize + 0.5);
+
+  hoverRects.transition(t)
+    .attr("x", d => position[d.col] * cellSize)
+    .attr("y", d => position[d.row] * cellSize);
+
+  rowLabels.transition(t)
+    .attr("y", d => position[d.id] * cellSize + cellSize / 2);
+
+  colLabels.transition(t)
+    .attr("x", d => position[d.id] * cellSize + cellSize / 2)
+    .attr("transform", d => `rotate(-90, ${position[d.id] * cellSize + cellSize / 2}, -6)`);
+
+  bars.transition(t)
+    .attr("transform", d => `translate(0, ${position[d.id] * cellSize})`);
+
+  controls.selectAll("button").classed("active", function() {
+    return d3.select(this).attr("data-order") === type;
+  });
+}
+
+// --- Buttons ---
+for (const order of orders) {
+  controls.append("button")
+    .attr("data-order", order)
+    .classed("active", order === currentOrder)
+    .text(order.charAt(0).toUpperCase() + order.slice(1))
+    .on("click", () => reorder(order));
+}
+
+// --- Legend ---
+const legendW = 160;
+const legendG = svg.append("g").attr("transform", `translate(${margin.left}, ${margin.top - 50})`);
+const defs = svg.append("defs");
+const gradId = "weight-gradient";
+const grad = defs.append("linearGradient").attr("id", gradId);
+const extent = colorScale.domain();
+d3.range(0, 1.01, 0.1).forEach(t => {
+  grad.append("stop")
+    .attr("offset", `${t * 100}%`)
+    .attr("stop-color", colorScale(extent[0] + t * (extent[1] - extent[0])));
+});
+
+legendG.append("rect").attr("width", legendW).attr("height", 10).attr("fill", `url(#${gradId})`).attr("rx", 2);
+legendG.append("text").attr("y", -4).attr("fill", "#888").attr("font-size", 11).text("Edge weight");
+legendG.append("text").attr("y", 22).attr("fill", "#888").attr("font-size", 10).text(extent[0]);
+legendG.append("text").attr("x", legendW).attr("y", 22).attr("fill", "#888").attr("font-size", 10).attr("text-anchor", "end").text(extent[1]);
+
+// --- Community legend ---
+const commLegG = svg.append("g").attr("transform", `translate(${margin.left + legendW + 40}, ${margin.top - 50})`);
+communities.forEach((c, i) => {
+  const lg = commLegG.append("g").attr("transform", `translate(${i * 70}, 0)`);
+  lg.append("rect").attr("width", 10).attr("height", 10).attr("fill", communityColor(c)).attr("rx", 2);
+  lg.append("text").attr("x", 14).attr("y", 9).attr("fill", "#888").attr("font-size", 10).text(communityNames[c]);
+});
+commLegG.append("text").attr("y", -4).attr("fill", "#888").attr("font-size", 11).text("Community");
+</script>
+</body>
+</html>

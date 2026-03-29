@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Skill Growth Sparklines — D3 Power Tools</title>
+<style>
+  *,*::before,*::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #f7f8fa; color: #1a1a1a;
+    display: flex; justify-content: center;
+    padding: 32px 24px; min-height: 100vh;
+  }
+  .container { max-width: 960px; width: 100%; }
+  h1 { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
+  .subtitle { font-size: 13px; color: #666; margin-bottom: 16px; line-height: 1.5; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-bottom: 14px; font-size: 11px; color: #555; }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .legend-swatch { width: 10px; height: 10px; border-radius: 2px; }
+
+  .table-wrap {
+    max-height: calc(100vh - 160px);
+    overflow-y: auto;
+    border: 1px solid #d4d8de;
+    border-radius: 6px;
+    background: #fff;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  }
+
+  table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: 13px;
+  }
+
+  thead th {
+    position: sticky; top: 0; z-index: 2;
+    background: #eef0f4;
+    border-bottom: 2px solid #c4c8ce;
+    padding: 9px 12px;
+    text-align: left;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #555;
+    transition: background 120ms;
+  }
+  thead th:hover { background: #dfe2e8; }
+  thead th.active { color: #1a1a1a; }
+  .sort-arrow {
+    display: inline-block; width: 12px; text-align: center;
+    font-size: 9px; margin-left: 2px; opacity: 0.35;
+  }
+  thead th.active .sort-arrow { opacity: 1; }
+
+  tbody tr { transition: background 100ms; }
+  tbody tr:hover { background: #f0f4ff; }
+
+  td {
+    padding: 5px 12px;
+    vertical-align: middle;
+    white-space: nowrap;
+    line-height: 1;
+    border-bottom: 1px solid #eef0f2;
+  }
+
+  td.skill-name { font-weight: 600; font-size: 13px; }
+  td.category { font-size: 12px; color: #555; }
+  .cat-dot {
+    display: inline-block; width: 8px; height: 8px;
+    border-radius: 50%; margin-right: 5px; vertical-align: middle;
+  }
+
+  td.num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px;
+  }
+  td.pos { color: #16a34a; }
+  td.neg { color: #dc2626; }
+
+  td.spark { padding: 3px 12px; }
+  td.spark svg { display: block; cursor: crosshair; }
+
+  .tip {
+    position: fixed; pointer-events: none;
+    background: rgba(20,24,32,0.92); color: #fff;
+    font-size: 11px; padding: 5px 9px; border-radius: 4px;
+    white-space: nowrap; z-index: 100; display: none;
+    font-variant-numeric: tabular-nums;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+    line-height: 1.45;
+  }
+  .tip.show { display: block; }
+  .tip b { color: #7dd3fc; }
+
+  @media (max-width: 640px) {
+    body { padding: 16px 8px; }
+    td { padding: 4px 6px; font-size: 12px; }
+    .legend { font-size: 10px; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Skill Growth Sparklines</h1>
+  <p class="subtitle">Monthly line-count evolution per D3 skill (Apr 2025 – Mar 2026). Click headers to sort. Hover sparklines for values.</p>
+  <div class="legend" id="legend"></div>
+  <div class="table-wrap" id="wrap"></div>
+</div>
+<div class="tip" id="tip"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// ── Seeded PRNG ──────────────────────────────────────────────────
+function mulberry32(a) {
+  return () => {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const rand = mulberry32(90);
+
+// ── Categories ───────────────────────────────────────────────────
+const categories = [
+  { name: "Seeing patterns",   color: "#4e79a7" },
+  { name: "Seeing structure",  color: "#f28e2b" },
+  { name: "Seeing place",      color: "#59a14f" },
+  { name: "Seeing change",     color: "#e15759" },
+  { name: "Making it legible", color: "#76b7b2" },
+  { name: "Making it work",    color: "#b07aa1" },
+  { name: "Before you render", color: "#9c755f" },
+];
+const catColor = new Map(categories.map(c => [c.name, c.color]));
+
+// ── Legend ───────────────────────────────────────────────────────
+const legend = d3.select("#legend");
+categories.forEach(c => {
+  const item = legend.append("span").attr("class", "legend-item");
+  item.append("span").attr("class", "legend-swatch").style("background", c.color);
+  item.append("span").text(c.name);
+});
+
+// ── Skill definitions ────────────────────────────────────────────
+const skills = [
+  { name: "parallel-coordinates", cat: "Seeing patterns",   base: 420, rate: 0.06 },
+  { name: "brushing",             cat: "Seeing patterns",   base: 380, rate: 0.08 },
+  { name: "linked-views",         cat: "Seeing patterns",   base: 350, rate: 0.05 },
+  { name: "distributions",        cat: "Seeing patterns",   base: 310, rate: 0.04 },
+  { name: "hierarchy-layouts",    cat: "Seeing structure",  base: 480, rate: 0.03 },
+  { name: "hierarchy-interaction",cat: "Seeing structure",  base: 290, rate: 0.07 },
+  { name: "edge-bundling",        cat: "Seeing structure",  base: 340, rate: 0.05 },
+  { name: "force",                cat: "Seeing structure",  base: 520, rate: 0.04 },
+  { name: "network",              cat: "Seeing structure",  base: 400, rate: 0.06 },
+  { name: "cartography",          cat: "Seeing place",      base: 680, rate: 0.09 },
+  { name: "time-series",          cat: "Seeing change",     base: 450, rate: 0.07 },
+  { name: "motion",               cat: "Seeing change",     base: 260, rate: 0.10 },
+  { name: "shape-morphing",       cat: "Seeing change",     base: 220, rate: 0.12 },
+  { name: "scales",               cat: "Making it legible", base: 390, rate: 0.03 },
+  { name: "color",                cat: "Making it legible", base: 440, rate: 0.05 },
+  { name: "visual-texture",       cat: "Making it legible", base: 180, rate: 0.15 },
+  { name: "annotation",           cat: "Making it legible", base: 310, rate: 0.06 },
+  { name: "data-table",           cat: "Making it legible", base: 200, rate: 0.09 },
+  { name: "canvas-accessibility", cat: "Making it legible", base: 170, rate: 0.11 },
+  { name: "canvas",               cat: "Making it work",    base: 360, rate: 0.04 },
+  { name: "webgl",                cat: "Making it work",    base: 280, rate: 0.13 },
+  { name: "navigation",           cat: "Making it work",    base: 320, rate: 0.05 },
+  { name: "responsive",           cat: "Making it work",    base: 250, rate: 0.06 },
+  { name: "data-gathering",       cat: "Before you render", base: 300, rate: 0.04 },
+  { name: "sparkcharts",          cat: "Before you render", base: 240, rate: 0.09 },
+  { name: "small-multiples",      cat: "Before you render", base: 270, rate: 0.07 },
+];
+
+// ── Generate 12-month series ─────────────────────────────────────
+const months = d3.range(12).map(i => new Date(2025, 3 + i, 1));
+const monthFmt = d3.timeFormat("%b %Y");
+const monthLabels = months.map(monthFmt);
+
+const data = skills.map(s => {
+  const series = [];
+  let v = s.base;
+  for (let i = 0; i < 12; i++) {
+    // Compound monthly growth with noise
+    v = v * (1 + s.rate / 12) + (rand() - 0.4) * 20;
+    v = Math.max(40, Math.round(v));
+    series.push(v);
+  }
+  const first = series[0], last = series[11];
+  return {
+    name: s.name,
+    cat: s.cat,
+    color: catColor.get(s.cat),
+    series,
+    current: last,
+    peak: d3.max(series),
+    change: (last - first) / first,
+  };
+});
+
+// ── Shared sparkline y-domain for comparability ──────────────────
+const globalY = d3.extent(data.flatMap(d => d.series));
+
+// ── Column config ────────────────────────────────────────────────
+const cols = [
+  { key: "name",    label: "Skill",    align: "left",  sort: (a, b) => d3.ascending(a.name, b.name) },
+  { key: "cat",     label: "Category", align: "left",  sort: (a, b) => d3.ascending(a.cat, b.cat) || d3.ascending(a.name, b.name) },
+  { key: "current", label: "Lines",    align: "right", sort: (a, b) => d3.ascending(a.current, b.current) },
+  { key: "peak",    label: "Peak",     align: "right", sort: (a, b) => d3.ascending(a.peak, b.peak) },
+  { key: "spark",   label: "Trend",    align: "left",  sort: (a, b) => d3.ascending(a.change, b.change) },
+  { key: "change",  label: "Δ %",      align: "right", sort: (a, b) => d3.ascending(a.change, b.change) },
+];
+
+// ── Sort state ───────────────────────────────────────────────────
+let sortKey = "current", sortAsc = false;
+
+const sorted = () => {
+  const col = cols.find(c => c.key === sortKey);
+  const s = [...data].sort(col.sort);
+  return sortAsc ? s : s.reverse();
+};
+
+// ── Sparkline dimensions ─────────────────────────────────────────
+const W = 150, H = 24, P = 2;
+const sx = d3.scaleLinear([0, 11], [P, W - P]);
+const sy = d3.scaleLinear(globalY, [H - P, P]);
+const lineFn = d3.line((d, i) => sx(i), d => sy(d)).curve(d3.curveMonotoneX);
+const areaFn = d3.area().x((d, i) => sx(i)).y0(H).y1(d => sy(d)).curve(d3.curveMonotoneX);
+
+// ── Tooltip ──────────────────────────────────────────────────────
+const tip = d3.select("#tip");
+const fmt = d3.format(",");
+
+// ── Build table ──────────────────────────────────────────────────
+const table = d3.select("#wrap").append("table");
+const thead = table.append("thead").append("tr");
+const tbody = table.append("tbody");
+
+// Header
+thead.selectAll("th").data(cols).join("th")
+  .style("text-align", d => d.align)
+  .on("click", (_, d) => {
+    if (sortKey === d.key) sortAsc = !sortAsc;
+    else { sortKey = d.key; sortAsc = true; }
+    render();
+  })
+  .each(function(d) {
+    const th = d3.select(this);
+    th.append("span").text(d.label);
+    th.append("span").attr("class", "sort-arrow");
+  });
+
+// ── Render ───────────────────────────────────────────────────────
+function render() {
+  // Sort indicators
+  thead.selectAll("th")
+    .attr("class", d => d.key === sortKey ? "active" : null)
+    .each(function(d) {
+      d3.select(this).select(".sort-arrow")
+        .text(d.key === sortKey ? (sortAsc ? "▲" : "▼") : "");
+    });
+
+  tbody.selectAll("tr")
+    .data(sorted(), d => d.name)
+    .join(
+      enter => {
+        const tr = enter.append("tr");
+
+        // Skill name
+        tr.append("td").attr("class", "skill-name").text(d => d.name);
+
+        // Category
+        tr.append("td").attr("class", "category").each(function(d) {
+          const td = d3.select(this);
+          td.append("span").attr("class", "cat-dot").style("background", d.color);
+          td.append("span").text(d.cat);
+        });
+
+        // Current lines
+        tr.append("td").attr("class", "num").text(d => fmt(d.current));
+
+        // Peak
+        tr.append("td").attr("class", "num").text(d => fmt(d.peak));
+
+        // Sparkline
+        tr.append("td").attr("class", "spark").each(function(d) {
+          const svg = d3.select(this).append("svg")
+            .attr("width", W).attr("height", H)
+            .attr("role", "img")
+            .attr("aria-label", `${d.name}: ${d3.format("+.0%")(d.change)} over 12 months`);
+
+          // Area fill
+          svg.append("path").datum(d.series)
+            .attr("d", areaFn)
+            .attr("fill", d.color).attr("opacity", 0.1);
+
+          // Line
+          svg.append("path").datum(d.series)
+            .attr("d", lineFn)
+            .attr("fill", "none").attr("stroke", d.color).attr("stroke-width", 1.5);
+
+          // Endpoint dot
+          svg.append("circle")
+            .attr("cx", sx(11)).attr("cy", sy(d.series[11]))
+            .attr("r", 2).attr("fill", d.color);
+
+          // Hover dot
+          const hDot = svg.append("circle")
+            .attr("r", 3).attr("fill", d.color)
+            .attr("stroke", "#fff").attr("stroke-width", 1.5)
+            .attr("opacity", 0).style("pointer-events", "none");
+
+          // Vertical crosshair
+          const vLine = svg.append("line")
+            .attr("y1", 0).attr("y2", H)
+            .attr("stroke", "#999").attr("stroke-width", 0.5)
+            .attr("stroke-dasharray", "2,2")
+            .attr("opacity", 0).style("pointer-events", "none");
+
+          // Hover rect
+          svg.append("rect")
+            .attr("width", W).attr("height", H)
+            .attr("fill", "none").attr("pointer-events", "all")
+            .on("pointermove", function(event) {
+              const [mx] = d3.pointer(event, this);
+              const ci = Math.max(0, Math.min(11, Math.round(sx.invert(mx))));
+              const val = d.series[ci];
+              const cx = sx(ci), cy = sy(val);
+
+              hDot.attr("cx", cx).attr("cy", cy).attr("opacity", 1);
+              vLine.attr("x1", cx).attr("x2", cx).attr("opacity", 1);
+
+              const delta = ci > 0 ? val - d.series[ci - 1] : 0;
+              const deltaStr = ci > 0 ? ` (${d3.format("+,")(delta)})` : "";
+
+              tip.classed("show", true)
+                .html(`<b>${d.name}</b> — ${monthLabels[ci]}<br>${fmt(val)} lines${deltaStr}`)
+                .style("left", (event.clientX + 14) + "px")
+                .style("top", (event.clientY - 36) + "px");
+            })
+            .on("pointerleave", () => {
+              hDot.attr("opacity", 0);
+              vLine.attr("opacity", 0);
+              tip.classed("show", false);
+            });
+        });
+
+        // Change %
+        tr.append("td")
+          .attr("class", d => `num ${d.change >= 0 ? "pos" : "neg"}`)
+          .text(d => d3.format("+.1%")(d.change));
+
+        return tr;
+      },
+      update => update,
+      exit => exit.remove()
+    )
+    .order();
+}
+
+render();
+</script>
+</body>
+</html>

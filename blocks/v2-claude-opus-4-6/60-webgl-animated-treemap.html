@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebGL Animated Treemap — Revenue vs Headcount</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #0a0a0f; color: #e0e0e0; font-family: system-ui, sans-serif; overflow: hidden; }
+  #container { position: relative; width: 100vw; height: 100vh; }
+  canvas { position: absolute; top: 0; left: 0; }
+  #overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+  #controls {
+    position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
+    z-index: 10; display: flex; gap: 12px; align-items: center;
+  }
+  button {
+    background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.25);
+    color: #fff; padding: 8px 20px; border-radius: 6px; font-size: 14px;
+    cursor: pointer; transition: background 0.2s;
+  }
+  button:hover { background: rgba(255,255,255,0.2); }
+  button.active { background: rgba(100,180,255,0.3); border-color: rgba(100,180,255,0.6); }
+  #fps { font-size: 12px; color: #888; font-variant-numeric: tabular-nums; }
+  .group-label {
+    fill: rgba(255,255,255,0.7); font-size: 13px; font-weight: 600;
+    pointer-events: none; text-anchor: start;
+  }
+  #tooltip {
+    position: absolute; display: none; pointer-events: none; z-index: 20;
+    background: rgba(10,10,20,0.92); border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 6px; padding: 8px 12px; font-size: 12px; max-width: 240px;
+    backdrop-filter: blur(6px); line-height: 1.5;
+  }
+  #tooltip strong { display: block; margin-bottom: 2px; }
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="glCanvas"></canvas>
+  <svg id="overlay"></svg>
+  <div id="controls">
+    <button id="btnRevenue" class="active">Revenue</button>
+    <button id="btnHeadcount">Headcount</button>
+    <span id="fps"></span>
+  </div>
+  <div id="tooltip"></div>
+</div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data: 5000 leaves across sectors/divisions/teams ---
+const sectors = [
+  { name: "Technology", divisions: ["Cloud", "AI/ML", "Security", "DevTools", "Data Platform", "Mobile", "Infrastructure"] },
+  { name: "Finance", divisions: ["Banking", "Insurance", "Trading", "Payments", "Compliance", "Wealth Mgmt"] },
+  { name: "Healthcare", divisions: ["Pharma", "Devices", "Diagnostics", "Biotech", "Telehealth", "Genomics"] },
+  { name: "Energy", divisions: ["Solar", "Wind", "Oil & Gas", "Nuclear", "Grid", "Storage"] },
+  { name: "Consumer", divisions: ["Retail", "Food & Bev", "Apparel", "Electronics", "Home", "Luxury"] },
+  { name: "Industrial", divisions: ["Aerospace", "Auto", "Chemicals", "Mining", "Construction", "Logistics"] },
+  { name: "Media", divisions: ["Streaming", "Gaming", "Publishing", "Advertising", "Social", "News"] },
+  { name: "Telecom", divisions: ["Wireless", "Fiber", "Satellite", "IoT", "5G Infra"] },
+];
+
+const rng = d3.randomLcg(42);
+const randExp = d3.randomExponential.source(rng)(0.5);
+const randNorm = d3.randomNormal.source(rng)(50, 20);
+
+const rows = [];
+for (const sector of sectors) {
+  for (const div of sector.divisions) {
+    const teamCount = 8 + Math.floor(rng() * 20);
+    for (let t = 0; t < teamCount; t++) {
+      rows.push({
+        sector: sector.name,
+        division: div,
+        team: `Team-${t + 1}`,
+        revenue: Math.max(1, Math.round(randExp() * 100)),
+        headcount: Math.max(1, Math.round(Math.abs(randNorm()))),
+      });
+    }
+  }
+}
+// Trim to exactly 5000
+while (rows.length > 5000) rows.pop();
+while (rows.length < 5000) {
+  const src = rows[Math.floor(rng() * rows.length)];
+  rows.push({ ...src, team: `Team-X${rows.length}`, revenue: Math.max(1, Math.round(randExp() * 100)), headcount: Math.max(1, Math.round(Math.abs(randNorm()))) });
+}
+
+// --- Build hierarchy from grouped data ---
+const grouped = d3.group(rows, d => d.sector, d => d.division);
+const hierarchyData = {
+  name: "root",
+  children: [...grouped].map(([sector, divMap]) => ({
+    name: sector,
+    children: [...divMap].map(([div, leaves]) => ({
+      name: div,
+      children: leaves.map((d, i) => ({ ...d, name: d.team, leafIndex: -1 }))
+    }))
+  }))
+};
+
+// --- Two treemap layouts ---
+let W = window.innerWidth, H = window.innerHeight;
+const dpr = devicePixelRatio;
+
+const treemap = d3.treemap()
+  .tile(d3.treemapResquarify)
+  .size([W, H])
+  .paddingOuter(3)
+  .paddingTop(20)
+  .paddingInner(1)
+  .round(true);
+
+function computeLayout(accessor) {
+  const root = d3.hierarchy(hierarchyData).sum(accessor).sort((a, b) => b.value - a.value);
+  treemap(root);
+  return root;
+}
+
+const rootA = computeLayout(d => d.revenue || 0);
+const rootB = computeLayout(d => d.headcount || 0);
+const leavesA = rootA.leaves();
+const leavesB = rootB.leaves();
+const N = leavesA.length;
+
+// Build id-based mapping for stable pairing between layouts
+// Both layouts have same leaf set; pair by matching data reference
+const leafIdMap = new Map();
+leavesA.forEach((l, i) => { l.data._idx = i; leafIdMap.set(l.data, i); });
+const bToA = leavesB.map(lb => leafIdMap.get(lb.data));
+
+// Color by sector
+const sectorNames = [...new Set(rows.map(r => r.sector))];
+const colorScale = d3.scaleOrdinal(sectorNames, d3.schemeTableau10);
+
+// Pack per-instance data: posA (x0,y0,w,h), posB (x0,y0,w,h), color
+const posA = new Float32Array(N * 4);
+const posB = new Float32Array(N * 4);
+const colors = new Float32Array(N * 4);
+
+for (let i = 0; i < N; i++) {
+  const la = leavesA[i];
+  posA[i*4] = la.x0; posA[i*4+1] = la.y0;
+  posA[i*4+2] = la.x1 - la.x0; posA[i*4+3] = la.y1 - la.y0;
+
+  // Find matching leaf in B
+  const lb = leavesB[bToA.indexOf(i)] || leavesB.find(b => b.data === la.data) || la;
+  posB[i*4] = lb.x0; posB[i*4+1] = lb.y0;
+  posB[i*4+2] = lb.x1 - lb.x0; posB[i*4+3] = lb.y1 - lb.y0;
+
+  const c = d3.rgb(colorScale(la.data.sector));
+  colors[i*4] = c.r / 255; colors[i*4+1] = c.g / 255;
+  colors[i*4+2] = c.b / 255; colors[i*4+3] = 0.88;
+}
+
+// Also pair internal nodes for label animation
+const sectorsA = rootA.children || [];
+const sectorsB = rootB.children || [];
+const sectorPairs = sectorsA.map(sa => {
+  const sb = sectorsB.find(sb => sb.data.name === sa.data.name) || sa;
+  return { name: sa.data.name, a: sa, b: sb };
+});
+
+// --- WebGL2 setup ---
+const canvas = document.getElementById("glCanvas");
+canvas.width = W * dpr; canvas.height = H * dpr;
+canvas.style.width = W + "px"; canvas.style.height = H + "px";
+
+const gl = canvas.getContext("webgl2", { antialias: false, alpha: false });
+if (!gl) { document.body.innerHTML = "<p style='color:red;padding:2em'>WebGL 2 required</p>"; throw "no webgl2"; }
+
+gl.viewport(0, 0, canvas.width, canvas.height);
+gl.clearColor(0.039, 0.039, 0.059, 1);
+gl.enable(gl.BLEND);
+gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+// --- Shaders ---
+const vsSource = `#version 300 es
+in vec2 a_quad;      // unit quad vertex
+in vec4 a_posA;      // x, y, w, h for layout A
+in vec4 a_posB;      // x, y, w, h for layout B
+in vec4 a_color;
+uniform vec2 u_resolution;
+uniform float u_t;   // 0 = layout A (revenue), 1 = layout B (headcount)
+out vec4 v_color;
+out vec2 v_uv;
+
+void main() {
+  vec4 p = mix(a_posA, a_posB, u_t);
+  // a_quad is [-0.5, 0.5], map to rect
+  vec2 pos = vec2(p.x, p.y) + (a_quad + 0.5) * vec2(p.z, p.w);
+  vec2 clip = (pos / u_resolution) * 2.0 - 1.0;
+  clip.y = -clip.y;
+  gl_Position = vec4(clip, 0.0, 1.0);
+  v_color = a_color;
+  v_uv = a_quad + 0.5;
+}`;
+
+const fsSource = `#version 300 es
+precision mediump float;
+in vec4 v_color;
+in vec2 v_uv;
+out vec4 fragColor;
+
+void main() {
+  // Edge darkening for depth/separation
+  float edge = smoothstep(0.0, 0.06, min(min(v_uv.x, 1.0 - v_uv.x), min(v_uv.y, 1.0 - v_uv.y)));
+  vec3 col = v_color.rgb * (0.65 + 0.35 * edge);
+  fragColor = vec4(col, v_color.a);
+}`;
+
+function compileShader(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw gl.getShaderInfoLog(s);
+  return s;
+}
+
+function linkProgram(vsSrc, fsSrc) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compileShader(gl.VERTEX_SHADER, vsSrc));
+  gl.attachShader(p, compileShader(gl.FRAGMENT_SHADER, fsSrc));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw gl.getProgramInfoLog(p);
+  return p;
+}
+
+const prog = linkProgram(vsSource, fsSource);
+const uT = gl.getUniformLocation(prog, "u_t");
+const uRes = gl.getUniformLocation(prog, "u_resolution");
+
+function attribBuffer(prog, name, data, size, divisor = 0, usage = gl.STATIC_DRAW) {
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, data, usage);
+  const loc = gl.getAttribLocation(prog, name);
+  if (loc >= 0) {
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0);
+    if (divisor) gl.vertexAttribDivisor(loc, divisor);
+  }
+  return buf;
+}
+
+// Unit quad vertices
+const quadVerts = new Float32Array([
+  -0.5,-0.5, 0.5,-0.5, 0.5,0.5, -0.5,-0.5, 0.5,0.5, -0.5,0.5
+]);
+
+// Main VAO
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+attribBuffer(prog, "a_quad", quadVerts, 2);
+attribBuffer(prog, "a_posA", posA, 4, 1);
+attribBuffer(prog, "a_posB", posB, 4, 1);
+attribBuffer(prog, "a_color", colors, 4, 1);
+
+// --- GPU picking ---
+const pickFsSource = `#version 300 es
+precision mediump float;
+in vec4 v_color;
+in vec2 v_uv;
+out vec4 fragColor;
+void main() { fragColor = v_color; }`;
+
+const pickProg = linkProgram(vsSource, pickFsSource);
+const pickColors = new Float32Array(N * 4);
+for (let i = 0; i < N; i++) {
+  const id = i + 1;
+  pickColors[i*4] = (id & 0xFF) / 255;
+  pickColors[i*4+1] = ((id >> 8) & 0xFF) / 255;
+  pickColors[i*4+2] = ((id >> 16) & 0xFF) / 255;
+  pickColors[i*4+3] = 1.0;
+}
+
+const pickVao = gl.createVertexArray();
+gl.bindVertexArray(pickVao);
+attribBuffer(pickProg, "a_quad", quadVerts, 2);
+attribBuffer(pickProg, "a_posA", posA, 4, 1);
+attribBuffer(pickProg, "a_posB", posB, 4, 1);
+attribBuffer(pickProg, "a_color", pickColors, 4, 1);
+
+const pickFB = gl.createFramebuffer();
+const pickTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, pickTex);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, canvas.width, canvas.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+gl.bindFramebuffer(gl.FRAMEBUFFER, pickFB);
+gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, pickTex, 0);
+gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+// --- SVG overlay for sector labels ---
+const svg = d3.select("#overlay").attr("width", W).attr("height", H);
+
+function updateLabels(t) {
+  svg.selectAll("text.group-label")
+    .data(sectorPairs, d => d.name)
+    .join("text")
+    .attr("class", "group-label")
+    .attr("x", d => d.a.x0 + (d.b.x0 - d.a.x0) * t + 5)
+    .attr("y", d => d.a.y0 + (d.b.y0 - d.a.y0) * t + 15)
+    .text(d => d.name)
+    .attr("fill", d => colorScale(d.name))
+    .attr("opacity", d => {
+      const w = (d.a.x1 - d.a.x0) + ((d.b.x1 - d.b.x0) - (d.a.x1 - d.a.x0)) * t;
+      const h = (d.a.y1 - d.a.y0) + ((d.b.y1 - d.b.y0) - (d.a.y1 - d.a.y0)) * t;
+      return (w > 60 && h > 24) ? 0.85 : 0;
+    });
+}
+
+// --- Animation state ---
+let currentLayout = 0;
+let animT = 0;
+let animStart = null, animFrom = 0, animTo = 0;
+const DURATION = 800;
+
+function cubicInOut(x) {
+  return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+}
+
+let frameCount = 0, lastFpsTime = performance.now();
+const fpsEl = document.getElementById("fps");
+let needPickRedraw = true;
+
+function render(now) {
+  if (animStart !== null) {
+    const progress = Math.min((now - animStart) / DURATION, 1);
+    animT = animFrom + (animTo - animFrom) * cubicInOut(progress);
+    needPickRedraw = true;
+    if (progress >= 1) animStart = null;
+  }
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.useProgram(prog);
+  gl.uniform1f(uT, animT);
+  gl.uniform2f(uRes, W, H);
+  gl.bindVertexArray(vao);
+  gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, N);
+
+  // Picking buffer — redraw only when positions changed
+  if (needPickRedraw) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, pickFB);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.clearColor(0.039, 0.039, 0.059, 1);
+    gl.useProgram(pickProg);
+    gl.uniform1f(gl.getUniformLocation(pickProg, "u_t"), animT);
+    gl.uniform2f(gl.getUniformLocation(pickProg, "u_resolution"), W, H);
+    gl.bindVertexArray(pickVao);
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, N);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    if (animStart === null) needPickRedraw = false;
+  }
+
+  updateLabels(animT);
+
+  // FPS
+  frameCount++;
+  if (now - lastFpsTime > 500) {
+    fpsEl.textContent = Math.round(frameCount / ((now - lastFpsTime) / 1000)) + " fps";
+    frameCount = 0; lastFpsTime = now;
+  }
+
+  requestAnimationFrame(render);
+}
+requestAnimationFrame(render);
+
+// --- Controls ---
+const btnR = document.getElementById("btnRevenue");
+const btnH = document.getElementById("btnHeadcount");
+
+function switchTo(layout) {
+  if (layout === currentLayout && animStart === null) return;
+  currentLayout = layout;
+  btnR.classList.toggle("active", layout === 0);
+  btnH.classList.toggle("active", layout === 1);
+  animFrom = animT;
+  animTo = layout;
+  animStart = performance.now();
+}
+
+btnR.addEventListener("click", () => switchTo(0));
+btnH.addEventListener("click", () => switchTo(1));
+
+// --- Tooltip ---
+const tooltip = document.getElementById("tooltip");
+const fmt = d3.format(",");
+
+canvas.addEventListener("pointermove", e => {
+  const px = new Uint8Array(4);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, pickFB);
+  gl.readPixels(e.clientX * dpr, (H - e.clientY) * dpr, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  const idx = (px[0] | (px[1] << 8) | (px[2] << 16)) - 1;
+
+  if (idx >= 0 && idx < N) {
+    const d = leavesA[idx].data;
+    tooltip.innerHTML = `<strong>${d.sector} / ${d.division}</strong>${d.team}<br>Revenue: $${fmt(d.revenue)}M &middot; Headcount: ${fmt(d.headcount)}`;
+    tooltip.style.display = "block";
+    tooltip.style.left = Math.min(e.clientX + 14, W - 250) + "px";
+    tooltip.style.top = Math.min(e.clientY - 10, H - 80) + "px";
+  } else {
+    tooltip.style.display = "none";
+  }
+});
+
+canvas.addEventListener("pointerleave", () => { tooltip.style.display = "none"; });
+
+// Keyboard
+window.addEventListener("keydown", e => {
+  if (e.key === " " || e.key === "t") {
+    e.preventDefault();
+    switchTo(currentLayout === 0 ? 1 : 0);
+  }
+});
+</script>
+</body>
+</html>

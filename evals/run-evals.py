@@ -55,7 +55,7 @@ def run_claude(prompt, output_file, *, cwd, model="sonnet", timeout=120):
         "--output-format", "json",
         "--model", model,
         "--permission-mode", "bypassPermissions",
-        "--max-turns", "3",
+        "--max-turns", "25",
     ]
 
     try:
