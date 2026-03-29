@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Accessible Hive Plot</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #0a0a1a; color: #e0e0e0; font-family: system-ui, sans-serif; display: flex; flex-direction: column; align-items: center; min-height: 100vh; padding: 20px; }
+  h1 { font-size: 1.4rem; margin-bottom: 4px; color: #fff; }
+  .subtitle { font-size: 0.85rem; color: #999; margin-bottom: 12px; }
+  #container { position: relative; outline: none; }
+  svg { display: block; }
+  .axis-line { stroke: #444; stroke-width: 1.5; }
+  .axis-label { fill: #aaa; font-size: 12px; font-weight: 600; text-anchor: middle; }
+  .edge { fill: none; stroke-opacity: 0.25; stroke-width: 1.2; }
+  .edge.highlighted { stroke-opacity: 0.8; stroke-width: 2.5; }
+  .node { cursor: pointer; }
+  .node circle { stroke: none; }
+  .node.focused circle { stroke: #fff; stroke-width: 2.5; }
+  .focus-ring { fill: none; stroke: #ffd700; stroke-width: 2; stroke-dasharray: 3 2; pointer-events: none; display: none; }
+  .focus-ring.visible { display: block; }
+  .legend { display: flex; gap: 18px; margin-top: 10px; font-size: 0.8rem; }
+  .legend-item { display: flex; align-items: center; gap: 5px; }
+  .legend-swatch { width: 12px; height: 12px; border-radius: 50%; }
+  #live-region { position: absolute; left: -9999px; width: 1px; height: 1px; overflow: hidden; }
+  .instructions { font-size: 0.75rem; color: #777; margin-top: 8px; max-width: 600px; text-align: center; }
+  .tooltip { position: absolute; background: rgba(20,20,40,0.95); border: 1px solid #555; border-radius: 6px; padding: 8px 12px; font-size: 0.8rem; pointer-events: none; opacity: 0; transition: opacity 0.15s; color: #e0e0e0; }
+</style>
+</head>
+<body>
+<h1>Accessible Hive Plot</h1>
+<p class="subtitle">Network topology: 80 nodes across 3 axes, ~120 edges</p>
+<div id="container" tabindex="0" role="application" aria-label="Hive plot with 80 nodes on 3 axes: Source, Connector, and Sink. Use arrow keys to navigate.">
+  <div id="live-region" aria-live="assertive" aria-atomic="true"></div>
+  <div class="tooltip" id="tooltip"></div>
+</div>
+<div class="legend">
+  <div class="legend-item"><div class="legend-swatch" style="background:#4fc3f7"></div>Source</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#aed581"></div>Connector</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#ff8a65"></div>Sink</div>
+</div>
+<p class="instructions">Arrow keys: ↑↓ move along axis, ←→ switch axes. Enter/Space for details. Tab to enter/exit.</p>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+const width = 700, height = 700;
+const cx = width / 2, cy = height / 2;
+const innerRadius = 40, outerRadius = 280;
+
+const axisConfig = [
+  { name: "Source", angle: (7 * Math.PI) / 6, color: "#4fc3f7", count: 25 },
+  { name: "Connector", angle: (11 * Math.PI) / 6, color: "#aed581", count: 30 },
+  { name: "Sink", angle: Math.PI / 2, color: "#ff8a65", count: 25 }
+];
+
+// --- Synthetic data ---
+const rng = d3.randomLcg(42);
+const rand = d3.randomUniform.source(rng)(0, 1);
+
+const nodes = [];
+let id = 0;
+for (const axis of axisConfig) {
+  for (let i = 0; i < axis.count; i++) {
+    const t = (i + 0.5) / axis.count;
+    const value = Math.round(rand() * 100);
+    nodes.push({ id: id++, axis: axis.name, axisIndex: axisConfig.indexOf(axis), positionOnAxis: i, t, value, label: `${axis.name[0]}${i + 1}` });
+  }
+}
+
+// Generate ~120 edges connecting nodes on different axes
+const edges = [];
+const edgeSet = new Set();
+function addEdge(src, tgt) {
+  const key = `${Math.min(src, tgt)}-${Math.max(src, tgt)}`;
+  if (!edgeSet.has(key) && nodes[src].axisIndex !== nodes[tgt].axisIndex) {
+    edgeSet.add(key);
+    edges.push({ source: src, target: tgt });
+  }
+}
+
+// Source → Connector
+for (let i = 0; i < 25; i++) {
+  const targets = d3.range(25, 55).sort(() => rand() - 0.5).slice(0, Math.ceil(rand() * 3));
+  for (const t of targets) addEdge(i, t);
+}
+// Connector → Sink
+for (let i = 25; i < 55; i++) {
+  const targets = d3.range(55, 80).sort(() => rand() - 0.5).slice(0, Math.ceil(rand() * 3));
+  for (const t of targets) addEdge(i, t);
+}
+// Source → Sink (fewer)
+for (let i = 0; i < 25; i++) {
+  if (rand() < 0.3) {
+    const t = 55 + Math.floor(rand() * 25);
+    addEdge(i, t);
+  }
+}
+
+// Trim to ~120
+while (edges.length > 120) edges.pop();
+
+// Build adjacency
+const adjacency = new Map();
+for (const n of nodes) adjacency.set(n.id, []);
+for (const e of edges) {
+  adjacency.get(e.source).push(e.target);
+  adjacency.get(e.target).push(e.source);
+}
+
+// --- Scales ---
+const radiusScale = d3.scaleLinear().domain([0, 1]).range([innerRadius, outerRadius]);
+
+function nodeX(n) {
+  const axis = axisConfig[n.axisIndex];
+  const r = radiusScale(n.t);
+  return cx + r * Math.cos(axis.angle);
+}
+function nodeY(n) {
+  const axis = axisConfig[n.axisIndex];
+  const r = radiusScale(n.t);
+  return cy + r * Math.sin(axis.angle);
+}
+
+// --- SVG ---
+const svg = d3.select("#container").append("svg")
+  .attr("width", width).attr("height", height)
+  .attr("viewBox", `0 0 ${width} ${height}`)
+  .attr("role", "img")
+  .attr("aria-label", "Hive plot visualization");
+
+// Axis lines
+for (const axis of axisConfig) {
+  const x1 = cx + innerRadius * Math.cos(axis.angle);
+  const y1 = cy + innerRadius * Math.sin(axis.angle);
+  const x2 = cx + outerRadius * Math.cos(axis.angle);
+  const y2 = cy + outerRadius * Math.sin(axis.angle);
+  svg.append("line").attr("class", "axis-line").attr("x1", x1).attr("y1", y1).attr("x2", x2).attr("y2", y2);
+  const lx = cx + (outerRadius + 22) * Math.cos(axis.angle);
+  const ly = cy + (outerRadius + 22) * Math.sin(axis.angle);
+  svg.append("text").attr("class", "axis-label").attr("x", lx).attr("y", ly).attr("dy", "0.35em").text(axis.name);
+}
+
+// Edges as quadratic Bezier curves through center-offset control point
+const edgeGroup = svg.append("g").attr("class", "edges");
+const edgeEls = edgeGroup.selectAll("path").data(edges).join("path")
+  .attr("class", "edge")
+  .attr("d", d => {
+    const s = nodes[d.source], t = nodes[d.target];
+    const sx = nodeX(s), sy = nodeY(s), tx = nodeX(t), ty = nodeY(t);
+    // Control point pulled toward center
+    const mx = (sx + tx) / 2, my = (sy + ty) / 2;
+    const cpx = cx + (mx - cx) * 0.15;
+    const cpy = cy + (my - cy) * 0.15;
+    return `M${sx},${sy} Q${cpx},${cpy} ${tx},${ty}`;
+  })
+  .attr("stroke", d => {
+    const sa = nodes[d.source].axisIndex, ta = nodes[d.target].axisIndex;
+    return axisConfig[Math.min(sa, ta)].color;
+  });
+
+// Nodes
+const nodeGroup = svg.append("g").attr("class", "nodes");
+const nodeEls = nodeGroup.selectAll("g").data(nodes).join("g")
+  .attr("class", "node")
+  .attr("transform", d => `translate(${nodeX(d)},${nodeY(d)})`)
+  .attr("role", "button")
+  .attr("aria-label", d => `${d.label}: ${d.axis} axis, value ${d.value}, ${adjacency.get(d.id).length} connections`);
+
+nodeEls.append("circle")
+  .attr("r", d => 3 + Math.sqrt(adjacency.get(d.id).length) * 1.5)
+  .attr("fill", d => axisConfig[d.axisIndex].color);
+
+// Focus ring
+const focusRing = svg.append("circle").attr("class", "focus-ring").attr("r", 12);
+
+// --- Keyboard navigation ---
+const container = document.getElementById("container");
+const liveRegion = document.getElementById("live-region");
+const tooltip = document.getElementById("tooltip");
+
+let currentAxisIdx = 0;
+let currentPosIdx = 0;
+let focusedNode = null;
+
+function getNodesOnAxis(axisIdx) {
+  return nodes.filter(n => n.axisIndex === axisIdx).sort((a, b) => a.positionOnAxis - b.positionOnAxis);
+}
+
+function announce(msg) {
+  liveRegion.textContent = "";
+  requestAnimationFrame(() => { liveRegion.textContent = msg; });
+}
+
+function updateFocus(axisIdx, posIdx, fromKeyboard = false) {
+  currentAxisIdx = axisIdx;
+  const axisNodes = getNodesOnAxis(axisIdx);
+  currentPosIdx = Math.max(0, Math.min(posIdx, axisNodes.length - 1));
+  focusedNode = axisNodes[currentPosIdx];
+
+  // Visual focus
+  nodeEls.classed("focused", d => d.id === focusedNode.id);
+  const x = nodeX(focusedNode), y = nodeY(focusedNode);
+  focusRing.attr("cx", x).attr("cy", y).classed("visible", true);
+
+  // Highlight connected edges
+  const connSet = new Set(adjacency.get(focusedNode.id));
+  edgeEls.classed("highlighted", d => d.source === focusedNode.id || d.target === focusedNode.id);
+
+  // Tooltip
+  tooltip.style.opacity = 1;
+  tooltip.style.left = `${x + 15}px`;
+  tooltip.style.top = `${y - 10}px`;
+  const connCount = adjacency.get(focusedNode.id).length;
+  tooltip.innerHTML = `<strong>${focusedNode.label}</strong><br>Axis: ${focusedNode.axis}<br>Value: ${focusedNode.value}<br>Connections: ${connCount}`;
+
+  if (fromKeyboard) {
+    announce(`${focusedNode.label}, ${focusedNode.axis} axis, value ${focusedNode.value}, ${connCount} connections`);
+  }
+}
+
+container.addEventListener("keydown", e => {
+  const axisNodes = getNodesOnAxis(currentAxisIdx);
+  let handled = true;
+  switch (e.key) {
+    case "ArrowUp":
+      updateFocus(currentAxisIdx, currentPosIdx - 1, true);
+      break;
+    case "ArrowDown":
+      updateFocus(currentAxisIdx, currentPosIdx + 1, true);
+      break;
+    case "ArrowLeft":
+      updateFocus((currentAxisIdx + 2) % 3, currentPosIdx, true);
+      break;
+    case "ArrowRight":
+      updateFocus((currentAxisIdx + 1) % 3, currentPosIdx, true);
+      break;
+    case "Enter":
+    case " ": {
+      const conn = adjacency.get(focusedNode.id);
+      const connLabels = conn.map(id => nodes[id].label).join(", ");
+      announce(`${focusedNode.label} connects to: ${connLabels || "none"}`);
+      break;
+    }
+    default:
+      handled = false;
+  }
+  if (handled) e.preventDefault();
+});
+
+container.addEventListener("focus", () => {
+  if (!focusedNode) updateFocus(0, 0, true);
+  else focusRing.classed("visible", true);
+});
+
+container.addEventListener("blur", () => {
+  focusRing.classed("visible", false);
+  tooltip.style.opacity = 0;
+  edgeEls.classed("highlighted", false);
+  nodeEls.classed("focused", false);
+});
+
+// Mouse interaction
+nodeEls.on("pointerenter", (e, d) => {
+  const idx = getNodesOnAxis(d.axisIndex).findIndex(n => n.id === d.id);
+  updateFocus(d.axisIndex, idx, false);
+}).on("pointerleave", () => {
+  if (document.activeElement !== container) {
+    tooltip.style.opacity = 0;
+    edgeEls.classed("highlighted", false);
+    nodeEls.classed("focused", false);
+    focusRing.classed("visible", false);
+  }
+});
+
+// Initialize
+updateFocus(0, 0, false);
+tooltip.style.opacity = 0;
+focusRing.classed("visible", false);
+edgeEls.classed("highlighted", false);
+nodeEls.classed("focused", false);
+</script>
+</body>
+</html>

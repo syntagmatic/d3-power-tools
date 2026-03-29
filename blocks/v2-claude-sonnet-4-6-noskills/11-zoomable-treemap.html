@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zoomable Filesystem Treemap</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #0f1117;
+    color: #e2e8f0;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  header {
+    padding: 14px 20px 10px;
+    background: #161b27;
+    border-bottom: 1px solid #2d3748;
+    flex-shrink: 0;
+  }
+  h1 {
+    font-size: 15px;
+    font-weight: 600;
+    color: #a0aec0;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+  #breadcrumb {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 13px;
+    flex-wrap: wrap;
+  }
+  .crumb {
+    cursor: pointer;
+    color: #63b3ed;
+    padding: 2px 6px;
+    border-radius: 4px;
+    transition: background 0.15s;
+    white-space: nowrap;
+  }
+  .crumb:hover { background: #2d3748; }
+  .crumb.active { color: #e2e8f0; cursor: default; }
+  .crumb.active:hover { background: transparent; }
+  .sep { color: #4a5568; font-size: 12px; }
+  #chart {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+  }
+  svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  .node rect {
+    stroke: #0f1117;
+    stroke-width: 1.5px;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .node rect:hover { opacity: 0.85; }
+  .node text {
+    pointer-events: none;
+    dominant-baseline: hanging;
+    fill: rgba(255,255,255,0.9);
+    text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+  }
+  .node .label-name {
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .node .label-size {
+    font-size: 10px;
+    fill: rgba(255,255,255,0.6);
+  }
+  .dir-label {
+    pointer-events: none;
+    font-size: 12px;
+    font-weight: 700;
+    fill: rgba(255,255,255,0.95);
+    text-shadow: 0 1px 4px rgba(0,0,0,0.9);
+    letter-spacing: 0.02em;
+  }
+  .tooltip {
+    position: absolute;
+    background: #1a202c;
+    border: 1px solid #2d3748;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 12px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s;
+    max-width: 220px;
+    z-index: 10;
+    line-height: 1.5;
+  }
+  .tooltip.visible { opacity: 1; }
+  .tooltip .tt-name { font-weight: 600; color: #e2e8f0; word-break: break-all; }
+  .tooltip .tt-path { color: #718096; font-size: 11px; margin-top: 2px; word-break: break-all; }
+  .tooltip .tt-size { color: #68d391; margin-top: 4px; }
+  .tooltip .tt-files { color: #90cdf4; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Filesystem Treemap</h1>
+  <div id="breadcrumb"></div>
+</header>
+<div id="chart">
+  <div class="tooltip" id="tooltip"></div>
+</div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+// ── Synthetic data generation ──────────────────────────────────────────────
+const rng = (() => {
+  let s = 42;
+  return () => { s = (s * 1664525 + 1013904223) & 0xffffffff; return (s >>> 0) / 0xffffffff; };
+})();
+
+function logRandSize(min = 1024, max = 50 * 1024 * 1024) {
+  return Math.round(Math.exp(rng() * (Math.log(max) - Math.log(min)) + Math.log(min)));
+}
+
+const EXT = {
+  src:    ['.js','.ts','.jsx','.tsx','.mjs','.cjs'],
+  style:  ['.css','.scss','.less','.sass'],
+  markup: ['.html','.xml','.svg','.vue'],
+  data:   ['.json','.yaml','.toml','.csv','.xml'],
+  doc:    ['.md','.txt','.rst','.pdf'],
+  image:  ['.png','.jpg','.gif','.webp','.svg','.ico'],
+  binary: ['.wasm','.so','.dll','.exe','.dylib'],
+  config: ['.env','.cfg','.ini','.conf','.lock'],
+};
+
+const WORDS = ['index','main','app','core','utils','helpers','config','setup',
+  'build','test','spec','mock','base','common','shared','types','constants',
+  'hooks','context','store','router','api','auth','data','model','view',
+  'service','client','server','worker','plugin','loader','parser','handler',
+  'manager','controller','factory','adapter','provider','registry','schema',
+  'theme','icons','assets','fonts','images','styles','scripts','vendor',
+  'cache','queue','event','logger','metrics','health','status','version',
+  'package','bundle','chunk','manifest','entry','output','public','private',
+  'components','pages','layouts','templates','partials','sections','modules'];
+
+function pick(arr) { return arr[Math.floor(rng() * arr.length)]; }
+function pickExt(type) { return pick(EXT[type]); }
+
+function makeName(extType) {
+  const word = pick(WORDS);
+  const suffix = rng() > 0.6 ? '-' + pick(WORDS) : '';
+  return word + suffix + pickExt(extType);
+}
+
+const DIRS = [
+  { name: 'src',      color: '#4299e1', types: ['src','style','markup'], fileCount: [40,60] },
+  { name: 'packages', color: '#9f7aea', types: ['src','config','data'],  fileCount: [55,75] },
+  { name: 'assets',   color: '#ed8936', types: ['image','binary'],        fileCount: [50,70] },
+  { name: 'docs',     color: '#68d391', types: ['doc','markup','data'],   fileCount: [30,45] },
+  { name: 'tests',    color: '#f6ad55', types: ['src','data','config'],   fileCount: [35,50] },
+  { name: 'config',   color: '#fc8181', types: ['config','data'],         fileCount: [20,30] },
+  { name: 'scripts',  color: '#76e4f7', types: ['src','config'],          fileCount: [20,30] },
+  { name: 'dist',     color: '#b794f4', types: ['binary','src','style'],  fileCount: [40,55] },
+];
+
+const SUBDIRS = {
+  src:      ['components','hooks','pages','utils','services','store','types','api','context'],
+  packages: ['ui','core','utils','plugins','cli','server','shared','types','testing'],
+  assets:   ['images','icons','fonts','videos','sprites','textures'],
+  docs:     ['guides','api','examples','tutorials','reference','changelog'],
+  tests:    ['unit','integration','e2e','fixtures','mocks','snapshots'],
+  config:   ['webpack','babel','jest','eslint','typescript','ci','docker'],
+  scripts:  ['build','deploy','lint','generate','analyze','migrate'],
+  dist:     ['esm','cjs','umd','types','assets','chunks'],
+};
+
+function buildTree() {
+  const root = { name: '/', children: [] };
+
+  DIRS.forEach(dirDef => {
+    const [minF, maxF] = dirDef.fileCount;
+    const totalFiles = Math.round(minF + rng() * (maxF - minF));
+    const subs = SUBDIRS[dirDef.name];
+    const subCount = Math.min(subs.length, 3 + Math.floor(rng() * 4));
+    const chosenSubs = subs.slice().sort(() => rng() - 0.5).slice(0, subCount);
+
+    const dirNode = { name: dirDef.name, color: dirDef.color, children: [] };
+
+    // distribute files across subdirs
+    const weights = chosenSubs.map(() => 0.5 + rng() * 1.5);
+    const wSum = weights.reduce((a, b) => a + b, 0);
+
+    chosenSubs.forEach((sub, i) => {
+      const subFiles = Math.max(3, Math.round((weights[i] / wSum) * totalFiles));
+      const subNode = { name: sub, children: [] };
+
+      for (let f = 0; f < subFiles; f++) {
+        const extType = pick(dirDef.types);
+        subNode.children.push({
+          name: makeName(extType),
+          size: logRandSize(),
+        });
+      }
+      dirNode.children.push(subNode);
+    });
+
+    root.children.push(dirNode);
+  });
+
+  return root;
+}
+
+const rawData = buildTree();
+
+// ── Chart setup ────────────────────────────────────────────────────────────
+const chartEl = document.getElementById('chart');
+const tooltip = document.getElementById('tooltip');
+const breadcrumbEl = document.getElementById('breadcrumb');
+
+const svg = d3.select('#chart').append('svg');
+const g = svg.append('g');
+
+let width, height;
+
+function getSize() {
+  const rect = chartEl.getBoundingClientRect();
+  width = rect.width;
+  height = rect.height;
+}
+
+// ── Hierarchy & treemap ────────────────────────────────────────────────────
+const hierarchy = d3.hierarchy(rawData)
+  .sum(d => d.size || 0)
+  .sort((a, b) => b.value - a.value);
+
+function makeTreemap(w, h) {
+  return d3.treemap()
+    .size([w, h])
+    .paddingOuter(4)
+    .paddingTop(22)
+    .paddingInner(2)
+    .round(true);
+}
+
+// Color: inherit from top-level ancestor
+function getColor(node) {
+  let n = node;
+  while (n.depth > 1 && n.parent) n = n.parent;
+  if (n.data.color) return n.data.color;
+  return '#4a5568';
+}
+
+function colorLeaf(node) {
+  const base = getColor(node);
+  const depth = node.depth;
+  return d3.color(base).darker(depth * 0.35 - 0.2).toString();
+}
+
+// ── State ──────────────────────────────────────────────────────────────────
+let currentRoot = hierarchy;
+let path = [hierarchy]; // breadcrumb path
+
+// ── Format helpers ─────────────────────────────────────────────────────────
+function fmtBytes(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
+  if (b < 1024 * 1024 * 1024) return (b / 1024 / 1024).toFixed(1) + ' MB';
+  return (b / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+
+function getFullPath(node) {
+  const parts = [];
+  let n = node;
+  while (n) { if (n.data.name) parts.unshift(n.data.name); n = n.parent; }
+  return '/' + parts.join('/');
+}
+
+// ── Render ─────────────────────────────────────────────────────────────────
+function render(rootNode, animated = false) {
+  getSize();
+  svg.attr('viewBox', `0 0 ${width} ${height}`);
+
+  const treemap = makeTreemap(width, height);
+  treemap(rootNode);
+
+  // flatten to displayable nodes (skip the virtual root itself when zoomed)
+  const nodes = rootNode.descendants().filter(d => d !== rootNode || d === hierarchy);
+  const displayNodes = rootNode.descendants().slice(1); // skip root
+
+  // Clear
+  g.selectAll('.node').remove();
+
+  const node = g.selectAll('.node')
+    .data(displayNodes, d => getFullPath(d))
+    .join(
+      enter => {
+        const el = enter.append('g')
+          .attr('class', 'node')
+          .attr('transform', d => `translate(${d.x0},${d.y0})`);
+
+        el.append('rect')
+          .attr('width', d => Math.max(0, d.x1 - d.x0))
+          .attr('height', d => Math.max(0, d.y1 - d.y0))
+          .attr('fill', d => colorLeaf(d))
+          .attr('rx', 2);
+
+        // Directory label (top strip)
+        el.filter(d => d.children)
+          .append('text')
+          .attr('class', 'dir-label')
+          .attr('x', 5)
+          .attr('y', 5)
+          .text(d => {
+            const w = d.x1 - d.x0;
+            const name = d.data.name;
+            if (w < 30) return '';
+            if (w < 60) return name.slice(0, 3);
+            return name;
+          });
+
+        // Leaf labels
+        el.filter(d => !d.children)
+          .each(function(d) {
+            const w = d.x1 - d.x0;
+            const h = d.y1 - d.y0;
+            if (w < 40 || h < 18) return;
+            const sel = d3.select(this);
+            sel.append('text')
+              .attr('class', 'label-name')
+              .attr('x', 4)
+              .attr('y', 4)
+              .text(() => {
+                const name = d.data.name;
+                const maxChars = Math.floor(w / 6.5);
+                return name.length > maxChars ? name.slice(0, maxChars - 1) + '…' : name;
+              });
+            if (h > 32) {
+              sel.append('text')
+                .attr('class', 'label-size')
+                .attr('x', 4)
+                .attr('y', 18)
+                .text(fmtBytes(d.data.size || d.value));
+            }
+          });
+
+        if (animated) {
+          el.attr('opacity', 0)
+            .transition().duration(300).delay((_, i) => i * 2)
+            .attr('opacity', 1);
+        }
+
+        return el;
+      }
+    );
+
+  // Click: zoom in on dirs
+  node.select('rect')
+    .on('click', (event, d) => {
+      event.stopPropagation();
+      if (d.children) {
+        zoomTo(d);
+      }
+    })
+    .on('mousemove', (event, d) => showTooltip(event, d))
+    .on('mouseleave', hideTooltip);
+
+  updateBreadcrumb();
+}
+
+function zoomTo(node) {
+  path = [];
+  let n = node;
+  while (n) { path.unshift(n); n = n.parent; }
+
+  currentRoot = node;
+
+  // Re-layout from this node
+  const treemap = makeTreemap(width, height);
+  const sub = d3.hierarchy(node.data)
+    .sum(d => d.size || 0)
+    .sort((a, b) => b.value - a.value);
+  treemap(sub);
+
+  // Map colors from original
+  sub.each(sn => {
+    sn._origNode = findNode(hierarchy, getFullPath(sn));
+  });
+
+  render(sub, true);
+  currentRoot = sub;
+}
+
+function findNode(root, path) {
+  let result = null;
+  root.each(n => { if (getFullPath(n) === path) result = n; });
+  return result;
+}
+
+function zoomOut(targetDepthNode) {
+  // Rebuild from original hierarchy
+  getSize();
+  const treemap = makeTreemap(width, height);
+
+  if (targetDepthNode === hierarchy || !targetDepthNode) {
+    treemap(hierarchy);
+    currentRoot = hierarchy;
+    path = [hierarchy];
+    render(hierarchy, true);
+    return;
+  }
+
+  // Find corresponding original node
+  const pathParts = [];
+  let n = targetDepthNode;
+  while (n) { pathParts.unshift(n.data.name); n = n.parent; }
+
+  // Navigate from root
+  let node = hierarchy;
+  for (let i = 1; i < pathParts.length; i++) {
+    if (!node.children) break;
+    const found = node.children.find(c => c.data.name === pathParts[i]);
+    if (found) node = found; else break;
+  }
+
+  if (node === hierarchy) {
+    treemap(hierarchy);
+    currentRoot = hierarchy;
+    path = [hierarchy];
+    render(hierarchy, true);
+  } else {
+    zoomTo(node);
+  }
+}
+
+// ── Breadcrumb ─────────────────────────────────────────────────────────────
+function updateBreadcrumb() {
+  breadcrumbEl.innerHTML = '';
+
+  // Build actual path from currentRoot
+  const crumbs = [];
+  let n = currentRoot;
+  // walk up original data to get names
+  const names = [];
+  let tmp = currentRoot;
+  while (tmp) { names.unshift(tmp.data.name); tmp = tmp.parent; }
+
+  // Root
+  const rootCrumb = document.createElement('span');
+  rootCrumb.className = 'crumb' + (names.length <= 1 ? ' active' : '');
+  rootCrumb.textContent = '/';
+  rootCrumb.addEventListener('click', () => {
+    if (names.length > 1) {
+      const treemap = makeTreemap(width, height);
+      treemap(hierarchy);
+      currentRoot = hierarchy;
+      path = [hierarchy];
+      render(hierarchy, true);
+    }
+  });
+  breadcrumbEl.appendChild(rootCrumb);
+
+  names.slice(1).forEach((name, i) => {
+    const sep = document.createElement('span');
+    sep.className = 'sep';
+    sep.textContent = '›';
+    breadcrumbEl.appendChild(sep);
+
+    const crumb = document.createElement('span');
+    const isLast = i === names.length - 2;
+    crumb.className = 'crumb' + (isLast ? ' active' : '');
+    crumb.textContent = name;
+
+    if (!isLast) {
+      crumb.addEventListener('click', () => {
+        // Navigate to this level in original hierarchy
+        let target = hierarchy;
+        for (let j = 0; j <= i; j++) {
+          if (!target.children) break;
+          const found = target.children.find(c => c.data.name === names[j + 1]);
+          if (found) target = found;
+        }
+        zoomTo(target);
+      });
+    }
+
+    breadcrumbEl.appendChild(crumb);
+  });
+}
+
+// ── Tooltip ────────────────────────────────────────────────────────────────
+function showTooltip(event, d) {
+  const chartRect = chartEl.getBoundingClientRect();
+  const x = event.clientX - chartRect.left;
+  const y = event.clientY - chartRect.top;
+
+  const isDir = !!d.children;
+  const fileCount = isDir ? d.leaves().length : null;
+
+  tooltip.innerHTML = `
+    <div class="tt-name">${d.data.name}</div>
+    <div class="tt-path">${getFullPath(d).replace(/^\/\//, '/')}</div>
+    <div class="tt-size">${fmtBytes(d.value)}</div>
+    ${fileCount !== null ? `<div class="tt-files">${fileCount} file${fileCount !== 1 ? 's' : ''}</div>` : ''}
+    ${isDir ? '<div style="color:#a0aec0;font-size:11px;margin-top:3px;">Click to zoom in</div>' : ''}
+  `;
+
+  const tw = 220, th = 100;
+  const tx = x + 14 + tw > width ? x - tw - 10 : x + 14;
+  const ty = y + th > chartRect.height ? y - th : y + 10;
+
+  tooltip.style.left = tx + 'px';
+  tooltip.style.top = ty + 'px';
+  tooltip.classList.add('visible');
+}
+
+function hideTooltip() {
+  tooltip.classList.remove('visible');
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+getSize();
+const treemap = makeTreemap(width, height);
+treemap(hierarchy);
+currentRoot = hierarchy;
+render(hierarchy, false);
+
+// Click on background to zoom out
+svg.on('click', () => {
+  if (currentRoot !== hierarchy) {
+    const parent = currentRoot.parent;
+    if (parent && parent !== hierarchy) {
+      // Find parent in original tree
+      const parentNames = [];
+      let n = parent;
+      while (n) { parentNames.unshift(n.data.name); n = n.parent; }
+      let target = hierarchy;
+      for (let i = 1; i < parentNames.length; i++) {
+        if (!target.children) break;
+        const found = target.children.find(c => c.data.name === parentNames[i]);
+        if (found) target = found;
+      }
+      zoomTo(target);
+    } else {
+      const treemap = makeTreemap(width, height);
+      treemap(hierarchy);
+      currentRoot = hierarchy;
+      path = [hierarchy];
+      render(hierarchy, true);
+    }
+  }
+});
+
+window.addEventListener('resize', () => {
+  getSize();
+  svg.attr('viewBox', `0 0 ${width} ${height}`);
+  const treemap = makeTreemap(width, height);
+  treemap(currentRoot);
+  render(currentRoot, false);
+});
+</script>
+</body>
+</html>

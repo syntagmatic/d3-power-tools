@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Gantt Chart with Edge-Bundled Dependencies</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; font-family: 'Helvetica Neue', sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+  #container { background: #16213e; border-radius: 8px; box-shadow: 0 4px 24px rgba(0,0,0,0.4); overflow: hidden; }
+  .task-label { font-size: 11px; fill: #c4c4d4; pointer-events: none; }
+  .phase-label { font-size: 13px; font-weight: 600; fill: #e8e8f0; }
+  .axis text { fill: #8888a0; font-size: 10px; }
+  .axis line, .axis path { stroke: #2a2a4a; }
+  .phase-bg { opacity: 0.06; }
+  .task-bar { cursor: pointer; rx: 3; ry: 3; }
+  .task-bar:hover { filter: brightness(1.3); }
+  .dep-path { fill: none; stroke-width: 1.2; opacity: 0.15; }
+  .dep-path.highlighted { opacity: 0.8; stroke-width: 2; }
+  .task-bar.dimmed { opacity: 0.2; }
+  .task-bar.highlighted { filter: brightness(1.3); stroke: #fff; stroke-width: 1.5; }
+  .dep-path.dimmed { opacity: 0.03; }
+  .tooltip { position: absolute; background: #0f3460; color: #e0e0f0; padding: 8px 12px; border-radius: 6px; font-size: 12px; pointer-events: none; opacity: 0; transition: opacity 0.15s; border: 1px solid #1a5276; max-width: 260px; }
+  .tooltip .tt-name { font-weight: 600; margin-bottom: 4px; }
+  .tooltip .tt-phase { color: #7eb8da; font-size: 11px; }
+  .tooltip .tt-dates { color: #a0a0c0; font-size: 11px; margin-top: 2px; }
+  .tooltip .tt-deps { color: #c09070; font-size: 11px; margin-top: 4px; }
+</style>
+</head>
+<body>
+<div id="container"></div>
+<div class="tooltip" id="tooltip"></div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data ---
+const phases = [
+  { id: "discovery", name: "Discovery", color: "#4fc3f7" },
+  { id: "design", name: "Design", color: "#ab47bc" },
+  { id: "build", name: "Build", color: "#66bb6a" },
+  { id: "launch", name: "Launch", color: "#ffa726" }
+];
+
+const phaseColor = new Map(phases.map(p => [p.id, p.color]));
+
+const taskDefs = [
+  // Discovery (12 tasks)
+  { id: "d1", phase: "discovery", name: "Stakeholder interviews", start: 0, dur: 5, deps: [] },
+  { id: "d2", phase: "discovery", name: "Market research", start: 1, dur: 6, deps: [] },
+  { id: "d3", phase: "discovery", name: "Competitor analysis", start: 2, dur: 4, deps: ["d2"] },
+  { id: "d4", phase: "discovery", name: "User surveys", start: 3, dur: 5, deps: ["d1"] },
+  { id: "d5", phase: "discovery", name: "Pain point mapping", start: 6, dur: 3, deps: ["d1", "d4"] },
+  { id: "d6", phase: "discovery", name: "Requirements doc", start: 7, dur: 4, deps: ["d3", "d5"] },
+  { id: "d7", phase: "discovery", name: "Persona creation", start: 5, dur: 4, deps: ["d4"] },
+  { id: "d8", phase: "discovery", name: "Journey mapping", start: 8, dur: 3, deps: ["d7"] },
+  { id: "d9", phase: "discovery", name: "Tech feasibility", start: 6, dur: 5, deps: ["d2"] },
+  { id: "d10", phase: "discovery", name: "Risk assessment", start: 9, dur: 3, deps: ["d9", "d6"] },
+  { id: "d11", phase: "discovery", name: "Budget estimation", start: 10, dur: 2, deps: ["d10"] },
+  { id: "d12", phase: "discovery", name: "Discovery sign-off", start: 12, dur: 1, deps: ["d10", "d11", "d8"] },
+
+  // Design (13 tasks)
+  { id: "s1", phase: "design", name: "Information architecture", start: 13, dur: 4, deps: ["d12"] },
+  { id: "s2", phase: "design", name: "Wireframe: home", start: 14, dur: 3, deps: ["s1"] },
+  { id: "s3", phase: "design", name: "Wireframe: dashboard", start: 15, dur: 4, deps: ["s1"] },
+  { id: "s4", phase: "design", name: "Wireframe: settings", start: 16, dur: 3, deps: ["s1"] },
+  { id: "s5", phase: "design", name: "Design system tokens", start: 14, dur: 5, deps: ["d12"] },
+  { id: "s6", phase: "design", name: "Component library", start: 18, dur: 5, deps: ["s5"] },
+  { id: "s7", phase: "design", name: "Hi-fi: home", start: 17, dur: 4, deps: ["s2", "s5"] },
+  { id: "s8", phase: "design", name: "Hi-fi: dashboard", start: 19, dur: 4, deps: ["s3", "s6"] },
+  { id: "s9", phase: "design", name: "Hi-fi: settings", start: 19, dur: 3, deps: ["s4", "s6"] },
+  { id: "s10", phase: "design", name: "Usability testing", start: 22, dur: 3, deps: ["s7", "s8"] },
+  { id: "s11", phase: "design", name: "Design iteration", start: 24, dur: 3, deps: ["s10"] },
+  { id: "s12", phase: "design", name: "Accessibility audit", start: 23, dur: 2, deps: ["s9"] },
+  { id: "s13", phase: "design", name: "Design freeze", start: 27, dur: 1, deps: ["s11", "s12"] },
+
+  // Build (15 tasks)
+  { id: "b1", phase: "build", name: "Project scaffolding", start: 28, dur: 2, deps: ["s13"] },
+  { id: "b2", phase: "build", name: "Auth module", start: 29, dur: 4, deps: ["b1"] },
+  { id: "b3", phase: "build", name: "Database schema", start: 29, dur: 3, deps: ["b1"] },
+  { id: "b4", phase: "build", name: "API: users", start: 31, dur: 4, deps: ["b2", "b3"] },
+  { id: "b5", phase: "build", name: "API: data", start: 32, dur: 5, deps: ["b3"] },
+  { id: "b6", phase: "build", name: "Frontend: home", start: 30, dur: 5, deps: ["b1", "s7"] },
+  { id: "b7", phase: "build", name: "Frontend: dashboard", start: 33, dur: 6, deps: ["b4", "s8"] },
+  { id: "b8", phase: "build", name: "Frontend: settings", start: 34, dur: 4, deps: ["b4", "s9"] },
+  { id: "b9", phase: "build", name: "Real-time engine", start: 35, dur: 5, deps: ["b5"] },
+  { id: "b10", phase: "build", name: "Notification system", start: 36, dur: 3, deps: ["b5", "b2"] },
+  { id: "b11", phase: "build", name: "Integration tests", start: 38, dur: 4, deps: ["b7", "b8", "b9"] },
+  { id: "b12", phase: "build", name: "E2E tests", start: 39, dur: 3, deps: ["b11"] },
+  { id: "b13", phase: "build", name: "Performance tuning", start: 40, dur: 3, deps: ["b9", "b10"] },
+  { id: "b14", phase: "build", name: "Security review", start: 41, dur: 2, deps: ["b11"] },
+  { id: "b15", phase: "build", name: "Build sign-off", start: 43, dur: 1, deps: ["b12", "b13", "b14"] },
+
+  // Launch (10 tasks)
+  { id: "l1", phase: "launch", name: "Staging deploy", start: 44, dur: 2, deps: ["b15"] },
+  { id: "l2", phase: "launch", name: "UAT testing", start: 45, dur: 3, deps: ["l1"] },
+  { id: "l3", phase: "launch", name: "Bug fixes", start: 47, dur: 3, deps: ["l2"] },
+  { id: "l4", phase: "launch", name: "Documentation", start: 44, dur: 5, deps: ["b15"] },
+  { id: "l5", phase: "launch", name: "Training materials", start: 47, dur: 3, deps: ["l4"] },
+  { id: "l6", phase: "launch", name: "Marketing prep", start: 46, dur: 4, deps: ["l1"] },
+  { id: "l7", phase: "launch", name: "DNS & infra setup", start: 48, dur: 2, deps: ["l3"] },
+  { id: "l8", phase: "launch", name: "Production deploy", start: 50, dur: 1, deps: ["l7", "l5"] },
+  { id: "l9", phase: "launch", name: "Smoke tests", start: 51, dur: 1, deps: ["l8"] },
+  { id: "l10", phase: "launch", name: "Launch announce", start: 52, dur: 1, deps: ["l9", "l6"] }
+];
+
+// Build task map & dependency edges
+const taskMap = new Map(taskDefs.map(t => [t.id, t]));
+const edges = [];
+taskDefs.forEach(t => {
+  t.deps.forEach(depId => {
+    edges.push({ source: depId, target: t.id });
+  });
+});
+
+// Group tasks by phase, assign row indices
+const tasksByPhase = d3.group(taskDefs, d => d.phase);
+let rowIndex = 0;
+const phaseRows = new Map();
+for (const phase of phases) {
+  const tasks = tasksByPhase.get(phase.id) || [];
+  const startRow = rowIndex;
+  tasks.forEach(t => { t.row = rowIndex++; });
+  phaseRows.set(phase.id, { start: startRow, end: rowIndex - 1 });
+}
+
+const totalRows = rowIndex;
+
+// --- Layout ---
+const margin = { top: 50, right: 30, bottom: 30, left: 180 };
+const rowHeight = 22;
+const width = 1100;
+const height = margin.top + margin.bottom + totalRows * rowHeight;
+
+const baseDate = new Date(2026, 0, 5); // Jan 5 2026 (Monday)
+const toDate = d => new Date(baseDate.getTime() + d * 86400000);
+
+const x = d3.scaleTime()
+  .domain([toDate(0), toDate(54)])
+  .range([margin.left, width - margin.right]);
+
+const y = row => margin.top + row * rowHeight + rowHeight / 2;
+
+// --- Build hierarchy for LCA bundling ---
+// Tree: root -> phases -> tasks
+const hierarchyData = {
+  id: "root",
+  children: phases.map(p => ({
+    id: p.id,
+    children: (tasksByPhase.get(p.id) || []).map(t => ({ id: t.id }))
+  }))
+};
+
+const root = d3.hierarchy(hierarchyData);
+const nodeById = new Map();
+root.each(n => { nodeById.set(n.data.id, n); });
+
+// LCA path: walk from source to target through their common ancestor
+function lcaPath(sourceId, targetId) {
+  const s = nodeById.get(sourceId);
+  const t = nodeById.get(targetId);
+  if (!s || !t) return [];
+  const sAnc = []; let n = s; while (n) { sAnc.push(n); n = n.parent; }
+  const tAnc = []; n = t; while (n) { tAnc.push(n); n = n.parent; }
+  const sSet = new Set(sAnc.map(a => a.data.id));
+  let lca = null;
+  for (const a of tAnc) { if (sSet.has(a.data.id)) { lca = a; break; } }
+  const pathUp = [];
+  n = s; while (n && n !== lca) { pathUp.push(n); n = n.parent; }
+  pathUp.push(lca);
+  const pathDown = [];
+  n = t; while (n && n !== lca) { pathDown.push(n); n = n.parent; }
+  return [...pathUp, ...pathDown.reverse()];
+}
+
+// Convert hierarchy path to x,y coords for rendering
+function pathToPoints(sourceId, targetId) {
+  const sourceTask = taskMap.get(sourceId);
+  const targetTask = taskMap.get(targetId);
+  const path = lcaPath(sourceId, targetId);
+  const points = [];
+
+  // Start at source bar end
+  points.push([x(toDate(sourceTask.start + sourceTask.dur)), y(sourceTask.row)]);
+
+  // Intermediate points via hierarchy
+  for (let i = 1; i < path.length - 1; i++) {
+    const node = path[i];
+    if (node.data.id === "root") {
+      // Root: route through midpoint between source and target y
+      const midY = (y(sourceTask.row) + y(targetTask.row)) / 2;
+      const midX = (x(toDate(sourceTask.start + sourceTask.dur)) + x(toDate(targetTask.start))) / 2;
+      // Push control point further right for root-level routing
+      const offsetX = Math.abs(y(targetTask.row) - y(sourceTask.row)) * 0.3;
+      points.push([midX + offsetX, midY]);
+    } else {
+      // Phase node: route through phase boundary
+      const pr = phaseRows.get(node.data.id);
+      if (pr) {
+        const phaseY = (y(pr.start) + y(pr.end)) / 2;
+        const midX = (x(toDate(sourceTask.start + sourceTask.dur)) + x(toDate(targetTask.start))) / 2;
+        points.push([midX, phaseY]);
+      }
+    }
+  }
+
+  // End at target bar start
+  points.push([x(toDate(targetTask.start)), y(targetTask.row)]);
+  return points;
+}
+
+// --- Build dependency graph for chain highlighting ---
+const depsOf = new Map(); // task -> tasks it depends on (upstream)
+const dependentsOf = new Map(); // task -> tasks that depend on it (downstream)
+taskDefs.forEach(t => {
+  depsOf.set(t.id, [...t.deps]);
+  if (!dependentsOf.has(t.id)) dependentsOf.set(t.id, []);
+  t.deps.forEach(d => {
+    if (!dependentsOf.has(d)) dependentsOf.set(d, []);
+    dependentsOf.get(d).push(t.id);
+  });
+});
+
+function getChain(taskId) {
+  const upstream = new Set();
+  const downstream = new Set();
+  const edgeSet = new Set();
+
+  // BFS upstream
+  const qu = [taskId];
+  while (qu.length) {
+    const cur = qu.pop();
+    (depsOf.get(cur) || []).forEach(d => {
+      if (!upstream.has(d)) { upstream.add(d); qu.push(d); }
+      edgeSet.add(`${d}->${cur}`);
+    });
+  }
+  // BFS downstream
+  const qd = [taskId];
+  while (qd.length) {
+    const cur = qd.pop();
+    (dependentsOf.get(cur) || []).forEach(d => {
+      if (!downstream.has(d)) { downstream.add(d); qd.push(d); }
+      edgeSet.add(`${cur}->${d}`);
+    });
+  }
+
+  const allTasks = new Set([taskId, ...upstream, ...downstream]);
+  return { allTasks, edgeSet };
+}
+
+// --- Render ---
+const svg = d3.select("#container")
+  .append("svg")
+  .attr("width", width)
+  .attr("height", height)
+  .attr("viewBox", `0 0 ${width} ${height}`);
+
+// Phase backgrounds
+phases.forEach(p => {
+  const pr = phaseRows.get(p.id);
+  if (!pr) return;
+  svg.append("rect")
+    .attr("class", "phase-bg")
+    .attr("x", margin.left)
+    .attr("y", y(pr.start) - rowHeight / 2)
+    .attr("width", width - margin.left - margin.right)
+    .attr("height", (pr.end - pr.start + 1) * rowHeight)
+    .attr("fill", phaseColor.get(p.id));
+
+  svg.append("text")
+    .attr("class", "phase-label")
+    .attr("x", 12)
+    .attr("y", (y(pr.start) + y(pr.end)) / 2)
+    .attr("dy", "0.35em")
+    .attr("fill", phaseColor.get(p.id))
+    .text(p.name);
+});
+
+// Time axis
+const xAxis = d3.axisTop(x)
+  .ticks(d3.timeWeek.every(1))
+  .tickFormat(d3.timeFormat("%b %d"));
+
+svg.append("g")
+  .attr("class", "axis")
+  .attr("transform", `translate(0,${margin.top - 8})`)
+  .call(xAxis)
+  .selectAll("text")
+  .attr("transform", "rotate(-30)")
+  .style("text-anchor", "end");
+
+// Grid lines
+const gridWeeks = x.ticks(d3.timeWeek.every(1));
+svg.append("g")
+  .selectAll("line")
+  .data(gridWeeks)
+  .join("line")
+  .attr("x1", d => x(d))
+  .attr("x2", d => x(d))
+  .attr("y1", margin.top)
+  .attr("y2", height - margin.bottom)
+  .attr("stroke", "#2a2a4a")
+  .attr("stroke-dasharray", "2,4");
+
+// Dependency curves (edge-bundled via LCA paths)
+const line = d3.line().curve(d3.curveBundle.beta(0.85));
+
+const depPaths = svg.append("g")
+  .selectAll("path")
+  .data(edges)
+  .join("path")
+  .attr("class", "dep-path")
+  .attr("d", d => {
+    const pts = pathToPoints(d.source, d.target);
+    return line(pts);
+  })
+  .attr("stroke", d => {
+    const srcPhase = taskMap.get(d.source).phase;
+    const tgtPhase = taskMap.get(d.target).phase;
+    if (srcPhase === tgtPhase) return phaseColor.get(srcPhase);
+    return d3.interpolateRgb(phaseColor.get(srcPhase), phaseColor.get(tgtPhase))(0.5);
+  })
+  .attr("data-edge", d => `${d.source}->${d.target}`);
+
+// Task bars
+const bars = svg.append("g")
+  .selectAll("rect")
+  .data(taskDefs)
+  .join("rect")
+  .attr("class", "task-bar")
+  .attr("x", d => x(toDate(d.start)))
+  .attr("y", d => y(d.row) - rowHeight * 0.35)
+  .attr("width", d => Math.max(4, x(toDate(d.start + d.dur)) - x(toDate(d.start))))
+  .attr("height", rowHeight * 0.7)
+  .attr("fill", d => phaseColor.get(d.phase))
+  .attr("rx", 3)
+  .attr("ry", 3);
+
+// Task labels
+svg.append("g")
+  .selectAll("text")
+  .data(taskDefs)
+  .join("text")
+  .attr("class", "task-label")
+  .attr("x", margin.left - 6)
+  .attr("y", d => y(d.row))
+  .attr("dy", "0.35em")
+  .attr("text-anchor", "end")
+  .text(d => d.name);
+
+// --- Tooltip ---
+const tooltip = d3.select("#tooltip");
+const fmt = d3.timeFormat("%b %d");
+
+// --- Interaction ---
+bars.on("mouseenter", function(event, d) {
+  const { allTasks, edgeSet } = getChain(d.id);
+
+  bars.classed("dimmed", t => !allTasks.has(t.id))
+      .classed("highlighted", t => allTasks.has(t.id));
+
+  depPaths.classed("dimmed", e => !edgeSet.has(`${e.source}->${e.target}`))
+          .classed("highlighted", e => edgeSet.has(`${e.source}->${e.target}`));
+
+  const depNames = d.deps.map(id => taskMap.get(id)?.name).filter(Boolean);
+  tooltip.style("opacity", 1)
+    .html(`<div class="tt-name">${d.name}</div>
+           <div class="tt-phase">${phases.find(p => p.id === d.phase).name}</div>
+           <div class="tt-dates">${fmt(toDate(d.start))} — ${fmt(toDate(d.start + d.dur))}</div>
+           ${depNames.length ? `<div class="tt-deps">Depends on: ${depNames.join(", ")}</div>` : ""}`);
+})
+.on("mousemove", function(event) {
+  tooltip.style("left", (event.pageX + 12) + "px")
+         .style("top", (event.pageY - 10) + "px");
+})
+.on("mouseleave", function() {
+  bars.classed("dimmed", false).classed("highlighted", false);
+  depPaths.classed("dimmed", false).classed("highlighted", false);
+  tooltip.style("opacity", 0);
+});
+
+// Title
+svg.append("text")
+  .attr("x", width / 2)
+  .attr("y", 18)
+  .attr("text-anchor", "middle")
+  .attr("fill", "#e0e0f0")
+  .attr("font-size", 16)
+  .attr("font-weight", 600)
+  .text("Project Timeline — Gantt with Edge-Bundled Dependencies");
+</script>
+</body>
+</html>

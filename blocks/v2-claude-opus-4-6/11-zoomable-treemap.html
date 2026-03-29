@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zoomable Treemap — File System</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #1a1a2e; color: #e0e0e0; }
+  #breadcrumb {
+    display: flex; align-items: center; gap: 4px;
+    padding: 10px 16px; background: #16213e; font-size: 13px;
+    border-bottom: 1px solid #0f3460;
+    min-height: 40px;
+  }
+  #breadcrumb span { color: #7f8c9b; user-select: none; }
+  #breadcrumb button {
+    background: none; border: 1px solid #0f3460; color: #a8d8ea;
+    padding: 2px 8px; border-radius: 3px; cursor: pointer; font-size: 13px;
+    font-family: inherit;
+  }
+  #breadcrumb button:hover { background: #0f3460; }
+  #breadcrumb button:last-of-type { color: #e0e0e0; border-color: #533483; cursor: default; }
+  #chart { width: 100%; height: calc(100vh - 40px); }
+</style>
+</head>
+<body>
+<div id="breadcrumb"></div>
+<div id="chart"></div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic file system data ---
+const dirs = [
+  { name: "src", subdirs: ["components", "utils", "hooks", "services", "pages"] },
+  { name: "docs", subdirs: ["api", "guides", "tutorials"] },
+  { name: "tests", subdirs: ["unit", "integration", "e2e", "fixtures"] },
+  { name: "assets", subdirs: ["images", "fonts", "icons", "videos"] },
+  { name: "config", subdirs: ["env", "deploy", "ci"] },
+  { name: "scripts", subdirs: ["build", "migrations", "tools"] },
+  { name: "packages", subdirs: ["core", "cli", "sdk", "ui", "shared"] },
+  { name: "vendor", subdirs: ["legacy", "patches", "shims"] },
+];
+
+const extensions = [".ts", ".js", ".json", ".css", ".md", ".yaml", ".tsx", ".html", ".svg", ".png", ".test.ts", ".spec.js"];
+const fileNames = [
+  "index", "main", "app", "config", "utils", "helpers", "types", "constants",
+  "schema", "handler", "middleware", "router", "store", "context", "provider",
+  "factory", "adapter", "bridge", "parser", "renderer", "compiler", "loader",
+  "validator", "formatter", "logger", "client", "server", "worker", "queue",
+  "cache", "auth", "session", "token", "user", "admin", "settings", "profile",
+  "dashboard", "layout", "header", "footer", "sidebar", "modal", "button",
+  "input", "form", "table", "list", "card", "chart", "graph", "tree",
+];
+
+const rng = d3.randomLcg(42);
+const logNormal = d3.randomLogNormal.source(rng)(8, 2);
+
+function buildTree() {
+  const root = { name: "/", children: [] };
+  let fileCount = 0;
+  for (const dir of dirs) {
+    const dirNode = { name: dir.name, children: [] };
+    for (const sub of dir.subdirs) {
+      const subNode = { name: sub, children: [] };
+      const nFiles = 3 + Math.floor(rng() * 12);
+      for (let i = 0; i < nFiles; i++) {
+        const fname = fileNames[Math.floor(rng() * fileNames.length)];
+        const ext = extensions[Math.floor(rng() * extensions.length)];
+        subNode.children.push({
+          name: `${fname}${ext}`,
+          size: Math.max(100, Math.round(logNormal())),
+        });
+        fileCount++;
+      }
+      dirNode.children.push(subNode);
+    }
+    root.children.push(dirNode);
+  }
+  return root;
+}
+
+const data = buildTree();
+
+// --- Layout ---
+const container = document.getElementById("chart");
+const width = container.clientWidth;
+const height = container.clientHeight;
+
+const root = d3.hierarchy(data)
+  .sum(d => d.size || 0)
+  .sort((a, b) => b.value - a.value);
+
+d3.treemap()
+  .size([width, height])
+  .paddingTop(22)
+  .paddingRight(2)
+  .paddingBottom(2)
+  .paddingLeft(2)
+  .paddingInner(1)
+  .round(true)
+  .tile(d3.treemapSquarify)(root);
+
+const x = d3.scaleLinear().domain([0, width]).rangeRound([0, width]);
+const y = d3.scaleLinear().domain([0, height]).rangeRound([0, height]);
+
+const color = d3.scaleOrdinal()
+  .domain(dirs.map(d => d.name))
+  .range(["#e63946", "#457b9d", "#2a9d8f", "#e9c46a", "#f4a261",
+          "#264653", "#a855f7", "#06b6d4"]);
+
+function leafColor(d) {
+  let n = d;
+  while (n.depth > 1) n = n.parent;
+  const base = d3.hsl(color(n.data.name));
+  base.l = 0.25 + (d.value ? Math.min(d.value / 20000, 0.4) : 0.2);
+  base.s = 0.5;
+  return base.formatHex();
+}
+
+function groupColor(d) {
+  let n = d;
+  while (n.depth > 1) n = n.parent;
+  const base = d3.hsl(color(n.data.name));
+  base.l = 0.15 + d.depth * 0.05;
+  base.s = 0.3;
+  return base.formatHex();
+}
+
+// --- SVG ---
+const svg = d3.select("#chart").append("svg")
+  .attr("width", width)
+  .attr("height", height)
+  .attr("viewBox", `0 0 ${width} ${height}`)
+  .style("font", "11px system-ui, sans-serif");
+
+let currentFocus = root;
+
+// Render all nodes — we'll control visibility via opacity
+const allNodes = root.descendants();
+
+const cell = svg.selectAll("g")
+  .data(allNodes.filter(d => d.depth > 0))
+  .join("g")
+    .attr("transform", d => `translate(${x(d.x0)},${y(d.y0)})`);
+
+// Clip paths
+cell.append("clipPath")
+  .attr("id", (d, i) => `clip-${i}`)
+  .append("rect")
+    .attr("width", d => Math.max(0, x(d.x1) - x(d.x0)))
+    .attr("height", d => Math.max(0, y(d.y1) - y(d.y0)));
+
+// Rectangles
+cell.append("rect")
+  .attr("width", d => Math.max(0, x(d.x1) - x(d.x0)))
+  .attr("height", d => Math.max(0, y(d.y1) - y(d.y0)))
+  .attr("fill", d => d.children ? groupColor(d) : leafColor(d))
+  .attr("stroke", "#1a1a2e")
+  .attr("stroke-width", 0.5)
+  .attr("rx", 1);
+
+// Group labels (top-left of padding area)
+cell.filter(d => d.children)
+  .append("text")
+    .attr("clip-path", (d, i) => {
+      const idx = allNodes.filter(n => n.depth > 0).indexOf(d);
+      return `url(#clip-${idx})`;
+    })
+    .attr("x", 4)
+    .attr("y", 15)
+    .attr("fill", "#c0c0d0")
+    .attr("font-weight", 600)
+    .attr("font-size", "11px")
+    .text(d => d.data.name);
+
+// Leaf labels
+cell.filter(d => !d.children)
+  .append("text")
+    .attr("clip-path", (d, i) => {
+      const idx = allNodes.filter(n => n.depth > 0).indexOf(d);
+      return `url(#clip-${idx})`;
+    })
+    .attr("x", 3)
+    .attr("y", 13)
+    .attr("fill", "#b0b0c0")
+    .attr("font-size", "10px")
+    .text(d => d.data.name)
+    .attr("opacity", d => {
+      const w = x(d.x1) - x(d.x0);
+      const h = y(d.y1) - y(d.y0);
+      return (w > 40 && h > 16) ? 1 : 0;
+    });
+
+// Size labels for leaves
+cell.filter(d => !d.children)
+  .append("text")
+    .attr("class", "size-label")
+    .attr("clip-path", (d, i) => {
+      const idx = allNodes.filter(n => n.depth > 0).indexOf(d);
+      return `url(#clip-${idx})`;
+    })
+    .attr("x", 3)
+    .attr("y", 25)
+    .attr("fill", "#707088")
+    .attr("font-size", "9px")
+    .text(d => d3.format(",.0f")(d.value) + " B")
+    .attr("opacity", d => {
+      const w = x(d.x1) - x(d.x0);
+      const h = y(d.y1) - y(d.y0);
+      return (w > 50 && h > 28) ? 1 : 0;
+    });
+
+// Click to zoom
+cell.filter(d => d.children)
+  .style("cursor", "pointer")
+  .on("click", (event, d) => {
+    event.stopPropagation();
+    zoomTo(d);
+  });
+
+// Click background to zoom out
+svg.on("click", () => {
+  if (currentFocus !== root) {
+    zoomTo(currentFocus.parent || root);
+  }
+});
+
+function isDescendant(node, ancestor) {
+  let n = node;
+  while (n) {
+    if (n === ancestor) return true;
+    n = n.parent;
+  }
+  return false;
+}
+
+function zoomTo(target) {
+  currentFocus = target;
+
+  x.domain([target.x0, target.x1]);
+  y.domain([target.y0, target.y1]);
+
+  const t = svg.transition().duration(650).ease(d3.easeCubicInOut);
+
+  cell.transition(t)
+    .attr("transform", d => `translate(${x(d.x0)},${y(d.y0)})`)
+    .attr("opacity", d => isDescendant(d, target) ? 1 : 0)
+    .attr("pointer-events", d => isDescendant(d, target) ? "auto" : "none");
+
+  cell.select("rect:not(clipPath rect)")
+    .transition(t)
+    .attr("width", d => Math.max(0, x(d.x1) - x(d.x0)))
+    .attr("height", d => Math.max(0, y(d.y1) - y(d.y0)));
+
+  cell.select("clipPath rect")
+    .transition(t)
+    .attr("width", d => Math.max(0, x(d.x1) - x(d.x0)))
+    .attr("height", d => Math.max(0, y(d.y1) - y(d.y0)));
+
+  // Update label visibility after transition
+  t.end().then(() => {
+    cell.filter(d => !d.children).select("text")
+      .attr("opacity", d => {
+        const w = x(d.x1) - x(d.x0);
+        const h = y(d.y1) - y(d.y0);
+        return (w > 40 && h > 16) ? 1 : 0;
+      });
+    cell.selectAll(".size-label")
+      .attr("opacity", d => {
+        const w = x(d.x1) - x(d.x0);
+        const h = y(d.y1) - y(d.y0);
+        return (w > 50 && h > 28) ? 1 : 0;
+      });
+    cell.filter(d => d.children).select("text")
+      .attr("opacity", d => {
+        const w = x(d.x1) - x(d.x0);
+        return w > 30 ? 1 : 0;
+      });
+  }).catch(() => {}); // transition interrupted
+
+  updateBreadcrumb();
+}
+
+// --- Breadcrumb ---
+function updateBreadcrumb() {
+  const crumbDiv = document.getElementById("breadcrumb");
+  crumbDiv.innerHTML = "";
+
+  const ancestors = currentFocus.ancestors().reverse();
+  ancestors.forEach((d, i) => {
+    if (i > 0) {
+      const sep = document.createElement("span");
+      sep.textContent = " / ";
+      crumbDiv.appendChild(sep);
+    }
+    const btn = document.createElement("button");
+    btn.textContent = d.data.name === "/" ? "root" : d.data.name;
+    if (d !== currentFocus) {
+      btn.addEventListener("click", () => zoomTo(d));
+    }
+    crumbDiv.appendChild(btn);
+  });
+}
+
+updateBreadcrumb();
+
+// Hover effect
+cell.on("mouseenter", function(event, d) {
+  d3.select(this).select("rect:not(clipPath rect)")
+    .attr("stroke", "#e0e0e0")
+    .attr("stroke-width", 1.5);
+}).on("mouseleave", function() {
+  d3.select(this).select("rect:not(clipPath rect)")
+    .attr("stroke", "#1a1a2e")
+    .attr("stroke-width", 0.5);
+});
+</script>
+</body>
+</html>

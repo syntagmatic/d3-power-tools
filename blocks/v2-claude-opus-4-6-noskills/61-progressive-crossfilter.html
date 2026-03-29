@@ -1,0 +1,857 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Progressive Crossfilter — 100K Records</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --panel-bg: #12121a;
+    --border: #1e1e2e;
+    --text: #c8c8d4;
+    --text-dim: #6a6a7a;
+    --accent: #5e8ff0;
+    --accent-dim: rgba(94,143,240,0.15);
+    --highlight: #f0a05e;
+    --filtered: #5ef0a0;
+    --brush-fill: rgba(94,143,240,0.12);
+    --brush-stroke: rgba(94,143,240,0.5);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 12px;
+    overflow: hidden;
+    height: 100vh;
+  }
+  #header {
+    padding: 12px 20px 6px;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+  #header h1 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+    letter-spacing: 0.5px;
+  }
+  #status {
+    font-size: 11px;
+    color: var(--text-dim);
+    transition: color 0.3s;
+  }
+  #status.refining { color: var(--highlight); }
+  #status.complete { color: var(--filtered); }
+  #grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 8px;
+    padding: 8px 12px 12px;
+    height: calc(100vh - 44px);
+  }
+  .panel {
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    position: relative;
+    overflow: hidden;
+  }
+  .panel-title {
+    position: absolute;
+    top: 8px;
+    left: 12px;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    z-index: 2;
+  }
+  .panel-count {
+    position: absolute;
+    top: 8px;
+    right: 12px;
+    font-size: 11px;
+    color: var(--text-dim);
+    z-index: 2;
+  }
+  .panel canvas, .panel svg {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+  }
+  .brush .selection {
+    fill: var(--brush-fill);
+    stroke: var(--brush-stroke);
+    stroke-width: 1;
+  }
+  .brush .handle {
+    fill: var(--accent);
+    opacity: 0.6;
+  }
+  .axis line, .axis path { stroke: #2a2a3a; }
+  .axis text { fill: var(--text-dim); font-size: 10px; }
+  .bar-bg { fill: #1a1a2a; }
+  .bar-filtered { fill: var(--accent); opacity: 0.85; }
+  .bar-approx { fill: var(--highlight); opacity: 0.5; }
+</style>
+</head>
+<body>
+<div id="header">
+  <h1>Progressive Crossfilter</h1>
+  <div id="status">Generating 100K records…</div>
+</div>
+<div id="grid">
+  <div class="panel" id="panel-scatter">
+    <span class="panel-title">Delay vs Distance</span>
+    <span class="panel-count" id="count-scatter"></span>
+    <canvas id="canvas-scatter"></canvas>
+    <svg id="svg-scatter"></svg>
+  </div>
+  <div class="panel" id="panel-hist">
+    <span class="panel-title">Delay Distribution</span>
+    <span class="panel-count" id="count-hist"></span>
+    <svg id="svg-hist"></svg>
+  </div>
+  <div class="panel" id="panel-bar">
+    <span class="panel-title">By Carrier</span>
+    <span class="panel-count" id="count-bar"></span>
+    <svg id="svg-bar"></svg>
+  </div>
+  <div class="panel" id="panel-timeline">
+    <span class="panel-title">Daily Volume</span>
+    <span class="panel-count" id="count-timeline"></span>
+    <svg id="svg-timeline"></svg>
+  </div>
+</div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// ─── Configuration ───────────────────────────────────────────
+const N = 100000;
+const SAMPLE_N = 10000;
+const CARRIERS = ['AA','UA','DL','WN','B6','AS','NK','F9','G4','HA'];
+const DELAY_BINS = 40;
+const TIME_BINS = 52; // weeks
+const MARGIN = { top: 32, right: 16, bottom: 32, left: 48 };
+
+// ─── Seeded RNG ──────────────────────────────────────────────
+function mulberry32(a) {
+  return function() {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const rng = mulberry32(42);
+function rngNormal(mu, sigma) {
+  let u, v, s;
+  do { u = rng() * 2 - 1; v = rng() * 2 - 1; s = u*u + v*v; } while (s >= 1 || s === 0);
+  return mu + sigma * u * Math.sqrt(-2 * Math.log(s) / s);
+}
+
+// ─── Generate Data ───────────────────────────────────────────
+const statusEl = document.getElementById('status');
+
+// Typed arrays for performance
+const delays = new Float32Array(N);
+const distances = new Float32Array(N);
+const carrierIds = new Uint8Array(N);
+const dayIndices = new Uint16Array(N); // day of year (0-364)
+const weekIndices = new Uint8Array(N);
+
+const startDate = new Date(2025, 0, 1);
+const msPerDay = 86400000;
+
+for (let i = 0; i < N; i++) {
+  const carrier = Math.floor(rng() * CARRIERS.length);
+  carrierIds[i] = carrier;
+  // Distance: 100-3000 miles, skewed right
+  distances[i] = 100 + Math.pow(rng(), 0.7) * 2900;
+  // Delay: mostly on-time with right tail, carrier effect
+  const carrierBias = (carrier % 3 - 1) * 5;
+  delays[i] = rngNormal(carrierBias, 20) + Math.max(0, rngNormal(0, 15));
+  // Day: uniform across 365 days
+  const day = Math.floor(rng() * 365);
+  dayIndices[i] = day;
+  weekIndices[i] = Math.floor(day / 7);
+}
+
+// Sample indices for progressive approximation
+const sampleIndices = new Uint32Array(SAMPLE_N);
+{
+  // Fisher-Yates partial shuffle
+  const pool = new Uint32Array(N);
+  for (let i = 0; i < N; i++) pool[i] = i;
+  for (let i = 0; i < SAMPLE_N; i++) {
+    const j = i + Math.floor(rng() * (N - i));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+    sampleIndices[i] = pool[i];
+  }
+  sampleIndices.sort();
+}
+
+// ─── Falcon-Inspired Precomputed Histograms ──────────────────
+// For each filterable dimension, precompute per-bin histograms
+// of all other dimensions. This gives O(bins) crossfilter updates.
+
+// Bin boundaries
+const delayExtent = [d3.min(delays), d3.max(delays)];
+const distExtent = [d3.min(distances), d3.max(distances)];
+const delayBinWidth = (delayExtent[1] - delayExtent[0]) / DELAY_BINS;
+const distBinCount = 40;
+const distBinWidth = (distExtent[1] - distExtent[0]) / distBinCount;
+
+function getDelayBin(v) {
+  return Math.min(DELAY_BINS - 1, Math.max(0, Math.floor((v - delayExtent[0]) / delayBinWidth)));
+}
+function getDistBin(v) {
+  return Math.min(distBinCount - 1, Math.max(0, Math.floor((v - distExtent[0]) / distBinWidth)));
+}
+
+// Precomputed data cubes:
+// For each source dimension's bin, store counts for each target dimension's bin.
+// cube[sourceDim][targetDim] = 2D array [sourceBins][targetBins]
+
+const DIMS = ['delay', 'distance', 'carrier', 'week'];
+const DIM_BIN_COUNTS = {
+  delay: DELAY_BINS,
+  distance: distBinCount,
+  carrier: CARRIERS.length,
+  week: TIME_BINS
+};
+
+function getBin(dim, i) {
+  switch(dim) {
+    case 'delay': return getDelayBin(delays[i]);
+    case 'distance': return getDistBin(distances[i]);
+    case 'carrier': return carrierIds[i];
+    case 'week': return Math.min(TIME_BINS - 1, weekIndices[i]);
+  }
+}
+
+// Build cubes: cube[srcDim][tgtDim][srcBin][tgtBin] = count
+// Also build marginals: marginal[dim][bin] = total count
+const cube = {};
+const marginal = {};
+
+for (const dim of DIMS) {
+  marginal[dim] = new Uint32Array(DIM_BIN_COUNTS[dim]);
+  cube[dim] = {};
+  for (const other of DIMS) {
+    if (other === dim) continue;
+    const arr = [];
+    for (let b = 0; b < DIM_BIN_COUNTS[dim]; b++) {
+      arr.push(new Uint32Array(DIM_BIN_COUNTS[other]));
+    }
+    cube[dim][other] = arr;
+  }
+}
+
+// Single pass to fill all cubes
+for (let i = 0; i < N; i++) {
+  const bins = {};
+  for (const dim of DIMS) bins[dim] = getBin(dim, i);
+  for (const dim of DIMS) {
+    marginal[dim][bins[dim]]++;
+    for (const other of DIMS) {
+      if (other === dim) continue;
+      cube[dim][other][bins[dim]][bins[other]]++;
+    }
+  }
+}
+
+statusEl.textContent = `100K records ready — precomputed ${DIMS.length}D cube`;
+
+// ─── Filter State ────────────────────────────────────────────
+const filters = {
+  delay: null,    // [min, max] in data space
+  distance: null,
+  carrier: null,  // Set of carrier indices
+  week: null      // [minWeek, maxWeek]
+};
+
+// ─── O(1) Filtered Counts via Cube Lookups ───────────────────
+// When one dimension is filtered, compute filtered histogram for another
+// by summing only the source bins within the filter range.
+
+function getFilteredCounts(targetDim) {
+  // Collect active filters on OTHER dimensions (not targetDim)
+  const activeFilters = [];
+  for (const dim of DIMS) {
+    if (dim === targetDim || !filters[dim]) continue;
+    activeFilters.push(dim);
+  }
+
+  if (activeFilters.length === 0) {
+    // No cross-filters: return marginals
+    return marginal[targetDim].slice();
+  }
+
+  if (activeFilters.length === 1) {
+    // Single filter: direct cube lookup — true O(1) Falcon style
+    const srcDim = activeFilters[0];
+    const result = new Uint32Array(DIM_BIN_COUNTS[targetDim]);
+    const srcBinRange = getFilterBinRange(srcDim);
+    const cubeSlice = cube[srcDim][targetDim];
+    for (let sb = srcBinRange[0]; sb <= srcBinRange[1]; sb++) {
+      const row = cubeSlice[sb];
+      for (let tb = 0; tb < result.length; tb++) {
+        result[tb] += row[tb];
+      }
+    }
+    return result;
+  }
+
+  // Multiple filters: fallback to scan (still fast for sample)
+  return scanFilteredCounts(targetDim);
+}
+
+function getFilterBinRange(dim) {
+  const f = filters[dim];
+  if (!f) return [0, DIM_BIN_COUNTS[dim] - 1];
+  switch(dim) {
+    case 'delay': {
+      const lo = Math.max(0, Math.floor((f[0] - delayExtent[0]) / delayBinWidth));
+      const hi = Math.min(DELAY_BINS - 1, Math.floor((f[1] - delayExtent[0]) / delayBinWidth));
+      return [lo, hi];
+    }
+    case 'distance': {
+      const lo = Math.max(0, Math.floor((f[0] - distExtent[0]) / distBinWidth));
+      const hi = Math.min(distBinCount - 1, Math.floor((f[1] - distExtent[0]) / distBinWidth));
+      return [lo, hi];
+    }
+    case 'carrier': {
+      // For set-based filter, return all bins in set
+      return f; // handled specially
+    }
+    case 'week': {
+      return [Math.max(0, f[0]), Math.min(TIME_BINS - 1, f[1])];
+    }
+  }
+}
+
+function passesFilter(dim, i) {
+  const f = filters[dim];
+  if (!f) return true;
+  switch(dim) {
+    case 'delay': return delays[i] >= f[0] && delays[i] <= f[1];
+    case 'distance': return distances[i] >= f[0] && distances[i] <= f[1];
+    case 'carrier': return f.has(carrierIds[i]);
+    case 'week': return weekIndices[i] >= f[0] && weekIndices[i] <= f[1];
+  }
+}
+
+function passesAllFiltersExcept(except, i) {
+  for (const dim of DIMS) {
+    if (dim === except) continue;
+    if (!passesFilter(dim, i)) return false;
+  }
+  return true;
+}
+
+function passesAllFilters(i) {
+  for (const dim of DIMS) {
+    if (!passesFilter(dim, i)) return false;
+  }
+  return true;
+}
+
+// Scan-based fallback for multi-filter case
+function scanFilteredCounts(targetDim) {
+  const result = new Uint32Array(DIM_BIN_COUNTS[targetDim]);
+  for (let i = 0; i < N; i++) {
+    if (passesAllFiltersExcept(targetDim, i)) {
+      result[getBin(targetDim, i)]++;
+    }
+  }
+  return result;
+}
+
+// ─── Layout helpers ──────────────────────────────────────────
+function panelSize(id) {
+  const el = document.getElementById(id);
+  const r = el.getBoundingClientRect();
+  return { w: r.width, h: r.height };
+}
+
+function innerRect(size) {
+  return {
+    x: MARGIN.left,
+    y: MARGIN.top,
+    w: size.w - MARGIN.left - MARGIN.right,
+    h: size.h - MARGIN.top - MARGIN.bottom
+  };
+}
+
+// ─── Panel 1: Scatter (Canvas) ───────────────────────────────
+const scatterCanvas = document.getElementById('canvas-scatter');
+const scatterSvg = d3.select('#svg-scatter');
+let scatterScaleX, scatterScaleY, scatterInner;
+
+function setupScatter() {
+  const size = panelSize('panel-scatter');
+  const dpr = devicePixelRatio;
+  scatterCanvas.width = size.w * dpr;
+  scatterCanvas.height = size.h * dpr;
+  scatterCanvas.style.width = size.w + 'px';
+  scatterCanvas.style.height = size.h + 'px';
+
+  scatterSvg.attr('width', size.w).attr('height', size.h);
+
+  const inner = innerRect(size);
+  scatterInner = inner;
+  scatterScaleX = d3.scaleLinear().domain(distExtent).range([inner.x, inner.x + inner.w]);
+  scatterScaleY = d3.scaleLinear().domain(delayExtent).range([inner.y + inner.h, inner.y]);
+
+  // Axes
+  scatterSvg.selectAll('.axis').remove();
+  scatterSvg.append('g').attr('class', 'axis')
+    .attr('transform', `translate(0,${inner.y + inner.h})`)
+    .call(d3.axisBottom(scatterScaleX).ticks(6).tickFormat(d => d >= 1000 ? (d/1000)+'K' : d));
+  scatterSvg.append('g').attr('class', 'axis')
+    .attr('transform', `translate(${inner.x},0)`)
+    .call(d3.axisLeft(scatterScaleY).ticks(6));
+
+  // 2D brush for scatter
+  scatterSvg.selectAll('.brush').remove();
+  const brush = d3.brush()
+    .extent([[inner.x, inner.y], [inner.x + inner.w, inner.y + inner.h]])
+    .on('brush end', onScatterBrush);
+  scatterSvg.append('g').attr('class', 'brush').call(brush);
+}
+
+function onScatterBrush(event) {
+  if (!event.selection) {
+    filters.delay = null;
+    filters.distance = null;
+  } else {
+    const [[x0, y0], [x1, y1]] = event.selection;
+    filters.distance = [scatterScaleX.invert(x0), scatterScaleX.invert(x1)];
+    filters.delay = [scatterScaleY.invert(y1), scatterScaleY.invert(y0)];
+  }
+  updateAll('scatter');
+}
+
+function drawScatter(useFullData) {
+  const ctx = scatterCanvas.getContext('2d');
+  const dpr = devicePixelRatio;
+  const size = panelSize('panel-scatter');
+  ctx.clearRect(0, 0, size.w * dpr, size.h * dpr);
+  ctx.save();
+  ctx.scale(dpr, dpr);
+
+  const hasFilter = DIMS.some(d => filters[d] !== null);
+
+  if (!hasFilter) {
+    // No filter: draw all with single color
+    ctx.globalAlpha = 0.15;
+    ctx.fillStyle = '#5e8ff0';
+    const indices = useFullData ? null : sampleIndices;
+    const count = useFullData ? N : SAMPLE_N;
+    for (let k = 0; k < count; k++) {
+      const i = useFullData ? k : indices[k];
+      const x = scatterScaleX(distances[i]);
+      const y = scatterScaleY(delays[i]);
+      ctx.fillRect(x - 0.8, y - 0.8, 1.6, 1.6);
+    }
+  } else {
+    // Draw unfiltered (dim) then filtered (bright)
+    const indices = useFullData ? null : sampleIndices;
+    const count = useFullData ? N : SAMPLE_N;
+
+    // Dim pass
+    ctx.globalAlpha = 0.06;
+    ctx.fillStyle = '#4a4a6a';
+    for (let k = 0; k < count; k++) {
+      const i = useFullData ? k : indices[k];
+      const x = scatterScaleX(distances[i]);
+      const y = scatterScaleY(delays[i]);
+      ctx.fillRect(x - 0.8, y - 0.8, 1.6, 1.6);
+    }
+
+    // Bright pass
+    ctx.globalAlpha = 0.3;
+    ctx.fillStyle = '#5ef0a0';
+    for (let k = 0; k < count; k++) {
+      const i = useFullData ? k : indices[k];
+      if (!passesAllFilters(i)) continue;
+      const x = scatterScaleX(distances[i]);
+      const y = scatterScaleY(delays[i]);
+      ctx.fillRect(x - 1, y - 1, 2, 2);
+    }
+  }
+
+  ctx.restore();
+
+  // Count
+  let filteredCount = 0;
+  if (hasFilter) {
+    if (useFullData) {
+      for (let i = 0; i < N; i++) if (passesAllFilters(i)) filteredCount++;
+    } else {
+      for (let k = 0; k < SAMPLE_N; k++) {
+        if (passesAllFilters(sampleIndices[k])) filteredCount++;
+      }
+      filteredCount = Math.round(filteredCount * (N / SAMPLE_N));
+    }
+  }
+  document.getElementById('count-scatter').textContent =
+    hasFilter ? `${d3.format(',')(filteredCount)} / ${d3.format(',')(N)}` : d3.format(',')(N);
+}
+
+// ─── Panel 2: Delay Histogram ────────────────────────────────
+const histSvg = d3.select('#svg-hist');
+let histScaleX, histScaleY, histInner;
+
+function setupHist() {
+  const size = panelSize('panel-hist');
+  histSvg.attr('width', size.w).attr('height', size.h);
+  const inner = innerRect(size);
+  histInner = inner;
+
+  histScaleX = d3.scaleLinear().domain(delayExtent).range([inner.x, inner.x + inner.w]);
+  histScaleY = d3.scaleLinear().range([inner.y + inner.h, inner.y]);
+
+  histSvg.selectAll('.axis').remove();
+  histSvg.append('g').attr('class', 'axis x-axis')
+    .attr('transform', `translate(0,${inner.y + inner.h})`)
+    .call(d3.axisBottom(histScaleX).ticks(8));
+  histSvg.append('g').attr('class', 'axis y-axis')
+    .attr('transform', `translate(${inner.x},0)`);
+
+  // Brush
+  histSvg.selectAll('.brush').remove();
+  const brush = d3.brushX()
+    .extent([[inner.x, inner.y], [inner.x + inner.w, inner.y + inner.h]])
+    .on('brush end', onHistBrush);
+  histSvg.append('g').attr('class', 'brush').call(brush);
+
+  // Bar groups
+  histSvg.selectAll('.bar-group').remove();
+  histSvg.insert('g', '.brush').attr('class', 'bar-group');
+}
+
+function onHistBrush(event) {
+  if (!event.selection) {
+    filters.delay = null;
+  } else {
+    filters.delay = [histScaleX.invert(event.selection[0]), histScaleX.invert(event.selection[1])];
+  }
+  updateAll('hist');
+}
+
+function drawHist() {
+  const counts = getFilteredCounts('delay');
+  const totalCounts = marginal.delay;
+  const hasFilter = DIMS.some(d => d !== 'delay' && filters[d] !== null);
+
+  const maxCount = d3.max(hasFilter ? totalCounts : counts);
+  histScaleY.domain([0, maxCount]);
+  histSvg.select('.y-axis').call(d3.axisLeft(histScaleY).ticks(5).tickFormat(d3.format('~s')));
+
+  const barW = histInner.w / DELAY_BINS - 1;
+  const g = histSvg.select('.bar-group');
+
+  const data = Array.from({length: DELAY_BINS}, (_, i) => ({
+    i,
+    x: histScaleX(delayExtent[0] + i * delayBinWidth),
+    total: totalCounts[i],
+    filtered: counts[i]
+  }));
+
+  const bars = g.selectAll('.bar-bg').data(data, d => d.i);
+  bars.enter().append('rect').attr('class', 'bar-bg')
+    .merge(bars)
+    .attr('x', d => d.x)
+    .attr('y', histInner.y)
+    .attr('width', Math.max(1, barW))
+    .attr('height', histInner.h);
+
+  if (hasFilter) {
+    const totalBars = g.selectAll('.bar-total').data(data, d => d.i);
+    totalBars.enter().append('rect').attr('class', 'bar-total')
+      .attr('fill', '#2a2a4a').attr('opacity', 0.6)
+      .merge(totalBars)
+      .attr('x', d => d.x)
+      .attr('width', Math.max(1, barW))
+      .attr('y', d => histScaleY(d.total))
+      .attr('height', d => histInner.y + histInner.h - histScaleY(d.total));
+    totalBars.exit().remove();
+  } else {
+    g.selectAll('.bar-total').remove();
+  }
+
+  const filteredBars = g.selectAll('.bar-filtered').data(data, d => d.i);
+  filteredBars.enter().append('rect').attr('class', 'bar-filtered')
+    .merge(filteredBars)
+    .attr('x', d => d.x)
+    .attr('width', Math.max(1, barW))
+    .attr('y', d => histScaleY(d.filtered))
+    .attr('height', d => histInner.y + histInner.h - histScaleY(d.filtered));
+
+  const total = d3.sum(counts);
+  document.getElementById('count-hist').textContent = d3.format(',')(total);
+}
+
+// ─── Panel 3: Carrier Bar Chart ──────────────────────────────
+const barSvg = d3.select('#svg-bar');
+let barScaleX, barScaleY, barInner;
+
+function setupBar() {
+  const size = panelSize('panel-bar');
+  barSvg.attr('width', size.w).attr('height', size.h);
+  const inner = innerRect(size);
+  barInner = inner;
+
+  barScaleX = d3.scaleBand().domain(CARRIERS).range([inner.x, inner.x + inner.w]).padding(0.2);
+  barScaleY = d3.scaleLinear().range([inner.y + inner.h, inner.y]);
+
+  barSvg.selectAll('.axis').remove();
+  barSvg.append('g').attr('class', 'axis')
+    .attr('transform', `translate(0,${inner.y + inner.h})`)
+    .call(d3.axisBottom(barScaleX));
+  barSvg.append('g').attr('class', 'axis y-axis')
+    .attr('transform', `translate(${inner.x},0)`);
+
+  barSvg.selectAll('.bar-group').remove();
+  const g = barSvg.append('g').attr('class', 'bar-group');
+
+  // Click to filter carriers
+  g.selectAll('.bar-click')
+    .data(CARRIERS)
+    .enter().append('rect')
+    .attr('class', 'bar-click')
+    .attr('x', d => barScaleX(d))
+    .attr('width', barScaleX.bandwidth())
+    .attr('y', inner.y)
+    .attr('height', inner.h)
+    .attr('fill', 'transparent')
+    .attr('cursor', 'pointer')
+    .on('click', function(event, d) {
+      const idx = CARRIERS.indexOf(d);
+      if (!filters.carrier) {
+        filters.carrier = new Set([idx]);
+      } else if (filters.carrier.has(idx)) {
+        filters.carrier.delete(idx);
+        if (filters.carrier.size === 0) filters.carrier = null;
+      } else {
+        filters.carrier.add(idx);
+      }
+      updateAll('bar');
+    });
+}
+
+function drawBar() {
+  const counts = getFilteredCounts('carrier');
+  const totalCounts = marginal.carrier;
+  const hasFilter = DIMS.some(d => d !== 'carrier' && filters[d] !== null);
+
+  const maxCount = d3.max(hasFilter ? totalCounts : counts);
+  barScaleY.domain([0, maxCount]);
+  barSvg.select('.y-axis').call(d3.axisLeft(barScaleY).ticks(5).tickFormat(d3.format('~s')));
+
+  const g = barSvg.select('.bar-group');
+  const data = CARRIERS.map((c, i) => ({ carrier: c, total: totalCounts[i], filtered: counts[i], idx: i }));
+
+  if (hasFilter) {
+    const totalBars = g.selectAll('.bar-total').data(data, d => d.carrier);
+    totalBars.enter().append('rect').attr('class', 'bar-total')
+      .attr('fill', '#2a2a4a').attr('opacity', 0.6)
+      .merge(totalBars)
+      .attr('x', d => barScaleX(d.carrier))
+      .attr('width', barScaleX.bandwidth())
+      .attr('y', d => barScaleY(d.total))
+      .attr('height', d => barInner.y + barInner.h - barScaleY(d.total));
+    totalBars.exit().remove();
+  } else {
+    g.selectAll('.bar-total').remove();
+  }
+
+  const filteredBars = g.selectAll('.bar-filtered').data(data, d => d.carrier);
+  filteredBars.enter().append('rect').attr('class', 'bar-filtered')
+    .merge(filteredBars)
+    .attr('x', d => barScaleX(d.carrier))
+    .attr('width', barScaleX.bandwidth())
+    .attr('y', d => barScaleY(d.filtered))
+    .attr('height', d => barInner.y + barInner.h - barScaleY(d.filtered));
+
+  // Highlight selected carriers
+  if (filters.carrier) {
+    filteredBars.merge(filteredBars.enter().selectAll('.bar-filtered'))
+      .attr('fill', d => filters.carrier.has(d.idx) ? '#5ef0a0' : 'var(--accent)')
+      .attr('opacity', d => filters.carrier.has(d.idx) ? 1 : 0.3);
+  } else {
+    g.selectAll('.bar-filtered').attr('fill', null).attr('opacity', null);
+  }
+
+  const total = d3.sum(counts);
+  document.getElementById('count-bar').textContent = d3.format(',')(total);
+}
+
+// ─── Panel 4: Timeline ──────────────────────────────────────
+const timeSvg = d3.select('#svg-timeline');
+let timeScaleX, timeScaleY, timeInner;
+
+function setupTimeline() {
+  const size = panelSize('panel-timeline');
+  timeSvg.attr('width', size.w).attr('height', size.h);
+  const inner = innerRect(size);
+  timeInner = inner;
+
+  const weekDates = Array.from({length: TIME_BINS}, (_, i) =>
+    new Date(startDate.getTime() + i * 7 * msPerDay)
+  );
+
+  timeScaleX = d3.scaleTime()
+    .domain([weekDates[0], new Date(weekDates[TIME_BINS-1].getTime() + 7 * msPerDay)])
+    .range([inner.x, inner.x + inner.w]);
+  timeScaleY = d3.scaleLinear().range([inner.y + inner.h, inner.y]);
+
+  timeSvg.selectAll('.axis').remove();
+  timeSvg.append('g').attr('class', 'axis')
+    .attr('transform', `translate(0,${inner.y + inner.h})`)
+    .call(d3.axisBottom(timeScaleX).ticks(6).tickFormat(d3.timeFormat('%b')));
+  timeSvg.append('g').attr('class', 'axis y-axis')
+    .attr('transform', `translate(${inner.x},0)`);
+
+  timeSvg.selectAll('.brush').remove();
+  const brush = d3.brushX()
+    .extent([[inner.x, inner.y], [inner.x + inner.w, inner.y + inner.h]])
+    .on('brush end', onTimeBrush);
+  timeSvg.append('g').attr('class', 'brush').call(brush);
+
+  timeSvg.selectAll('.bar-group').remove();
+  timeSvg.insert('g', '.brush').attr('class', 'bar-group');
+}
+
+function onTimeBrush(event) {
+  if (!event.selection) {
+    filters.week = null;
+  } else {
+    const [x0, x1] = event.selection;
+    const d0 = timeScaleX.invert(x0);
+    const d1 = timeScaleX.invert(x1);
+    const w0 = Math.floor((d0 - startDate) / (7 * msPerDay));
+    const w1 = Math.floor((d1 - startDate) / (7 * msPerDay));
+    filters.week = [Math.max(0, w0), Math.min(TIME_BINS - 1, w1)];
+  }
+  updateAll('timeline');
+}
+
+function drawTimeline() {
+  const counts = getFilteredCounts('week');
+  const totalCounts = marginal.week;
+  const hasFilter = DIMS.some(d => d !== 'week' && filters[d] !== null);
+
+  const maxCount = d3.max(hasFilter ? totalCounts : counts);
+  timeScaleY.domain([0, maxCount]);
+  timeSvg.select('.y-axis').call(d3.axisLeft(timeScaleY).ticks(5).tickFormat(d3.format('~s')));
+
+  const barW = timeInner.w / TIME_BINS - 1;
+  const g = timeSvg.select('.bar-group');
+
+  const data = Array.from({length: TIME_BINS}, (_, i) => ({
+    i,
+    x: timeScaleX(new Date(startDate.getTime() + i * 7 * msPerDay)),
+    total: totalCounts[i],
+    filtered: counts[i]
+  }));
+
+  const bars = g.selectAll('.bar-bg').data(data, d => d.i);
+  bars.enter().append('rect').attr('class', 'bar-bg')
+    .merge(bars)
+    .attr('x', d => d.x)
+    .attr('y', timeInner.y)
+    .attr('width', Math.max(1, barW))
+    .attr('height', timeInner.h);
+
+  if (hasFilter) {
+    const totalBars = g.selectAll('.bar-total').data(data, d => d.i);
+    totalBars.enter().append('rect').attr('class', 'bar-total')
+      .attr('fill', '#2a2a4a').attr('opacity', 0.6)
+      .merge(totalBars)
+      .attr('x', d => d.x)
+      .attr('width', Math.max(1, barW))
+      .attr('y', d => timeScaleY(d.total))
+      .attr('height', d => timeInner.y + timeInner.h - timeScaleY(d.total));
+    totalBars.exit().remove();
+  } else {
+    g.selectAll('.bar-total').remove();
+  }
+
+  const filteredBars = g.selectAll('.bar-filtered').data(data, d => d.i);
+  filteredBars.enter().append('rect').attr('class', 'bar-filtered')
+    .merge(filteredBars)
+    .attr('x', d => d.x)
+    .attr('width', Math.max(1, barW))
+    .attr('y', d => timeScaleY(d.filtered))
+    .attr('height', d => timeInner.y + timeInner.h - timeScaleY(d.filtered));
+
+  const total = d3.sum(counts);
+  document.getElementById('count-timeline').textContent = d3.format(',')(total);
+}
+
+// ─── Progressive Update Engine ───────────────────────────────
+let idleCallbackId = null;
+let phase = 'idle'; // 'approx' | 'refining' | 'idle'
+
+function updateAll(source) {
+  // Cancel pending refinement
+  if (idleCallbackId !== null) {
+    cancelIdleCallback(idleCallbackId);
+    idleCallbackId = null;
+  }
+
+  phase = 'approx';
+  statusEl.className = 'refining';
+  statusEl.textContent = 'Approximate (10K sample)…';
+
+  // Phase 1: Immediate — O(1) cube lookups for histograms,
+  // sample-only scatter
+  drawScatter(false);
+  drawHist();
+  drawBar();
+  drawTimeline();
+
+  // Phase 2: Refine scatter with full data on idle
+  idleCallbackId = requestIdleCallback(() => {
+    phase = 'refining';
+    statusEl.textContent = 'Refining to 100K…';
+
+    drawScatter(true);
+
+    phase = 'idle';
+    statusEl.className = 'complete';
+    statusEl.textContent = '100K records — full resolution';
+    idleCallbackId = null;
+  }, { timeout: 100 });
+}
+
+// ─── Resize ──────────────────────────────────────────────────
+const ro = new ResizeObserver(() => {
+  setupScatter();
+  setupHist();
+  setupBar();
+  setupTimeline();
+  updateAll();
+});
+ro.observe(document.getElementById('grid'));
+
+// ─── Init ────────────────────────────────────────────────────
+setupScatter();
+setupHist();
+setupBar();
+setupTimeline();
+updateAll();
+</script>
+</body>
+</html>

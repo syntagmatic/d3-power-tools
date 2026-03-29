@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Crossfilter Flight Explorer</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #0f1117;
+    color: #e2e8f0;
+    min-height: 100vh;
+    padding: 24px;
+  }
+
+  header {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    margin-bottom: 28px;
+  }
+
+  h1 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: #f1f5f9;
+  }
+
+  #counter {
+    font-size: 0.85rem;
+    color: #94a3b8;
+  }
+
+  #counter span {
+    color: #38bdf8;
+    font-weight: 600;
+  }
+
+  #reset-btn {
+    margin-left: auto;
+    padding: 6px 14px;
+    border-radius: 6px;
+    border: 1px solid #334155;
+    background: #1e293b;
+    color: #94a3b8;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  #reset-btn:hover {
+    border-color: #38bdf8;
+    color: #38bdf8;
+  }
+
+  #reset-btn.active {
+    border-color: #38bdf8;
+    color: #38bdf8;
+    background: rgba(56, 189, 248, 0.08);
+  }
+
+  .charts {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 20px;
+  }
+
+  .chart-wrap {
+    background: #1a1f2e;
+    border-radius: 10px;
+    border: 1px solid #1e293b;
+    padding: 16px 16px 12px;
+  }
+
+  .chart-label {
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 10px;
+  }
+
+  svg {
+    display: block;
+    overflow: visible;
+  }
+
+  .bar {
+    fill: #2d6a9f;
+    transition: fill 0.1s;
+  }
+
+  .bar.filtered {
+    fill: #38bdf8;
+  }
+
+  .bar.dimmed {
+    fill: #1d3d5c;
+  }
+
+  .brush .selection {
+    fill: rgba(56, 189, 248, 0.15);
+    stroke: #38bdf8;
+    stroke-width: 1px;
+  }
+
+  .brush .handle {
+    fill: #38bdf8;
+    opacity: 0.6;
+  }
+
+  .axis path,
+  .axis line {
+    stroke: #334155;
+  }
+
+  .axis text {
+    fill: #64748b;
+    font-size: 10px;
+  }
+
+  .hint {
+    font-size: 0.72rem;
+    color: #475569;
+    margin-top: 8px;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Flight Explorer</h1>
+  <div id="counter">Showing <span id="count">2000</span> of 2000 flights</div>
+  <button id="reset-btn">Reset filters</button>
+</header>
+
+<div class="charts">
+  <div class="chart-wrap" id="wrap-hour">
+    <div class="chart-label">Departure Hour</div>
+  </div>
+  <div class="chart-wrap" id="wrap-delay">
+    <div class="chart-label">Arrival Delay (min)</div>
+  </div>
+  <div class="chart-wrap" id="wrap-dist">
+    <div class="chart-label">Distance (miles)</div>
+  </div>
+</div>
+
+<p class="hint">Brush any histogram to filter. All charts update simultaneously.</p>
+
+<script type="module">
+// ── Synthetic data ────────────────────────────────────────────────────────────
+
+const N = 2000;
+const rng = (() => {
+  // Seeded LCG for reproducibility
+  let s = 42;
+  return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+})();
+
+function randNorm(mu = 0, sigma = 1) {
+  // Box-Muller
+  const u = rng(), v = rng();
+  return mu + sigma * Math.sqrt(-2 * Math.log(u + 1e-10)) * Math.cos(2 * Math.PI * v);
+}
+
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+// Bimodal departure: morning peak ~8h, evening peak ~17h
+function genHour() {
+  if (rng() < 0.45) {
+    return clamp(Math.round(randNorm(8, 1.8)), 0, 23);
+  } else if (rng() < 0.7) {
+    return clamp(Math.round(randNorm(17, 1.5)), 0, 23);
+  } else {
+    return clamp(Math.round(randNorm(12, 3)), 0, 23);
+  }
+}
+
+// Delay: mostly small, right-skewed, some cancellations
+function genDelay() {
+  const r = rng();
+  if (r < 0.55) return clamp(Math.round(randNorm(-2, 8)), -30, 15);    // on time / early
+  if (r < 0.80) return clamp(Math.round(randNorm(25, 15)), 5, 80);     // moderate delay
+  return clamp(Math.round(randNorm(100, 40)), 60, 300);                 // severe delay
+}
+
+// Distance: three route buckets (short, medium, long)
+function genDistance() {
+  const r = rng();
+  if (r < 0.45) return clamp(Math.round(randNorm(450, 150)), 100, 800);
+  if (r < 0.80) return clamp(Math.round(randNorm(1300, 250)), 700, 2000);
+  return clamp(Math.round(randNorm(2500, 500)), 1800, 5000);
+}
+
+const flights = Array.from({ length: N }, () => ({
+  hour: genHour(),
+  delay: genDelay(),
+  dist: genDistance(),
+}));
+
+// ── Crossfilter state ─────────────────────────────────────────────────────────
+// We store brushed extents per dimension. Intersection is applied across all.
+
+const filters = { hour: null, delay: null, dist: null };
+
+function isSelected(d) {
+  return (!filters.hour || (d.hour >= filters.hour[0] && d.hour <= filters.hour[1]))
+      && (!filters.delay || (d.delay >= filters.delay[0] && d.delay <= filters.delay[1]))
+      && (!filters.dist || (d.dist >= filters.dist[0] && d.dist <= filters.dist[1]));
+}
+
+function countSelected() { return flights.filter(isSelected).length; }
+
+function updateCounter() {
+  document.getElementById("count").textContent = countSelected().toLocaleString();
+  const anyActive = Object.values(filters).some(f => f !== null);
+  document.getElementById("reset-btn").classList.toggle("active", anyActive);
+}
+
+// ── Chart factory ─────────────────────────────────────────────────────────────
+
+const W = 340, H = 180;
+const margin = { top: 8, right: 12, bottom: 28, left: 36 };
+const innerW = W - margin.left - margin.right;
+const innerH = H - margin.top - margin.bottom;
+
+function makeHistogram(containerId, dimKey, domain, thresholds, tickFormat) {
+  const wrap = document.getElementById(containerId);
+
+  const svg = d3.select(wrap)
+    .append("svg")
+    .attr("width", W)
+    .attr("height", H);
+
+  const g = svg.append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+  // Scales
+  const xScale = d3.scaleLinear().domain(domain).range([0, innerW]);
+
+  // Compute bins from ALL data
+  const bin = d3.bin()
+    .domain(domain)
+    .thresholds(thresholds)
+    .value(d => d[dimKey]);
+
+  const bins = bin(flights);
+
+  const yScale = d3.scaleLinear()
+    .domain([0, d3.max(bins, b => b.length)])
+    .range([innerH, 0])
+    .nice();
+
+  // Axes
+  const xAxis = g.append("g")
+    .attr("class", "axis")
+    .attr("transform", `translate(0,${innerH})`)
+    .call(d3.axisBottom(xScale).ticks(6).tickFormat(tickFormat).tickSize(3));
+
+  xAxis.select(".domain").remove();
+
+  g.append("g")
+    .attr("class", "axis")
+    .call(d3.axisLeft(yScale).ticks(4).tickSize(3))
+    .select(".domain").remove();
+
+  // Bars
+  const barG = g.append("g").attr("class", "bars");
+
+  const barWidth = d => Math.max(0, xScale(d.x1) - xScale(d.x0) - 1);
+
+  barG.selectAll(".bar")
+    .data(bins)
+    .join("rect")
+    .attr("class", "bar")
+    .attr("x", d => xScale(d.x0))
+    .attr("y", d => yScale(d.length))
+    .attr("width", barWidth)
+    .attr("height", d => innerH - yScale(d.length));
+
+  // Brush
+  const brushG = g.append("g").attr("class", "brush");
+
+  const brush = d3.brushX()
+    .extent([[0, 0], [innerW, innerH]])
+    .on("brush", ({ selection }) => {
+      if (!selection) return;
+      const [x0, x1] = selection.map(xScale.invert);
+      filters[dimKey] = [Math.min(x0, x1), Math.max(x0, x1)];
+      updateAll();
+    })
+    .on("end", ({ selection }) => {
+      if (!selection) {
+        filters[dimKey] = null;
+        updateAll();
+      }
+    });
+
+  brushG.call(brush);
+
+  // Update function — recolors bars based on current filter state
+  function update() {
+    // For this dimension, temporarily ignore its own filter to show marginal
+    const otherFilters = Object.entries(filters)
+      .filter(([k]) => k !== dimKey);
+
+    function passesOthers(d_val) {
+      return otherFilters.every(([k, f]) => {
+        if (!f) return true;
+        const v = d_val[k];
+        return v >= f[0] && v <= f[1];
+      });
+    }
+
+    // Recount bins using only other-dimension filters
+    const filteredFlights = flights.filter(passesOthers);
+    const filteredBins = bin(filteredFlights);
+
+    const maxCount = d3.max(bins, b => b.length);
+
+    barG.selectAll(".bar")
+      .data(bins)
+      .join("rect")
+      .attr("class", (d, i) => {
+        const fb = filteredBins[i];
+        const fc = fb ? fb.length : 0;
+        if (fc === d.length) return "bar";            // unfiltered
+        if (fc === 0) return "bar dimmed";            // fully filtered out
+        return "bar filtered";                        // partial
+      })
+      .attr("y", (d, i) => {
+        const fb = filteredBins[i];
+        const fc = fb ? fb.length : 0;
+        return yScale(fc);
+      })
+      .attr("height", (d, i) => {
+        const fb = filteredBins[i];
+        const fc = fb ? fb.length : 0;
+        return innerH - yScale(fc);
+      });
+  }
+
+  // Expose clear brush programmatically
+  function clearBrush() {
+    brushG.call(brush.move, null);
+  }
+
+  return { update, clearBrush };
+}
+
+// ── Build charts ──────────────────────────────────────────────────────────────
+
+const charts = {
+  hour: makeHistogram(
+    "wrap-hour", "hour",
+    [0, 24],
+    d3.range(0, 25, 1),
+    d => d === 0 ? "12a" : d < 12 ? `${d}a` : d === 12 ? "12p" : `${d - 12}p`
+  ),
+  delay: makeHistogram(
+    "wrap-delay", "delay",
+    [-30, 300],
+    d3.range(-30, 305, 15),
+    d => d === 0 ? "0" : d > 0 ? `+${d}` : `${d}`
+  ),
+  dist: makeHistogram(
+    "wrap-dist", "dist",
+    [100, 5000],
+    d3.range(100, 5100, 200),
+    d => d >= 1000 ? `${d / 1000}k` : `${d}`
+  ),
+};
+
+function updateAll() {
+  Object.values(charts).forEach(c => c.update());
+  updateCounter();
+}
+
+// ── Reset button ──────────────────────────────────────────────────────────────
+
+document.getElementById("reset-btn").addEventListener("click", () => {
+  filters.hour = null;
+  filters.delay = null;
+  filters.dist = null;
+  Object.values(charts).forEach(c => c.clearBrush());
+  updateAll();
+});
+
+// Initial render
+updateAll();
+</script>
+</body>
+</html>

@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Gantt Chart with Edge-Bundled Dependencies</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #0f1117; color: #c9d1d9; font-family: system-ui, -apple-system, sans-serif; }
+  h1 { font-size: 15px; font-weight: 500; color: #8b949e; padding: 16px 24px 0; letter-spacing: 0.02em; }
+  .tooltip {
+    position: absolute; pointer-events: none; opacity: 0;
+    background: #1c2028; border: 1px solid #30363d; border-radius: 6px;
+    padding: 8px 12px; font-size: 12px; line-height: 1.5;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4); max-width: 260px;
+  }
+  .tooltip .name { font-weight: 600; color: #e6edf3; }
+  .tooltip .phase { color: #8b949e; font-size: 11px; }
+  .tooltip .dates { color: #7ee787; margin-top: 4px; }
+  .tooltip .deps { color: #d2a8ff; margin-top: 2px; font-size: 11px; }
+  .legend { display: flex; gap: 18px; padding: 8px 24px; font-size: 11px; color: #8b949e; }
+  .legend span { display: flex; align-items: center; gap: 5px; }
+  .legend .swatch { width: 12px; height: 12px; border-radius: 2px; }
+</style>
+</head>
+<body>
+<h1>Project Timeline — Dependency Flow via LCA Edge Bundling</h1>
+<div class="legend" id="legend"></div>
+<div id="chart"></div>
+<div class="tooltip" id="tooltip"></div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data: 50 tasks across 4 phases ---
+const phases = [
+  { id: "planning", name: "Planning", color: "#58a6ff" },
+  { id: "design", name: "Design", color: "#d2a8ff" },
+  { id: "development", name: "Development", color: "#7ee787" },
+  { id: "testing", name: "Testing", color: "#ffa657" }
+];
+
+const phaseColors = new Map(phases.map(p => [p.id, p.color]));
+
+// Generate tasks with realistic dependencies
+const tasksRaw = [
+  // Planning (8 tasks) — weeks 0-6
+  { id: "p1", phase: "planning", name: "Stakeholder interviews", start: 0, dur: 2 },
+  { id: "p2", phase: "planning", name: "Requirements gathering", start: 1, dur: 3 },
+  { id: "p3", phase: "planning", name: "Market analysis", start: 0, dur: 3 },
+  { id: "p4", phase: "planning", name: "Technical feasibility", start: 2, dur: 2 },
+  { id: "p5", phase: "planning", name: "Risk assessment", start: 3, dur: 2 },
+  { id: "p6", phase: "planning", name: "Budget estimation", start: 3, dur: 2 },
+  { id: "p7", phase: "planning", name: "Resource allocation", start: 4, dur: 2 },
+  { id: "p8", phase: "planning", name: "Project charter", start: 5, dur: 1 },
+
+  // Design (13 tasks) — weeks 4-12
+  { id: "d1", phase: "design", name: "Information architecture", start: 4, dur: 3 },
+  { id: "d2", phase: "design", name: "User flow mapping", start: 5, dur: 2 },
+  { id: "d3", phase: "design", name: "Wireframes", start: 6, dur: 3 },
+  { id: "d4", phase: "design", name: "API schema design", start: 5, dur: 3 },
+  { id: "d5", phase: "design", name: "Data model design", start: 5, dur: 3 },
+  { id: "d6", phase: "design", name: "Component library", start: 7, dur: 3 },
+  { id: "d7", phase: "design", name: "Visual design system", start: 7, dur: 2 },
+  { id: "d8", phase: "design", name: "Interaction specs", start: 8, dur: 2 },
+  { id: "d9", phase: "design", name: "Accessibility audit", start: 9, dur: 2 },
+  { id: "d10", phase: "design", name: "Security architecture", start: 6, dur: 3 },
+  { id: "d11", phase: "design", name: "Infrastructure plan", start: 7, dur: 2 },
+  { id: "d12", phase: "design", name: "Design review", start: 10, dur: 1 },
+  { id: "d13", phase: "design", name: "Prototype", start: 9, dur: 3 },
+
+  // Development (17 tasks) — weeks 9-22
+  { id: "v1", phase: "development", name: "Dev environment setup", start: 9, dur: 2 },
+  { id: "v2", phase: "development", name: "Auth module", start: 10, dur: 3 },
+  { id: "v3", phase: "development", name: "Database layer", start: 10, dur: 3 },
+  { id: "v4", phase: "development", name: "API endpoints", start: 12, dur: 4 },
+  { id: "v5", phase: "development", name: "Frontend scaffold", start: 11, dur: 2 },
+  { id: "v6", phase: "development", name: "Core UI components", start: 12, dur: 3 },
+  { id: "v7", phase: "development", name: "Data visualization", start: 14, dur: 3 },
+  { id: "v8", phase: "development", name: "Search & filtering", start: 14, dur: 3 },
+  { id: "v9", phase: "development", name: "Notification system", start: 15, dur: 2 },
+  { id: "v10", phase: "development", name: "File upload service", start: 13, dur: 3 },
+  { id: "v11", phase: "development", name: "Background jobs", start: 14, dur: 3 },
+  { id: "v12", phase: "development", name: "Caching layer", start: 16, dur: 2 },
+  { id: "v13", phase: "development", name: "CI/CD pipeline", start: 11, dur: 2 },
+  { id: "v14", phase: "development", name: "API integration", start: 16, dur: 3 },
+  { id: "v15", phase: "development", name: "Performance tuning", start: 18, dur: 2 },
+  { id: "v16", phase: "development", name: "Error handling", start: 17, dur: 2 },
+  { id: "v17", phase: "development", name: "Feature freeze", start: 20, dur: 1 },
+
+  // Testing (12 tasks) — weeks 18-26
+  { id: "t1", phase: "testing", name: "Test plan", start: 18, dur: 2 },
+  { id: "t2", phase: "testing", name: "Unit test suite", start: 18, dur: 3 },
+  { id: "t3", phase: "testing", name: "Integration tests", start: 20, dur: 3 },
+  { id: "t4", phase: "testing", name: "E2E test automation", start: 20, dur: 3 },
+  { id: "t5", phase: "testing", name: "Load testing", start: 21, dur: 2 },
+  { id: "t6", phase: "testing", name: "Security pen test", start: 21, dur: 2 },
+  { id: "t7", phase: "testing", name: "Accessibility testing", start: 22, dur: 2 },
+  { id: "t8", phase: "testing", name: "UAT", start: 23, dur: 2 },
+  { id: "t9", phase: "testing", name: "Bug triage", start: 22, dur: 3 },
+  { id: "t10", phase: "testing", name: "Regression suite", start: 24, dur: 2 },
+  { id: "t11", phase: "testing", name: "Release candidate", start: 25, dur: 1 },
+  { id: "t12", phase: "testing", name: "Go/no-go review", start: 25, dur: 1 }
+];
+
+// Dependencies: [source, target]
+const dependencies = [
+  // Within planning
+  ["p1", "p2"], ["p3", "p4"], ["p2", "p5"], ["p4", "p5"],
+  ["p2", "p6"], ["p5", "p7"], ["p6", "p7"], ["p7", "p8"],
+  // Planning → Design (cross-phase)
+  ["p2", "d1"], ["p8", "d1"], ["p4", "d4"], ["p4", "d5"],
+  ["p8", "d10"], ["p3", "d2"], ["p5", "d10"],
+  // Within design
+  ["d1", "d2"], ["d2", "d3"], ["d1", "d4"], ["d4", "d5"],
+  ["d3", "d6"], ["d3", "d7"], ["d6", "d8"], ["d7", "d8"],
+  ["d8", "d9"], ["d5", "d11"], ["d10", "d11"],
+  ["d9", "d12"], ["d3", "d13"], ["d8", "d13"], ["d13", "d12"],
+  // Design → Development (cross-phase)
+  ["d4", "v4"], ["d5", "v3"], ["d6", "v6"], ["d11", "v1"],
+  ["d12", "v5"], ["d10", "v2"], ["d7", "v6"], ["d13", "v7"],
+  // Within development
+  ["v1", "v2"], ["v1", "v3"], ["v1", "v13"], ["v2", "v4"],
+  ["v3", "v4"], ["v5", "v6"], ["v6", "v7"], ["v6", "v8"],
+  ["v4", "v9"], ["v4", "v10"], ["v4", "v11"], ["v3", "v12"],
+  ["v11", "v12"], ["v7", "v14"], ["v8", "v14"], ["v12", "v15"],
+  ["v14", "v15"], ["v9", "v16"], ["v15", "v17"], ["v16", "v17"],
+  // Development → Testing (cross-phase)
+  ["v13", "t2"], ["v17", "t1"], ["v4", "t3"], ["v14", "t3"],
+  ["v17", "t4"], ["v15", "t5"], ["d10", "t6"], ["d9", "t7"],
+  // Within testing
+  ["t1", "t3"], ["t1", "t4"], ["t2", "t3"], ["t3", "t5"],
+  ["t3", "t6"], ["t4", "t7"], ["t5", "t8"], ["t6", "t8"],
+  ["t7", "t8"], ["t3", "t9"], ["t9", "t10"], ["t8", "t10"],
+  ["t10", "t11"], ["t11", "t12"]
+];
+
+// --- Build hierarchy for LCA path routing ---
+const hierarchyData = [
+  { id: "root", parent: null },
+  ...phases.map(p => ({ id: p.id, parent: "root" })),
+  ...tasksRaw.map(t => ({ id: t.id, parent: t.phase }))
+];
+
+const root = d3.stratify()
+  .id(d => d.id)
+  .parentId(d => d.parent)(hierarchyData);
+
+const nodesById = new Map(root.descendants().map(d => [d.data.id, d]));
+
+// Compute LCA paths for each dependency
+const links = dependencies.map(([s, t]) => {
+  const source = nodesById.get(s);
+  const target = nodesById.get(t);
+  if (!source || !target) return null;
+  return { path: source.path(target), sourceId: s, targetId: t };
+}).filter(Boolean);
+
+// --- Layout ---
+const margin = { top: 40, right: 40, bottom: 40, left: 190 };
+const rowHeight = 18;
+const rowPad = 3;
+const phaseGap = 12;
+const width = 1200;
+
+// Compute y positions for tasks, grouped by phase
+const taskMap = new Map(tasksRaw.map(t => [t.id, t]));
+let currentY = 0;
+const phaseYRanges = new Map();
+
+for (const phase of phases) {
+  const phaseTasks = tasksRaw.filter(t => t.phase === phase.id);
+  const startY = currentY;
+  phaseTasks.forEach((t, i) => {
+    t.y = currentY + i * (rowHeight + rowPad);
+  });
+  currentY += phaseTasks.length * (rowHeight + rowPad) + phaseGap;
+  phaseYRanges.set(phase.id, {
+    top: startY,
+    bottom: startY + (phaseTasks.length - 1) * (rowHeight + rowPad) + rowHeight,
+    center: startY + ((phaseTasks.length - 1) * (rowHeight + rowPad) + rowHeight) / 2
+  });
+}
+
+const height = currentY + margin.top + margin.bottom;
+
+// Time scale: weeks → pixels
+const maxWeek = d3.max(tasksRaw, t => t.start + t.dur);
+const x = d3.scaleLinear()
+  .domain([0, maxWeek])
+  .range([margin.left, width - margin.right]);
+
+// Assign routing positions to ALL hierarchy nodes
+// Leaf nodes: center of their bar
+tasksRaw.forEach(t => {
+  const node = nodesById.get(t.id);
+  node.cx = (x(t.start) + x(t.start + t.dur)) / 2;
+  node.cy = margin.top + t.y + rowHeight / 2;
+});
+
+// Phase nodes: centroid of children, pushed left for routing clearance
+for (const phase of phases) {
+  const node = nodesById.get(phase.id);
+  const range = phaseYRanges.get(phase.id);
+  node.cy = margin.top + range.center;
+  node.cx = margin.left - 40; // route through left margin for visual separation
+}
+
+// Root: center of everything
+const rootNode = nodesById.get("root");
+rootNode.cx = margin.left - 70;
+rootNode.cy = margin.top + currentY / 2;
+
+// --- Build adjacency for hover chain traversal ---
+const outgoing = new Map(); // taskId → [targetIds]
+const incoming = new Map(); // taskId → [sourceIds]
+for (const [s, t] of dependencies) {
+  if (!outgoing.has(s)) outgoing.set(s, []);
+  outgoing.get(s).push(t);
+  if (!incoming.has(t)) incoming.set(t, []);
+  incoming.get(t).push(s);
+}
+
+// Collect full dependency chain (all ancestors + all descendants)
+function getDependencyChain(taskId) {
+  const chain = new Set([taskId]);
+  // Upstream
+  const upStack = [taskId];
+  while (upStack.length) {
+    const curr = upStack.pop();
+    for (const pred of (incoming.get(curr) || [])) {
+      if (!chain.has(pred)) { chain.add(pred); upStack.push(pred); }
+    }
+  }
+  // Downstream
+  const downStack = [taskId];
+  while (downStack.length) {
+    const curr = downStack.pop();
+    for (const succ of (outgoing.get(curr) || [])) {
+      if (!chain.has(succ)) { chain.add(succ); downStack.push(succ); }
+    }
+  }
+  return chain;
+}
+
+// --- Render ---
+const svg = d3.select("#chart").append("svg")
+  .attr("width", width)
+  .attr("height", height)
+  .attr("viewBox", [0, 0, width, height]);
+
+// Legend
+const legend = d3.select("#legend");
+phases.forEach(p => {
+  legend.append("span").html(
+    `<span class="swatch" style="background:${p.color}"></span>${p.name}`
+  );
+});
+
+// Phase background bands
+const phaseG = svg.append("g").attr("class", "phase-bands");
+for (const phase of phases) {
+  const range = phaseYRanges.get(phase.id);
+  phaseG.append("rect")
+    .attr("x", margin.left - 6)
+    .attr("y", margin.top + range.top - 4)
+    .attr("width", width - margin.left - margin.right + 12)
+    .attr("height", range.bottom - range.top + 8)
+    .attr("rx", 4)
+    .attr("fill", phaseColors.get(phase.id))
+    .attr("fill-opacity", 0.03);
+
+  // Phase label
+  phaseG.append("text")
+    .attr("x", margin.left - 12)
+    .attr("y", margin.top + range.center)
+    .attr("text-anchor", "end")
+    .attr("dominant-baseline", "central")
+    .attr("font-size", 11)
+    .attr("font-weight", 600)
+    .attr("fill", phaseColors.get(phase.id))
+    .attr("opacity", 0.6)
+    .text(phase.name);
+}
+
+// Week grid lines
+const weekTicks = d3.range(0, maxWeek + 1, 2);
+const gridG = svg.append("g").attr("class", "grid");
+weekTicks.forEach(w => {
+  gridG.append("line")
+    .attr("x1", x(w)).attr("x2", x(w))
+    .attr("y1", margin.top - 10)
+    .attr("y2", height - margin.bottom)
+    .attr("stroke", "#21262d")
+    .attr("stroke-width", 1);
+});
+
+// Week axis labels
+const axisG = svg.append("g").attr("class", "axis");
+weekTicks.forEach(w => {
+  axisG.append("text")
+    .attr("x", x(w))
+    .attr("y", margin.top - 16)
+    .attr("text-anchor", "middle")
+    .attr("font-size", 10)
+    .attr("fill", "#484f58")
+    .text(`W${w}`);
+});
+
+// --- Dependency curves (edge-bundled via LCA paths) ---
+const line = d3.line()
+  .curve(d3.curveBundle.beta(0.2))
+  .x(d => d.cx)
+  .y(d => d.cy);
+
+const linksG = svg.append("g").attr("class", "links");
+
+const linkPaths = linksG.selectAll("path.dep")
+  .data(links)
+  .join("path")
+    .attr("class", "dep")
+    .attr("fill", "none")
+    .attr("stroke", "#8b949e")
+    .attr("stroke-opacity", 0.12)
+    .attr("stroke-width", 1.2)
+    .attr("d", d => line(d.path));
+
+// --- Task bars ---
+const barsG = svg.append("g").attr("class", "bars");
+
+const taskGroups = barsG.selectAll("g.task")
+  .data(tasksRaw)
+  .join("g")
+    .attr("class", "task")
+    .attr("transform", d => `translate(0, ${margin.top + d.y})`);
+
+taskGroups.append("rect")
+  .attr("x", d => x(d.start))
+  .attr("y", 0)
+  .attr("width", d => x(d.start + d.dur) - x(d.start))
+  .attr("height", rowHeight)
+  .attr("rx", 3)
+  .attr("fill", d => phaseColors.get(d.phase))
+  .attr("fill-opacity", 0.7);
+
+taskGroups.append("text")
+  .attr("x", d => x(d.start) - 6)
+  .attr("y", rowHeight / 2)
+  .attr("text-anchor", "end")
+  .attr("dominant-baseline", "central")
+  .attr("font-size", 10)
+  .attr("fill", "#8b949e")
+  .text(d => d.name);
+
+// --- Hover interaction ---
+const tooltip = d3.select("#tooltip");
+
+// Invisible wider hit targets for task bars
+taskGroups.append("rect")
+  .attr("x", d => x(d.start) - 2)
+  .attr("y", -3)
+  .attr("width", d => x(d.start + d.dur) - x(d.start) + 4)
+  .attr("height", rowHeight + 6)
+  .attr("fill", "transparent")
+  .attr("cursor", "pointer")
+  .on("pointerenter", (event, d) => highlight(d, event))
+  .on("pointermove", (event) => {
+    tooltip
+      .style("left", (event.pageX + 14) + "px")
+      .style("top", (event.pageY - 10) + "px");
+  })
+  .on("pointerleave", unhighlight);
+
+function highlight(task, event) {
+  const chain = getDependencyChain(task.id);
+
+  // Dim everything
+  taskGroups.select("rect:first-child")
+    .attr("fill-opacity", d => chain.has(d.id) ? 0.9 : 0.12);
+  taskGroups.select("text")
+    .attr("fill", d => chain.has(d.id) ? "#e6edf3" : "#30363d");
+
+  // Highlight connected links
+  linkPaths
+    .attr("stroke", d => {
+      if (chain.has(d.sourceId) && chain.has(d.targetId)) {
+        const sTask = taskMap.get(d.sourceId);
+        const tTask = taskMap.get(d.targetId);
+        // Color by source phase or blend
+        return phaseColors.get(sTask.phase);
+      }
+      return "#8b949e";
+    })
+    .attr("stroke-opacity", d =>
+      chain.has(d.sourceId) && chain.has(d.targetId) ? 0.7 : 0.03
+    )
+    .attr("stroke-width", d =>
+      chain.has(d.sourceId) && chain.has(d.targetId) ? 2 : 1
+    );
+
+  // Raise highlighted links
+  linkPaths.filter(d => chain.has(d.sourceId) && chain.has(d.targetId)).raise();
+
+  // Tooltip
+  const ups = incoming.get(task.id) || [];
+  const downs = outgoing.get(task.id) || [];
+  tooltip
+    .style("opacity", 1)
+    .style("left", (event.pageX + 14) + "px")
+    .style("top", (event.pageY - 10) + "px")
+    .html(`
+      <div class="name">${task.name}</div>
+      <div class="phase">${phases.find(p => p.id === task.phase).name}</div>
+      <div class="dates">Week ${task.start} – ${task.start + task.dur}</div>
+      ${ups.length ? `<div class="deps">← ${ups.map(id => taskMap.get(id).name).join(", ")}</div>` : ""}
+      ${downs.length ? `<div class="deps">→ ${downs.map(id => taskMap.get(id).name).join(", ")}</div>` : ""}
+    `);
+}
+
+function unhighlight() {
+  taskGroups.select("rect:first-child").attr("fill-opacity", 0.7);
+  taskGroups.select("text").attr("fill", "#8b949e");
+  linkPaths
+    .attr("stroke", "#8b949e")
+    .attr("stroke-opacity", 0.12)
+    .attr("stroke-width", 1.2);
+  tooltip.style("opacity", 0);
+}
+
+</script>
+</body>
+</html>

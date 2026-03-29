@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Crossfilter Flight Explorer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif; background: #fafafa; color: #333; padding: 24px; }
+  h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
+  .header { display: flex; align-items: baseline; gap: 16px; margin-bottom: 20px; }
+  .counter { font-size: 14px; color: #666; }
+  .counter strong { color: #333; }
+  button.reset { font-size: 13px; padding: 4px 12px; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; }
+  button.reset:hover { background: #eee; }
+  .chart { margin-bottom: 24px; }
+  .chart-title { font-size: 13px; font-weight: 600; margin-bottom: 4px; color: #555; }
+  .bar-active { fill: steelblue; }
+  .bar-background { fill: #e0e0e0; }
+  .brush .selection { fill: rgba(70, 130, 180, 0.25); stroke: steelblue; stroke-width: 1; }
+  .axis text { font-size: 11px; fill: #666; }
+  .axis path, .axis line { stroke: #ccc; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Flight Explorer</h1>
+  <span class="counter"><strong id="count">2000</strong> of 2000 flights selected</span>
+  <button class="reset" id="reset">Reset All</button>
+</div>
+<div id="charts"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data: 2000 flights with bimodal departure peaks ---
+const N = 2000;
+const rng = d3.randomLcg(42);
+const randNorm = (mu, sigma) => { const n = d3.randomNormal.source(rng)(mu, sigma); return n(); };
+
+const flights = Array.from({ length: N }, () => {
+  // Bimodal departure: ~40% morning peak (8), ~40% evening peak (18), ~20% uniform
+  let hour;
+  const r = rng();
+  if (r < 0.4) hour = randNorm(8, 1.5);
+  else if (r < 0.8) hour = randNorm(18, 1.5);
+  else hour = rng() * 24;
+  hour = ((hour % 24) + 24) % 24;
+
+  // Delay: mostly small, skewed right, some negatives (early)
+  const delay = randNorm(5, 25);
+
+  // Distance: log-normal-ish, 50–3500 miles
+  const distance = Math.exp(randNorm(6.2, 0.8));
+
+  return {
+    hour: Math.round(hour * 10) / 10,
+    delay: Math.round(delay),
+    distance: Math.min(4000, Math.max(50, Math.round(distance)))
+  };
+});
+
+// --- Crossfilter engine (bitmap intersection) ---
+const filters = new Map(); // dimension name → Set of passing indices or null (no filter)
+
+function setFilter(dim, predicate) {
+  if (!predicate) { filters.delete(dim); }
+  else {
+    const passing = new Set();
+    flights.forEach((d, i) => { if (predicate(d)) passing.add(i); });
+    filters.set(dim, passing);
+  }
+}
+
+function getFiltered(excludeDim) {
+  const active = [...filters.entries()].filter(([k]) => k !== excludeDim);
+  if (active.length === 0) return flights.map((_, i) => i);
+  return flights.reduce((acc, _, i) => {
+    if (active.every(([, s]) => s.has(i))) acc.push(i);
+    return acc;
+  }, []);
+}
+
+function getSelected() {
+  const active = [...filters.values()];
+  if (active.length === 0) return flights.map((_, i) => i);
+  return flights.reduce((acc, _, i) => {
+    if (active.every(s => s.has(i))) acc.push(i);
+    return acc;
+  }, []);
+}
+
+// --- Chart dimensions ---
+const dims = [
+  { key: "hour", label: "Departure Hour", accessor: d => d.hour, domain: [0, 24], bins: 24, format: d => `${d}h` },
+  { key: "delay", label: "Delay (min)", accessor: d => d.delay, domain: [d3.min(flights, d => d.delay) - 5, d3.max(flights, d => d.delay) + 5], bins: 30, format: d => `${d}` },
+  { key: "distance", label: "Distance (mi)", accessor: d => d.distance, domain: [0, d3.max(flights, d => d.distance)], bins: 30, format: d => d >= 1000 ? `${(d/1000).toFixed(1)}k` : `${d}` }
+];
+
+const margin = { top: 4, right: 16, bottom: 28, left: 44 };
+const width = 700;
+const barHeight = 140;
+const innerW = width - margin.left - margin.right;
+const innerH = barHeight - margin.top - margin.bottom;
+
+const container = d3.select("#charts");
+
+const charts = dims.map(dim => {
+  const div = container.append("div").attr("class", "chart");
+  div.append("div").attr("class", "chart-title").text(dim.label);
+
+  const svg = div.append("svg")
+    .attr("width", width)
+    .attr("height", barHeight)
+    .attr("viewBox", `0 0 ${width} ${barHeight}`);
+
+  const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+  const x = d3.scaleLinear().domain(dim.domain).range([0, innerW]);
+
+  const binner = d3.bin()
+    .domain(x.domain())
+    .thresholds(x.ticks(dim.bins))
+    .value(dim.accessor);
+
+  const allBins = binner(flights);
+  const yMax = d3.max(allBins, b => b.length);
+  const y = d3.scaleLinear().domain([0, yMax]).range([innerH, 0]);
+
+  // Background bars (all data)
+  g.selectAll(".bar-background")
+    .data(allBins)
+    .join("rect")
+    .attr("class", "bar-background")
+    .attr("x", b => x(b.x0) + 0.5)
+    .attr("width", b => Math.max(0, x(b.x1) - x(b.x0) - 1))
+    .attr("y", b => y(b.length))
+    .attr("height", b => innerH - y(b.length));
+
+  // Active bars (filtered)
+  const activeBars = g.selectAll(".bar-active")
+    .data(allBins)
+    .join("rect")
+    .attr("class", "bar-active")
+    .attr("x", b => x(b.x0) + 0.5)
+    .attr("width", b => Math.max(0, x(b.x1) - x(b.x0) - 1))
+    .attr("y", b => y(b.length))
+    .attr("height", b => innerH - y(b.length));
+
+  // Axes
+  g.append("g")
+    .attr("class", "axis")
+    .attr("transform", `translate(0,${innerH})`)
+    .call(d3.axisBottom(x).ticks(dim.bins > 24 ? 10 : dim.bins).tickFormat(dim.format).tickSizeOuter(0));
+
+  g.append("g")
+    .attr("class", "axis")
+    .call(d3.axisLeft(y).ticks(4).tickSizeOuter(0));
+
+  // Brush
+  const brush = d3.brushX()
+    .extent([[0, 0], [innerW, innerH]])
+    .on("brush end", function(event) {
+      if (event.selection) {
+        const [x0, x1] = event.selection.map(x.invert);
+        setFilter(dim.key, d => dim.accessor(d) >= x0 && dim.accessor(d) <= x1);
+      } else {
+        setFilter(dim.key, null);
+      }
+      updateAll(dim.key);
+    });
+
+  const brushG = g.append("g").attr("class", "brush").call(brush);
+
+  return { dim, x, y, binner, activeBars, brushG, brush, g };
+});
+
+function updateAll(sourceDim) {
+  const selected = getSelected();
+  d3.select("#count").text(selected.length);
+
+  charts.forEach(chart => {
+    // For each chart, show data filtered by OTHER dimensions only
+    const indices = getFiltered(chart.dim.key);
+    const subset = indices.map(i => flights[i]);
+    const bins = chart.binner(subset);
+
+    chart.activeBars
+      .data(bins)
+      .transition().duration(sourceDim ? 0 : 300)
+      .attr("y", b => chart.y(b.length))
+      .attr("height", b => innerH - chart.y(b.length));
+  });
+}
+
+d3.select("#reset").on("click", () => {
+  filters.clear();
+  charts.forEach(c => c.brushG.call(c.brush.move, null));
+  updateAll();
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Employee Parallel Coordinates</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      padding: 24px 16px;
+    }
+    h1 {
+      text-align: center;
+      font-size: 15px;
+      font-weight: 600;
+      color: #cbd5e0;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      margin-bottom: 5px;
+    }
+    #subtitle {
+      text-align: center;
+      font-size: 12px;
+      color: #4a5568;
+      margin-bottom: 18px;
+    }
+    #wrapper {
+      max-width: 960px;
+      margin: 0 auto;
+      overflow-x: auto;
+    }
+    #legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      justify-content: center;
+      margin-bottom: 14px;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 12px;
+      color: #a0aec0;
+    }
+    .legend-swatch {
+      width: 28px;
+      height: 3px;
+      border-radius: 2px;
+      flex-shrink: 0;
+    }
+    #chart {
+      position: relative;
+    }
+    .axis text { fill: #9aa5b4; font-size: 10px; }
+    .axis .domain { stroke: #3d4a5c; }
+    .axis .tick line { stroke: #3d4a5c; }
+    .axis-label { fill: #e2e8f0; font-size: 12px; font-weight: 600; text-anchor: middle; }
+    .axis-badge { fill: #4a5568; font-size: 9px; text-anchor: middle; font-style: italic; }
+    .brush .selection {
+      fill: rgba(99, 179, 237, 0.15);
+      stroke: #63b3ed;
+      stroke-width: 1.5;
+    }
+    .brush .handle--n, .brush .handle--s {
+      fill: #63b3ed;
+      rx: 2;
+    }
+    #status {
+      text-align: center;
+      font-size: 12px;
+      color: #718096;
+      margin-top: 10px;
+    }
+    #reset {
+      display: block;
+      margin: 10px auto 0;
+      padding: 5px 16px;
+      background: transparent;
+      border: 1px solid #3d4a5c;
+      border-radius: 4px;
+      color: #718096;
+      font-size: 11px;
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    #reset:hover { border-color: #63b3ed; color: #63b3ed; }
+  </style>
+</head>
+<body>
+  <div id="wrapper">
+    <h1>Employee Overview — Parallel Coordinates</h1>
+    <p id="subtitle">300 employees · 6 dimensions · brush any axis to filter · mixed scale types</p>
+    <div id="legend"></div>
+    <div id="chart"></div>
+    <p id="status">Showing all 300 employees</p>
+    <button id="reset">Reset All Filters</button>
+  </div>
+
+  <script type="module">
+    import * as d3 from 'https://cdn.jsdelivr.net/npm/d3@7/+esm';
+
+    // ── Seeded RNG (mulberry32) ────────────────────────────────────────────────
+    function mulberry32(a) {
+      return () => {
+        a |= 0; a = (a + 0x6D2B79F5) | 0;
+        let t = Math.imul(a ^ (a >>> 15), 1 | a);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+    const rng = mulberry32(42);
+
+    // Box-Muller normal using seeded rng
+    function randN(mu, sigma) {
+      const u1 = Math.max(rng(), 1e-10), u2 = rng();
+      return mu + sigma * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+    }
+    const randChoice = arr => arr[Math.floor(rng() * arr.length)];
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+    // ── Synthetic Data ────────────────────────────────────────────────────────
+    const DEPARTMENTS = ['Engineering', 'Marketing', 'Sales', 'HR', 'Finance', 'Operations'];
+    const PERF_LEVELS = ['Poor', 'Fair', 'Good', 'Excellent'];
+
+    const BASE_SALARY = {
+      Engineering: 98000, Marketing: 68000, Sales: 58000,
+      HR: 55000, Finance: 90000, Operations: 50000
+    };
+
+    const employees = Array.from({ length: 300 }, (_, id) => {
+      const dept = randChoice(DEPARTMENTS);
+      const experience = clamp(Math.round(randN(9, 7)), 0, 40);
+      const age = clamp(Math.round(22 + experience + randN(3, 4)), 22, 65);
+      const salary = clamp(
+        BASE_SALARY[dept] * Math.exp(experience * 0.042) * (0.72 + rng() * 0.56),
+        28000, 530000
+      );
+      const perfScore = clamp(Math.round((experience / 40) * 2.6 + randN(0.3, 0.9)), 0, 3);
+      const hoursPerWeek = clamp(Math.round(randN(42, 8)), 20, 80);
+      return { id, dept, age, experience, salary, performance: PERF_LEVELS[perfScore], hoursPerWeek };
+    });
+
+    // ── Layout ────────────────────────────────────────────────────────────────
+    const margin = { top: 85, right: 50, bottom: 30, left: 50 };
+    const W = 920, H = 480;
+    const w = W - margin.left - margin.right;
+    const h = H - margin.top - margin.bottom;
+
+    // ── Color ─────────────────────────────────────────────────────────────────
+    const deptColor = d3.scaleOrdinal()
+      .domain(DEPARTMENTS)
+      .range(['#4299e1', '#ed8936', '#48bb78', '#f687b3', '#9f7aea', '#fc8181']);
+
+    // ── Axes: 2 linear, 1 log, 2 ordinal, 1 linear (as spec) ─────────────────
+    const axes = [
+      { key: 'age',          label: 'Age',          type: 'linear',  unit: 'yrs'  },
+      { key: 'experience',   label: 'Experience',   type: 'linear',  unit: 'yrs'  },
+      { key: 'salary',       label: 'Salary',       type: 'log',     unit: '$'    },
+      { key: 'dept',         label: 'Department',   type: 'ordinal', values: DEPARTMENTS },
+      { key: 'performance',  label: 'Performance',  type: 'ordinal', values: PERF_LEVELS },
+      { key: 'hoursPerWeek', label: 'Hours / Week', type: 'linear',  unit: 'hrs'  },
+    ];
+
+    // x positions (one per axis)
+    const xPos = d3.scalePoint()
+      .domain(axes.map(a => a.key))
+      .range([0, w])
+      .padding(0.1);
+
+    // y scale per axis
+    const yScale = {};
+    axes.forEach(({ key, type, values }) => {
+      if (type === 'linear') {
+        const [lo, hi] = d3.extent(employees, d => d[key]);
+        yScale[key] = d3.scaleLinear().domain([lo, hi]).range([h, 0]).nice();
+      } else if (type === 'log') {
+        const [lo, hi] = d3.extent(employees, d => d[key]);
+        yScale[key] = d3.scaleLog().domain([lo * 0.92, hi * 1.08]).range([h, 0]).nice();
+      } else {
+        // ordinal point
+        yScale[key] = d3.scalePoint()
+          .domain(values)
+          .range([h * 0.88, h * 0.12])
+          .padding(0.5);
+      }
+    });
+
+    // ── Canvas (data layer) ───────────────────────────────────────────────────
+    const chartDiv = document.getElementById('chart');
+    chartDiv.style.cssText = `width:${W}px;height:${H}px;position:relative;`;
+
+    const dpr = window.devicePixelRatio || 1;
+    const canvas = document.createElement('canvas');
+    canvas.width = W * dpr;
+    canvas.height = H * dpr;
+    canvas.style.cssText = `width:${W}px;height:${H}px;position:absolute;top:0;left:0;pointer-events:none;`;
+    chartDiv.appendChild(canvas);
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+
+    // ── SVG (axes + brushes) ──────────────────────────────────────────────────
+    const svg = d3.select('#chart').append('svg')
+      .attr('width', W)
+      .attr('height', H)
+      .style('position', 'absolute')
+      .style('top', 0)
+      .style('left', 0);
+
+    const g = svg.append('g')
+      .attr('transform', `translate(${margin.left},${margin.top})`);
+
+    // ── Brush State ───────────────────────────────────────────────────────────
+    const brushState = {};   // key → [y0, y1] in axis-local px coords, or null
+
+    function ypx(d, key) {
+      return yScale[key](d[key]);
+    }
+
+    function passes(d) {
+      return axes.every(({ key }) => {
+        const sel = brushState[key];
+        if (!sel) return true;
+        const y = ypx(d, key);
+        return y >= sel[0] && y <= sel[1];
+      });
+    }
+
+    // ── Canvas Draw ───────────────────────────────────────────────────────────
+    function draw() {
+      ctx.clearRect(0, 0, W, H);
+      ctx.save();
+      ctx.translate(margin.left, margin.top);
+
+      const active   = employees.filter(d =>  passes(d));
+      const inactive = employees.filter(d => !passes(d));
+
+      // Inactive: very dim
+      ctx.lineWidth = 0.75;
+      inactive.forEach(d => {
+        ctx.globalAlpha = 0.04;
+        ctx.strokeStyle = deptColor(d.dept);
+        ctx.beginPath();
+        axes.forEach(({ key }, i) => {
+          const x = xPos(key), y = ypx(d, key);
+          i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      });
+
+      // Active: bright
+      ctx.lineWidth = 1.25;
+      active.forEach(d => {
+        ctx.globalAlpha = 0.62;
+        ctx.strokeStyle = deptColor(d.dept);
+        ctx.beginPath();
+        axes.forEach(({ key }, i) => {
+          const x = xPos(key), y = ypx(d, key);
+          i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      });
+
+      ctx.restore();
+
+      // Status line
+      const anyBrush = Object.values(brushState).some(Boolean);
+      document.getElementById('status').textContent = anyBrush
+        ? `Showing ${active.length} of 300 employees`
+        : 'Showing all 300 employees';
+    }
+
+    // ── Axis Groups ───────────────────────────────────────────────────────────
+    const BRUSH_W = 22;
+
+    axes.forEach(a => {
+      const ax = g.append('g')
+        .attr('class', 'axis')
+        .attr('transform', `translate(${xPos(a.key)},0)`);
+
+      // Axis renderer
+      let axisGen;
+      if (a.type === 'linear') {
+        axisGen = d3.axisLeft(yScale[a.key]).ticks(6).tickSize(4);
+      } else if (a.type === 'log') {
+        const fmt = d => d >= 1e6 ? `$${(d / 1e6).toFixed(1)}M`
+                       : d >= 1e3 ? `$${Math.round(d / 1e3)}k`
+                       : `$${d}`;
+        axisGen = d3.axisLeft(yScale[a.key]).ticks(5, fmt).tickSize(4);
+      } else {
+        axisGen = d3.axisLeft(yScale[a.key]).tickSize(3);
+      }
+      ax.call(axisGen);
+
+      // Remove the domain line — use a hand-drawn axis spine
+      ax.select('.domain').remove();
+      ax.append('line')
+        .attr('y1', 0).attr('y2', h)
+        .attr('stroke', '#3d4a5c')
+        .attr('stroke-width', 1);
+
+      // Label
+      ax.append('text')
+        .attr('class', 'axis-label')
+        .attr('y', -30)
+        .text(a.label);
+
+      // Scale-type badge
+      ax.append('text')
+        .attr('class', 'axis-badge')
+        .attr('y', -16)
+        .text(a.type === 'log' ? 'log scale' : a.type === 'ordinal' ? 'ordinal' : 'linear');
+
+      // Brush
+      const brush = d3.brushY()
+        .extent([[-BRUSH_W / 2, 0], [BRUSH_W / 2, h]])
+        .on('brush end', ({ selection }) => {
+          brushState[a.key] = selection ?? null;
+          draw();
+        });
+
+      const brushG = ax.append('g')
+        .attr('class', 'brush')
+        .call(brush);
+
+      a._brush  = brush;
+      a._brushG = brushG;
+    });
+
+    // ── Legend ────────────────────────────────────────────────────────────────
+    const legend = document.getElementById('legend');
+    DEPARTMENTS.forEach(dept => {
+      const div = document.createElement('div');
+      div.className = 'legend-item';
+      div.innerHTML = `<div class="legend-swatch" style="background:${deptColor(dept)}"></div><span>${dept}</span>`;
+      legend.appendChild(div);
+    });
+
+    // ── Reset ─────────────────────────────────────────────────────────────────
+    document.getElementById('reset').addEventListener('click', () => {
+      axes.forEach(a => {
+        brushState[a.key] = null;
+        a._brushG.call(a._brush.clear);
+      });
+      draw();
+    });
+
+    // ── Initial render ────────────────────────────────────────────────────────
+    draw();
+  </script>
+</body>
+</html>

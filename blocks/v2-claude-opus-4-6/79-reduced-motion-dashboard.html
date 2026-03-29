@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reduced-Motion Crossfilter Dashboard</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#fafafa;--panel-bg:#fff;--text:#1a1a2e;--muted:#888;
+    --accent:#4361ee;--accent2:#f72585;--accent3:#4cc9f0;
+    --ghost:#e0e0e0;--border:#ddd;
+    --duration:300ms;
+  }
+  body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);padding:16px}
+  h1{font-size:1.2rem;font-weight:600;margin-bottom:4px}
+  .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px}
+  .header-left{display:flex;align-items:baseline;gap:12px}
+  .subtitle{font-size:.85rem;color:var(--muted)}
+  .toggle-wrap{display:flex;align-items:center;gap:8px;font-size:.85rem}
+  .toggle-wrap label{cursor:pointer;user-select:none}
+  .toggle-wrap input{accent-color:var(--accent)}
+  .status{font-size:.75rem;padding:2px 8px;border-radius:10px;font-weight:500}
+  .status.animated{background:#e8f5e9;color:#2e7d32}
+  .status.instant{background:#fff3e0;color:#e65100}
+  .grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+  @media(max-width:800px){.grid{grid-template-columns:1fr}}
+  .panel{background:var(--panel-bg);border:1px solid var(--border);border-radius:8px;padding:12px;overflow:hidden}
+  .panel-title{font-size:.8rem;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-bottom:8px}
+  .brush .selection{fill:var(--accent);fill-opacity:.15;stroke:var(--accent);stroke-width:1}
+  .reset-btn{font-size:.75rem;color:var(--accent);cursor:pointer;border:none;background:none;padding:2px 6px;margin-left:8px;text-decoration:underline}
+  .reset-btn:hover{color:var(--accent2)}
+  svg text{font-family:system-ui,-apple-system,sans-serif}
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="header-left">
+    <h1>Crossfilter Dashboard</h1>
+    <span class="subtitle">Brush any chart to filter all three</span>
+  </div>
+  <div class="toggle-wrap">
+    <span class="status" id="motionStatus"></span>
+    <label><input type="checkbox" id="motionToggle"> Reduce motion</label>
+  </div>
+</div>
+<div class="grid">
+  <div class="panel" id="panel-age">
+    <div style="display:flex;align-items:center">
+      <span class="panel-title">Age Distribution</span>
+      <button class="reset-btn" id="reset-age" style="display:none" onclick="resetBrush('age')">reset</button>
+    </div>
+    <svg id="chart-age"></svg>
+  </div>
+  <div class="panel" id="panel-income">
+    <div style="display:flex;align-items:center">
+      <span class="panel-title">Income Distribution</span>
+      <button class="reset-btn" id="reset-income" style="display:none" onclick="resetBrush('income')">reset</button>
+    </div>
+    <svg id="chart-income"></svg>
+  </div>
+  <div class="panel" id="panel-score">
+    <div style="display:flex;align-items:center">
+      <span class="panel-title">Satisfaction Score</span>
+      <button class="reset-btn" id="reset-score" style="display:none" onclick="resetBrush('score')">reset</button>
+    </div>
+    <svg id="chart-score"></svg>
+  </div>
+</div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Motion detection ---
+const mql = window.matchMedia("(prefers-reduced-motion: reduce)");
+let reduceMotion = mql.matches;
+const toggle = document.getElementById("motionToggle");
+const statusEl = document.getElementById("motionStatus");
+toggle.checked = reduceMotion;
+
+function updateStatus() {
+  statusEl.textContent = reduceMotion ? "Instant" : "Animated";
+  statusEl.className = "status " + (reduceMotion ? "instant" : "animated");
+}
+updateStatus();
+
+mql.addEventListener("change", e => {
+  reduceMotion = e.matches;
+  toggle.checked = reduceMotion;
+  updateStatus();
+});
+toggle.addEventListener("change", () => {
+  reduceMotion = toggle.checked;
+  updateStatus();
+});
+
+function dur() { return reduceMotion ? 0 : 300; }
+
+// --- Synthetic data ---
+const rng = d3.randomLcg(42);
+const randNorm = d3.randomNormal.source(rng);
+const randUni = d3.randomUniform.source(rng);
+const N = 800;
+const data = d3.range(N).map(i => {
+  const age = Math.max(18, Math.min(75, Math.round(randNorm(40, 12)())));
+  const income = Math.max(15000, Math.round(randNorm(50000 + (age - 30) * 600, 18000)()));
+  const score = Math.max(1, Math.min(10, Math.round(
+    randNorm(5 + (income > 60000 ? 1.5 : 0) - (age > 55 ? 0.8 : 0), 1.8)()
+  )));
+  return { id: i, age, income, score };
+});
+
+// --- Crossfilter state ---
+const filters = { age: null, income: null, score: null };
+
+function filtered() {
+  return data.filter(d => {
+    if (filters.age && (d.age < filters.age[0] || d.age > filters.age[1])) return false;
+    if (filters.income && (d.income < filters.income[0] || d.income > filters.income[1])) return false;
+    if (filters.score && (d.score < filters.score[0] || d.score > filters.score[1])) return false;
+    return true;
+  });
+}
+
+// --- Chart setup ---
+const margin = { top: 8, right: 12, bottom: 28, left: 40 };
+const charts = {};
+
+function setupChart(key, accessor, domain, binCount, format) {
+  const container = document.getElementById(`panel-${key}`);
+  const svgEl = document.getElementById(`chart-${key}`);
+  const w = container.clientWidth - 24;
+  const h = 180;
+  const innerW = w - margin.left - margin.right;
+  const innerH = h - margin.top - margin.bottom;
+
+  const svg = d3.select(svgEl).attr("width", w).attr("height", h);
+  const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+  const x = d3.scaleLinear().domain(domain).range([0, innerW]);
+  const thresholds = x.ticks(binCount);
+  const bins = d3.bin().domain(x.domain()).thresholds(thresholds).value(accessor);
+
+  const allBins = bins(data);
+  const yMax = d3.max(allBins, b => b.length);
+  const y = d3.scaleLinear().domain([0, yMax]).range([innerH, 0]);
+
+  // Ghost bars (full dataset, always visible)
+  g.selectAll(".ghost").data(allBins).join("rect")
+    .attr("class", "ghost")
+    .attr("x", d => x(d.x0) + 1)
+    .attr("width", d => Math.max(0, x(d.x1) - x(d.x0) - 2))
+    .attr("y", d => y(d.length))
+    .attr("height", d => innerH - y(d.length))
+    .attr("fill", "var(--ghost)");
+
+  // Active bars
+  const activeBars = g.selectAll(".active").data(allBins).join("rect")
+    .attr("class", "active")
+    .attr("x", d => x(d.x0) + 1)
+    .attr("width", d => Math.max(0, x(d.x1) - x(d.x0) - 2))
+    .attr("y", d => y(d.length))
+    .attr("height", d => innerH - y(d.length))
+    .attr("fill", key === "age" ? "var(--accent)" : key === "income" ? "var(--accent2)" : "var(--accent3)")
+    .attr("opacity", 0.85);
+
+  // Axes
+  g.append("g").attr("transform", `translate(0,${innerH})`)
+    .call(d3.axisBottom(x).ticks(6).tickFormat(format || (d => d)))
+    .call(g => g.select(".domain").remove());
+
+  g.append("g")
+    .call(d3.axisLeft(y).ticks(4))
+    .call(g => g.select(".domain").remove())
+    .call(g => g.selectAll(".tick line").attr("stroke", "#ddd"));
+
+  // Brush
+  const brush = d3.brushX()
+    .extent([[0, 0], [innerW, innerH]])
+    .on("brush end", function(event) {
+      if (!event.sourceEvent) return;
+      const sel = event.selection;
+      if (sel) {
+        filters[key] = [x.invert(sel[0]), x.invert(sel[1])];
+        document.getElementById(`reset-${key}`).style.display = "";
+      } else {
+        filters[key] = null;
+        document.getElementById(`reset-${key}`).style.display = "none";
+      }
+      updateAll(key);
+    });
+
+  const brushG = g.append("g").attr("class", "brush").call(brush);
+
+  charts[key] = { g, x, y, bins, activeBars, accessor, brush, brushG, innerH };
+}
+
+function updateAll(sourceKey) {
+  const active = filtered();
+  for (const [key, chart] of Object.entries(charts)) {
+    const newBins = chart.bins(active);
+    const t = d3.transition().duration(dur());
+
+    chart.activeBars.data(newBins).join("rect")
+      .transition(t)
+      .attr("y", d => chart.y(d.length))
+      .attr("height", d => chart.innerH - chart.y(d.length));
+  }
+}
+
+// --- Reset brushes ---
+window.resetBrush = function(key) {
+  filters[key] = null;
+  charts[key].brushG.call(charts[key].brush.move, null);
+  document.getElementById(`reset-${key}`).style.display = "none";
+  updateAll(key);
+};
+
+// --- Init ---
+setupChart("age", d => d.age, [18, 75], 20);
+setupChart("income", d => d.income, [15000, 130000], 20, d => `${d / 1000}k`);
+setupChart("score", d => d.score, [1, 10], 9);
+</script>
+</body>
+</html>

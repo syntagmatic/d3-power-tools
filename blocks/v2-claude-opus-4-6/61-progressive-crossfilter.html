@@ -1,0 +1,728 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Progressive Crossfilter — 100K Records</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #0a0a0f; color: #c8c8d0; }
+  h1 { font-size: 14px; font-weight: 500; padding: 12px 16px 4px; color: #8888a0; letter-spacing: 0.5px; }
+  #status { position: fixed; top: 8px; right: 12px; font-size: 11px; color: #666; z-index: 10; }
+  #grid { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; width: 100vw; height: calc(100vh - 36px); }
+  .panel { position: relative; overflow: hidden; border: 1px solid #1a1a2e; }
+  .panel-label { position: absolute; top: 6px; left: 10px; font-size: 11px; color: #556; z-index: 5; pointer-events: none; }
+  .panel-count { position: absolute; top: 6px; right: 10px; font-size: 11px; color: #668; z-index: 5; pointer-events: none; }
+  canvas { position: absolute; top: 0; left: 0; }
+  svg { position: absolute; top: 0; left: 0; }
+  .axis text { fill: #556; font-size: 10px; }
+  .axis line, .axis path { stroke: #222; }
+  .brush .selection { fill: rgba(80, 120, 255, 0.15); stroke: rgba(80, 120, 255, 0.5); stroke-width: 1; }
+  .brush .handle { fill: rgba(80, 120, 255, 0.3); }
+</style>
+</head>
+<body>
+<h1>PROGRESSIVE CROSSFILTER</h1>
+<div id="status">Generating…</div>
+<div id="grid">
+  <div class="panel" id="panel-scatter">
+    <span class="panel-label">Revenue × Quantity</span>
+    <span class="panel-count" id="count-scatter"></span>
+  </div>
+  <div class="panel" id="panel-histogram">
+    <span class="panel-label">Revenue Distribution</span>
+    <span class="panel-count" id="count-histogram"></span>
+  </div>
+  <div class="panel" id="panel-bar">
+    <span class="panel-label">By Category</span>
+    <span class="panel-count" id="count-bar"></span>
+  </div>
+  <div class="panel" id="panel-timeline">
+    <span class="panel-label">Orders Over Time</span>
+    <span class="panel-count" id="count-timeline"></span>
+  </div>
+</div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script type="module">
+
+// ─── Data Generation ─────────────────────────────────────────────────
+const N = 100_000;
+const SAMPLE_N = 10_000;
+const categories = ["Electronics", "Clothing", "Food", "Books", "Home", "Sports", "Health", "Toys"];
+const rng = d3.randomLcg(42);
+const randNorm = d3.randomNormal.source(rng)(50, 25);
+const randExp = d3.randomExponential.source(rng)(0.01);
+
+const startDate = new Date(2021, 0, 1);
+const endDate = new Date(2024, 11, 31);
+const timeSpan = endDate - startDate;
+
+const data = new Array(N);
+for (let i = 0; i < N; i++) {
+  const cat = categories[Math.floor(rng() * categories.length)];
+  const revenue = Math.max(1, randExp() + rng() * 50);
+  const quantity = Math.max(1, Math.round(randNorm() + (cat === "Electronics" ? 20 : 0)));
+  const date = new Date(+startDate + rng() * timeSpan);
+  data[i] = { revenue, quantity, category: cat, date, _i: i };
+}
+
+// ─── Precomputed Falcon-style snapshots ──────────────────────────────
+// For each dimension, precompute binned histograms for O(1) brush updates.
+// We store: full histogram, and cumulative prefix sums so a brush range
+// can be resolved to a count via subtraction.
+
+const margin = { top: 30, right: 16, bottom: 32, left: 50 };
+
+// Revenue bins
+const revExtent = d3.extent(data, d => d.revenue);
+const REV_BINS = 60;
+const revBinWidth = (revExtent[1] - revExtent[0]) / REV_BINS;
+
+// Timeline bins (monthly)
+const timeExtent = d3.extent(data, d => d.date);
+const monthBins = d3.timeMonths(d3.timeMonth.floor(timeExtent[0]), d3.timeMonth.offset(d3.timeMonth.ceil(timeExtent[1])));
+const MONTH_COUNT = monthBins.length;
+
+// ─── Falcon precomputed cubes ────────────────────────────────────────
+// For each filter dimension, we precompute histograms of every other dimension.
+// This allows O(1) updates when a brush changes: just look up the precomputed slice.
+
+// Index data into bins
+function revBin(d) { return Math.min(REV_BINS - 1, Math.floor((d.revenue - revExtent[0]) / revBinWidth)); }
+function monthBin(d) {
+  const m = (d.date.getFullYear() - monthBins[0].getFullYear()) * 12
+          + d.date.getMonth() - monthBins[0].getMonth();
+  return Math.max(0, Math.min(MONTH_COUNT - 1, m));
+}
+function catBin(d) { return categories.indexOf(d.category); }
+
+// Build prefix-sum histograms for Falcon-style O(1) range queries.
+// For dimension A filtered by dimension B: prefixHist[A_bin][B_bin_cumulative]
+// A brush on B from [lo, hi] → hist[A_bin] = prefix[hi+1] - prefix[lo]
+
+function buildPrefixCube(data, sourceBinFn, sourceBinCount, filterBinFn, filterBinCount) {
+  // cube[sourceBin][filterBin] = count
+  const cube = Array.from({ length: sourceBinCount }, () => new Uint32Array(filterBinCount));
+  for (const d of data) {
+    cube[sourceBinFn(d)][filterBinFn(d)]++;
+  }
+  // Convert to prefix sums along filter axis
+  const prefix = Array.from({ length: sourceBinCount }, () => new Uint32Array(filterBinCount + 1));
+  for (let s = 0; s < sourceBinCount; s++) {
+    for (let f = 0; f < filterBinCount; f++) {
+      prefix[s][f + 1] = prefix[s][f] + cube[s][f];
+    }
+  }
+  return prefix;
+}
+
+// Precompute cubes: revenue histogram filtered by timeline, category, scatter
+// Timeline histogram filtered by revenue, category, scatter
+// Category bar filtered by revenue, timeline, scatter
+// (Scatter is filtered by the other three, uses sample + progressive)
+
+const revByMonth = buildPrefixCube(data, revBin, REV_BINS, monthBin, MONTH_COUNT);
+const revByCat = buildPrefixCube(data, revBin, REV_BINS, catBin, categories.length);
+const monthByRev = buildPrefixCube(data, monthBin, MONTH_COUNT, revBin, REV_BINS);
+const monthByCat = buildPrefixCube(data, monthBin, MONTH_COUNT, catBin, categories.length);
+const catByRev = buildPrefixCube(data, catBin, categories.length, revBin, REV_BINS);
+const catByMonth = buildPrefixCube(data, catBin, categories.length, monthBin, MONTH_COUNT);
+
+function queryPrefix(prefix, lo, hi) {
+  // Returns array of counts for each source bin, filtered to [lo, hi] range
+  return prefix.map(p => p[hi + 1] - p[lo]);
+}
+
+// ─── Filter state ────────────────────────────────────────────────────
+const filters = {
+  scatter: null,    // { revRange: [lo, hi], qtyRange: [lo, hi] }
+  histogram: null,  // [binLo, binHi] indices
+  bar: null,        // Set of category indices
+  timeline: null    // [binLo, binHi] indices
+};
+
+// ─── Sample for progressive filtering ────────────────────────────────
+const sampleIndices = d3.shuffle(d3.range(N)).slice(0, SAMPLE_N);
+const sample = sampleIndices.map(i => data[i]);
+
+// ─── Bitfield for scatter filtering ──────────────────────────────────
+// Each record gets a bit per filter dimension (excluding scatter itself).
+// When all active filter bits are set, the record passes.
+const filterMask = new Uint8Array(N); // bits: 0=histogram, 1=bar, 2=timeline
+const HIST_BIT = 1, BAR_BIT = 2, TIME_BIT = 4;
+let activeMask = 0; // which filters are active
+
+function updateFilterMask(bit, testFn) {
+  if (!testFn) {
+    activeMask &= ~bit;
+    // Clear bit from all
+    for (let i = 0; i < N; i++) filterMask[i] |= bit;
+    return;
+  }
+  activeMask |= bit;
+  for (let i = 0; i < N; i++) {
+    if (testFn(data[i])) filterMask[i] |= bit;
+    else filterMask[i] &= ~bit;
+  }
+}
+
+// Initialize: all pass
+filterMask.fill(HIST_BIT | BAR_BIT | TIME_BIT);
+
+function passesFilter(i) {
+  return (filterMask[i] & activeMask) === activeMask || activeMask === 0;
+}
+
+// ─── Layout ──────────────────────────────────────────────────────────
+const dpr = devicePixelRatio;
+
+function panelSize(id) {
+  const el = document.getElementById(id);
+  return { width: el.clientWidth, height: el.clientHeight, el };
+}
+
+function addCanvas(el, w, h) {
+  const canvas = document.createElement("canvas");
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  canvas.style.width = w + "px";
+  canvas.style.height = h + "px";
+  canvas.style.position = "absolute";
+  el.appendChild(canvas);
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  return ctx;
+}
+
+function addSvg(el, w, h) {
+  return d3.select(el).append("svg")
+    .attr("width", w).attr("height", h)
+    .style("position", "absolute")
+    .style("pointer-events", "none");
+}
+
+// ─── Scatter Panel (Canvas) ──────────────────────────────────────────
+function initScatter() {
+  const { width, height, el } = panelSize("panel-scatter");
+  const iw = width - margin.left - margin.right;
+  const ih = height - margin.top - margin.bottom;
+
+  const xScale = d3.scaleLinear().domain(d3.extent(data, d => d.quantity)).nice().range([0, iw]);
+  const yScale = d3.scaleLinear().domain(d3.extent(data, d => d.revenue)).nice().range([ih, 0]);
+
+  const bgCtx = addCanvas(el, width, height);
+  const fgCtx = addCanvas(el, width, height);
+  const svg = addSvg(el, width, height);
+
+  const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+  g.append("g").attr("class", "axis").attr("transform", `translate(0,${ih})`).call(d3.axisBottom(xScale).ticks(6));
+  g.append("g").attr("class", "axis").call(d3.axisLeft(yScale).ticks(6));
+
+  // Draw background (ghost) - all data, very dim
+  function drawBg() {
+    bgCtx.clearRect(0, 0, width, height);
+    bgCtx.save();
+    bgCtx.translate(margin.left, margin.top);
+    bgCtx.globalAlpha = 0.08;
+    bgCtx.fillStyle = "#4488ff";
+    bgCtx.beginPath();
+    for (let i = 0; i < N; i++) {
+      const x = xScale(data[i].quantity), y = yScale(data[i].revenue);
+      bgCtx.moveTo(x + 1.5, y);
+      bgCtx.arc(x, y, 1.5, 0, Math.PI * 2);
+    }
+    bgCtx.fill();
+    bgCtx.restore();
+  }
+
+  let renderPhase = "idle"; // "sample" | "progressive" | "idle"
+  let progressiveIndex = 0;
+  let progressiveRafId = null;
+
+  function drawFgSample() {
+    fgCtx.clearRect(0, 0, width, height);
+    fgCtx.save();
+    fgCtx.translate(margin.left, margin.top);
+    fgCtx.globalAlpha = 0.35;
+    fgCtx.fillStyle = "#5599ff";
+    fgCtx.beginPath();
+    let count = 0;
+    for (const idx of sampleIndices) {
+      if (!passesFilter(idx)) continue;
+      const d = data[idx];
+      const x = xScale(d.quantity), y = yScale(d.revenue);
+      fgCtx.moveTo(x + 2, y);
+      fgCtx.arc(x, y, 2, 0, Math.PI * 2);
+      count++;
+    }
+    fgCtx.fill();
+    fgCtx.restore();
+    document.getElementById("count-scatter").textContent = `~${d3.format(",")(count * (N / SAMPLE_N))}`;
+    return count;
+  }
+
+  function startProgressiveRefine() {
+    if (progressiveRafId) cancelAnimationFrame(progressiveRafId);
+    renderPhase = "progressive";
+    progressiveIndex = 0;
+    fgCtx.clearRect(0, 0, width, height);
+    fgCtx.save();
+    fgCtx.translate(margin.left, margin.top);
+    fgCtx.globalAlpha = 0.25;
+    fgCtx.fillStyle = "#5599ff";
+
+    let totalCount = 0;
+    const BATCH = 5000;
+
+    function drainBatch() {
+      fgCtx.beginPath();
+      const end = Math.min(progressiveIndex + BATCH, N);
+      for (let i = progressiveIndex; i < end; i++) {
+        if (!passesFilter(i)) continue;
+        const d = data[i];
+        const x = xScale(d.quantity), y = yScale(d.revenue);
+        fgCtx.moveTo(x + 2, y);
+        fgCtx.arc(x, y, 2, 0, Math.PI * 2);
+        totalCount++;
+      }
+      fgCtx.fill();
+      progressiveIndex = end;
+      if (progressiveIndex < N) {
+        progressiveRafId = requestAnimationFrame(drainBatch);
+      } else {
+        fgCtx.restore();
+        renderPhase = "idle";
+        document.getElementById("count-scatter").textContent = d3.format(",")(totalCount);
+      }
+    }
+    drainBatch();
+  }
+
+  function updateScatter() {
+    if (progressiveRafId) cancelAnimationFrame(progressiveRafId);
+    drawFgSample();
+    // Schedule progressive refine on idle
+    progressiveRafId = requestAnimationFrame(() => {
+      setTimeout(startProgressiveRefine, 80);
+    });
+  }
+
+  // Brush on scatter
+  const brush = d3.brush()
+    .extent([[0, 0], [iw, ih]])
+    .on("brush end", (event) => {
+      if (!event.selection) {
+        filters.scatter = null;
+        onFilterChange("scatter");
+        return;
+      }
+      const [[x0, y0], [x1, y1]] = event.selection;
+      filters.scatter = {
+        qtyRange: [xScale.invert(x0), xScale.invert(x1)],
+        revRange: [yScale.invert(y1), yScale.invert(y0)]
+      };
+      onFilterChange("scatter");
+    });
+
+  const brushG = svg.append("g")
+    .attr("class", "brush")
+    .attr("transform", `translate(${margin.left},${margin.top})`)
+    .style("pointer-events", "all")
+    .call(brush);
+
+  drawBg();
+  updateScatter();
+
+  return { update: updateScatter, xScale, yScale };
+}
+
+// ─── Histogram Panel ─────────────────────────────────────────────────
+function initHistogram() {
+  const { width, height, el } = panelSize("panel-histogram");
+  const iw = width - margin.left - margin.right;
+  const ih = height - margin.top - margin.bottom;
+
+  const xScale = d3.scaleLinear().domain(revExtent).nice().range([0, iw]);
+  const yScale = d3.scaleLinear().range([ih, 0]);
+
+  const svg = addSvg(el, width, height).style("pointer-events", "all");
+  const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+  const ghostGroup = g.append("g").attr("class", "ghost-bars");
+  const activeGroup = g.append("g").attr("class", "active-bars");
+
+  const xAxisG = g.append("g").attr("class", "axis").attr("transform", `translate(0,${ih})`);
+  const yAxisG = g.append("g").attr("class", "axis");
+
+  const barWidth = Math.max(1, iw / REV_BINS - 1);
+
+  // Full histogram (no filter)
+  const fullHist = new Uint32Array(REV_BINS);
+  for (const d of data) fullHist[revBin(d)]++;
+  const fullMax = d3.max(fullHist);
+  yScale.domain([0, fullMax]);
+
+  xAxisG.call(d3.axisBottom(xScale).ticks(8).tickFormat(d3.format(",.0f")));
+  yAxisG.call(d3.axisLeft(yScale).ticks(5).tickFormat(d3.format("~s")));
+
+  // Ghost bars
+  ghostGroup.selectAll("rect").data(fullHist).join("rect")
+    .attr("x", (_, i) => xScale(revExtent[0] + i * revBinWidth))
+    .attr("y", d => yScale(d))
+    .attr("width", barWidth)
+    .attr("height", d => ih - yScale(d))
+    .attr("fill", "#223")
+    .attr("rx", 1);
+
+  function updateHistogram(source) {
+    let hist;
+    if (source === "histogram") {
+      // Don't self-filter; show full or filtered by other dims
+      hist = fullHist.slice();
+    } else {
+      hist = new Float64Array(REV_BINS);
+      // Use Falcon cubes for O(1) updates
+      let hasTimeFilter = filters.timeline !== null;
+      let hasBarFilter = filters.bar !== null;
+      let hasScatterFilter = filters.scatter !== null;
+
+      if (!hasTimeFilter && !hasBarFilter && !hasScatterFilter) {
+        hist = fullHist.slice();
+      } else {
+        // Combine filters via cubes where possible
+        if (hasTimeFilter && !hasBarFilter && !hasScatterFilter) {
+          const [lo, hi] = filters.timeline;
+          hist = Float64Array.from(queryPrefix(revByMonth, lo, hi));
+        } else if (hasBarFilter && !hasTimeFilter && !hasScatterFilter) {
+          // Sum selected categories
+          hist.fill(0);
+          for (const ci of filters.bar) {
+            const sliced = queryPrefix(revByCat, ci, ci);
+            for (let b = 0; b < REV_BINS; b++) hist[b] += sliced[b];
+          }
+        } else {
+          // Fallback: scan sample then refine
+          hist.fill(0);
+          for (let i = 0; i < N; i++) {
+            const d = data[i];
+            if (hasTimeFilter) {
+              const mb = monthBin(d);
+              if (mb < filters.timeline[0] || mb > filters.timeline[1]) continue;
+            }
+            if (hasBarFilter && !filters.bar.has(categories.indexOf(d.category))) continue;
+            if (hasScatterFilter) {
+              const f = filters.scatter;
+              if (d.quantity < f.qtyRange[0] || d.quantity > f.qtyRange[1] ||
+                  d.revenue < f.revRange[0] || d.revenue > f.revRange[1]) continue;
+            }
+            hist[revBin(d)]++;
+          }
+        }
+      }
+    }
+
+    const maxVal = d3.max(hist) || 1;
+    yScale.domain([0, maxVal]);
+    yAxisG.call(d3.axisLeft(yScale).ticks(5).tickFormat(d3.format("~s")));
+
+    activeGroup.selectAll("rect").data(hist).join("rect")
+      .attr("x", (_, i) => xScale(revExtent[0] + i * revBinWidth))
+      .attr("y", d => yScale(d))
+      .attr("width", barWidth)
+      .attr("height", d => ih - yScale(d))
+      .attr("fill", "#4488ff")
+      .attr("opacity", 0.7)
+      .attr("rx", 1);
+
+    const total = d3.sum(hist);
+    document.getElementById("count-histogram").textContent = d3.format(",")(total);
+  }
+
+  // Brush
+  const brush = d3.brushX()
+    .extent([[0, 0], [iw, ih]])
+    .on("brush end", (event) => {
+      if (!event.selection) {
+        filters.histogram = null;
+        onFilterChange("histogram");
+        return;
+      }
+      const [x0, x1] = event.selection;
+      const binLo = Math.floor((xScale.invert(x0) - revExtent[0]) / revBinWidth);
+      const binHi = Math.floor((xScale.invert(x1) - revExtent[0]) / revBinWidth);
+      filters.histogram = [Math.max(0, binLo), Math.min(REV_BINS - 1, binHi)];
+      onFilterChange("histogram");
+    });
+
+  g.append("g").attr("class", "brush").style("pointer-events", "all").call(brush);
+
+  updateHistogram(null);
+  return { update: updateHistogram };
+}
+
+// ─── Bar Chart Panel ─────────────────────────────────────────────────
+function initBar() {
+  const { width, height, el } = panelSize("panel-bar");
+  const iw = width - margin.left - margin.right;
+  const ih = height - margin.top - margin.bottom;
+
+  const yScale = d3.scaleBand().domain(categories).range([0, ih]).padding(0.15);
+  const xScale = d3.scaleLinear().range([0, iw]);
+
+  const svg = addSvg(el, width, height).style("pointer-events", "all");
+  const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+  const ghostGroup = g.append("g");
+  const activeGroup = g.append("g");
+  const xAxisG = g.append("g").attr("class", "axis").attr("transform", `translate(0,${ih})`);
+  const yAxisG = g.append("g").attr("class", "axis");
+
+  yAxisG.call(d3.axisLeft(yScale).tickSize(0)).select(".domain").remove();
+
+  const fullCounts = categories.map((_, ci) => {
+    let c = 0; for (const d of data) if (catBin(d) === ci) c++; return c;
+  });
+  const fullMax = d3.max(fullCounts);
+  xScale.domain([0, fullMax]);
+
+  xAxisG.call(d3.axisBottom(xScale).ticks(5).tickFormat(d3.format("~s")));
+
+  ghostGroup.selectAll("rect").data(fullCounts).join("rect")
+    .attr("x", 0).attr("y", (_, i) => yScale(categories[i]))
+    .attr("width", d => xScale(d)).attr("height", yScale.bandwidth())
+    .attr("fill", "#223").attr("rx", 2);
+
+  function updateBar(source) {
+    let counts;
+    if (source === "bar") {
+      counts = fullCounts.slice();
+    } else {
+      let hasTimeFilter = filters.timeline !== null;
+      let hasHistFilter = filters.histogram !== null;
+      let hasScatterFilter = filters.scatter !== null;
+
+      if (!hasTimeFilter && !hasHistFilter && !hasScatterFilter) {
+        counts = fullCounts.slice();
+      } else if (hasTimeFilter && !hasHistFilter && !hasScatterFilter) {
+        const [lo, hi] = filters.timeline;
+        counts = queryPrefix(catByMonth, lo, hi);
+      } else if (hasHistFilter && !hasTimeFilter && !hasScatterFilter) {
+        const [lo, hi] = filters.histogram;
+        counts = queryPrefix(catByRev, lo, hi);
+      } else {
+        counts = new Array(categories.length).fill(0);
+        for (let i = 0; i < N; i++) {
+          const d = data[i];
+          if (hasTimeFilter) {
+            const mb = monthBin(d);
+            if (mb < filters.timeline[0] || mb > filters.timeline[1]) continue;
+          }
+          if (hasHistFilter) {
+            const rb = revBin(d);
+            if (rb < filters.histogram[0] || rb > filters.histogram[1]) continue;
+          }
+          if (hasScatterFilter) {
+            const f = filters.scatter;
+            if (d.quantity < f.qtyRange[0] || d.quantity > f.qtyRange[1] ||
+                d.revenue < f.revRange[0] || d.revenue > f.revRange[1]) continue;
+          }
+          counts[catBin(d)]++;
+        }
+      }
+    }
+
+    const maxVal = d3.max(counts) || 1;
+    xScale.domain([0, maxVal]);
+    xAxisG.call(d3.axisBottom(xScale).ticks(5).tickFormat(d3.format("~s")));
+
+    activeGroup.selectAll("rect").data(counts).join("rect")
+      .attr("x", 0).attr("y", (_, i) => yScale(categories[i]))
+      .attr("width", d => xScale(d)).attr("height", yScale.bandwidth())
+      .attr("fill", "#4488ff").attr("opacity", 0.7).attr("rx", 2);
+
+    document.getElementById("count-bar").textContent = d3.format(",")(d3.sum(counts));
+  }
+
+  // Click to toggle category filter
+  let selectedCats = null;
+  g.append("g").selectAll("rect").data(categories).join("rect")
+    .attr("x", 0).attr("y", d => yScale(d))
+    .attr("width", iw).attr("height", yScale.bandwidth())
+    .attr("fill", "transparent").attr("cursor", "pointer")
+    .style("pointer-events", "all")
+    .on("click", (event, cat) => {
+      const ci = categories.indexOf(cat);
+      if (!selectedCats) {
+        selectedCats = new Set([ci]);
+      } else if (event.shiftKey || event.metaKey) {
+        if (selectedCats.has(ci)) selectedCats.delete(ci);
+        else selectedCats.add(ci);
+        if (selectedCats.size === 0) selectedCats = null;
+      } else {
+        if (selectedCats.size === 1 && selectedCats.has(ci)) selectedCats = null;
+        else selectedCats = new Set([ci]);
+      }
+      filters.bar = selectedCats;
+      // Highlight selected bars
+      activeGroup.selectAll("rect").attr("opacity", (_, i) =>
+        !selectedCats || selectedCats.has(i) ? 0.8 : 0.2);
+      onFilterChange("bar");
+    });
+
+  updateBar(null);
+  return { update: updateBar };
+}
+
+// ─── Timeline Panel ──────────────────────────────────────────────────
+function initTimeline() {
+  const { width, height, el } = panelSize("panel-timeline");
+  const iw = width - margin.left - margin.right;
+  const ih = height - margin.top - margin.bottom;
+
+  const xScale = d3.scaleTime().domain(d3.extent(monthBins)).range([0, iw]);
+  const yScale = d3.scaleLinear().range([ih, 0]);
+
+  const svg = addSvg(el, width, height).style("pointer-events", "all");
+  const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+  const ghostPath = g.append("path").attr("fill", "#223").attr("stroke", "none");
+  const activePath = g.append("path").attr("fill", "#4488ff").attr("fill-opacity", 0.6).attr("stroke", "#5599ff").attr("stroke-width", 1);
+
+  const xAxisG = g.append("g").attr("class", "axis").attr("transform", `translate(0,${ih})`);
+  const yAxisG = g.append("g").attr("class", "axis");
+
+  xAxisG.call(d3.axisBottom(xScale).ticks(8));
+
+  const fullHist = new Uint32Array(MONTH_COUNT);
+  for (const d of data) fullHist[monthBin(d)]++;
+  const fullMax = d3.max(fullHist);
+  yScale.domain([0, fullMax]);
+  yAxisG.call(d3.axisLeft(yScale).ticks(4).tickFormat(d3.format("~s")));
+
+  const barW = Math.max(1, iw / MONTH_COUNT - 0.5);
+
+  function makeArea(hist) {
+    return d3.area()
+      .x((_, i) => xScale(monthBins[i]))
+      .y0(ih)
+      .y1(d => yScale(d))
+      .curve(d3.curveMonotoneX)(Array.from(hist));
+  }
+
+  ghostPath.attr("d", makeArea(fullHist));
+
+  function updateTimeline(source) {
+    let hist;
+    if (source === "timeline") {
+      hist = fullHist.slice();
+    } else {
+      let hasHistFilter = filters.histogram !== null;
+      let hasBarFilter = filters.bar !== null;
+      let hasScatterFilter = filters.scatter !== null;
+
+      if (!hasHistFilter && !hasBarFilter && !hasScatterFilter) {
+        hist = fullHist.slice();
+      } else if (hasHistFilter && !hasBarFilter && !hasScatterFilter) {
+        const [lo, hi] = filters.histogram;
+        hist = Float64Array.from(queryPrefix(monthByRev, lo, hi));
+      } else if (hasBarFilter && !hasHistFilter && !hasScatterFilter) {
+        hist = new Float64Array(MONTH_COUNT);
+        for (const ci of filters.bar) {
+          const sliced = queryPrefix(monthByCat, ci, ci);
+          for (let b = 0; b < MONTH_COUNT; b++) hist[b] += sliced[b];
+        }
+      } else {
+        hist = new Float64Array(MONTH_COUNT);
+        for (let i = 0; i < N; i++) {
+          const d = data[i];
+          if (hasHistFilter) {
+            const rb = revBin(d);
+            if (rb < filters.histogram[0] || rb > filters.histogram[1]) continue;
+          }
+          if (hasBarFilter && !filters.bar.has(categories.indexOf(d.category))) continue;
+          if (hasScatterFilter) {
+            const f = filters.scatter;
+            if (d.quantity < f.qtyRange[0] || d.quantity > f.qtyRange[1] ||
+                d.revenue < f.revRange[0] || d.revenue > f.revRange[1]) continue;
+          }
+          hist[monthBin(d)]++;
+        }
+      }
+    }
+
+    const maxVal = d3.max(hist) || 1;
+    yScale.domain([0, maxVal]);
+    yAxisG.call(d3.axisLeft(yScale).ticks(4).tickFormat(d3.format("~s")));
+
+    activePath.attr("d", makeArea(hist));
+    document.getElementById("count-timeline").textContent = d3.format(",")(d3.sum(hist));
+  }
+
+  // Brush
+  const brush = d3.brushX()
+    .extent([[0, 0], [iw, ih]])
+    .on("brush end", (event) => {
+      if (!event.selection) {
+        filters.timeline = null;
+        onFilterChange("timeline");
+        return;
+      }
+      const [x0, x1] = event.selection;
+      const d0 = xScale.invert(x0), d1 = xScale.invert(x1);
+      const binLo = monthBin({ date: d0 });
+      const binHi = monthBin({ date: d1 });
+      filters.timeline = [Math.max(0, binLo), Math.min(MONTH_COUNT - 1, binHi)];
+      onFilterChange("timeline");
+    });
+
+  g.append("g").attr("class", "brush").style("pointer-events", "all").call(brush);
+
+  updateTimeline(null);
+  return { update: updateTimeline };
+}
+
+// ─── Initialize ──────────────────────────────────────────────────────
+const scatterPanel = initScatter();
+const histPanel = initHistogram();
+const barPanel = initBar();
+const timePanel = initTimeline();
+
+document.getElementById("status").textContent = `${d3.format(",")(N)} records loaded`;
+
+// ─── Filter coordination ────────────────────────────────────────────
+let updateRaf = null;
+
+function onFilterChange(source) {
+  // Update bitmask for scatter filtering
+  if (source !== "scatter") {
+    if (source === "histogram") {
+      updateFilterMask(HIST_BIT, filters.histogram
+        ? d => { const rb = revBin(d); return rb >= filters.histogram[0] && rb <= filters.histogram[1]; }
+        : null);
+    }
+    if (source === "bar") {
+      updateFilterMask(BAR_BIT, filters.bar
+        ? d => filters.bar.has(categories.indexOf(d.category))
+        : null);
+    }
+    if (source === "timeline") {
+      updateFilterMask(TIME_BIT, filters.timeline
+        ? d => { const mb = monthBin(d); return mb >= filters.timeline[0] && mb <= filters.timeline[1]; }
+        : null);
+    }
+  }
+
+  if (updateRaf) cancelAnimationFrame(updateRaf);
+  updateRaf = requestAnimationFrame(() => {
+    const t0 = performance.now();
+    if (source !== "scatter") scatterPanel.update();
+    if (source !== "histogram") histPanel.update(source);
+    if (source !== "bar") barPanel.update(source);
+    if (source !== "timeline") timePanel.update(source);
+    const ms = (performance.now() - t0).toFixed(1);
+    document.getElementById("status").textContent = `${d3.format(",")(N)} records · ${ms}ms update`;
+  });
+}
+
+</script>
+</body>
+</html>

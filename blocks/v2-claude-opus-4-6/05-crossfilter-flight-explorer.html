@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Crossfilter Flight Explorer</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #f8f9fa; color: #1a1a2e; padding: 24px; }
+  h1 { font-size: 1.4rem; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { font-size: 0.85rem; color: #666; margin-bottom: 16px; }
+  .toolbar { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; }
+  #counter { font-size: 0.9rem; font-weight: 500; }
+  #counter span { color: #e63946; font-weight: 700; }
+  button#reset { padding: 4px 14px; font-size: 0.8rem; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; transition: background 0.15s; }
+  button#reset:hover { background: #eee; }
+  .charts { display: flex; gap: 16px; flex-wrap: wrap; }
+  .chart-container { background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); padding: 12px 16px 8px; }
+  .chart-title { font-size: 0.78rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #555; margin-bottom: 4px; }
+  .selection { fill: rgba(0,0,0,0.08); stroke: #333; stroke-width: 1; }
+</style>
+</head>
+<body>
+<h1>Crossfilter Flight Explorer</h1>
+<p class="subtitle">Brush any histogram to filter. Intersection logic — all brushes must agree.</p>
+<div class="toolbar">
+  <div id="counter">Showing <span id="count">2000</span> of 2000 flights</div>
+  <button id="reset">Reset filters</button>
+</div>
+<div class="charts" id="charts"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data: 2000 flights with bimodal departure peaks ---
+const N = 2000;
+const rng = d3.randomLcg(42);
+const randNormal = (mu, sigma) => { const n = d3.randomNormal.source(rng)(mu, sigma); return n; };
+
+const hourGen1 = randNormal(8, 1.5);
+const hourGen2 = randNormal(18, 2);
+const delayGen = randNormal(10, 25);
+const distGen1 = randNormal(600, 300);
+const distGen2 = randNormal(2200, 500);
+
+const flights = Array.from({ length: N }, () => {
+  const peak = rng() < 0.55 ? 1 : 2;
+  let hour = peak === 1 ? hourGen1() : hourGen2();
+  hour = Math.max(0, Math.min(23.99, hour));
+
+  let delay = delayGen();
+  // Morning flights slightly less delayed
+  if (hour < 12) delay -= 5;
+  delay = Math.max(-30, Math.min(120, delay));
+
+  let distance = rng() < 0.6 ? distGen1() : distGen2();
+  distance = Math.max(50, Math.min(4000, distance));
+
+  return { hour, delay, distance };
+});
+
+// --- Dimensions config ---
+const dims = [
+  { key: "hour", label: "Departure Hour", domain: [0, 24], bins: 24, format: d => `${d}h` },
+  { key: "delay", label: "Delay (min)", domain: [-30, 120], bins: 30, format: d3.format("d") },
+  { key: "distance", label: "Distance (mi)", domain: [0, 4000], bins: 25, format: d3.format(",d") },
+];
+
+// --- Layout ---
+const margin = { top: 6, right: 12, bottom: 28, left: 44 };
+const chartW = 320, chartH = 180;
+const innerW = chartW - margin.left - margin.right;
+const innerH = chartH - margin.top - margin.bottom;
+
+// --- State: per-dimension brush extents (in data space) ---
+const brushExtents = new Map(); // key -> [lo, hi] or null
+
+// --- Pre-bin the full dataset for ghost layer ---
+const fullBins = new Map();
+dims.forEach(dim => {
+  const scale = d3.scaleLinear().domain(dim.domain).range([0, innerW]);
+  const binner = d3.bin()
+    .value(d => d[dim.key])
+    .domain(dim.domain)
+    .thresholds(scale.ticks(dim.bins));
+  fullBins.set(dim.key, binner(flights));
+});
+
+// --- Compute filtered indices (intersection of all active brushes) ---
+function getFilteredIndices() {
+  const active = [...brushExtents.entries()].filter(([, ext]) => ext != null);
+  if (active.length === 0) return flights.map((_, i) => i);
+  return flights.reduce((acc, d, i) => {
+    if (active.every(([key, [lo, hi]]) => d[key] >= lo && d[key] <= hi)) acc.push(i);
+    return acc;
+  }, []);
+}
+
+// --- Build charts ---
+const chartsDiv = d3.select("#charts");
+const views = [];
+
+dims.forEach(dim => {
+  const container = chartsDiv.append("div").attr("class", "chart-container");
+  container.append("div").attr("class", "chart-title").text(dim.label);
+
+  const svg = container.append("svg")
+    .attr("width", chartW)
+    .attr("height", chartH);
+
+  const g = svg.append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+  const x = d3.scaleLinear().domain(dim.domain).range([0, innerW]);
+
+  const binner = d3.bin()
+    .value(d => d[dim.key])
+    .domain(dim.domain)
+    .thresholds(x.ticks(dim.bins));
+
+  // Y scale fixed to full data max
+  const ghostBins = fullBins.get(dim.key);
+  const yMax = d3.max(ghostBins, b => b.length);
+  const y = d3.scaleLinear().domain([0, yMax]).range([innerH, 0]);
+
+  // Ghost bars (full dataset)
+  g.selectAll(".ghost")
+    .data(ghostBins)
+    .join("rect")
+      .attr("class", "ghost")
+      .attr("x", d => x(d.x0) + 0.5)
+      .attr("width", d => Math.max(0, x(d.x1) - x(d.x0) - 1))
+      .attr("y", d => y(d.length))
+      .attr("height", d => innerH - y(d.length))
+      .attr("fill", "#e0e0e0");
+
+  // Active bars (filtered)
+  const activeBars = g.selectAll(".active")
+    .data(ghostBins)
+    .join("rect")
+      .attr("class", "active")
+      .attr("x", d => x(d.x0) + 0.5)
+      .attr("width", d => Math.max(0, x(d.x1) - x(d.x0) - 1))
+      .attr("y", d => y(d.length))
+      .attr("height", d => innerH - y(d.length))
+      .attr("fill", "#e63946");
+
+  // Axes
+  const xAxis = g.append("g")
+    .attr("transform", `translate(0,${innerH})`)
+    .call(d3.axisBottom(x).ticks(6).tickFormat(dim.format))
+    .call(g => g.select(".domain").remove());
+
+  g.append("g")
+    .call(d3.axisLeft(y).ticks(4).tickFormat(d3.format("d")))
+    .call(g => g.select(".domain").remove())
+    .call(g => g.selectAll(".tick line").clone()
+      .attr("x2", innerW)
+      .attr("stroke-opacity", 0.06));
+
+  // Brush
+  const brush = d3.brushX()
+    .extent([[0, 0], [innerW, innerH]])
+    .on("brush end", ({ selection, type }) => {
+      if (selection) {
+        brushExtents.set(dim.key, [x.invert(selection[0]), x.invert(selection[1])]);
+      } else {
+        brushExtents.delete(dim.key);
+      }
+      updateAll(dim.key);
+    });
+
+  const brushG = g.append("g").attr("class", "brush").call(brush);
+
+  views.push({ dim, g, x, y, binner, activeBars, brushG, brush });
+});
+
+// --- Update all charts ---
+function updateAll(sourceDim) {
+  const filteredIndices = getFilteredIndices();
+  const filteredData = filteredIndices.map(i => flights[i]);
+
+  // Update counter
+  d3.select("#count").text(filteredData.length);
+
+  // Re-bin filtered data for each dimension, excluding that dimension's own brush
+  views.forEach(({ dim, y, binner, activeBars }) => {
+    // For the source dimension, show data filtered by OTHER dimensions only (not self)
+    const otherActive = [...brushExtents.entries()].filter(([k, ext]) => k !== dim.key && ext != null);
+    let subset;
+    if (otherActive.length === 0) {
+      subset = flights;
+    } else {
+      subset = flights.filter(d =>
+        otherActive.every(([key, [lo, hi]]) => d[key] >= lo && d[key] <= hi)
+      );
+    }
+
+    const bins = binner(subset);
+
+    activeBars.data(bins)
+      .attr("y", d => y(d.length))
+      .attr("height", d => innerH - y(d.length));
+  });
+}
+
+// --- Reset button ---
+d3.select("#reset").on("click", () => {
+  brushExtents.clear();
+  views.forEach(({ brushG, brush }) => brushG.call(brush.move, null));
+  updateAll(null);
+});
+
+// Initial render
+updateAll(null);
+</script>
+</body>
+</html>

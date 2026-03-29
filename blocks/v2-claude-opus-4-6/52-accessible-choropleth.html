@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Accessible US Choropleth</title>
+<style>
+  :root {
+    --bg: #fff;
+    --fg: #222;
+    --border: #ccc;
+    --focus-ring: #1a73e8;
+    --hover-bg: #f0f4ff;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--fg); padding: 16px; }
+  h1 { font-size: 1.25rem; margin-bottom: 4px; }
+  .subtitle { font-size: 0.85rem; color: #666; margin-bottom: 12px; }
+  .controls { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; }
+  .toggle-btn {
+    padding: 6px 14px; border: 1px solid var(--border); border-radius: 4px;
+    background: var(--bg); cursor: pointer; font-size: 0.85rem;
+  }
+  .toggle-btn[aria-pressed="true"] { background: var(--focus-ring); color: #fff; border-color: var(--focus-ring); }
+  .toggle-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+  .help-text { font-size: 0.8rem; color: #666; margin-left: auto; }
+  .viz-container { position: relative; }
+  canvas { display: block; }
+  .svg-overlay { position: absolute; top: 0; left: 0; pointer-events: none; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+  /* Legend */
+  .legend { display: flex; align-items: center; gap: 4px; margin-top: 8px; font-size: 0.8rem; }
+  .legend-bar { height: 12px; flex: 0 0 200px; border: 1px solid var(--border); }
+
+  /* Table */
+  .table-container { max-height: 500px; overflow-y: auto; border: 1px solid var(--border); border-radius: 4px; display: none; }
+  table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 0.85rem; }
+  thead { position: sticky; top: 0; z-index: 2; }
+  th {
+    background: #f5f5f5; padding: 8px 12px; text-align: left; border-bottom: 2px solid var(--border);
+    cursor: pointer; user-select: none; white-space: nowrap;
+  }
+  th.num, td.num { text-align: right; }
+  td { padding: 6px 12px; border-bottom: 1px solid #eee; font-variant-numeric: tabular-nums; }
+  th:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+  tr.highlighted { background: var(--hover-bg); }
+  .sort-arrow { margin-left: 4px; opacity: 0.4; }
+  .sort-arrow.active { opacity: 1; }
+
+  /* Forced-colors mode */
+  @media (forced-colors: active) {
+    .toggle-btn { forced-color-adjust: auto; }
+    .legend { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Unemployment Rate by State</h1>
+<p class="subtitle">Synthetic data for demonstration. Arrow keys navigate states geographically.</p>
+
+<div class="controls">
+  <button class="toggle-btn" id="chartBtn" aria-pressed="true">Map</button>
+  <button class="toggle-btn" id="tableBtn" aria-pressed="false">Table</button>
+  <span class="help-text" id="navHelp">Arrow keys to navigate, Enter to select, T for table</span>
+</div>
+
+<div id="live" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+<a href="#after-viz" class="sr-only">Skip visualization</a>
+
+<div class="viz-container" id="mapView">
+  <canvas id="canvas" tabindex="0" role="application"
+    aria-label="US choropleth map showing unemployment rate by state. Use arrow keys to navigate states geographically."></canvas>
+  <svg class="svg-overlay" id="focusOverlay"></svg>
+</div>
+
+<div class="legend" id="legend" aria-hidden="true">
+  <span id="legendMin"></span>
+  <canvas id="legendBar" class="legend-bar" width="200" height="12"></canvas>
+  <span id="legendMax"></span>
+</div>
+
+<div class="table-container" id="tableView" role="region" aria-label="Unemployment data table">
+  <table role="grid">
+    <thead><tr id="tableHead"></tr></thead>
+    <tbody id="tableBody"></tbody>
+  </table>
+</div>
+
+<div id="after-viz"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+import * as topojson from "https://cdn.jsdelivr.net/npm/topojson-client@3/+esm";
+
+// ── Synthetic data ──
+const stateData = new Map();
+const stateNames = new Map();
+// Seeded random for reproducibility
+let seed = 42;
+function rand() { seed = (seed * 16807 + 0) % 2147483647; return (seed - 1) / 2147483646; }
+
+const syntheticRates = {
+  "01":"5.2","02":"6.8","04":"5.7","05":"5.0","06":"7.5","08":"3.8","09":"5.5","10":"4.9",
+  "11":"6.1","12":"5.3","13":"5.6","15":"4.2","16":"3.9","17":"6.2","18":"4.8","19":"3.5",
+  "20":"3.7","21":"5.1","22":"6.3","23":"4.0","24":"5.4","25":"5.8","26":"6.0","27":"3.6",
+  "28":"6.5","29":"4.7","30":"4.1","31":"3.4","32":"6.7","33":"3.3","34":"5.9","35":"6.4",
+  "36":"6.1","37":"5.3","38":"3.2","39":"5.5","40":"4.6","41":"5.0","42":"5.7","44":"5.6",
+  "45":"5.4","46":"3.1","47":"5.2","48":"5.0","49":"3.5","50":"3.0","51":"4.8","53":"5.9",
+  "54":"6.2","55":"4.3","56":"4.0"
+};
+
+const stateNameMap = {
+  "01":"Alabama","02":"Alaska","04":"Arizona","05":"Arkansas","06":"California",
+  "08":"Colorado","09":"Connecticut","10":"Delaware","11":"District of Columbia",
+  "12":"Florida","13":"Georgia","15":"Hawaii","16":"Idaho","17":"Illinois",
+  "18":"Indiana","19":"Iowa","20":"Kansas","21":"Kentucky","22":"Louisiana",
+  "23":"Maine","24":"Maryland","25":"Massachusetts","26":"Michigan","27":"Minnesota",
+  "28":"Mississippi","29":"Missouri","30":"Montana","31":"Nebraska","32":"Nevada",
+  "33":"New Hampshire","34":"New Jersey","35":"New Mexico","36":"New York",
+  "37":"North Carolina","38":"North Dakota","39":"Ohio","40":"Oklahoma","41":"Oregon",
+  "42":"Pennsylvania","44":"Rhode Island","45":"South Carolina","46":"South Dakota",
+  "47":"Tennessee","48":"Texas","49":"Utah","50":"Vermont","51":"Virginia",
+  "53":"Washington","54":"West Virginia","55":"Wisconsin","56":"Wyoming"
+};
+
+for (const [fips, rate] of Object.entries(syntheticRates)) {
+  stateData.set(fips, +rate);
+  stateNames.set(fips, stateNameMap[fips]);
+}
+
+// ── Load geometry ──
+const us = await d3.json("https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json");
+const states = topojson.feature(us, us.objects.states).features;
+const stateMesh = topojson.mesh(us, us.objects.states, (a, b) => a !== b);
+const nation = topojson.merge(us, us.objects.states.geometries);
+
+// Attach data to features
+for (const f of states) {
+  const fips = String(f.id).padStart(2, "0");
+  f.properties.name = stateNames.get(fips) || "Unknown";
+  f.properties.rate = stateData.get(fips) ?? null;
+  f.properties.fips = fips;
+}
+
+// ── Layout ──
+const width = Math.min(960, window.innerWidth - 32);
+const height = width * 0.62;
+
+const projection = d3.geoAlbersUsa().fitSize([width, height], nation);
+const path = d3.geoPath(projection);
+
+const canvas = document.getElementById("canvas");
+canvas.width = width * devicePixelRatio;
+canvas.height = height * devicePixelRatio;
+canvas.style.width = width + "px";
+canvas.style.height = height + "px";
+const ctx = canvas.getContext("2d");
+ctx.scale(devicePixelRatio, devicePixelRatio);
+
+const svgOverlay = d3.select("#focusOverlay").attr("width", width).attr("height", height);
+
+// ── Color scale ──
+const extent = d3.extent(states, d => d.properties.rate).map(v => v ?? 0);
+const color = d3.scaleSequential(d3.interpolateYlOrRd).domain(extent);
+const fmt = d3.format(".1f");
+
+// Legend
+document.getElementById("legendMin").textContent = fmt(extent[0]) + "%";
+document.getElementById("legendMax").textContent = fmt(extent[1]) + "%";
+const legendCtx = document.getElementById("legendBar").getContext("2d");
+for (let i = 0; i < 200; i++) {
+  legendCtx.fillStyle = color(extent[0] + (extent[1] - extent[0]) * i / 199);
+  legendCtx.fillRect(i, 0, 1, 12);
+}
+
+// ── Canvas patterns for forced-colors ──
+const forcedColors = matchMedia("(forced-colors: active)");
+const patterns = new Map();
+
+function createPattern(rate) {
+  const t = (rate - extent[0]) / (extent[1] - extent[0]);
+  const key = Math.round(t * 4); // 5 density levels
+  if (patterns.has(key)) return patterns.get(key);
+
+  const sz = 8;
+  const offscreen = new OffscreenCanvas(sz, sz);
+  const pctx = offscreen.getContext("2d");
+  // Use CanvasText (system color) for strokes in forced-colors mode
+  pctx.fillStyle = "Canvas";
+  pctx.fillRect(0, 0, sz, sz);
+  pctx.strokeStyle = "CanvasText";
+  pctx.lineWidth = 1;
+
+  // Different hatch densities
+  const spacing = Math.max(2, 8 - key * 1.5);
+  for (let y = -sz; y < sz * 2; y += spacing) {
+    pctx.beginPath();
+    pctx.moveTo(0, y);
+    pctx.lineTo(sz, y + sz);
+    pctx.stroke();
+  }
+
+  const pat = ctx.createPattern(offscreen, "repeat");
+  patterns.set(key, pat);
+  return pat;
+}
+
+// ── Geographic sort order (west→east, north→south) ──
+const sortedStates = states
+  .filter(f => projection(d3.geoCentroid(f)))
+  .sort((a, b) => {
+    const ca = projection(d3.geoCentroid(a));
+    const cb = projection(d3.geoCentroid(b));
+    // Rough row grouping then left to right
+    const rowA = Math.round(ca[1] / 80);
+    const rowB = Math.round(cb[1] / 80);
+    return rowA !== rowB ? rowA - rowB : ca[0] - cb[0];
+  });
+
+// Build spatial navigation lookup using centroids
+const centroids = new Map();
+for (const f of sortedStates) {
+  centroids.set(f, projection(d3.geoCentroid(f)));
+}
+
+function findNearest(current, direction) {
+  const [cx, cy] = centroids.get(current);
+  let best = null, bestDist = Infinity;
+
+  for (const f of sortedStates) {
+    if (f === current) continue;
+    const [px, py] = centroids.get(f);
+    const dx = px - cx, dy = py - cy;
+    // 90° cone check
+    let inDir = false;
+    switch (direction) {
+      case "right": inDir = dx > 0 && Math.abs(dy) <= dx; break;
+      case "left":  inDir = dx < 0 && Math.abs(dy) <= -dx; break;
+      case "down":  inDir = dy > 0 && Math.abs(dx) <= dy; break;
+      case "up":    inDir = dy < 0 && Math.abs(dx) <= -dy; break;
+    }
+    if (!inDir) continue;
+    const dist = Math.hypot(dx, dy);
+    if (dist < bestDist) { bestDist = dist; best = f; }
+  }
+  return best;
+}
+
+// ── State ──
+let focusedIdx = -1;
+let selectedId = null;
+let showTable = false;
+const liveRegion = document.getElementById("live");
+
+function announce(feature, extra) {
+  const p = feature.properties;
+  const parts = [p.name];
+  if (p.rate != null) parts.push(`unemployment ${fmt(p.rate)}%`);
+  if (extra) parts.push(extra);
+  liveRegion.textContent = parts.join(", ");
+}
+
+let announceTimer;
+function debouncedAnnounce(feature, extra) {
+  clearTimeout(announceTimer);
+  announceTimer = setTimeout(() => announce(feature, extra), 120);
+}
+
+// ── Render ──
+const canvasPath = d3.geoPath(projection, ctx);
+
+function render() {
+  ctx.clearRect(0, 0, width, height);
+  const useForcedColors = forcedColors.matches;
+
+  // Fill states
+  if (useForcedColors) {
+    for (const f of sortedStates) {
+      ctx.beginPath(); canvasPath(f);
+      ctx.fillStyle = f.properties.rate != null ? createPattern(f.properties.rate) : "Canvas";
+      ctx.fill();
+    }
+  } else {
+    // Batch by color
+    const byColor = d3.group(sortedStates, f => f.properties.rate != null ? color(f.properties.rate) : "#eee");
+    for (const [c, group] of byColor) {
+      ctx.beginPath();
+      for (const f of group) canvasPath(f);
+      ctx.fillStyle = c;
+      ctx.fill();
+    }
+  }
+
+  // Selected state highlight
+  if (selectedId != null) {
+    const sel = sortedStates.find(f => f.properties.fips === selectedId);
+    if (sel) {
+      ctx.beginPath(); canvasPath(sel);
+      ctx.strokeStyle = "#000"; ctx.lineWidth = 2.5; ctx.stroke();
+    }
+  }
+
+  // Internal state borders
+  ctx.beginPath(); canvasPath(stateMesh);
+  ctx.strokeStyle = useForcedColors ? "CanvasText" : "#fff";
+  ctx.lineWidth = 0.5; ctx.stroke();
+
+  // Nation outline
+  ctx.beginPath(); canvasPath(nation);
+  ctx.strokeStyle = useForcedColors ? "CanvasText" : "#333";
+  ctx.lineWidth = 1; ctx.stroke();
+
+  // Focus ring via SVG overlay
+  svgOverlay.selectAll("path").remove();
+  if (focusedIdx >= 0 && !showTable) {
+    const f = sortedStates[focusedIdx];
+    svgOverlay.append("path")
+      .attr("d", path(f))
+      .attr("fill", "none")
+      .attr("stroke", "var(--focus-ring)")
+      .attr("stroke-width", 2.5)
+      .attr("stroke-dasharray", "5,3")
+      .attr("filter", "drop-shadow(0 0 2px rgba(255,255,255,0.9))");
+  }
+}
+
+render();
+forcedColors.addEventListener("change", () => { patterns.clear(); render(); });
+matchMedia("(prefers-contrast: more)").addEventListener("change", render);
+
+// ── Keyboard navigation ──
+canvas.addEventListener("keydown", e => {
+  if (showTable) return;
+  const dirMap = { ArrowRight: "right", ArrowLeft: "left", ArrowDown: "down", ArrowUp: "up" };
+
+  if (dirMap[e.key]) {
+    e.preventDefault();
+    if (focusedIdx < 0) {
+      focusedIdx = 0;
+    } else {
+      const next = findNearest(sortedStates[focusedIdx], dirMap[e.key]);
+      if (next) focusedIdx = sortedStates.indexOf(next);
+    }
+    render();
+    debouncedAnnounce(sortedStates[focusedIdx]);
+  } else if (e.key === "Home") {
+    e.preventDefault();
+    focusedIdx = 0; render();
+    announce(sortedStates[focusedIdx]);
+  } else if (e.key === "End") {
+    e.preventDefault();
+    focusedIdx = sortedStates.length - 1; render();
+    announce(sortedStates[focusedIdx]);
+  } else if (e.key === "Enter" || e.key === " ") {
+    e.preventDefault();
+    if (focusedIdx >= 0) {
+      const f = sortedStates[focusedIdx];
+      selectedId = selectedId === f.properties.fips ? null : f.properties.fips;
+      render();
+      announce(f, selectedId ? "selected" : "deselected");
+    }
+  } else if (e.key === "Escape") {
+    selectedId = null; focusedIdx = -1; render();
+    liveRegion.textContent = "Selection cleared";
+  } else if (e.key === "t" || e.key === "T") {
+    tableBtn.click();
+  }
+});
+
+// Mouse interaction
+canvas.addEventListener("pointermove", e => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const hit = sortedStates.find(f => d3.geoContains(f, projection.invert([mx, my])));
+  if (hit) {
+    const idx = sortedStates.indexOf(hit);
+    if (idx !== focusedIdx) {
+      focusedIdx = idx;
+      render();
+    }
+  }
+});
+
+canvas.addEventListener("pointerdown", e => {
+  canvas.focus();
+  if (focusedIdx >= 0) {
+    const f = sortedStates[focusedIdx];
+    selectedId = selectedId === f.properties.fips ? null : f.properties.fips;
+    render();
+    announce(f, selectedId ? "selected" : "deselected");
+  }
+});
+
+canvas.addEventListener("pointerleave", () => {
+  if (focusedIdx >= 0) { focusedIdx = -1; render(); }
+});
+
+// ── Table view ──
+const columns = [
+  { key: "name", label: "State", type: "string" },
+  { key: "fips", label: "FIPS", type: "string" },
+  { key: "rate", label: "Unemployment (%)", type: "number", format: fmt }
+];
+
+const tableHead = d3.select("#tableHead");
+const tableBody = d3.select("#tableBody");
+let sortKey = "name", sortDir = 1;
+
+function renderTableHead() {
+  tableHead.selectAll("th").data(columns).join("th")
+    .attr("class", d => d.type === "number" ? "num" : null)
+    .attr("tabindex", 0)
+    .attr("role", "columnheader")
+    .attr("aria-sort", d => d.key === sortKey ? (sortDir === 1 ? "ascending" : "descending") : "none")
+    .html(d => {
+      const arrow = d.key === sortKey ? (sortDir === 1 ? "▲" : "▼") : "▲";
+      const cls = d.key === sortKey ? "sort-arrow active" : "sort-arrow";
+      return `${d.label}<span class="${cls}">${arrow}</span>`;
+    })
+    .on("click", (e, d) => handleSort(d))
+    .on("keydown", (e, d) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleSort(d); } });
+}
+
+function handleSort(col) {
+  if (sortKey === col.key) sortDir *= -1;
+  else { sortKey = col.key; sortDir = 1; }
+  renderTable();
+  liveRegion.textContent = `Sorted by ${col.label}, ${sortDir === 1 ? "ascending" : "descending"}`;
+}
+
+function renderTable() {
+  const tableData = sortedStates.map(f => ({
+    id: f.properties.fips,
+    name: f.properties.name,
+    fips: f.properties.fips,
+    rate: f.properties.rate
+  }));
+
+  const sorted = [...tableData].sort((a, b) => {
+    const va = a[sortKey], vb = b[sortKey];
+    return d3.ascending(va, vb) * sortDir;
+  });
+
+  renderTableHead();
+
+  const rows = tableBody.selectAll("tr").data(sorted, d => d.id).join("tr")
+    .classed("highlighted", d => d.id === selectedId);
+
+  rows.selectAll("td").data(d => columns.map(col => ({
+    value: col.format ? col.format(d[col.key]) : d[col.key],
+    type: col.type
+  }))).join("td")
+    .attr("class", d => d.type === "number" ? "num" : null)
+    .text(d => d.value);
+
+  rows.on("click", (e, d) => {
+    selectedId = selectedId === d.id ? null : d.id;
+    focusedIdx = sortedStates.findIndex(f => f.properties.fips === d.id);
+    render();
+    renderTable();
+    announce(sortedStates[focusedIdx] || { properties: d }, selectedId ? "selected" : "deselected");
+  });
+}
+
+// ── Toggle ──
+const chartBtn = document.getElementById("chartBtn");
+const tableBtn = document.getElementById("tableBtn");
+const mapView = document.getElementById("mapView");
+const tableView = document.getElementById("tableView");
+const legendEl = document.getElementById("legend");
+const navHelp = document.getElementById("navHelp");
+
+function setView(table) {
+  showTable = table;
+  chartBtn.setAttribute("aria-pressed", !table);
+  tableBtn.setAttribute("aria-pressed", table);
+  mapView.style.display = table ? "none" : "block";
+  mapView.setAttribute("aria-hidden", table);
+  legendEl.style.display = table ? "none" : "flex";
+  tableView.style.display = table ? "block" : "none";
+  tableView.setAttribute("aria-hidden", !table);
+  navHelp.textContent = table ? "Click headers to sort" : "Arrow keys to navigate, Enter to select, T for table";
+  if (table) renderTable();
+  else render();
+  liveRegion.textContent = table ? "Table view" : "Map view";
+}
+
+chartBtn.addEventListener("click", () => setView(false));
+tableBtn.addEventListener("click", () => setView(true));
+
+// Global keyboard shortcut
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+  if (e.key === "t" || e.key === "T") {
+    if (document.activeElement !== canvas) {
+      setView(!showTable);
+    }
+  }
+});
+
+// ── Canvas text fallback for screen readers ──
+canvas.textContent = `Choropleth map of US unemployment rates by state. ${sortedStates.length} states shown. Rates range from ${fmt(extent[0])}% to ${fmt(extent[1])}%. Use arrow keys to navigate.`;
+
+</script>
+</body>
+</html>

@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Accessible Force Network</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1a1a2e;
+    --muted: #666;
+    --border: #ddd;
+    --focus-ring: #1a73e8;
+    --hover-bg: #f0f4ff;
+    --selected-bg: #e0e8ff;
+    --link-color: #999;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a1a2e;
+      --fg: #e0e0e0;
+      --muted: #aaa;
+      --border: #333;
+      --hover-bg: #2a2a4e;
+      --selected-bg: #3a3a5e;
+      --link-color: #555;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: var(--bg); color: var(--fg);
+    padding: 1rem;
+  }
+  h1 { font-size: 1.25rem; margin-bottom: 0.25rem; }
+  .subtitle { color: var(--muted); font-size: 0.85rem; margin-bottom: 0.75rem; }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px;
+    overflow: hidden; clip: rect(0,0,0,0);
+    white-space: nowrap; border: 0;
+  }
+  .skip-link {
+    position: absolute; top: -40px; left: 0; padding: 8px 16px;
+    background: var(--focus-ring); color: #fff; z-index: 100;
+    text-decoration: none; font-weight: bold;
+  }
+  .skip-link:focus { top: 0; }
+  #canvas-wrap {
+    position: relative; width: 100%; max-width: 960px;
+    border: 1px solid var(--border); border-radius: 4px;
+    margin-bottom: 1rem;
+  }
+  canvas { display: block; width: 100%; cursor: default; }
+  canvas:focus { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 0.5rem 1rem;
+    margin-bottom: 0.75rem; font-size: 0.8rem;
+  }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .legend-swatch {
+    width: 12px; height: 12px; border-radius: 50%;
+    border: 1px solid var(--border);
+  }
+
+  /* Data table */
+  .table-wrap {
+    max-width: 960px; max-height: 400px;
+    overflow: auto; border: 1px solid var(--border); border-radius: 4px;
+  }
+  table {
+    width: 100%; border-collapse: separate; border-spacing: 0;
+    font-size: 0.8rem;
+  }
+  thead { position: sticky; top: 0; z-index: 2; }
+  th {
+    background: var(--bg); border-bottom: 2px solid var(--border);
+    padding: 6px 10px; text-align: left; cursor: pointer;
+    user-select: none; white-space: nowrap;
+    font-weight: 600;
+  }
+  th[aria-sort="ascending"]::after { content: " ▲"; font-size: 0.65em; }
+  th[aria-sort="descending"]::after { content: " ▼"; font-size: 0.65em; }
+  th:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+  td {
+    padding: 4px 10px; border-bottom: 1px solid var(--border);
+  }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  th.num { text-align: right; }
+  tr.hovered td { background: var(--hover-bg); }
+  tr.selected td { background: var(--selected-bg); font-weight: 600; }
+  tbody tr:hover td { background: var(--hover-bg); }
+
+  .instructions {
+    font-size: 0.75rem; color: var(--muted); margin-top: 0.5rem;
+  }
+
+  /* Forced-colors: canvas is a bitmap, so show table prominently */
+  @media (forced-colors: active) {
+    canvas { border: 2px solid CanvasText; }
+    .legend-swatch { forced-color-adjust: none; }
+    th, td { border-color: CanvasText; }
+    tr.selected td { outline: 2px solid Highlight; }
+    tr.hovered td { outline: 1px dashed Highlight; }
+    .forced-colors-notice { display: block !important; }
+  }
+  .forced-colors-notice {
+    display: none; padding: 0.5rem; margin-bottom: 0.5rem;
+    border: 2px solid; font-size: 0.85rem;
+  }
+</style>
+</head>
+<body>
+
+<a href="#data-table" class="skip-link">Skip to data table</a>
+
+<h1>Community Network Graph</h1>
+<p class="subtitle">150 nodes across 6 communities with force-directed layout</p>
+
+<div class="forced-colors-notice" role="alert">
+  High contrast mode detected. The canvas graph may not adapt colors. Use the data table below for full access.
+</div>
+
+<div class="legend" role="img" aria-label="Legend: 6 communities shown by color"></div>
+
+<div aria-live="polite" aria-atomic="true" id="live-region" class="sr-only"></div>
+
+<div id="canvas-wrap">
+  <canvas id="graph"
+    tabindex="0"
+    role="application"
+    aria-label="Force-directed network graph with 150 nodes. Use arrow keys to navigate between nodes, Enter to select, Escape to clear selection, Tab to move to data table.">
+  </canvas>
+  <div id="dom-mirror" class="sr-only" role="listbox" aria-label="Network nodes"></div>
+</div>
+
+<p class="instructions">
+  Arrow keys: navigate by direction &middot; Enter: select node &middot; Escape: clear &middot; Tab: move to table
+</p>
+
+<div class="table-wrap" id="data-table">
+  <table role="grid" aria-label="Network node data">
+    <thead><tr id="table-header"></tr></thead>
+    <tbody id="table-body"></tbody>
+  </table>
+</div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// ── Synthetic data ──────────────────────────────────────────────
+const communityNames = ["Engineering", "Design", "Marketing", "Research", "Operations", "Leadership"];
+const communityColors = ["#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f", "#edc948"];
+const rng = d3.randomLcg(42);
+const rand = d3.randomUniform.source(rng);
+
+const nodes = d3.range(150).map(i => {
+  const community = i < 6 ? i : Math.floor(rand(0, 6)());
+  return {
+    id: i,
+    name: `${communityNames[community].slice(0, 3)}-${String(i).padStart(3, "0")}`,
+    community,
+    communityName: communityNames[community],
+    value: Math.round(rand(10, 100)()),
+    r: i < 6 ? 10 : rand(4, 8)()
+  };
+});
+
+// Build links: intra-community links + some inter-community
+const links = [];
+const communityMembers = d3.group(nodes, d => d.community);
+for (const [, members] of communityMembers) {
+  for (let i = 1; i < members.length; i++) {
+    if (rand(0, 1)() < 0.6)
+      links.push({ source: members[i].id, target: members[Math.floor(rand(0, i)())].id });
+  }
+}
+// Inter-community bridges
+for (let i = 0; i < 30; i++) {
+  const a = Math.floor(rand(0, 150)());
+  let b = Math.floor(rand(0, 150)());
+  while (b === a || nodes[b].community === nodes[a].community) b = Math.floor(rand(0, 150)());
+  links.push({ source: a, target: b });
+}
+
+// Precompute neighbor map
+const neighbors = new Map(nodes.map(n => [n.id, new Set()]));
+links.forEach(l => {
+  const s = typeof l.source === "object" ? l.source.id : l.source;
+  const t = typeof l.target === "object" ? l.target.id : l.target;
+  neighbors.get(s).add(t);
+  neighbors.get(t).add(s);
+});
+
+// ── Canvas setup ────────────────────────────────────────────────
+const wrap = document.getElementById("canvas-wrap");
+const canvas = document.getElementById("graph");
+const ctx = canvas.getContext("2d");
+const dpr = window.devicePixelRatio || 1;
+
+let width, height;
+function resize() {
+  const rect = wrap.getBoundingClientRect();
+  width = rect.width;
+  height = Math.min(width * 0.6, 560);
+  canvas.width = width * dpr;
+  canvas.height = height * dpr;
+  canvas.style.height = height + "px";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+resize();
+
+// ── Accessibility preferences ───────────────────────────────────
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+const highContrast = matchMedia("(prefers-contrast: more)");
+const forcedColors = matchMedia("(forced-colors: active)");
+
+// ── Legend ───────────────────────────────────────────────────────
+const legendEl = document.querySelector(".legend");
+communityNames.forEach((name, i) => {
+  const item = document.createElement("span");
+  item.className = "legend-item";
+  item.innerHTML = `<span class="legend-swatch" style="background:${communityColors[i]}"></span>${name}`;
+  legendEl.appendChild(item);
+});
+
+// ── Force simulation ────────────────────────────────────────────
+const simulation = d3.forceSimulation(nodes)
+  .force("link", d3.forceLink(links).id(d => d.id).distance(40).strength(0.3))
+  .force("charge", d3.forceManyBody().strength(-60).distanceMax(300))
+  .force("center", d3.forceCenter(width / 2, height / 2))
+  .force("collide", d3.forceCollide(d => d.r + 2).iterations(2))
+  .force("x", d3.forceX(width / 2).strength(0.05))
+  .force("y", d3.forceY(height / 2).strength(0.05));
+
+if (reducedMotion.matches) {
+  simulation.stop();
+  simulation.tick(300);
+}
+
+// ── State ───────────────────────────────────────────────────────
+let focusedId = null;
+let selectedId = null;
+let canvasHasFocus = false;
+
+// ── Quadtree for spatial nav ────────────────────────────────────
+let qt;
+function rebuildQuadtree() {
+  qt = d3.quadtree().x(d => d.x).y(d => d.y).addAll(nodes);
+}
+
+function inDirection(ox, oy, tx, ty, dir) {
+  const dx = tx - ox, dy = ty - oy;
+  if (!dx && !dy) return false;
+  switch (dir) {
+    case "right": return dx > 0 && Math.abs(dy) <= dx;
+    case "left":  return dx < 0 && Math.abs(dy) <= -dx;
+    case "down":  return dy > 0 && Math.abs(dx) <= dy;
+    case "up":    return dy < 0 && Math.abs(dx) <= -dy;
+  }
+}
+
+function pointRectDist(px, py, x0, y0, x1, y1) {
+  return Math.hypot(Math.max(x0 - px, 0, px - x1), Math.max(y0 - py, 0, py - y1));
+}
+
+function findNearest(current, direction) {
+  if (!qt) return null;
+  const cx = current.x, cy = current.y;
+  let best = null, bestDist = Infinity;
+
+  qt.visit((quad, x0, y0, x1, y1) => {
+    if (best && pointRectDist(cx, cy, x0, y0, x1, y1) > bestDist) return true;
+    if (!quad.length) {
+      let p = quad;
+      do {
+        if (p.data === current) continue;
+        const px = p.data.x, py = p.data.y;
+        if (!inDirection(cx, cy, px, py, direction)) continue;
+        const dist = Math.hypot(px - cx, py - cy);
+        if (dist < bestDist) { bestDist = dist; best = p.data; }
+      } while ((p = p.next));
+    }
+  });
+  return best;
+}
+
+// ── Announce ────────────────────────────────────────────────────
+const liveRegion = document.getElementById("live-region");
+let announceTimer;
+function announce(node, extra) {
+  clearTimeout(announceTimer);
+  announceTimer = setTimeout(() => {
+    const conns = neighbors.get(node.id);
+    const parts = [
+      node.name,
+      `community: ${node.communityName}`,
+      `value: ${node.value}`,
+      `${conns.size} connection${conns.size !== 1 ? "s" : ""}`
+    ];
+    if (extra) parts.push(extra);
+    liveRegion.textContent = parts.join(", ");
+  }, 150);
+}
+
+// ── DOM mirror for screen readers ───────────────────────────────
+const mirror = document.getElementById("dom-mirror");
+function updateMirror() {
+  d3.select(mirror).selectAll("[role=option]")
+    .data(nodes, d => d.id)
+    .join("div")
+      .attr("role", "option")
+      .attr("id", d => `mirror-${d.id}`)
+      .attr("aria-label", d => {
+        const conns = neighbors.get(d.id);
+        return `${d.name}, ${d.communityName}, value ${d.value}, ${conns.size} connections`;
+      })
+      .attr("aria-selected", d => d.id === selectedId ? "true" : null);
+}
+canvas.setAttribute("aria-owns", "dom-mirror");
+updateMirror();
+
+// ── Render ──────────────────────────────────────────────────────
+const strokeBoost = () => highContrast.matches ? 1 : 0;
+
+function render() {
+  ctx.clearRect(0, 0, width, height);
+
+  // Links
+  ctx.beginPath();
+  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--link-color").trim();
+  ctx.lineWidth = 0.5 + strokeBoost();
+  ctx.globalAlpha = 0.4;
+  for (const l of links) {
+    ctx.moveTo(l.source.x, l.source.y);
+    ctx.lineTo(l.target.x, l.target.y);
+  }
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+
+  // Highlight links for focused/selected node
+  const activeId = selectedId ?? focusedId;
+  if (activeId !== null && canvasHasFocus) {
+    ctx.beginPath();
+    ctx.strokeStyle = var_focus_ring();
+    ctx.lineWidth = 1.5 + strokeBoost();
+    ctx.globalAlpha = 0.6;
+    for (const l of links) {
+      if (l.source.id === activeId || l.target.id === activeId) {
+        ctx.moveTo(l.source.x, l.source.y);
+        ctx.lineTo(l.target.x, l.target.y);
+      }
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  // Nodes
+  for (const n of nodes) {
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+    const isActive = n.id === activeId && canvasHasFocus;
+    const isNeighbor = activeId !== null && canvasHasFocus && neighbors.get(activeId)?.has(n.id);
+
+    if (activeId !== null && canvasHasFocus && !isActive && !isNeighbor) {
+      ctx.globalAlpha = 0.2;
+    }
+    ctx.fillStyle = communityColors[n.community];
+    ctx.fill();
+    ctx.strokeStyle = isActive ? var_focus_ring() : "rgba(0,0,0,0.3)";
+    ctx.lineWidth = isActive ? 2 + strokeBoost() : 0.5 + strokeBoost();
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  // Focus ring
+  if (focusedId !== null && canvasHasFocus) {
+    const n = nodes[focusedId];
+    drawFocusRing(ctx, n);
+  }
+
+  // Label for focused node
+  if (focusedId !== null && canvasHasFocus) {
+    const n = nodes[focusedId];
+    ctx.font = `bold ${11 + (highContrast.matches ? 2 : 0)}px system-ui`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    const label = n.name;
+    const tw = ctx.measureText(label).width;
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    ctx.fillRect(n.x - tw / 2 - 3, n.y - n.r - 20, tw + 6, 16);
+    ctx.fillStyle = var_fg();
+    ctx.fillText(label, n.x, n.y - n.r - 6);
+  }
+}
+
+function var_focus_ring() { return getComputedStyle(document.documentElement).getPropertyValue("--focus-ring").trim() || "#1a73e8"; }
+function var_fg() { return getComputedStyle(document.documentElement).getPropertyValue("--fg").trim() || "#1a1a2e"; }
+
+function drawFocusRing(ctx, n) {
+  ctx.save();
+  ctx.strokeStyle = var_focus_ring();
+  ctx.lineWidth = 2.5;
+  ctx.setLineDash([4, 3]);
+  ctx.shadowColor = "rgba(255,255,255,0.9)";
+  ctx.shadowBlur = 3;
+  if (!reducedMotion.matches) {
+    ctx.lineDashOffset = -performance.now() / 50;
+  }
+  ctx.beginPath();
+  ctx.arc(n.x, n.y, n.r + 5, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// ── Simulation tick ─────────────────────────────────────────────
+if (!reducedMotion.matches) {
+  simulation.on("tick", () => {
+    rebuildQuadtree();
+    render();
+  });
+} else {
+  rebuildQuadtree();
+  render();
+}
+
+// ── Keyboard navigation ────────────────────────────────────────
+const dirMap = { ArrowRight: "right", ArrowLeft: "left", ArrowDown: "down", ArrowUp: "up" };
+
+canvas.addEventListener("keydown", e => {
+  const dir = dirMap[e.key];
+  if (dir) {
+    e.preventDefault();
+    if (focusedId === null) {
+      // Start at center-most node
+      const cx = width / 2, cy = height / 2;
+      let best = nodes[0], bd = Infinity;
+      for (const n of nodes) {
+        const d = Math.hypot(n.x - cx, n.y - cy);
+        if (d < bd) { bd = d; best = n; }
+      }
+      focusedId = best.id;
+    } else {
+      const current = nodes[focusedId];
+      const next = findNearest(current, dir);
+      if (next) focusedId = next.id;
+    }
+    canvas.setAttribute("aria-activedescendant", `mirror-${focusedId}`);
+    announce(nodes[focusedId]);
+    syncTableHighlight();
+    render();
+    if (!reducedMotion.matches) animateFocusRing();
+    return;
+  }
+
+  switch (e.key) {
+    case "Enter":
+    case " ":
+      e.preventDefault();
+      if (focusedId !== null) {
+        selectedId = selectedId === focusedId ? null : focusedId;
+        updateMirror();
+        announce(nodes[focusedId], selectedId !== null ? "selected" : "deselected");
+        syncTableHighlight();
+        render();
+      }
+      break;
+    case "Home":
+      e.preventDefault();
+      focusedId = 0;
+      canvas.setAttribute("aria-activedescendant", `mirror-${focusedId}`);
+      announce(nodes[focusedId]);
+      syncTableHighlight();
+      render();
+      break;
+    case "End":
+      e.preventDefault();
+      focusedId = nodes.length - 1;
+      canvas.setAttribute("aria-activedescendant", `mirror-${focusedId}`);
+      announce(nodes[focusedId]);
+      syncTableHighlight();
+      render();
+      break;
+    case "Escape":
+      e.preventDefault();
+      selectedId = null;
+      focusedId = null;
+      canvas.removeAttribute("aria-activedescendant");
+      updateMirror();
+      liveRegion.textContent = "Selection cleared";
+      syncTableHighlight();
+      render();
+      break;
+  }
+});
+
+// Animated focus ring
+let animFrameId;
+function animateFocusRing() {
+  cancelAnimationFrame(animFrameId);
+  if (focusedId === null || !canvasHasFocus) return;
+  function loop() {
+    render();
+    if (focusedId !== null && canvasHasFocus) animFrameId = requestAnimationFrame(loop);
+  }
+  animFrameId = requestAnimationFrame(loop);
+}
+
+canvas.addEventListener("focus", () => {
+  canvasHasFocus = true;
+  render();
+  if (focusedId !== null && !reducedMotion.matches) animateFocusRing();
+});
+canvas.addEventListener("blur", () => {
+  canvasHasFocus = false;
+  cancelAnimationFrame(animFrameId);
+  render();
+});
+
+// ── Mouse interaction on canvas ─────────────────────────────────
+canvas.addEventListener("pointermove", e => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  if (!qt) return;
+  const found = qt.find(mx, my, 20);
+  if (found) {
+    focusedId = found.id;
+    canvas.setAttribute("aria-activedescendant", `mirror-${focusedId}`);
+    syncTableHighlight();
+    render();
+  }
+});
+
+canvas.addEventListener("pointerdown", e => {
+  canvas.focus();
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  if (!qt) return;
+  const found = qt.find(mx, my, 20);
+  if (found) {
+    focusedId = found.id;
+    selectedId = selectedId === found.id ? null : found.id;
+    canvas.setAttribute("aria-activedescendant", `mirror-${focusedId}`);
+    updateMirror();
+    announce(found, selectedId !== null ? "selected" : "deselected");
+    syncTableHighlight();
+    render();
+  }
+});
+
+// ── Drag ────────────────────────────────────────────────────────
+let dragNode = null;
+canvas.addEventListener("pointerdown", e => {
+  const rect = canvas.getBoundingClientRect();
+  const found = qt?.find(e.clientX - rect.left, e.clientY - rect.top, 20);
+  if (found) {
+    dragNode = found;
+    dragNode.fx = dragNode.x;
+    dragNode.fy = dragNode.y;
+    simulation.alphaTarget(0.3).restart();
+    canvas.setPointerCapture(e.pointerId);
+  }
+});
+canvas.addEventListener("pointermove", e => {
+  if (!dragNode) return;
+  const rect = canvas.getBoundingClientRect();
+  dragNode.fx = e.clientX - rect.left;
+  dragNode.fy = e.clientY - rect.top;
+});
+canvas.addEventListener("pointerup", () => {
+  if (dragNode) {
+    dragNode.fx = null;
+    dragNode.fy = null;
+    dragNode = null;
+    simulation.alphaTarget(0);
+  }
+});
+
+// ── Data Table ──────────────────────────────────────────────────
+const columns = [
+  { key: "name", label: "Name", type: "string" },
+  { key: "communityName", label: "Community", type: "string" },
+  { key: "value", label: "Value", type: "number", format: d3.format(",") },
+  { key: "connections", label: "Connections", type: "number", format: d3.format(",") }
+];
+
+// Augment data with connection count
+const tableData = nodes.map(n => ({
+  ...n,
+  connections: neighbors.get(n.id).size
+}));
+
+let sortKey = "name";
+let sortDir = 1; // 1 = ascending, -1 = descending
+
+const headerRow = d3.select("#table-header");
+headerRow.selectAll("th").data(columns).join("th")
+  .attr("scope", "col")
+  .attr("tabindex", 0)
+  .attr("role", "columnheader")
+  .attr("class", d => d.type === "number" ? "num" : null)
+  .attr("aria-sort", d => d.key === sortKey ? (sortDir === 1 ? "ascending" : "descending") : "none")
+  .text(d => d.label)
+  .on("click", (e, col) => sortByColumn(col))
+  .on("keydown", (e, col) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); sortByColumn(col); }
+  });
+
+function sortByColumn(col) {
+  if (sortKey === col.key) sortDir *= -1;
+  else { sortKey = col.key; sortDir = 1; }
+
+  headerRow.selectAll("th")
+    .attr("aria-sort", d => d.key === sortKey ? (sortDir === 1 ? "ascending" : "descending") : "none");
+
+  renderTable();
+  liveRegion.textContent = `Sorted by ${col.label}, ${sortDir === 1 ? "ascending" : "descending"}`;
+}
+
+function renderTable() {
+  const sorted = [...tableData].sort((a, b) => {
+    const col = columns.find(c => c.key === sortKey);
+    const cmp = col.type === "number"
+      ? d3.ascending(a[sortKey], b[sortKey])
+      : d3.ascending(String(a[sortKey]), String(b[sortKey]));
+    return cmp * sortDir;
+  });
+
+  const rows = d3.select("#table-body").selectAll("tr")
+    .data(sorted, d => d.id)
+    .join("tr")
+      .attr("role", "row")
+      .classed("selected", d => d.id === selectedId)
+      .classed("hovered", d => d.id === focusedId && canvasHasFocus)
+      .on("mouseenter", (e, d) => {
+        focusedId = d.id;
+        canvasHasFocus = false;
+        syncTableHighlight();
+        render();
+      })
+      .on("click", (e, d) => {
+        focusedId = d.id;
+        selectedId = selectedId === d.id ? null : d.id;
+        canvas.setAttribute("aria-activedescendant", `mirror-${d.id}`);
+        updateMirror();
+        announce(nodes[d.id], selectedId !== null ? "selected" : "deselected");
+        syncTableHighlight();
+        render();
+      });
+
+  rows.selectAll("td")
+    .data(d => columns.map(col => ({
+      value: col.format ? col.format(d[col.key]) : d[col.key],
+      type: col.type
+    })))
+    .join("td")
+      .attr("class", d => d.type === "number" ? "num" : null)
+      .text(d => d.value);
+}
+
+function syncTableHighlight() {
+  d3.select("#table-body").selectAll("tr")
+    .classed("selected", d => d.id === selectedId)
+    .classed("hovered", d => d.id === focusedId);
+
+  // Scroll selected row into view
+  if (selectedId !== null) {
+    const row = d3.select("#table-body").selectAll("tr")
+      .filter(d => d.id === selectedId).node();
+    if (row) row.scrollIntoView({ block: "nearest" });
+  }
+}
+
+renderTable();
+
+// ── Resize ──────────────────────────────────────────────────────
+const ro = new ResizeObserver(() => {
+  resize();
+  simulation.force("center", d3.forceCenter(width / 2, height / 2));
+  simulation.force("x", d3.forceX(width / 2).strength(0.05));
+  simulation.force("y", d3.forceY(height / 2).strength(0.05));
+  simulation.alpha(0.3).restart();
+});
+ro.observe(wrap);
+
+// Re-render on preference changes
+reducedMotion.addEventListener("change", render);
+highContrast.addEventListener("change", render);
+</script>
+</body>
+</html>

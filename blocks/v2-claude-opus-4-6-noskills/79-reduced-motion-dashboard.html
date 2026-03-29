@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reduced Motion Dashboard</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:system-ui,-apple-system,sans-serif;background:#0f1117;color:#c9d1d9;display:flex;flex-direction:column;min-height:100vh;padding:16px 24px}
+  h1{font-size:1.25rem;font-weight:600;margin-bottom:4px}
+  .subtitle{font-size:.8rem;color:#8b949e;margin-bottom:12px}
+  .controls{display:flex;align-items:center;gap:16px;margin-bottom:16px;flex-wrap:wrap}
+  .toggle{display:flex;align-items:center;gap:8px;font-size:.8rem;cursor:pointer;user-select:none}
+  .toggle input{appearance:none;width:36px;height:20px;background:#30363d;border-radius:10px;position:relative;cursor:pointer;transition:background .2s}
+  .toggle input:checked{background:#58a6ff}
+  .toggle input::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;background:#fff;border-radius:50%;transition:transform .2s}
+  .toggle input:checked::after{transform:translateX(16px)}
+  .motion-badge{font-size:.7rem;padding:2px 8px;border-radius:9999px;font-weight:600}
+  .motion-badge.animated{background:#1f3a1f;color:#7ee787}
+  .motion-badge.instant{background:#3a1f1f;color:#f97583}
+  .reset-btn{font-size:.75rem;padding:4px 12px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;cursor:pointer}
+  .reset-btn:hover{background:#30363d}
+  .panels{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;flex:1}
+  .panel{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:12px;display:flex;flex-direction:column}
+  .panel-title{font-size:.8rem;font-weight:600;margin-bottom:8px;color:#8b949e}
+  .panel svg{flex:1;width:100%;min-height:0}
+  .brush .selection{fill:#58a6ff;fill-opacity:.15;stroke:#58a6ff;stroke-width:1}
+  .bar-active{fill:#58a6ff}
+  .bar-muted{fill:#21262d}
+  .dot-active{fill:#58a6ff;opacity:.7}
+  .dot-muted{fill:#21262d;opacity:.3}
+  .line-active{fill:none;stroke:#58a6ff;stroke-width:1.5}
+  .line-muted{fill:none;stroke:#21262d;stroke-width:1.5}
+  .area-active{fill:#58a6ff;opacity:.15}
+  .area-muted{fill:#21262d;opacity:.05}
+  .axis text{fill:#8b949e;font-size:10px}
+  .axis line,.axis path{stroke:#30363d}
+  .count-label{font-size:.7rem;color:#8b949e;margin-top:4px;text-align:right}
+  @media(max-width:800px){.panels{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<h1>Crossfilter Dashboard</h1>
+<p class="subtitle">Brush any panel to filter across all three. Respects <code>prefers-reduced-motion</code>.</p>
+<div class="controls">
+  <label class="toggle">
+    <input type="checkbox" id="motionToggle">
+    <span>Override: force reduced motion</span>
+  </label>
+  <span class="motion-badge" id="motionBadge"></span>
+  <button class="reset-btn" id="resetBtn">Reset filters</button>
+</div>
+<div class="panels">
+  <div class="panel" id="panelAge">
+    <div class="panel-title">Age Distribution</div>
+    <svg></svg>
+    <div class="count-label" id="countAge"></div>
+  </div>
+  <div class="panel" id="panelIncome">
+    <div class="panel-title">Income vs Satisfaction</div>
+    <svg></svg>
+    <div class="count-label" id="countIncome"></div>
+  </div>
+  <div class="panel" id="panelTime">
+    <div class="panel-title">Signups Over Time</div>
+    <svg></svg>
+    <div class="count-label" id="countTime"></div>
+  </div>
+</div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Motion detection ---
+const mql = window.matchMedia("(prefers-reduced-motion: reduce)");
+const toggle = document.getElementById("motionToggle");
+const badge = document.getElementById("motionBadge");
+let forceReduced = false;
+
+function reducedMotion() { return forceReduced || mql.matches; }
+
+function updateBadge() {
+  const r = reducedMotion();
+  badge.textContent = r ? "instant" : "300ms transitions";
+  badge.className = "motion-badge " + (r ? "instant" : "animated");
+}
+toggle.addEventListener("change", () => { forceReduced = toggle.checked; updateBadge(); });
+mql.addEventListener("change", updateBadge);
+updateBadge();
+
+function dur() { return reducedMotion() ? 0 : 300; }
+
+// --- Synthetic data ---
+const N = 500;
+const rng = d3.randomLcg(42);
+const randNorm = d3.randomNormal.source(rng);
+const randUni = d3.randomUniform.source(rng);
+const ageGen = randNorm(38, 12);
+const incomeGen = randNorm(55000, 20000);
+const satGen = randUni(1, 10);
+const startDate = new Date(2023, 0, 1);
+const endDate = new Date(2025, 11, 31);
+const timeGen = randUni(startDate.getTime(), endDate.getTime());
+
+const data = d3.range(N).map(i => ({
+  id: i,
+  age: Math.max(18, Math.min(75, Math.round(ageGen()))),
+  income: Math.max(15000, Math.round(incomeGen())),
+  satisfaction: Math.round(satGen() * 10) / 10,
+  date: new Date(Math.round(timeGen()))
+}));
+
+// --- Crossfilter state ---
+const filters = { age: null, income: null, time: null };
+
+function passesFilter(d) {
+  if (filters.age && (d.age < filters.age[0] || d.age > filters.age[1])) return false;
+  if (filters.income) {
+    const [x0, y0, x1, y1] = filters.income;
+    if (d.income < x0 || d.income > x1 || d.satisfaction < y0 || d.satisfaction > y1) return false;
+  }
+  if (filters.time) {
+    const t = d.date.getTime();
+    if (t < filters.time[0] || t > filters.time[1]) return false;
+  }
+  return true;
+}
+
+function activeSet() { return new Set(data.filter(passesFilter).map(d => d.id)); }
+
+// --- Dimensions ---
+const margin = { top: 12, right: 12, bottom: 28, left: 40 };
+
+function dims(panel) {
+  const svg = panel.querySelector("svg");
+  const w = svg.clientWidth || 300;
+  const h = svg.clientHeight || 200;
+  return { w, h, iw: w - margin.left - margin.right, ih: h - margin.top - margin.bottom };
+}
+
+// --- Panel 1: Age histogram ---
+const ageSvg = d3.select("#panelAge svg");
+const ageBins = d3.bin().domain([18, 75]).thresholds(20);
+
+function drawAge() {
+  const { w, h, iw, ih } = dims(document.getElementById("panelAge"));
+  ageSvg.attr("viewBox", `0 0 ${w} ${h}`);
+
+  const bins = ageBins(data.map(d => d.age));
+  const act = activeSet();
+  const activeBins = ageBins(data.filter(d => act.has(d.id)).map(d => d.age));
+
+  const x = d3.scaleLinear().domain([18, 75]).range([margin.left, margin.left + iw]);
+  const y = d3.scaleLinear().domain([0, d3.max(bins, b => b.length)]).nice().range([margin.top + ih, margin.top]);
+
+  let g = ageSvg.selectAll("g.content").data([0]);
+  g = g.enter().append("g").attr("class", "content").merge(g);
+
+  // Background bars
+  const bgBars = g.selectAll(".bar-bg").data(bins, (d, i) => i);
+  bgBars.enter().append("rect").attr("class", "bar-bg")
+    .merge(bgBars)
+    .attr("x", d => x(d.x0) + 1).attr("width", d => Math.max(0, x(d.x1) - x(d.x0) - 2))
+    .attr("y", d => y(d.length)).attr("height", d => y(0) - y(d.length))
+    .attr("fill", "#21262d");
+
+  // Active bars
+  const actBars = g.selectAll(".bar-fg").data(activeBins, (d, i) => i);
+  const actEnter = actBars.enter().append("rect").attr("class", "bar-fg")
+    .attr("x", d => x(d.x0) + 1).attr("width", d => Math.max(0, x(d.x1) - x(d.x0) - 2))
+    .attr("y", y(0)).attr("height", 0).attr("fill", "#58a6ff");
+  actEnter.merge(actBars)
+    .transition().duration(dur())
+    .attr("x", d => x(d.x0) + 1).attr("width", d => Math.max(0, x(d.x1) - x(d.x0) - 2))
+    .attr("y", d => y(d.length)).attr("height", d => y(0) - y(d.length));
+
+  // Axes
+  let xAx = ageSvg.selectAll(".x-axis").data([0]);
+  xAx = xAx.enter().append("g").attr("class", "x-axis axis").merge(xAx);
+  xAx.attr("transform", `translate(0,${margin.top + ih})`).call(d3.axisBottom(x).ticks(6));
+
+  let yAx = ageSvg.selectAll(".y-axis").data([0]);
+  yAx = yAx.enter().append("g").attr("class", "y-axis axis").merge(yAx);
+  yAx.attr("transform", `translate(${margin.left},0)`).call(d3.axisLeft(y).ticks(5));
+
+  // Brush
+  let brushG = ageSvg.selectAll(".brush").data([0]);
+  brushG = brushG.enter().append("g").attr("class", "brush").merge(brushG);
+
+  const brush = d3.brushX()
+    .extent([[margin.left, margin.top], [margin.left + iw, margin.top + ih]])
+    .on("brush end", (e) => {
+      if (e.sourceEvent === undefined) return; // programmatic
+      if (e.selection) {
+        filters.age = [x.invert(e.selection[0]), x.invert(e.selection[1])];
+      } else {
+        filters.age = null;
+      }
+      updateAll("age");
+    });
+  brushG.call(brush);
+  if (filters.age) brushG.call(brush.move, filters.age.map(x));
+
+  document.getElementById("countAge").textContent = `${act.size} / ${N}`;
+}
+
+// --- Panel 2: Income vs Satisfaction scatter ---
+const incSvg = d3.select("#panelIncome svg");
+
+function drawIncome() {
+  const { w, h, iw, ih } = dims(document.getElementById("panelIncome"));
+  incSvg.attr("viewBox", `0 0 ${w} ${h}`);
+
+  const act = activeSet();
+  const x = d3.scaleLinear().domain([10000, 120000]).range([margin.left, margin.left + iw]);
+  const y = d3.scaleLinear().domain([1, 10]).range([margin.top + ih, margin.top]);
+
+  let g = incSvg.selectAll("g.content").data([0]);
+  g = g.enter().append("g").attr("class", "content").merge(g);
+
+  const dots = g.selectAll("circle").data(data, d => d.id);
+  const dotsEnter = dots.enter().append("circle").attr("r", 3)
+    .attr("cx", d => x(d.income)).attr("cy", d => y(d.satisfaction));
+  dotsEnter.merge(dots)
+    .transition().duration(dur())
+    .attr("fill", d => act.has(d.id) ? "#58a6ff" : "#21262d")
+    .attr("opacity", d => act.has(d.id) ? 0.7 : 0.3);
+
+  // Axes
+  let xAx = incSvg.selectAll(".x-axis").data([0]);
+  xAx = xAx.enter().append("g").attr("class", "x-axis axis").merge(xAx);
+  xAx.attr("transform", `translate(0,${margin.top + ih})`).call(d3.axisBottom(x).ticks(5).tickFormat(d => `${d / 1000}k`));
+
+  let yAx = incSvg.selectAll(".y-axis").data([0]);
+  yAx = yAx.enter().append("g").attr("class", "y-axis axis").merge(yAx);
+  yAx.attr("transform", `translate(${margin.left},0)`).call(d3.axisLeft(y).ticks(5));
+
+  // 2D brush
+  let brushG = incSvg.selectAll(".brush").data([0]);
+  brushG = brushG.enter().append("g").attr("class", "brush").merge(brushG);
+
+  const brush = d3.brush()
+    .extent([[margin.left, margin.top], [margin.left + iw, margin.top + ih]])
+    .on("brush end", (e) => {
+      if (e.sourceEvent === undefined) return;
+      if (e.selection) {
+        const [[sx0, sy0], [sx1, sy1]] = e.selection;
+        filters.income = [x.invert(sx0), y.invert(sy1), x.invert(sx1), y.invert(sy0)];
+      } else {
+        filters.income = null;
+      }
+      updateAll("income");
+    });
+  brushG.call(brush);
+
+  document.getElementById("countIncome").textContent = `${act.size} / ${N}`;
+}
+
+// --- Panel 3: Signups over time (area chart) ---
+const timeSvg = d3.select("#panelTime svg");
+
+function drawTime() {
+  const { w, h, iw, ih } = dims(document.getElementById("panelTime"));
+  timeSvg.attr("viewBox", `0 0 ${w} ${h}`);
+
+  const act = activeSet();
+
+  // Bin by month
+  const months = d3.timeMonths(d3.timeMonth.floor(startDate), d3.timeMonth.ceil(endDate));
+  const allCounts = months.map(m => {
+    const end = d3.timeMonth.offset(m, 1);
+    return { date: m, total: 0, active: 0 };
+  });
+  for (const d of data) {
+    const mi = d3.bisectRight(months, d.date) - 1;
+    if (mi >= 0 && mi < allCounts.length) {
+      allCounts[mi].total++;
+      if (act.has(d.id)) allCounts[mi].active++;
+    }
+  }
+
+  const x = d3.scaleTime().domain([months[0], months[months.length - 1]]).range([margin.left, margin.left + iw]);
+  const yMax = d3.max(allCounts, d => d.total);
+  const y = d3.scaleLinear().domain([0, yMax]).nice().range([margin.top + ih, margin.top]);
+
+  const areaGen = d3.area().x(d => x(d.date)).y0(y(0)).y1(d => y(d.val)).curve(d3.curveMonotoneX);
+  const lineGen = d3.line().x(d => x(d.date)).y(d => y(d.val)).curve(d3.curveMonotoneX);
+
+  let g = timeSvg.selectAll("g.content").data([0]);
+  g = g.enter().append("g").attr("class", "content").merge(g);
+
+  // Total area
+  const totalData = allCounts.map(d => ({ date: d.date, val: d.total }));
+  let totalArea = g.selectAll(".area-bg").data([totalData]);
+  totalArea.enter().append("path").attr("class", "area-bg").attr("fill", "#21262d").attr("opacity", 0.3)
+    .merge(totalArea).attr("d", areaGen);
+
+  // Active area
+  const activeData = allCounts.map(d => ({ date: d.date, val: d.active }));
+  let actArea = g.selectAll(".area-fg").data([activeData]);
+  actArea.enter().append("path").attr("class", "area-fg").attr("fill", "#58a6ff").attr("opacity", 0.2)
+    .merge(actArea).transition().duration(dur()).attr("d", areaGen);
+
+  // Active line
+  let actLine = g.selectAll(".line-fg").data([activeData]);
+  actLine.enter().append("path").attr("class", "line-fg").attr("fill", "none").attr("stroke", "#58a6ff").attr("stroke-width", 1.5)
+    .merge(actLine).transition().duration(dur()).attr("d", lineGen);
+
+  // Axes
+  let xAx = timeSvg.selectAll(".x-axis").data([0]);
+  xAx = xAx.enter().append("g").attr("class", "x-axis axis").merge(xAx);
+  xAx.attr("transform", `translate(0,${margin.top + ih})`).call(d3.axisBottom(x).ticks(6).tickFormat(d3.timeFormat("%b '%y")));
+
+  let yAx = timeSvg.selectAll(".y-axis").data([0]);
+  yAx = yAx.enter().append("g").attr("class", "y-axis axis").merge(yAx);
+  yAx.attr("transform", `translate(${margin.left},0)`).call(d3.axisLeft(y).ticks(5));
+
+  // Brush
+  let brushG = timeSvg.selectAll(".brush").data([0]);
+  brushG = brushG.enter().append("g").attr("class", "brush").merge(brushG);
+
+  const brush = d3.brushX()
+    .extent([[margin.left, margin.top], [margin.left + iw, margin.top + ih]])
+    .on("brush end", (e) => {
+      if (e.sourceEvent === undefined) return;
+      if (e.selection) {
+        filters.time = [x.invert(e.selection[0]).getTime(), x.invert(e.selection[1]).getTime()];
+      } else {
+        filters.time = null;
+      }
+      updateAll("time");
+    });
+  brushG.call(brush);
+  if (filters.time) brushG.call(brush.move, filters.time.map(t => x(new Date(t))));
+
+  document.getElementById("countTime").textContent = `${act.size} / ${N}`;
+}
+
+// --- Coordination ---
+function updateAll(source) {
+  if (source !== "age") drawAge();
+  if (source !== "income") drawIncome();
+  if (source !== "time") drawTime();
+}
+
+// Reset
+document.getElementById("resetBtn").addEventListener("click", () => {
+  filters.age = null;
+  filters.income = null;
+  filters.time = null;
+  ageSvg.selectAll(".brush").call(d3.brushX().extent([[0,0],[1,1]]).move, null);
+  incSvg.selectAll(".brush").call(d3.brush().extent([[0,0],[1,1]]).move, null);
+  timeSvg.selectAll(".brush").call(d3.brushX().extent([[0,0],[1,1]]).move, null);
+  drawAge();
+  drawIncome();
+  drawTime();
+});
+
+// Initial draw
+drawAge();
+drawIncome();
+drawTime();
+
+// Resize
+const ro = new ResizeObserver(() => { drawAge(); drawIncome(); drawTime(); });
+ro.observe(document.querySelector(".panels"));
+</script>
+</body>
+</html>

@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Accessible Hive Plot</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; color: #e0e0e0; font-family: system-ui, sans-serif; display: flex; flex-direction: column; align-items: center; min-height: 100vh; padding: 1rem; }
+  h1 { font-size: 1.3rem; margin-bottom: 0.3rem; color: #e8e8f0; }
+  .subtitle { font-size: 0.85rem; color: #888; margin-bottom: 0.8rem; }
+  .instructions { font-size: 0.75rem; color: #777; margin-bottom: 0.6rem; text-align: center; line-height: 1.4; }
+  .instructions kbd { background: #2a2a4a; padding: 1px 5px; border-radius: 3px; border: 1px solid #444; font-family: inherit; }
+  svg { display: block; }
+  .axis-line { stroke: #445; stroke-width: 1.5; }
+  .axis-label { fill: #aab; font-size: 13px; font-weight: 600; text-anchor: middle; }
+  .edge { fill: none; stroke-opacity: 0.25; stroke-width: 1.2; }
+  .edge.highlighted { stroke-opacity: 0.7; stroke-width: 2; }
+  .node { cursor: pointer; }
+  .node circle { stroke: #1a1a2e; stroke-width: 1.5; }
+  .node circle.focused { stroke: #4dabf7; stroke-width: 2.5; stroke-dasharray: 4 3; }
+  .node-label { fill: #ccc; font-size: 10px; pointer-events: none; }
+  .legend { font-size: 11px; }
+  .legend text { fill: #aab; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+  a.skip-link { position: absolute; left: -9999px; color: #4dabf7; background: #1a1a2e; padding: 4px 8px; z-index: 10; }
+  a.skip-link:focus { left: 10px; top: 10px; }
+</style>
+</head>
+<body>
+
+<a href="#after-viz" class="skip-link">Skip visualization</a>
+<h1>Accessible Hive Plot</h1>
+<p class="subtitle">80 nodes across 3 axes — source, connector, sink</p>
+<p class="instructions">
+  <kbd>Tab</kbd> to focus chart &middot;
+  <kbd>↑</kbd><kbd>↓</kbd> navigate along axis &middot;
+  <kbd>←</kbd><kbd>→</kbd> switch axis &middot;
+  <kbd>Home</kbd>/<kbd>End</kbd> first/last on axis &middot;
+  <kbd>Esc</kbd> exit
+</p>
+
+<div id="chart-container"></div>
+<div id="live-region" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+<div id="after-viz" tabindex="-1"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data ---
+const rng = d3.randomLcg(42);
+const randInt = (min, max) => Math.floor(rng() * (max - min + 1)) + min;
+const randFloat = rng;
+
+const axisNames = ["source", "connector", "sink"];
+const axisColors = { source: "#ff6b6b", connector: "#51cf66", sink: "#4dabf7" };
+
+// Generate 80 nodes: ~27 per axis
+const nodes = [];
+const perAxis = [27, 26, 27];
+let id = 0;
+for (let ai = 0; ai < 3; ai++) {
+  for (let i = 0; i < perAxis[ai]; i++) {
+    nodes.push({
+      id: id++,
+      axis: ai,
+      axisName: axisNames[ai],
+      value: 0.05 + randFloat() * 0.9, // position along axis [0.05, 0.95]
+      degree: 0,
+      label: `${axisNames[ai][0].toUpperCase()}${i + 1}`
+    });
+  }
+}
+
+// Sort nodes within each axis by value
+nodes.sort((a, b) => a.axis - b.axis || a.value - b.value);
+// Re-index within axis
+const axisBuckets = [[], [], []];
+nodes.forEach(n => axisBuckets[n.axis].push(n));
+
+// Generate ~120 edges between different axes
+const edges = [];
+const edgeSet = new Set();
+function addEdge(s, t) {
+  const key = s.id < t.id ? `${s.id}-${t.id}` : `${t.id}-${s.id}`;
+  if (edgeSet.has(key) || s.axis === t.axis) return false;
+  edgeSet.add(key);
+  edges.push({ source: s, target: t });
+  s.degree++;
+  t.degree++;
+  return true;
+}
+
+// source→connector, connector→sink, some source→sink
+const pairs = [[0, 1], [1, 2], [0, 2]];
+const pairWeights = [50, 50, 20]; // target edge counts
+
+for (let pi = 0; pi < pairs.length; pi++) {
+  const [ai, bi] = pairs[pi];
+  let count = 0;
+  let attempts = 0;
+  while (count < pairWeights[pi] && attempts < 500) {
+    const s = axisBuckets[ai][randInt(0, axisBuckets[ai].length - 1)];
+    const t = axisBuckets[bi][randInt(0, axisBuckets[bi].length - 1)];
+    if (addEdge(s, t)) count++;
+    attempts++;
+  }
+}
+
+// --- Layout ---
+const width = 700, height = 700;
+const cx = width / 2, cy = height / 2;
+const innerRadius = 50, outerRadius = 300;
+
+// 3 axes at 120° apart, starting from top
+const axisAngles = [
+  -Math.PI / 2,             // top (source)
+  -Math.PI / 2 + 2 * Math.PI / 3, // bottom-right (connector)
+  -Math.PI / 2 + 4 * Math.PI / 3  // bottom-left (sink)
+];
+
+const radiusScale = d3.scaleLinear([0, 1], [innerRadius, outerRadius]);
+
+function nodeXY(n) {
+  const r = radiusScale(n.value);
+  const angle = axisAngles[n.axis];
+  return { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) };
+}
+
+// Assign positions
+nodes.forEach(n => {
+  const pos = nodeXY(n);
+  n.x = pos.x;
+  n.y = pos.y;
+});
+
+// Quadratic Bezier edge path through a control point near center
+function edgePath(e) {
+  const s = e.source, t = e.target;
+  // Control point: pull toward center, offset perpendicular
+  const mx = (s.x + t.x) / 2, my = (s.y + t.y) / 2;
+  // Blend toward center for curvature
+  const blend = 0.45;
+  const cpx = mx * (1 - blend) + cx * blend;
+  const cpy = my * (1 - blend) + cy * blend;
+  return `M${s.x},${s.y} Q${cpx},${cpy} ${t.x},${t.y}`;
+}
+
+// --- Render ---
+const svg = d3.select("#chart-container")
+  .append("svg")
+  .attr("width", width)
+  .attr("height", height)
+  .attr("viewBox", `0 0 ${width} ${height}`)
+  .attr("role", "application")
+  .attr("aria-label", "Hive plot with 80 nodes on 3 axes and approximately 120 edges. Use arrow keys to navigate.")
+  .attr("tabindex", "0");
+
+// Axis lines
+const axisG = svg.append("g").attr("class", "axes");
+axisAngles.forEach((angle, i) => {
+  const x1 = cx + innerRadius * Math.cos(angle);
+  const y1 = cy + innerRadius * Math.sin(angle);
+  const x2 = cx + outerRadius * Math.cos(angle);
+  const y2 = cy + outerRadius * Math.sin(angle);
+  axisG.append("line")
+    .attr("class", "axis-line")
+    .attr("x1", x1).attr("y1", y1)
+    .attr("x2", x2).attr("y2", y2);
+
+  // Axis label
+  const lx = cx + (outerRadius + 24) * Math.cos(angle);
+  const ly = cy + (outerRadius + 24) * Math.sin(angle);
+  axisG.append("text")
+    .attr("class", "axis-label")
+    .attr("x", lx).attr("y", ly)
+    .attr("dy", "0.35em")
+    .text(axisNames[i]);
+});
+
+// Edges
+const edgeG = svg.append("g").attr("class", "edges");
+const edgePaths = edgeG.selectAll("path")
+  .data(edges)
+  .join("path")
+  .attr("class", "edge")
+  .attr("d", edgePath)
+  .attr("stroke", d => {
+    // Color by source axis
+    return axisColors[d.source.axisName];
+  });
+
+// Nodes
+const nodeG = svg.append("g").attr("class", "nodes");
+const nodeGroups = nodeG.selectAll("g.node")
+  .data(nodes, d => d.id)
+  .join("g")
+  .attr("class", "node")
+  .attr("transform", d => `translate(${d.x},${d.y})`);
+
+const sizeScale = d3.scaleSqrt([0, d3.max(nodes, d => d.degree)], [3, 8]);
+
+nodeGroups.append("circle")
+  .attr("r", d => sizeScale(d.degree))
+  .attr("fill", d => axisColors[d.axisName]);
+
+// --- Hidden DOM mirror for screen readers ---
+const mirror = document.createElement("div");
+mirror.id = "hive-mirror";
+mirror.setAttribute("role", "group");
+mirror.setAttribute("aria-label", "Hive plot nodes");
+mirror.style.cssText = "position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;";
+
+for (let ai = 0; ai < 3; ai++) {
+  const axisDiv = document.createElement("div");
+  axisDiv.setAttribute("role", "group");
+  axisDiv.setAttribute("aria-label", `${axisNames[ai]} axis, ${axisBuckets[ai].length} nodes`);
+  axisBuckets[ai].forEach(n => {
+    const el = document.createElement("div");
+    el.id = `mirror-${n.id}`;
+    el.setAttribute("role", "option");
+    el.setAttribute("aria-label", describeNode(n));
+    axisDiv.appendChild(el);
+  });
+  mirror.appendChild(axisDiv);
+}
+document.getElementById("chart-container").appendChild(mirror);
+
+// --- Keyboard navigation ---
+const liveRegion = document.getElementById("live-region");
+let focusedAxis = 0;
+let focusedIndex = 0; // index within axis
+let hasFocus = false;
+
+function getFocusedNode() {
+  return axisBuckets[focusedAxis][focusedIndex];
+}
+
+function describeNode(n) {
+  const conns = edges.filter(e => e.source === n || e.target === n);
+  const connAxes = new Set(conns.map(e => e.source === n ? e.target.axisName : e.source.axisName));
+  return `${n.label}, ${n.axisName} axis, degree ${n.degree}, connects to ${Array.from(connAxes).join(" and ") || "none"}`;
+}
+
+let announceTimer;
+function announce(text) {
+  clearTimeout(announceTimer);
+  announceTimer = setTimeout(() => {
+    liveRegion.textContent = text;
+  }, 150);
+}
+
+function updateFocus() {
+  const node = getFocusedNode();
+
+  // Update visual focus ring
+  nodeGroups.select("circle").classed("focused", d => d === node);
+
+  // Highlight connected edges
+  edgePaths
+    .classed("highlighted", d => d.source === node || d.target === node)
+    .attr("stroke-opacity", d => (d.source === node || d.target === node) ? 0.7 : 0.15);
+
+  // Update ARIA
+  svg.attr("aria-activedescendant", `mirror-${node.id}`);
+
+  // Announce
+  announce(`${node.label}. ${node.axisName} axis, position ${focusedIndex + 1} of ${axisBuckets[focusedAxis].length}. Degree ${node.degree}.`);
+}
+
+function clearFocus() {
+  hasFocus = false;
+  nodeGroups.select("circle").classed("focused", false);
+  edgePaths.classed("highlighted", false).attr("stroke-opacity", 0.25);
+  svg.attr("aria-activedescendant", null);
+}
+
+svg.on("focus", () => {
+  hasFocus = true;
+  updateFocus();
+});
+
+svg.on("blur", () => {
+  clearFocus();
+});
+
+svg.on("keydown", (e) => {
+  if (!hasFocus) return;
+
+  const bucket = axisBuckets[focusedAxis];
+  switch (e.key) {
+    case "ArrowUp":
+      if (focusedIndex > 0) focusedIndex--;
+      break;
+    case "ArrowDown":
+      if (focusedIndex < bucket.length - 1) focusedIndex++;
+      break;
+    case "ArrowLeft":
+      focusedAxis = (focusedAxis + 2) % 3; // previous axis
+      focusedIndex = Math.min(focusedIndex, axisBuckets[focusedAxis].length - 1);
+      break;
+    case "ArrowRight":
+      focusedAxis = (focusedAxis + 1) % 3; // next axis
+      focusedIndex = Math.min(focusedIndex, axisBuckets[focusedAxis].length - 1);
+      break;
+    case "Home":
+      focusedIndex = 0;
+      break;
+    case "End":
+      focusedIndex = bucket.length - 1;
+      break;
+    case "Escape":
+      clearFocus();
+      svg.node().blur();
+      return;
+    default:
+      return; // let unhandled keys pass through
+  }
+  e.preventDefault();
+  updateFocus();
+});
+
+// Click to focus a node
+svg.on("click", (event) => {
+  const [mx, my] = d3.pointer(event);
+  let closest = null, closestDist = Infinity;
+  nodes.forEach(n => {
+    const dist = Math.hypot(n.x - mx, n.y - my);
+    if (dist < closestDist && dist < 20) {
+      closestDist = dist;
+      closest = n;
+    }
+  });
+  if (closest) {
+    focusedAxis = closest.axis;
+    focusedIndex = axisBuckets[focusedAxis].indexOf(closest);
+    hasFocus = true;
+    svg.node().focus();
+    updateFocus();
+  }
+});
+
+// Reduced motion: disable animated focus dash
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+if (!reducedMotion.matches) {
+  // Animate dash offset for focused ring
+  (function animateDash() {
+    svg.selectAll("circle.focused")
+      .attr("stroke-dashoffset", -performance.now() / 50);
+    requestAnimationFrame(animateDash);
+  })();
+}
+
+// Legend
+const legendG = svg.append("g").attr("class", "legend").attr("transform", `translate(16, ${height - 80})`);
+axisNames.forEach((name, i) => {
+  const y = i * 22;
+  legendG.append("circle").attr("cx", 6).attr("cy", y).attr("r", 5).attr("fill", axisColors[name]);
+  legendG.append("text").attr("x", 18).attr("y", y).attr("dy", "0.35em").text(`${name} (${axisBuckets[i].length} nodes)`);
+});
+
+// Stats text
+svg.append("text")
+  .attr("x", width - 16).attr("y", height - 16)
+  .attr("text-anchor", "end")
+  .attr("fill", "#666").attr("font-size", 11)
+  .text(`${nodes.length} nodes · ${edges.length} edges`);
+</script>
+</body>
+</html>

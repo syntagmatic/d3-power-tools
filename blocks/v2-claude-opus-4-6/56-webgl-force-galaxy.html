@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebGL Force Galaxy — 50K Nodes</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #0a0a1a; overflow: hidden; font-family: system-ui, sans-serif; }
+  #container { position: relative; width: 100vw; height: 100vh; }
+  canvas, svg { position: absolute; top: 0; left: 0; }
+  svg { pointer-events: all; }
+  canvas { pointer-events: none; }
+  #controls {
+    position: absolute; top: 16px; left: 16px; z-index: 10;
+    display: flex; gap: 10px; align-items: center;
+  }
+  button {
+    background: rgba(255,255,255,0.12); color: #ddd; border: 1px solid rgba(255,255,255,0.2);
+    padding: 6px 16px; border-radius: 4px; cursor: pointer; font-size: 13px;
+    transition: background 0.15s;
+  }
+  button:hover { background: rgba(255,255,255,0.22); }
+  #stats {
+    position: absolute; top: 16px; right: 16px; z-index: 10;
+    color: rgba(255,255,255,0.5); font-size: 12px; font-family: monospace;
+  }
+  #tooltip {
+    position: absolute; pointer-events: none; z-index: 20;
+    background: rgba(10,10,26,0.92); color: #eee; padding: 6px 10px;
+    border-radius: 4px; font-size: 12px; border: 1px solid rgba(255,255,255,0.15);
+    display: none; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="glCanvas"></canvas>
+  <svg id="overlay"></svg>
+  <div id="controls">
+    <button id="reheat">Reheat</button>
+  </div>
+  <div id="stats"></div>
+  <div id="tooltip"></div>
+</div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// ── Dimensions ──
+const width = window.innerWidth, height = window.innerHeight;
+const dpr = window.devicePixelRatio || 1;
+
+// ── Synthetic data: 50K nodes, 8 communities, ~80K edges ──
+const N = 50000, K = 8;
+const communitySize = Math.floor(N / K);
+const palette = [
+  [0.33, 0.69, 0.94], [0.94, 0.39, 0.41], [0.47, 0.87, 0.47],
+  [0.98, 0.73, 0.30], [0.74, 0.50, 0.89], [0.97, 0.56, 0.69],
+  [0.40, 0.85, 0.82], [0.85, 0.82, 0.40]
+];
+
+const nodes = new Array(N);
+for (let i = 0; i < N; i++) {
+  const community = Math.min(Math.floor(i / communitySize), K - 1);
+  nodes[i] = { index: i, community, x: 0, y: 0, vx: 0, vy: 0 };
+}
+
+// Preferential attachment within communities + cross-community links
+const rng = d3.randomLcg(42);
+const rand = d3.randomUniform.source(rng)(0, 1);
+const links = [];
+const targetEdges = 80000;
+const intraRatio = 0.88;
+const intraTarget = Math.floor(targetEdges * intraRatio);
+const interTarget = targetEdges - intraTarget;
+
+// Intra-community edges
+for (let c = 0; c < K; c++) {
+  const start = c * communitySize;
+  const end = c === K - 1 ? N : (c + 1) * communitySize;
+  const size = end - start;
+  const edgesPerCommunity = Math.floor(intraTarget / K);
+  for (let e = 0; e < edgesPerCommunity; e++) {
+    const s = start + Math.floor(rand() * size);
+    let t = start + Math.floor(rand() * size);
+    if (s !== t) links.push({ source: s, target: t });
+  }
+}
+
+// Inter-community edges
+for (let e = 0; e < interTarget; e++) {
+  const s = Math.floor(rand() * N);
+  let t = Math.floor(rand() * N);
+  if (nodes[s].community !== nodes[t].community) {
+    links.push({ source: s, target: t });
+  }
+}
+
+console.log(`Nodes: ${N}, Edges: ${links.length}`);
+
+// ── Force simulation ──
+const simulation = d3.forceSimulation(nodes)
+  .force("charge", d3.forceManyBody().strength(-0.4).theta(1.5).distanceMax(200))
+  .force("link", d3.forceLink(links).distance(8).strength(0.02).iterations(1))
+  .force("center", d3.forceCenter(width / 2, height / 2))
+  .force("collide", d3.forceCollide(1.5).iterations(1))
+  .alphaDecay(0.01)
+  .velocityDecay(0.5)
+  .stop();
+
+// ── WebGL2 setup ──
+const canvas = document.getElementById("glCanvas");
+canvas.width = width * dpr;
+canvas.height = height * dpr;
+canvas.style.width = width + "px";
+canvas.style.height = height + "px";
+
+const gl = canvas.getContext("webgl2", { antialias: false, alpha: false });
+if (!gl) { document.body.innerHTML = "<h1 style='color:white;padding:2em'>WebGL2 required</h1>"; throw new Error("No WebGL2"); }
+
+gl.viewport(0, 0, canvas.width, canvas.height);
+gl.clearColor(0.039, 0.039, 0.102, 1.0);
+gl.enable(gl.BLEND);
+gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+// ── Shaders ──
+const vsSource = `#version 300 es
+  in vec2 a_quad;
+  in vec2 a_offset;
+  in vec4 a_color;
+  uniform vec2 u_resolution;
+  uniform float u_dpr;
+  uniform float u_radius;
+  out vec4 v_color;
+  out vec2 v_uv;
+
+  void main() {
+    float r = u_radius * u_dpr;
+    vec2 pos = a_quad * r * 2.0 + a_offset * u_dpr;
+    vec2 clip = (pos / (u_resolution * u_dpr)) * 2.0 - 1.0;
+    clip.y = -clip.y;
+    gl_Position = vec4(clip, 0.0, 1.0);
+    v_color = a_color;
+    v_uv = a_quad;
+  }
+`;
+
+const fsSource = `#version 300 es
+  precision mediump float;
+  in vec4 v_color;
+  in vec2 v_uv;
+  out vec4 fragColor;
+
+  void main() {
+    float dist = length(v_uv);
+    if (dist > 0.5) discard;
+    float alpha = v_color.a * (1.0 - smoothstep(0.38, 0.5, dist));
+    fragColor = vec4(v_color.rgb, alpha);
+  }
+`;
+
+function compileShader(gl, type, source) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, source);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    console.error(gl.getShaderInfoLog(s));
+    gl.deleteShader(s);
+    return null;
+  }
+  return s;
+}
+
+const vs = compileShader(gl, gl.VERTEX_SHADER, vsSource);
+const fs = compileShader(gl, gl.FRAGMENT_SHADER, fsSource);
+const program = gl.createProgram();
+gl.attachShader(program, vs);
+gl.attachShader(program, fs);
+gl.linkProgram(program);
+if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+  console.error(gl.getProgramInfoLog(program));
+}
+gl.useProgram(program);
+
+// Uniforms
+const u_resolution = gl.getUniformLocation(program, "u_resolution");
+const u_dpr = gl.getUniformLocation(program, "u_dpr");
+const u_radius = gl.getUniformLocation(program, "u_radius");
+gl.uniform2f(u_resolution, width, height);
+gl.uniform1f(u_dpr, dpr);
+gl.uniform1f(u_radius, 1.8);
+
+// ── Buffers ──
+const quadVerts = new Float32Array([
+  -0.5, -0.5, 0.5, -0.5, 0.5, 0.5,
+  -0.5, -0.5, 0.5, 0.5, -0.5, 0.5
+]);
+
+// Position buffer (dynamic — updated each tick)
+const offsets = new Float32Array(N * 2);
+// Color buffer (static)
+const colors = new Float32Array(N * 4);
+for (let i = 0; i < N; i++) {
+  const c = palette[nodes[i].community];
+  colors[i * 4] = c[0];
+  colors[i * 4 + 1] = c[1];
+  colors[i * 4 + 2] = c[2];
+  colors[i * 4 + 3] = 0.7;
+}
+
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+
+// Quad template
+const quadBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+gl.bufferData(gl.ARRAY_BUFFER, quadVerts, gl.STATIC_DRAW);
+const aQuad = gl.getAttribLocation(program, "a_quad");
+gl.enableVertexAttribArray(aQuad);
+gl.vertexAttribPointer(aQuad, 2, gl.FLOAT, false, 0, 0);
+
+// Per-instance offset
+const offsetBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, offsetBuf);
+gl.bufferData(gl.ARRAY_BUFFER, offsets, gl.DYNAMIC_DRAW);
+const aOffset = gl.getAttribLocation(program, "a_offset");
+gl.enableVertexAttribArray(aOffset);
+gl.vertexAttribPointer(aOffset, 2, gl.FLOAT, false, 0, 0);
+gl.vertexAttribDivisor(aOffset, 1);
+
+// Per-instance color
+const colorBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, colorBuf);
+gl.bufferData(gl.ARRAY_BUFFER, colors, gl.STATIC_DRAW);
+const aColor = gl.getAttribLocation(program, "a_color");
+gl.enableVertexAttribArray(aColor);
+gl.vertexAttribPointer(aColor, 4, gl.FLOAT, false, 0, 0);
+gl.vertexAttribDivisor(aColor, 1);
+
+gl.bindVertexArray(null);
+
+// ── SVG overlay for hover ──
+const svg = d3.select("#overlay")
+  .attr("width", width)
+  .attr("height", height);
+
+const hoverCircle = svg.append("circle")
+  .attr("r", 8)
+  .attr("fill", "none")
+  .attr("stroke", "#fff")
+  .attr("stroke-width", 1.5)
+  .style("display", "none");
+
+// ── Quadtree for hover ──
+let quadtree = d3.quadtree()
+  .x(d => d.x)
+  .y(d => d.y);
+
+const tooltip = document.getElementById("tooltip");
+const statsEl = document.getElementById("stats");
+
+svg.on("pointermove", function(event) {
+  const [mx, my] = d3.pointer(event);
+  const found = quadtree.find(mx, my, 15);
+  if (found) {
+    hoverCircle
+      .attr("cx", found.x)
+      .attr("cy", found.y)
+      .style("display", null);
+    tooltip.style.display = "block";
+    tooltip.style.left = (found.x + 14) + "px";
+    tooltip.style.top = (found.y - 14) + "px";
+    tooltip.textContent = `Node ${found.index} · Community ${found.community}`;
+  } else {
+    hoverCircle.style("display", "none");
+    tooltip.style.display = "none";
+  }
+});
+
+svg.on("pointerleave", () => {
+  hoverCircle.style("display", "none");
+  tooltip.style.display = "none";
+});
+
+// ── Draw ──
+function draw() {
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.bindVertexArray(vao);
+  gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, N);
+  gl.bindVertexArray(null);
+}
+
+// ── Animation loop ──
+let tickCount = 0;
+let lastTime = performance.now();
+let fps = 0;
+
+function animate(now) {
+  // Batch 3 ticks per frame for faster convergence
+  const ticks = simulation.alpha() > 0.05 ? 3 : 1;
+  for (let t = 0; t < ticks; t++) {
+    simulation.tick();
+    tickCount++;
+  }
+
+  // Upload positions via bufferSubData
+  for (let i = 0; i < N; i++) {
+    offsets[i * 2] = nodes[i].x;
+    offsets[i * 2 + 1] = nodes[i].y;
+  }
+  gl.bindBuffer(gl.ARRAY_BUFFER, offsetBuf);
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, offsets);
+
+  draw();
+
+  // Rebuild quadtree every few frames (not every frame — expensive for 50K)
+  if (tickCount % 6 === 0) {
+    quadtree = d3.quadtree().x(d => d.x).y(d => d.y).addAll(nodes);
+  }
+
+  // FPS counter
+  const dt = now - lastTime;
+  if (dt > 500) {
+    fps = Math.round(1000 / dt * ticks);
+    lastTime = now;
+  }
+  const alpha = simulation.alpha();
+  statsEl.textContent = `α ${alpha.toFixed(4)} · ${N.toLocaleString()} nodes · ${links.length.toLocaleString()} edges · tick ${tickCount}`;
+
+  if (alpha > simulation.alphaMin()) {
+    requestAnimationFrame(animate);
+  } else {
+    // Final quadtree rebuild
+    quadtree = d3.quadtree().x(d => d.x).y(d => d.y).addAll(nodes);
+    statsEl.textContent = `settled · ${N.toLocaleString()} nodes · ${links.length.toLocaleString()} edges · ${tickCount} ticks`;
+  }
+}
+
+// Start
+requestAnimationFrame(animate);
+
+// ── Reheat button ──
+document.getElementById("reheat").addEventListener("click", () => {
+  simulation.alpha(1).restart();
+  simulation.stop(); // we drive ticks manually
+  tickCount = 0;
+  requestAnimationFrame(animate);
+});
+
+// ── Resize ──
+window.addEventListener("resize", () => {
+  const w = window.innerWidth, h = window.innerHeight;
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  canvas.style.width = w + "px";
+  canvas.style.height = h + "px";
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.uniform2f(u_resolution, w, h);
+  svg.attr("width", w).attr("height", h);
+  simulation.force("center", d3.forceCenter(w / 2, h / 2));
+  draw();
+});
+</script>
+</body>
+</html>

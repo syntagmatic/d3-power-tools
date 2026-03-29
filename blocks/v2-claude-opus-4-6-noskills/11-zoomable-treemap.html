@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zoomable Treemap — Synthetic File System</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #1a1a2e; color: #eee; }
+  #breadcrumb {
+    display: flex; align-items: center; gap: 4px;
+    padding: 10px 16px; font-size: 13px; background: #16213e;
+    border-bottom: 1px solid #0f3460; min-height: 38px; flex-wrap: wrap;
+  }
+  #breadcrumb span { color: #556; }
+  #breadcrumb button {
+    background: none; border: none; color: #a8b2d1; cursor: pointer;
+    font-size: 13px; padding: 2px 6px; border-radius: 3px;
+  }
+  #breadcrumb button:hover { background: #0f3460; color: #e6f1ff; }
+  #breadcrumb button.current { color: #64ffda; cursor: default; }
+  #chart { width: 100%; height: calc(100vh - 38px); }
+  svg { display: block; }
+</style>
+</head>
+<body>
+<div id="breadcrumb"></div>
+<div id="chart"></div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data generation ---
+const rng = d3.randomLcg(42);
+const randLog = () => Math.exp(rng() * 8 + 4); // ~55 to ~162k bytes
+
+const extensions = {
+  src:    [".js",".ts",".jsx",".tsx",".vue",".svelte"],
+  lib:    [".js",".ts",".mjs",".cjs"],
+  docs:   [".md",".txt",".rst",".html"],
+  assets: [".png",".jpg",".svg",".gif",".webp",".ico"],
+  config: [".json",".yaml",".toml",".env",".ini"],
+  tests:  [".test.js",".spec.ts",".test.ts",".spec.js"],
+  data:   [".csv",".json",".parquet",".ndjson"],
+  scripts:[".sh",".py",".rb",".ps1"]
+};
+
+const pick = (arr) => arr[Math.floor(rng() * arr.length)];
+
+const dirs = Object.keys(extensions);
+const subdirsPool = [
+  "core","utils","helpers","models","views","components","hooks",
+  "api","routes","middleware","services","handlers","adapters",
+  "fixtures","snapshots","mocks","pages","layouts","stores","types"
+];
+
+function generateTree() {
+  const root = { name: "project", children: [] };
+  for (const dir of dirs) {
+    const exts = extensions[dir];
+    const dirNode = { name: dir, children: [] };
+    const nSub = 2 + Math.floor(rng() * 4); // 2-5 subdirs
+    const usedSubs = new Set();
+    for (let s = 0; s < nSub; s++) {
+      let sub;
+      do { sub = pick(subdirsPool); } while (usedSubs.has(sub));
+      usedSubs.add(sub);
+      const subNode = { name: sub, children: [] };
+      const nFiles = 4 + Math.floor(rng() * 12); // 4-15 files per subdir
+      for (let f = 0; f < nFiles; f++) {
+        const baseName = pick(["index","main","app","handler","util","helper","config",
+          "setup","init","render","parse","transform","validate","process","build",
+          "fetch","store","cache","queue","worker","stream","pipe","filter","map",
+          "reduce","sort","merge","diff","patch","test","spec","mock","fixture",
+          "schema","model","view","route","service","adapter","hook","context"]);
+        subNode.children.push({
+          name: baseName + (f > 0 ? f : "") + pick(exts),
+          value: Math.round(randLog())
+        });
+      }
+      dirNode.children.push(subNode);
+    }
+    root.children.push(dirNode);
+  }
+  return root;
+}
+
+const data = generateTree();
+
+// --- Layout ---
+const container = document.getElementById("chart");
+const width = container.clientWidth;
+const height = container.clientHeight;
+
+const color = d3.scaleOrdinal()
+  .domain(dirs)
+  .range(["#e45858","#f5a623","#50e3c2","#4a90d9","#b8e986",
+          "#bd10e0","#f8e71c","#7ed6df"]);
+
+const hierarchy = d3.hierarchy(data)
+  .sum(d => d.value)
+  .sort((a, b) => b.value - a.value);
+
+const treemap = d3.treemap()
+  .size([width, height])
+  .paddingTop(20)
+  .paddingRight(2)
+  .paddingBottom(2)
+  .paddingLeft(2)
+  .paddingInner(1)
+  .round(true);
+
+treemap(hierarchy);
+
+const svg = d3.select("#chart").append("svg")
+  .attr("width", width)
+  .attr("height", height)
+  .attr("viewBox", [0, 0, width, height])
+  .style("font", "10px system-ui, sans-serif");
+
+// x/y scales for zooming
+const x = d3.scaleLinear().rangeRound([0, width]);
+const y = d3.scaleLinear().rangeRound([0, height]);
+
+let currentRoot = hierarchy;
+const fmt = d3.format(",");
+
+function topDir(d) {
+  let n = d;
+  while (n.depth > 1) n = n.parent;
+  return n;
+}
+
+function render(group, root) {
+  const nodes = root.descendants();
+
+  const node = group.selectAll("g")
+    .data(nodes, d => d.data.name + d.depth + (d.parent ? d.parent.data.name : ""))
+    .join("g");
+
+  node.attr("transform", d => `translate(${x(d.x0)},${y(d.y0)})`);
+
+  // Rectangles
+  node.selectAll("rect").data(d => [d]).join("rect")
+    .attr("width", d => Math.max(0, x(d.x1) - x(d.x0)))
+    .attr("height", d => Math.max(0, y(d.y1) - y(d.y0)))
+    .attr("fill", d => {
+      if (d === root) return "#16213e";
+      const top = topDir(d);
+      const c = d3.color(color(top.data.name));
+      if (d.children) {
+        c.opacity = 0.35 - d.depth * 0.05;
+        return c + "";
+      }
+      c.opacity = 0.7 + (d.value / hierarchy.value) * 2;
+      return c + "";
+    })
+    .attr("stroke", d => d.children ? "#0f3460" : "none")
+    .attr("stroke-width", d => d === root ? 0 : 0.5)
+    .attr("rx", 1)
+    .style("cursor", d => d.children ? "pointer" : "default")
+    .on("click", (event, d) => {
+      if (d.children) zoomTo(d);
+    });
+
+  // Directory labels (top-left, inside padding)
+  node.selectAll("text.dir-label").data(d => d.children && d !== root ? [d] : []).join("text")
+    .attr("class", "dir-label")
+    .attr("x", 4)
+    .attr("y", 14)
+    .attr("fill", "#ccd6f6")
+    .attr("font-size", "11px")
+    .attr("font-weight", 600)
+    .text(d => {
+      const w = x(d.x1) - x(d.x0);
+      return w > 40 ? d.data.name : "";
+    });
+
+  // Leaf labels
+  node.selectAll("text.leaf-label").data(d => !d.children ? [d] : []).join("text")
+    .attr("class", "leaf-label")
+    .attr("x", 3)
+    .attr("y", 12)
+    .attr("fill", "#fff")
+    .attr("fill-opacity", d => {
+      const w = x(d.x1) - x(d.x0);
+      const h = y(d.y1) - y(d.y0);
+      return (w > 50 && h > 16) ? 0.85 : 0;
+    })
+    .attr("font-size", "9px")
+    .text(d => {
+      const w = x(d.x1) - x(d.x0);
+      const maxChars = Math.floor((w - 6) / 5.5);
+      const name = d.data.name;
+      return name.length > maxChars ? name.slice(0, maxChars - 1) + "…" : name;
+    });
+
+  // Leaf size labels
+  node.selectAll("text.size-label").data(d => !d.children ? [d] : []).join("text")
+    .attr("class", "size-label")
+    .attr("x", 3)
+    .attr("y", 22)
+    .attr("fill", "#8892b0")
+    .attr("fill-opacity", d => {
+      const w = x(d.x1) - x(d.x0);
+      const h = y(d.y1) - y(d.y0);
+      return (w > 50 && h > 28) ? 0.7 : 0;
+    })
+    .attr("font-size", "8px")
+    .text(d => fmt(d.value) + " B");
+}
+
+const group = svg.append("g");
+
+function updateBreadcrumb(d) {
+  const path = d.ancestors().reverse();
+  const bc = d3.select("#breadcrumb");
+  bc.html("");
+  path.forEach((node, i) => {
+    if (i > 0) bc.append("span").text(" / ");
+    const btn = bc.append("button")
+      .text(node.data.name)
+      .classed("current", i === path.length - 1);
+    if (i < path.length - 1) {
+      btn.on("click", () => zoomTo(node));
+    }
+  });
+}
+
+function zoomTo(d) {
+  currentRoot = d;
+
+  const t = svg.transition().duration(650).ease(d3.easeCubicInOut);
+
+  x.domain([d.x0, d.x1]);
+  y.domain([d.y0, d.y1]);
+
+  // Re-layout with new bounds isn't needed — we just rescale positions
+  const nodes = d.descendants();
+
+  const node = group.selectAll("g")
+    .data(nodes, d => d.data.name + d.depth + (d.parent ? d.parent.data.name : ""));
+
+  // Remove exiting
+  node.exit().transition(t).attr("opacity", 0).remove();
+
+  const enter = node.enter().append("g").attr("opacity", 0);
+  enter.append("rect");
+  enter.append("text").attr("class", "dir-label");
+  enter.append("text").attr("class", "leaf-label");
+  enter.append("text").attr("class", "size-label");
+
+  const merged = enter.merge(node);
+
+  merged.transition(t)
+    .attr("opacity", 1)
+    .attr("transform", d => `translate(${x(d.x0)},${y(d.y0)})`);
+
+  merged.select("rect").transition(t)
+    .attr("width", d => Math.max(0, x(d.x1) - x(d.x0)))
+    .attr("height", d => Math.max(0, y(d.y1) - y(d.y0)))
+    .attr("fill", d => {
+      if (d === currentRoot) return "#16213e";
+      const top = topDir(d);
+      const c = d3.color(color(top.data.name));
+      if (d.children) {
+        c.opacity = 0.35 - d.depth * 0.05;
+        return c + "";
+      }
+      c.opacity = 0.7;
+      return c + "";
+    })
+    .attr("stroke", d => d.children ? "#0f3460" : "none")
+    .attr("rx", 1);
+
+  merged.select("rect")
+    .style("cursor", d => d.children ? "pointer" : "default")
+    .on("click", (event, d) => {
+      if (d.children) zoomTo(d);
+    });
+
+  // Update labels after transition
+  merged.transition(t).on("end", function(d) {
+    const sel = d3.select(this);
+    const w = x(d.x1) - x(d.x0);
+    const h = y(d.y1) - y(d.y0);
+
+    sel.select("text.dir-label")
+      .attr("x", 4).attr("y", 14)
+      .attr("fill", "#ccd6f6")
+      .attr("font-size", "11px")
+      .attr("font-weight", 600)
+      .text(d.children && d !== currentRoot && w > 40 ? d.data.name : "");
+
+    if (!d.children) {
+      const maxChars = Math.floor((w - 6) / 5.5);
+      const name = d.data.name;
+      sel.select("text.leaf-label")
+        .attr("x", 3).attr("y", 12)
+        .attr("fill", "#fff")
+        .attr("fill-opacity", (w > 50 && h > 16) ? 0.85 : 0)
+        .attr("font-size", "9px")
+        .text(name.length > maxChars ? name.slice(0, maxChars - 1) + "…" : name);
+
+      sel.select("text.size-label")
+        .attr("x", 3).attr("y", 22)
+        .attr("fill", "#8892b0")
+        .attr("fill-opacity", (w > 50 && h > 28) ? 0.7 : 0)
+        .attr("font-size", "8px")
+        .text(fmt(d.value) + " B");
+    }
+  });
+
+  updateBreadcrumb(d);
+}
+
+// Initial render
+x.domain([hierarchy.x0, hierarchy.x1]);
+y.domain([hierarchy.y0, hierarchy.y1]);
+render(group, hierarchy);
+updateBreadcrumb(hierarchy);
+</script>
+</body>
+</html>

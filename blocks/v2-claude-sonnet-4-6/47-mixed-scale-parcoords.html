@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Employee Parallel Coordinates — Mixed Scales</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #16213e; color: #dce3ec; min-height: 100vh; }
+
+  header { text-align: center; padding: 18px 16px 6px; }
+  header h1 { font-size: 17px; font-weight: 600; letter-spacing: 0.4px; color: #cdd8e8; }
+  header p  { font-size: 12px; color: #6b7e94; margin-top: 4px; }
+
+  #legend {
+    display: flex; flex-wrap: wrap; gap: 6px 14px;
+    justify-content: center; padding: 10px 20px 6px;
+  }
+  .legend-item {
+    display: flex; align-items: center; gap: 5px;
+    font-size: 11px; color: #a8b8c8; cursor: pointer;
+    transition: opacity 0.2s;
+  }
+  .legend-item.muted { opacity: 0.3; }
+  .legend-swatch {
+    width: 11px; height: 11px; border-radius: 2px; flex-shrink: 0;
+  }
+
+  #status {
+    text-align: center; font-size: 12px; color: #5f7588;
+    padding: 2px 0 6px;
+  }
+  #status strong { color: #8ab4cc; }
+
+  #chart-wrap { position: relative; width: 100%; }
+  canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
+  svg.overlay { position: absolute; top: 0; left: 0; overflow: visible; }
+
+  /* Axes */
+  .tick text { font-size: 9.5px; fill: #7a8fa0; }
+  .tick line { stroke: #2d4059; }
+  .domain { stroke: #2d4059; }
+
+  .axis-label {
+    font-size: 11.5px; font-weight: 600;
+    fill: #b8ccdc; text-anchor: middle;
+  }
+  .scale-badge {
+    font-size: 8.5px; fill: #4e6a82; text-anchor: middle;
+    font-family: monospace;
+  }
+
+  /* Brushes */
+  .brush .selection {
+    fill: #4e9de0; fill-opacity: 0.22;
+    stroke: #6ab2f0; stroke-width: 1px;
+  }
+  .brush .handle--n, .brush .handle--s {
+    fill: #6ab2f0;
+  }
+
+  /* Clear button per axis */
+  .clear-axis {
+    font-size: 9px; fill: #c0392b; text-anchor: middle;
+    cursor: pointer; user-select: none; opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .axis-group:hover .clear-axis { opacity: 1; }
+  .clear-axis:hover { fill: #e74c3c; }
+
+  #clear-all {
+    display: block; margin: 4px auto 14px;
+    font-size: 11px; padding: 4px 14px;
+    background: none; border: 1px solid #3d5166;
+    color: #7a96ad; border-radius: 4px;
+    cursor: pointer; transition: all 0.15s;
+  }
+  #clear-all:hover { background: #2a3a4d; color: #aac5d8; border-color: #5d7d96; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Employee Explorer — Parallel Coordinates</h1>
+  <p>300 employees · 6 axes with mixed scales · Drag on any axis to filter by value range</p>
+</header>
+
+<div id="legend"></div>
+<div id="status"><strong>300</strong> of 300 employees selected</div>
+<button id="clear-all">Clear all filters</button>
+<div id="chart-wrap"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// ── Seeded RNG ────────────────────────────────────────────────────────────────
+const rng = (() => {
+  let s = 0xdeadbeef;
+  return () => {
+    s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+    return ((s >>> 0) / 0x100000000);
+  };
+})();
+
+function randNorm(mean, sd) {
+  const u = Math.max(1e-9, rng()), v = rng();
+  return mean + sd * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+// ── Synthetic Data ────────────────────────────────────────────────────────────
+const DEPARTMENTS = ["Engineering", "Marketing", "Sales", "HR", "Finance", "Operations"];
+const RATINGS     = ["Exceptional", "Strong", "Meets Expectations", "Needs Improvement", "Unsatisfactory"];
+
+const DEPT_PROFILE = {
+  Engineering: { salBase: 115000, salSD: 42000, hrsBase: 46, ageBase: 31 },
+  Marketing:   { salBase:  75000, salSD: 22000, hrsBase: 43, ageBase: 30 },
+  Sales:       { salBase:  70000, salSD: 28000, hrsBase: 49, ageBase: 31 },
+  HR:          { salBase:  62000, salSD: 14000, hrsBase: 40, ageBase: 34 },
+  Finance:     { salBase:  92000, salSD: 33000, hrsBase: 44, ageBase: 35 },
+  Operations:  { salBase:  52000, salSD: 11000, hrsBase: 47, ageBase: 37 },
+};
+
+function assignRating(normalizedSalary) {
+  const jitter = rng() - 0.5;
+  const score  = normalizedSalary * 0.6 + rng() * 0.4 + jitter * 0.15;
+  if (score > 0.84) return "Exceptional";
+  if (score > 0.60) return "Strong";
+  if (score > 0.22) return "Meets Expectations";
+  if (score > 0.07) return "Needs Improvement";
+  return "Unsatisfactory";
+}
+
+const employees = Array.from({ length: 300 }, (_, id) => {
+  const dept  = DEPARTMENTS[Math.floor(rng() * DEPARTMENTS.length)];
+  const prof  = DEPT_PROFILE[dept];
+  const age   = Math.round(Math.max(22, Math.min(65, randNorm(prof.ageBase + 3, 9))));
+  const yrs   = Math.round(Math.max(0, Math.min(age - 22, randNorm(age - 28, 5))));
+  const sal   = Math.round(Math.max(32000, Math.min(340000,
+                  randNorm(prof.salBase + yrs * 2800, prof.salSD))));
+  const salNorm = (sal - 32000) / (340000 - 32000);
+  const rating  = assignRating(salNorm);
+  const hours   = Math.round(Math.max(30, Math.min(70, randNorm(prof.hrsBase, 5))));
+  return { id, dept, age, salary: sal, yearsAtCo: yrs, rating, hours };
+});
+
+// ── Axis Definitions ──────────────────────────────────────────────────────────
+const AXES = [
+  {
+    key:   "age",
+    label: "Age",
+    badge: "linear",
+    type:  "linear",
+  },
+  {
+    key:   "salary",
+    label: "Salary (USD)",
+    badge: "log₁₀",
+    type:  "log",
+  },
+  {
+    key:   "yearsAtCo",
+    label: "Years at Co.",
+    badge: "linear",
+    type:  "linear",
+  },
+  {
+    key:    "dept",
+    label:  "Department",
+    badge:  "ordinal",
+    type:   "ordinal",
+    domain: DEPARTMENTS,
+  },
+  {
+    key:    "rating",
+    label:  "Performance",
+    badge:  "ordinal",
+    type:   "ordinal",
+    domain: RATINGS,
+  },
+  {
+    key:   "hours",
+    label: "Weekly Hours",
+    badge: "linear",
+    type:  "linear",
+  },
+];
+
+// ── Color Scale ───────────────────────────────────────────────────────────────
+const COLOR = d3.scaleOrdinal(DEPARTMENTS, d3.schemeTableau10);
+
+// ── Layout constants ──────────────────────────────────────────────────────────
+const M = { top: 60, right: 50, bottom: 40, left: 50 };
+
+// ── DOM Setup ─────────────────────────────────────────────────────────────────
+const wrap     = document.getElementById("chart-wrap");
+const dpr      = window.devicePixelRatio || 1;
+const canvas   = document.createElement("canvas");
+const svgNode  = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+svgNode.classList.add("overlay");
+wrap.appendChild(canvas);
+wrap.appendChild(svgNode);
+const svg = d3.select(svgNode);
+
+// ── State ─────────────────────────────────────────────────────────────────────
+const brushExtents = {}; // key → [y0, y1] in pixel space, or null
+let scales, xPos, innerW, innerH;
+
+// ── Legend ────────────────────────────────────────────────────────────────────
+const legendEl = document.getElementById("legend");
+DEPARTMENTS.forEach(dept => {
+  const el = document.createElement("div");
+  el.className = "legend-item";
+  el.dataset.dept = dept;
+  el.innerHTML = `
+    <div class="legend-swatch" style="background:${COLOR(dept)}"></div>
+    <span>${dept}</span>`;
+  legendEl.appendChild(el);
+});
+
+// ── Scale Builders ────────────────────────────────────────────────────────────
+function buildScales(h) {
+  const out = {};
+  AXES.forEach(ax => {
+    if (ax.type === "linear") {
+      const ext = d3.extent(employees, d => d[ax.key]);
+      out[ax.key] = d3.scaleLinear().domain(ext).nice().range([h, 0]);
+    } else if (ax.type === "log") {
+      const ext = d3.extent(employees, d => d[ax.key]);
+      // ensure strictly positive domain
+      out[ax.key] = d3.scaleLog()
+        .base(10)
+        .domain([Math.max(1, ext[0]), ext[1]])
+        .nice()
+        .range([h, 0]);
+    } else {
+      // ordinal → scalePoint
+      out[ax.key] = d3.scalePoint()
+        .domain(ax.domain)
+        .range([h, 0])
+        .padding(0.25);
+    }
+  });
+  return out;
+}
+
+// ── Filtering ─────────────────────────────────────────────────────────────────
+function getSelected() {
+  const activeFilters = Object.entries(brushExtents).filter(([, e]) => e !== null);
+  if (!activeFilters.length) return employees;
+  return employees.filter(d =>
+    activeFilters.every(([key, [y0, y1]]) => {
+      const py = scales[key](d[key]);
+      return py >= y0 && py <= y1;
+    })
+  );
+}
+
+// ── Canvas Drawing ────────────────────────────────────────────────────────────
+function drawCanvas() {
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.save();
+  ctx.scale(dpr, dpr);
+  ctx.translate(M.left, M.top);
+
+  const selected    = getSelected();
+  const selectedIds = new Set(selected.map(d => d.id));
+  const hasFilter   = Object.values(brushExtents).some(e => e !== null);
+
+  if (hasFilter) {
+    // Dimmed background lines
+    ctx.lineWidth = 0.9;
+    employees.forEach(d => {
+      if (selectedIds.has(d.id)) return;
+      drawPolyline(ctx, d, "rgba(90,110,130,0.06)");
+    });
+  }
+
+  // Foreground lines
+  ctx.lineWidth = hasFilter ? 1.4 : 1.1;
+  const alpha = hasFilter ? 0.65 : 0.32;
+  (hasFilter ? selected : employees).forEach(d => {
+    const c = d3.color(COLOR(d.dept));
+    c.opacity = alpha;
+    drawPolyline(ctx, d, c.toString());
+  });
+
+  ctx.restore();
+
+  // Update status
+  const n = hasFilter ? selected.length : employees.length;
+  document.getElementById("status").innerHTML =
+    `<strong>${n}</strong> of ${employees.length} employees selected`;
+}
+
+function drawPolyline(ctx, d, style) {
+  ctx.beginPath();
+  ctx.strokeStyle = style;
+  let started = false;
+  AXES.forEach((ax, i) => {
+    const x = xPos[i];
+    const y = scales[ax.key](d[ax.key]);
+    if (!isFinite(y)) return;
+    if (!started) { ctx.moveTo(x, y); started = true; }
+    else           { ctx.lineTo(x, y); }
+  });
+  ctx.stroke();
+}
+
+// ── SVG Axes + Brushes ────────────────────────────────────────────────────────
+function buildSVG() {
+  svg.selectAll("*").remove();
+  const g = svg.append("g").attr("transform", `translate(${M.left},${M.top})`);
+
+  AXES.forEach((ax, i) => {
+    const x  = xPos[i];
+    const sc = scales[ax.key];
+    const grp = g.append("g")
+      .attr("class", "axis-group")
+      .attr("transform", `translate(${x},0)`);
+
+    // ── Axis ──
+    let axisFn;
+    if (ax.type === "linear") {
+      axisFn = d3.axisLeft(sc).ticks(6).tickSize(3);
+    } else if (ax.type === "log") {
+      const [lo, hi] = sc.domain();
+      // pick readable tick values spanning the domain
+      const allPow = [30000, 40000, 50000, 75000, 100000, 150000, 200000, 300000];
+      const ticks  = allPow.filter(v => v >= lo && v <= hi);
+      axisFn = d3.axisLeft(sc)
+        .tickValues(ticks)
+        .tickFormat(v => "$" + (v >= 1000 ? (v / 1000).toFixed(0) + "k" : v))
+        .tickSize(3);
+    } else {
+      axisFn = d3.axisLeft(sc).tickSize(3);
+    }
+
+    grp.call(axisFn);
+
+    // Restyle ticks
+    grp.selectAll(".tick text").attr("x", -7);
+
+    // ── Labels ──
+    grp.append("text")
+      .attr("class", "axis-label")
+      .attr("y", -20)
+      .text(ax.label);
+
+    grp.append("text")
+      .attr("class", "scale-badge")
+      .attr("y", -8)
+      .text(ax.badge);
+
+    // ── Brush ──
+    const brushBehavior = d3.brushY()
+      .extent([[-9, 0], [9, innerH]])
+      .on("brush end", event => {
+        brushExtents[ax.key] = event.selection ?? null;
+        drawCanvas();
+      });
+
+    const brushG = grp.append("g")
+      .attr("class", "brush")
+      .call(brushBehavior);
+
+    // Restore existing brush extent (on resize)
+    if (brushExtents[ax.key]) {
+      brushG.call(brushBehavior.move, brushExtents[ax.key]);
+    }
+
+    // ── Per-axis clear button ──
+    grp.append("text")
+      .attr("class", "clear-axis")
+      .attr("y", innerH + 16)
+      .text("✕ clear")
+      .on("click", () => {
+        brushExtents[ax.key] = null;
+        brushG.call(brushBehavior.clear);
+        drawCanvas();
+      });
+  });
+}
+
+// ── Clear-all button ──────────────────────────────────────────────────────────
+document.getElementById("clear-all").addEventListener("click", () => {
+  Object.keys(brushExtents).forEach(k => { brushExtents[k] = null; });
+  buildSVG(); // rebuilds brushes (clears their visual state)
+  drawCanvas();
+});
+
+// ── Resize ────────────────────────────────────────────────────────────────────
+function resize() {
+  const W = wrap.clientWidth || 800;
+  innerW  = W - M.left - M.right;
+  innerH  = Math.min(500, Math.max(300, Math.round(window.innerHeight * 0.58)));
+  const H = innerH + M.top + M.bottom;
+
+  wrap.style.height = H + "px";
+
+  // Canvas
+  canvas.width  = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width  = W + "px";
+  canvas.style.height = H + "px";
+
+  // SVG
+  svgNode.setAttribute("width",  W);
+  svgNode.setAttribute("height", H);
+
+  // Axis x-positions: evenly spaced
+  const step = innerW / (AXES.length - 1);
+  xPos = AXES.map((_, i) => i * step);
+
+  scales = buildScales(innerH);
+  buildSVG();
+  drawCanvas();
+}
+
+const ro = new ResizeObserver(() => resize());
+ro.observe(wrap);
+resize();
+</script>
+</body>
+</html>

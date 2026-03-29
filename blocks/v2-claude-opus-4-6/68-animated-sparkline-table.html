@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Server Metrics — Animated Sparkline Table</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1117;
+    --card-bg: #1a1d27;
+    --border: #2a2d3a;
+    --text: #e0e2eb;
+    --text-dim: #8b8fa3;
+    --green: #34d399;
+    --red: #f87171;
+    --blue: #60a5fa;
+    --purple: #a78bfa;
+    --orange: #fb923c;
+    --yellow: #fbbf24;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 14px; line-height: 1.5; padding: 24px;
+  }
+  h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { color: var(--text-dim); font-size: 13px; margin-bottom: 20px; }
+
+  /* KPI Cards */
+  .kpi-row {
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    gap: 16px; margin-bottom: 24px;
+  }
+  .kpi-card {
+    background: var(--card-bg); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px 18px; position: relative; overflow: hidden;
+  }
+  .kpi-label { font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+  .kpi-value { font-size: 28px; font-weight: 700; line-height: 1.2; }
+  .kpi-delta { font-size: 12px; margin-top: 2px; }
+  .kpi-delta.up { color: var(--green); }
+  .kpi-delta.down { color: var(--red); }
+  .kpi-spark { margin-top: 10px; }
+  .kpi-spark svg { display: block; }
+
+  /* Replay button */
+  .controls { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+  .replay-btn {
+    background: var(--card-bg); border: 1px solid var(--border);
+    color: var(--text); padding: 6px 14px; border-radius: 6px;
+    cursor: pointer; font-size: 13px; display: flex; align-items: center; gap: 6px;
+    transition: background 0.15s;
+  }
+  .replay-btn:hover { background: var(--border); }
+  .replay-btn svg { width: 14px; height: 14px; }
+
+  /* Table */
+  .table-wrap {
+    background: var(--card-bg); border: 1px solid var(--border);
+    border-radius: 10px; overflow: hidden;
+  }
+  table { width: 100%; border-collapse: separate; border-spacing: 0; }
+  th {
+    text-align: left; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--text-dim); padding: 10px 14px;
+    border-bottom: 1px solid var(--border); background: var(--card-bg);
+    position: sticky; top: 0; z-index: 2; cursor: pointer; user-select: none;
+  }
+  th.num { text-align: right; }
+  th:hover { color: var(--text); }
+  td { padding: 8px 14px; border-bottom: 1px solid #1e2130; white-space: nowrap; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(96, 165, 250, 0.04); }
+  .server-name { font-weight: 500; }
+  .status-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; }
+  .status-healthy { background: var(--green); }
+  .status-warning { background: var(--yellow); }
+  .status-critical { background: var(--red); }
+  .spark-cell svg { display: block; }
+  .sort-arrow { font-size: 10px; margin-left: 3px; opacity: 0.6; }
+</style>
+</head>
+<body>
+
+<h1>Infrastructure Dashboard</h1>
+<p class="subtitle">Real-time server metrics with inline sparklines — 24h window</p>
+
+<div class="kpi-row" id="kpi-row"></div>
+
+<div class="controls">
+  <button class="replay-btn" id="replay-btn">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
+    </svg>
+    Replay Animation
+  </button>
+</div>
+
+<div class="table-wrap">
+  <table id="metrics-table">
+    <thead><tr id="header-row"></tr></thead>
+    <tbody id="table-body"></tbody>
+  </table>
+</div>
+
+<script type="module">
+// ── Synthetic Data ──────────────────────────────────────────
+
+const serverNames = [
+  'api-prod-01', 'api-prod-02', 'api-prod-03',
+  'web-us-east-1', 'web-us-west-2', 'web-eu-central-1',
+  'db-primary', 'db-replica-01', 'db-replica-02',
+  'cache-redis-01', 'cache-redis-02',
+  'worker-queue-01', 'worker-queue-02',
+  'ml-inference-01', 'ml-inference-02',
+  'cdn-edge-01', 'cdn-edge-02', 'cdn-edge-03',
+  'monitor-grafana', 'ci-runner-01'
+];
+
+const regions = ['us-east-1', 'us-west-2', 'eu-central-1', 'ap-southeast-1'];
+const statuses = ['healthy', 'healthy', 'healthy', 'healthy', 'healthy', 'healthy', 'warning', 'critical'];
+
+function genSeries(n, base, volatility, trend = 0) {
+  const vals = [base];
+  for (let i = 1; i < n; i++) {
+    vals.push(Math.max(0, vals[i - 1] + (Math.random() - 0.48) * volatility + trend));
+  }
+  return vals;
+}
+
+function genWinLoss(n) {
+  return Array.from({ length: n }, () => Math.random() > 0.3 ? 1 : Math.random() > 0.5 ? -1 : 0);
+}
+
+const servers = serverNames.map((name, i) => {
+  const cpuBase = 20 + Math.random() * 50;
+  const memBase = 40 + Math.random() * 40;
+  const reqBase = 200 + Math.random() * 2000;
+  const errBase = Math.random() * 5;
+  const latBase = 10 + Math.random() * 200;
+
+  const cpuSeries = genSeries(48, cpuBase, 8, 0.1);
+  const memSeries = genSeries(48, memBase, 4, 0.05);
+  const reqSeries = genSeries(48, reqBase, reqBase * 0.15);
+  const errSeries = genSeries(48, errBase, 2);
+  const latSeries = genSeries(48, latBase, latBase * 0.2);
+
+  const status = name.includes('db-primary') ? 'warning' :
+    cpuSeries.at(-1) > 85 ? 'critical' :
+    errSeries.at(-1) > 4 ? 'warning' : 'healthy';
+
+  return {
+    id: i, name, status,
+    region: regions[i % regions.length],
+    cpu: cpuSeries, mem: memSeries,
+    requests: reqSeries, errors: errSeries,
+    latency: latSeries,
+    uptime: 99 + Math.random() * 0.99,
+    healthChecks: genWinLoss(24)
+  };
+});
+
+// ── KPI Cards ───────────────────────────────────────────────
+
+const kpiData = [
+  {
+    label: 'Avg CPU', value: d3.mean(servers, d => d.cpu.at(-1)),
+    prev: d3.mean(servers, d => d.cpu.at(-2)),
+    format: v => d3.format('.1f')(v) + '%', type: 'spark-bar',
+    series: servers.map(s => s.cpu.at(-1)), color: var_css('--blue')
+  },
+  {
+    label: 'Total Requests/s', value: d3.sum(servers, d => d.requests.at(-1)),
+    prev: d3.sum(servers, d => d.requests.at(-2)),
+    format: v => d3.format(',.0f')(v), type: 'spark-area',
+    series: Array.from({ length: 48 }, (_, i) => d3.sum(servers, s => s.requests[i])),
+    color: var_css('--green')
+  },
+  {
+    label: 'Health Checks', value: null,
+    format: () => `${servers.filter(s => s.status === 'healthy').length}/${servers.length} OK`,
+    type: 'win-loss',
+    series: servers.map(s => s.status === 'healthy' ? 1 : s.status === 'warning' ? 0 : -1),
+    color: var_css('--green')
+  },
+  {
+    label: 'P95 Latency', value: d3.quantile(servers.map(d => d.latency.at(-1)).sort(d3.ascending), 0.95),
+    prev: d3.quantile(servers.map(d => d.latency.at(-2)).sort(d3.ascending), 0.95),
+    format: v => d3.format('.0f')(v) + 'ms', type: 'bullet',
+    target: 150, ranges: [100, 200, 300],
+    color: var_css('--purple')
+  }
+];
+
+function var_css(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function renderKPIs() {
+  const row = d3.select('#kpi-row');
+  row.selectAll('*').remove();
+
+  kpiData.forEach(kpi => {
+    const card = row.append('div').attr('class', 'kpi-card');
+    card.append('div').attr('class', 'kpi-label').text(kpi.label);
+    card.append('div').attr('class', 'kpi-value').text(kpi.format(kpi.value));
+
+    if (kpi.prev != null && kpi.value != null) {
+      const delta = kpi.value - kpi.prev;
+      const pct = delta / kpi.prev;
+      const isUp = delta >= 0;
+      card.append('div')
+        .attr('class', `kpi-delta ${isUp ? 'up' : 'down'}`)
+        .text(`${isUp ? '▲' : '▼'} ${d3.format('+.1%')(pct)}`);
+    }
+
+    const sparkDiv = card.append('div').attr('class', 'kpi-spark');
+    const sw = 160, sh = 36;
+    const svg = sparkDiv.append('svg').attr('width', sw).attr('height', sh);
+
+    if (kpi.type === 'spark-bar') {
+      drawSparkBar(svg, kpi.series, sw, sh, kpi.color);
+    } else if (kpi.type === 'spark-area') {
+      drawSparkArea(svg, kpi.series, sw, sh, kpi.color);
+    } else if (kpi.type === 'win-loss') {
+      drawWinLoss(svg, kpi.series, sw, sh);
+    } else if (kpi.type === 'bullet') {
+      drawBullet(svg, kpi.value, kpi.target, kpi.ranges, sw, sh, kpi.color);
+    }
+  });
+}
+
+function drawSparkBar(svg, data, w, h, color) {
+  const n = data.length, gap = 2;
+  const barW = Math.max(1, (w - gap * (n - 1)) / n);
+  const y = d3.scaleLinear([0, d3.max(data)], [h, 2]);
+
+  svg.selectAll('rect').data(data).join('rect')
+    .attr('x', (d, i) => i * (barW + gap))
+    .attr('y', d => y(d)).attr('width', barW)
+    .attr('height', d => h - y(d))
+    .attr('fill', color).attr('opacity', 0.7)
+    .attr('rx', 1);
+}
+
+function drawSparkArea(svg, data, w, h, color) {
+  const x = d3.scaleLinear([0, data.length - 1], [0, w]);
+  const y = d3.scaleLinear(d3.extent(data), [h - 1, 1]);
+  const area = d3.area().x((d, i) => x(i)).y0(h).y1(d => y(d)).curve(d3.curveMonotoneX);
+  const line = d3.line().x((d, i) => x(i)).y(d => y(d)).curve(d3.curveMonotoneX);
+
+  svg.append('path').datum(data).attr('d', area).attr('fill', color).attr('opacity', 0.15);
+  svg.append('path').datum(data).attr('d', line).attr('fill', 'none').attr('stroke', color).attr('stroke-width', 1.5);
+  svg.append('circle').attr('cx', x(data.length - 1)).attr('cy', y(data.at(-1))).attr('r', 2.5).attr('fill', color);
+}
+
+function drawWinLoss(svg, data, w, h) {
+  const n = data.length, gap = 2;
+  const barW = Math.max(2, (w - gap * (n - 1)) / n);
+  const mid = h / 2, barH = mid - 2;
+
+  svg.selectAll('rect').data(data).join('rect')
+    .attr('x', (d, i) => i * (barW + gap))
+    .attr('y', d => d > 0 ? mid - barH : d < 0 ? mid + 2 : mid - 0.5)
+    .attr('width', barW)
+    .attr('height', d => d === 0 ? 1 : barH)
+    .attr('rx', 1)
+    .attr('fill', d => d > 0 ? var_css('--green') : d < 0 ? var_css('--red') : var_css('--text-dim'));
+}
+
+function drawBullet(svg, value, target, ranges, w, h, color) {
+  const x = d3.scaleLinear([0, d3.max(ranges)], [0, w]);
+  const sortedRanges = [...ranges].sort((a, b) => b - a);
+  const grays = ['#2a2d3a', '#232636', '#1e2030'];
+
+  svg.selectAll('.range').data(sortedRanges).join('rect')
+    .attr('class', 'range').attr('width', d => x(d)).attr('height', h)
+    .attr('fill', (d, i) => grays[i]).attr('rx', 3);
+
+  svg.append('rect')
+    .attr('y', h * 0.3).attr('width', x(value)).attr('height', h * 0.4)
+    .attr('fill', color).attr('rx', 2);
+
+  svg.append('line')
+    .attr('x1', x(target)).attr('x2', x(target))
+    .attr('y1', h * 0.1).attr('y2', h * 0.9)
+    .attr('stroke', var_css('--text')).attr('stroke-width', 2);
+}
+
+// ── Table ───────────────────────────────────────────────────
+
+const columns = [
+  { key: 'name', label: 'Server', type: 'string' },
+  { key: 'status', label: 'Status', type: 'string' },
+  { key: 'region', label: 'Region', type: 'string' },
+  { key: 'cpu', label: 'CPU %', type: 'sparkline', latest: d => d.cpu.at(-1), format: d3.format('.1f') },
+  { key: 'mem', label: 'Memory %', type: 'sparkline', latest: d => d.mem.at(-1), format: d3.format('.1f') },
+  { key: 'requests', label: 'Req/s', type: 'sparkline', latest: d => d.requests.at(-1), format: d3.format(',.0f') },
+  { key: 'errors', label: 'Err/s', type: 'sparkline', latest: d => d.errors.at(-1), format: d3.format('.2f') },
+  { key: 'latency', label: 'Latency (ms)', type: 'sparkline', latest: d => d.latency.at(-1), format: d3.format('.0f') },
+  { key: 'uptime', label: 'Uptime %', type: 'number', format: d3.format('.3f') },
+  { key: 'healthChecks', label: 'Health (24h)', type: 'winloss' }
+];
+
+// Shared domains for sparklines
+const domains = {
+  cpu: [0, 100],
+  mem: [0, 100],
+  requests: [0, d3.max(servers, d => d3.max(d.requests))],
+  errors: [0, d3.max(servers, d => d3.max(d.errors))],
+  latency: [0, d3.max(servers, d => d3.max(d.latency))]
+};
+
+const sparkColors = {
+  cpu: var_css('--blue'),
+  mem: var_css('--purple'),
+  requests: var_css('--green'),
+  errors: var_css('--red'),
+  latency: var_css('--orange')
+};
+
+let sortKey = null, sortDir = 1;
+
+function sortData(data) {
+  if (!sortKey) return data;
+  const col = columns.find(c => c.key === sortKey);
+  return [...data].sort((a, b) => {
+    let va, vb;
+    if (col.type === 'sparkline') {
+      va = col.latest(a); vb = col.latest(b);
+    } else if (col.key === 'uptime') {
+      va = a.uptime; vb = b.uptime;
+    } else {
+      va = a[col.key]; vb = b[col.key];
+    }
+    return d3.ascending(va, vb) * sortDir;
+  });
+}
+
+function renderHeader() {
+  const tr = d3.select('#header-row');
+  tr.selectAll('*').remove();
+  columns.forEach(col => {
+    const th = tr.append('th')
+      .attr('class', col.type === 'number' || col.type === 'sparkline' ? 'num' : null)
+      .text(col.label)
+      .on('click', () => {
+        if (sortKey === col.key) sortDir *= -1;
+        else { sortKey = col.key; sortDir = 1; }
+        renderHeader();
+        renderTable(false);
+      });
+
+    if (sortKey === col.key) {
+      th.append('span').attr('class', 'sort-arrow').text(sortDir === 1 ? ' ▲' : ' ▼');
+    }
+  });
+}
+
+function renderTable(animate = true) {
+  const tbody = d3.select('#table-body');
+  tbody.selectAll('*').remove();
+  const sorted = sortData(servers);
+  const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  sorted.forEach((server, rowIdx) => {
+    const tr = tbody.append('tr');
+    const clipId = `clip-${server.id}-${Date.now()}`;
+
+    columns.forEach(col => {
+      if (col.key === 'name') {
+        tr.append('td').attr('class', 'server-name').text(server.name);
+      } else if (col.key === 'status') {
+        const td = tr.append('td');
+        td.append('span').attr('class', `status-dot status-${server.status}`);
+        td.append('span').text(server.status);
+      } else if (col.key === 'region') {
+        tr.append('td').text(server.region);
+      } else if (col.key === 'uptime') {
+        tr.append('td').attr('class', 'num').text(col.format(server.uptime));
+      } else if (col.type === 'sparkline') {
+        const td = tr.append('td').attr('class', 'spark-cell');
+        const sw = 90, sh = 22;
+        const svg = td.append('svg').attr('width', sw + 42).attr('height', sh)
+          .attr('role', 'img')
+          .attr('aria-label', `${col.label}: ${col.format(col.latest(server))}`);
+
+        const series = server[col.key];
+        const x = d3.scaleLinear([0, series.length - 1], [1, sw - 1]);
+        const y = d3.scaleLinear(domains[col.key], [sh - 1, 1]);
+        const line = d3.line().x((d, i) => x(i)).y(d => y(d)).curve(d3.curveMonotoneX);
+        const color = sparkColors[col.key];
+
+        // ClipPath for reveal animation
+        const defs = svg.append('defs');
+        defs.append('clipPath').attr('id', clipId)
+          .append('rect').attr('x', 0).attr('y', 0)
+          .attr('width', animate && !reducedMotion ? 0 : sw)
+          .attr('height', sh);
+
+        const g = svg.append('g').attr('clip-path', `url(#${clipId})`);
+
+        // Area fill
+        const area = d3.area().x((d, i) => x(i)).y0(sh).y1(d => y(d)).curve(d3.curveMonotoneX);
+        g.append('path').datum(series).attr('d', area).attr('fill', color).attr('opacity', 0.1);
+
+        // Line
+        g.append('path').datum(series).attr('d', line)
+          .attr('fill', 'none').attr('stroke', color).attr('stroke-width', 1.5);
+
+        // Endpoint dot
+        g.append('circle')
+          .attr('cx', x(series.length - 1)).attr('cy', y(series.at(-1)))
+          .attr('r', 2).attr('fill', color);
+
+        // Value label
+        svg.append('text')
+          .attr('x', sw + 6).attr('y', sh / 2)
+          .attr('dy', '0.35em').attr('fill', var_css('--text'))
+          .attr('font-size', '11px')
+          .attr('font-family', "'JetBrains Mono', 'SF Mono', monospace")
+          .text(col.format(col.latest(server)));
+
+        // Animate clipPath
+        if (animate && !reducedMotion) {
+          svg.select(`#${clipId} rect`)
+            .transition()
+            .delay(rowIdx * 40 + 200)
+            .duration(600)
+            .ease(d3.easeCubicOut)
+            .attr('width', sw);
+        }
+
+      } else if (col.type === 'winloss') {
+        const td = tr.append('td').attr('class', 'spark-cell');
+        const data = server.healthChecks;
+        const sw = 72, sh = 18;
+        const svg = td.append('svg').attr('width', sw).attr('height', sh)
+          .attr('role', 'img')
+          .attr('aria-label', `Health: ${data.filter(d => d > 0).length} pass, ${data.filter(d => d < 0).length} fail`);
+
+        const wlClipId = `wl-${server.id}-${Date.now()}`;
+        svg.append('defs').append('clipPath').attr('id', wlClipId)
+          .append('rect').attr('x', 0).attr('y', 0)
+          .attr('width', animate && !reducedMotion ? 0 : sw)
+          .attr('height', sh);
+
+        const g = svg.append('g').attr('clip-path', `url(#${wlClipId})`);
+        const n = data.length, gap = 1;
+        const barW = Math.max(1, (sw - gap * (n - 1)) / n);
+        const mid = sh / 2, barH = mid - 1;
+
+        g.selectAll('rect').data(data).join('rect')
+          .attr('x', (d, i) => i * (barW + gap))
+          .attr('y', d => d > 0 ? mid - barH : d < 0 ? mid + 1 : mid - 0.5)
+          .attr('width', barW)
+          .attr('height', d => d === 0 ? 1 : barH)
+          .attr('rx', 0.5)
+          .attr('fill', d => d > 0 ? var_css('--green') : d < 0 ? var_css('--red') : var_css('--text-dim'));
+
+        if (animate && !reducedMotion) {
+          svg.select(`#${wlClipId} rect`)
+            .transition()
+            .delay(rowIdx * 40 + 200)
+            .duration(600)
+            .ease(d3.easeCubicOut)
+            .attr('width', sw);
+        }
+      }
+    });
+  });
+}
+
+// ── Init ────────────────────────────────────────────────────
+
+renderKPIs();
+renderHeader();
+renderTable(true);
+
+d3.select('#replay-btn').on('click', () => renderTable(true));
+</script>
+</body>
+</html>

@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Accessible Hive Plot — Source · Connector · Sink</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0d1117;
+      color: #c9d1d9;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    .sr-only {
+      position: absolute; width: 1px; height: 1px;
+      padding: 0; margin: -1px; overflow: hidden;
+      clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+    }
+
+    #chart { width: 100%; height: 100vh; position: relative; }
+
+    #svg {
+      width: 100%; height: 100%;
+      display: block;
+      outline: none;
+    }
+    #svg:focus-visible {
+      outline: 2px solid rgba(88, 166, 255, 0.4);
+      outline-offset: -2px;
+    }
+
+    #header {
+      position: absolute; top: 20px; left: 24px; pointer-events: none;
+    }
+    #header h1 { font-size: 16px; font-weight: 600; color: #f0f6fc; line-height: 1; }
+    #header p  { font-size: 11px; color: #6e7681; margin-top: 4px; letter-spacing: 0.02em; }
+
+    #info-panel {
+      position: absolute; bottom: 20px; left: 24px;
+      background: rgba(22, 27, 34, 0.95);
+      border: 1px solid #30363d;
+      border-radius: 10px;
+      padding: 13px 16px;
+      min-width: 220px; max-width: 300px;
+      font-size: 12px; line-height: 1.65;
+      transition: opacity 0.15s;
+    }
+    #info-panel .iname {
+      font-size: 14px; font-weight: 600; color: #f0f6fc; margin-bottom: 3px;
+    }
+    #info-panel .imeta { color: #8b949e; }
+    #info-panel .iconn { margin-top: 5px; color: #58a6ff; font-weight: 500; }
+    #info-panel .iconn-list {
+      color: #8b949e; font-size: 11px; margin-top: 2px;
+      max-height: 60px; overflow: hidden;
+    }
+
+    #legend {
+      position: absolute; top: 20px; right: 20px;
+      background: rgba(22, 27, 34, 0.95);
+      border: 1px solid #30363d;
+      border-radius: 10px;
+      padding: 11px 14px;
+      font-size: 12px;
+    }
+    #legend h4 {
+      font-size: 10px; font-weight: 600; color: #6e7681;
+      text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 7px;
+    }
+    .leg-row { display: flex; align-items: center; gap: 8px; margin: 3px 0; color: #c9d1d9; }
+    .leg-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+
+    #kbd-hint {
+      position: absolute; bottom: 20px; right: 20px;
+      color: #484f58; font-size: 11px; text-align: right; line-height: 2;
+      pointer-events: none;
+    }
+    kbd {
+      background: rgba(48,54,61,0.8); border: 1px solid #484f58;
+      border-radius: 3px; padding: 1px 5px; font-size: 10px; font-family: inherit;
+    }
+  </style>
+</head>
+<body>
+
+<div id="chart">
+  <div id="live" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+
+  <svg id="svg" tabindex="0"
+       role="application"
+       aria-label="Hive plot with three axes: Source, Connector, and Sink. 80 nodes and 120 edges. Use arrow keys to navigate nodes.">
+  </svg>
+
+  <div id="header" aria-hidden="true">
+    <h1>Hive Plot</h1>
+    <p>Source · Connector · Sink &nbsp;—&nbsp; 80 nodes, 120 edges</p>
+  </div>
+
+  <div id="info-panel" aria-hidden="true">
+    <div class="iname">Explore the network</div>
+    <div class="imeta">Click a node or press <kbd>Tab</kbd>, then arrow keys</div>
+  </div>
+
+  <div id="legend" aria-hidden="true">
+    <h4>Category</h4>
+  </div>
+
+  <div id="kbd-hint" aria-hidden="true">
+    <kbd>↑</kbd>&thinsp;<kbd>↓</kbd> along axis &nbsp; <kbd>←</kbd>&thinsp;<kbd>→</kbd> switch axis<br>
+    <kbd>Home</kbd>&thinsp;<kbd>End</kbd> first/last &nbsp; <kbd>Enter</kbd> announce
+  </div>
+</div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// ── RNG ──────────────────────────────────────────────────────────────────────
+function mulberry32(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s = (s + 0x6D2B79F5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t ^= t + Math.imul(t ^ (t >>> 7), 61 | t);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const rand = mulberry32(0xC0FFEE42);
+
+// ── CONSTANTS ────────────────────────────────────────────────────────────────
+const AXIS_NAMES  = ['Source', 'Connector', 'Sink'];
+const CATEGORIES  = ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon'];
+// Paul Tol bright palette (colorblind-safe), adapted for dark bg
+const CAT_COLORS  = ['#FF7B72', '#7EE787', '#58A6FF', '#E3B341', '#D2A8FF'];
+const AXIS_COUNTS = [27, 27, 26]; // 80 total
+
+// ── DATA GENERATION ──────────────────────────────────────────────────────────
+const nodes = [];
+
+AXIS_NAMES.forEach((_, ai) => {
+  const n = AXIS_COUNTS[ai];
+  for (let i = 0; i < n; i++) {
+    nodes.push({
+      id: nodes.length,
+      axis: ai,
+      indexOnAxis: i,
+      totalOnAxis: n,
+      value: (i + 1) / (n + 1),  // evenly spaced, avoiding 0 and 1
+      name: `${AXIS_NAMES[ai]}-${String(i + 1).padStart(2, '0')}`,
+      category: Math.floor(rand() * CATEGORIES.length),
+      edges: [],
+      x: 0, y: 0
+    });
+  }
+});
+
+const nodesByAxis = [0, 1, 2].map(ai => nodes.filter(n => n.axis === ai));
+
+// ~120 edges: 40 per axis pair
+const edges = [];
+[[0, 1], [1, 2], [0, 2]].forEach(([a, b]) => {
+  const na = nodesByAxis[a], nb = nodesByAxis[b];
+  const used = new Set();
+  let count = 0;
+  while (count < 40) {
+    const si = Math.floor(rand() * na.length);
+    const ti = Math.floor(rand() * nb.length);
+    const key = `${si}_${ti}`;
+    if (!used.has(key)) {
+      used.add(key);
+      const eid = edges.length;
+      edges.push({ source: na[si].id, target: nb[ti].id });
+      na[si].edges.push(eid);
+      nb[ti].edges.push(eid);
+      count++;
+    }
+  }
+});
+
+// ── STATE ────────────────────────────────────────────────────────────────────
+let focusAxis  = 0;
+let focusIndex = 0;
+let hasFocus   = false;
+
+function focusedNode() { return nodesByAxis[focusAxis][focusIndex]; }
+
+// ── LAYOUT ───────────────────────────────────────────────────────────────────
+// Axis angles: Source = up, Connector = lower-right, Sink = lower-left
+const AXIS_ANGLES = [
+  -Math.PI / 2,                          // 270° → up
+  -Math.PI / 2 + (2 * Math.PI / 3),     //  30° → lower-right
+  -Math.PI / 2 + (4 * Math.PI / 3),     // 150° → lower-left
+];
+
+let geom = {};
+
+function computeLayout() {
+  const el  = document.getElementById('svg');
+  const W   = el.clientWidth  || 800;
+  const H   = el.clientHeight || 600;
+  const cx  = W / 2;
+  const cy  = H / 2 + 14;
+  const inner = Math.min(W, H) * 0.06;
+  const outer = Math.min(W, H) * 0.38;
+
+  nodes.forEach(n => {
+    const angle = AXIS_ANGLES[n.axis];
+    const r = inner + n.value * (outer - inner);
+    n.x = cx + Math.cos(angle) * r;
+    n.y = cy + Math.sin(angle) * r;
+  });
+
+  geom = { W, H, cx, cy, inner, outer };
+}
+
+// ── RENDER ───────────────────────────────────────────────────────────────────
+const svg = d3.select('#svg');
+
+function render() {
+  computeLayout();
+  const { W, H, cx, cy, inner, outer } = geom;
+
+  svg.selectAll('*').remove();
+
+  // Defs: glow filter for focus ring
+  const defs = svg.append('defs');
+  const filt = defs.append('filter')
+    .attr('id', 'ring-glow')
+    .attr('x', '-80%').attr('y', '-80%')
+    .attr('width', '260%').attr('height', '260%');
+  filt.append('feGaussianBlur').attr('stdDeviation', 4).attr('result', 'blur');
+  const merge = filt.append('feMerge');
+  merge.append('feMergeNode').attr('in', 'blur');
+  merge.append('feMergeNode').attr('in', 'SourceGraphic');
+
+  const gEdges = svg.append('g').attr('aria-hidden', 'true');
+  const gAxes  = svg.append('g').attr('aria-hidden', 'true');
+  const gNodes = svg.append('g').attr('aria-hidden', 'true');
+  const gFocus = svg.append('g').attr('aria-hidden', 'true');
+
+  // ── Edges ──────────────────────────────────────────────────────────────────
+  gEdges.selectAll('path')
+    .data(edges)
+    .join('path')
+      .attr('class', 'edge')
+      .attr('data-eid', (_, i) => i)
+      .attr('d', e => {
+        const s = nodes[e.source], t = nodes[e.target];
+        return `M ${s.x},${s.y} Q ${cx},${cy} ${t.x},${t.y}`;
+      })
+      .attr('fill', 'none')
+      .attr('stroke', e => CAT_COLORS[nodes[e.source].category])
+      .attr('stroke-width', 1.5)
+      .attr('opacity', 0.18);
+
+  // ── Axes ───────────────────────────────────────────────────────────────────
+  AXIS_ANGLES.forEach((angle, i) => {
+    const x1 = cx + Math.cos(angle) * inner;
+    const y1 = cy + Math.sin(angle) * inner;
+    const x2 = cx + Math.cos(angle) * outer;
+    const y2 = cy + Math.sin(angle) * outer;
+
+    gAxes.append('line')
+      .attr('x1', x1).attr('y1', y1)
+      .attr('x2', x2).attr('y2', y2)
+      .attr('stroke', '#21262d').attr('stroke-width', 2)
+      .attr('stroke-linecap', 'round');
+
+    // Tick marks at 25%, 50%, 75%
+    [0.25, 0.5, 0.75].forEach(t => {
+      const r  = inner + t * (outer - inner);
+      const tx = cx + Math.cos(angle) * r;
+      const ty = cy + Math.sin(angle) * r;
+      const perp = angle + Math.PI / 2;
+      gAxes.append('line')
+        .attr('x1', tx + Math.cos(perp) * 4).attr('y1', ty + Math.sin(perp) * 4)
+        .attr('x2', tx - Math.cos(perp) * 4).attr('y2', ty - Math.sin(perp) * 4)
+        .attr('stroke', '#21262d').attr('stroke-width', 1.5);
+    });
+
+    // Axis label
+    const ld  = outer + 26;
+    const lx  = cx + Math.cos(angle) * ld;
+    const ly  = cy + Math.sin(angle) * ld;
+    const anc = i === 0 ? 'middle' : i === 1 ? 'start' : 'end';
+    const dy  = i === 0 ? -4 : 4;
+
+    gAxes.append('text')
+      .attr('x', lx).attr('y', ly + dy)
+      .attr('text-anchor', anc)
+      .attr('dominant-baseline', 'middle')
+      .attr('fill', '#6e7681')
+      .attr('font-size', '11px')
+      .attr('font-weight', '700')
+      .attr('letter-spacing', '0.08em')
+      .text(AXIS_NAMES[i].toUpperCase());
+  });
+
+  // Centre dot
+  gAxes.append('circle').attr('cx', cx).attr('cy', cy)
+    .attr('r', 4).attr('fill', '#21262d');
+
+  // ── Nodes ──────────────────────────────────────────────────────────────────
+  gNodes.selectAll('g')
+    .data(nodes)
+    .join('g')
+      .attr('class', 'node')
+      .attr('transform', n => `translate(${n.x},${n.y})`)
+      .attr('data-id', n => n.id)
+      .call(g => {
+        // Outer halo for hover
+        g.append('circle')
+          .attr('class', 'halo')
+          .attr('r', 10)
+          .attr('fill', n => CAT_COLORS[n.category])
+          .attr('opacity', 0)
+          .attr('pointer-events', 'none');
+
+        g.append('circle')
+          .attr('r', 5)
+          .attr('fill', n => CAT_COLORS[n.category])
+          .attr('stroke', '#0d1117')
+          .attr('stroke-width', 1.5);
+      })
+      .style('cursor', 'pointer')
+      .on('pointerenter', function(_, n) {
+        d3.select(this).select('.halo').attr('opacity', 0.15);
+        highlightNode(n);
+      })
+      .on('pointerleave', function() {
+        d3.select(this).select('.halo').attr('opacity', 0);
+        if (!hasFocus) clearHighlight();
+        else highlightNode(focusedNode());
+      })
+      .on('click', (_, n) => {
+        focusAxis  = n.axis;
+        focusIndex = n.indexOnAxis;
+        hasFocus   = true;
+        document.getElementById('svg').focus();
+        moveFocusRing(n);
+        highlightNode(n);
+        announce(n);
+      });
+
+  // ── Focus ring ─────────────────────────────────────────────────────────────
+  gFocus.append('circle')
+    .attr('id', 'focus-ring')
+    .attr('r', 11)
+    .attr('fill', 'none')
+    .attr('stroke', '#ffffff')
+    .attr('stroke-width', 2.5)
+    .attr('opacity', 0)
+    .attr('pointer-events', 'none')
+    .attr('filter', 'url(#ring-glow)');
+
+  if (hasFocus) {
+    moveFocusRing(focusedNode(), false);
+    highlightNode(focusedNode());
+  }
+}
+
+// ── HIGHLIGHT / FOCUS ────────────────────────────────────────────────────────
+function highlightNode(n) {
+  const connSet = new Set(n.edges);
+
+  svg.selectAll('.edge')
+    .attr('opacity', function() {
+      const eid = +this.getAttribute('data-eid');
+      return connSet.has(eid) ? 0.85 : 0.04;
+    })
+    .attr('stroke-width', function() {
+      const eid = +this.getAttribute('data-eid');
+      return connSet.has(eid) ? 2.5 : 1.5;
+    });
+
+  const connNodes = n.edges.flatMap(eid => {
+    const e = edges[eid];
+    const other = nodes[e.source === n.id ? e.target : e.source];
+    return [other.name];
+  });
+
+  const panel = document.getElementById('info-panel');
+  panel.innerHTML = `
+    <div class="iname" style="color:${CAT_COLORS[n.category]}">${n.name}</div>
+    <div class="imeta">
+      Axis: <strong style="color:#c9d1d9">${AXIS_NAMES[n.axis]}</strong>
+      &thinsp;·&thinsp; Position ${n.indexOnAxis + 1} of ${n.totalOnAxis}
+    </div>
+    <div class="imeta">Category: <strong style="color:#c9d1d9">${CATEGORIES[n.category]}</strong></div>
+    <div class="iconn">${n.edges.length} connection${n.edges.length !== 1 ? 's' : ''}</div>
+    ${connNodes.length ? `<div class="iconn-list">${connNodes.join(', ')}</div>` : ''}
+  `;
+}
+
+function clearHighlight() {
+  svg.selectAll('.edge').attr('opacity', 0.18).attr('stroke-width', 1.5);
+  document.getElementById('info-panel').innerHTML = `
+    <div class="iname">Explore the network</div>
+    <div class="imeta">Click a node or press <kbd>Tab</kbd>, then arrow keys</div>
+  `;
+}
+
+function moveFocusRing(n, visible = true) {
+  const ring = document.getElementById('focus-ring');
+  if (!ring) return;
+  ring.setAttribute('cx', n.x);
+  ring.setAttribute('cy', n.y);
+  ring.setAttribute('opacity', visible ? 1 : 0);
+}
+
+function hideFocusRing() {
+  const ring = document.getElementById('focus-ring');
+  if (ring) ring.setAttribute('opacity', 0);
+}
+
+// ── ARIA LIVE ────────────────────────────────────────────────────────────────
+function announce(n) {
+  const liveEl = document.getElementById('live');
+  const conn   = n.edges.length;
+  const msg    = `${n.name}. ${AXIS_NAMES[n.axis]} axis, position ${n.indexOnAxis + 1} of ${n.totalOnAxis}. ` +
+                 `Category ${CATEGORIES[n.category]}. ${conn} connection${conn !== 1 ? 's' : ''}.`;
+  liveEl.textContent = '';
+  requestAnimationFrame(() => { liveEl.textContent = msg; });
+}
+
+function announceAxis(ai) {
+  const liveEl = document.getElementById('live');
+  liveEl.textContent = `Moved to ${AXIS_NAMES[ai]} axis. ${AXIS_COUNTS[ai]} nodes.`;
+}
+
+// ── KEYBOARD ─────────────────────────────────────────────────────────────────
+const svgEl = document.getElementById('svg');
+
+svgEl.addEventListener('focus', () => {
+  if (!hasFocus) {
+    hasFocus = true;
+    moveFocusRing(focusedNode());
+    highlightNode(focusedNode());
+    announce(focusedNode());
+  }
+});
+
+svgEl.addEventListener('blur', () => {
+  hasFocus = false;
+  hideFocusRing();
+  clearHighlight();
+});
+
+svgEl.addEventListener('keydown', e => {
+  if (!hasFocus) return;
+
+  switch (e.key) {
+    case 'ArrowUp': {
+      e.preventDefault();
+      const ni = focusIndex - 1;
+      focusIndex = ni < 0 ? nodesByAxis[focusAxis].length - 1 : ni;
+      moveFocusRing(focusedNode());
+      highlightNode(focusedNode());
+      announce(focusedNode());
+      break;
+    }
+    case 'ArrowDown': {
+      e.preventDefault();
+      const ni = focusIndex + 1;
+      focusIndex = ni >= nodesByAxis[focusAxis].length ? 0 : ni;
+      moveFocusRing(focusedNode());
+      highlightNode(focusedNode());
+      announce(focusedNode());
+      break;
+    }
+    case 'ArrowLeft': {
+      e.preventDefault();
+      const ratio = focusIndex / (nodesByAxis[focusAxis].length - 1 || 1);
+      focusAxis  = (focusAxis + 2) % 3;
+      focusIndex = Math.round(ratio * (nodesByAxis[focusAxis].length - 1));
+      announceAxis(focusAxis);
+      setTimeout(() => {
+        moveFocusRing(focusedNode());
+        highlightNode(focusedNode());
+        announce(focusedNode());
+      }, 80);
+      break;
+    }
+    case 'ArrowRight': {
+      e.preventDefault();
+      const ratio = focusIndex / (nodesByAxis[focusAxis].length - 1 || 1);
+      focusAxis  = (focusAxis + 1) % 3;
+      focusIndex = Math.round(ratio * (nodesByAxis[focusAxis].length - 1));
+      announceAxis(focusAxis);
+      setTimeout(() => {
+        moveFocusRing(focusedNode());
+        highlightNode(focusedNode());
+        announce(focusedNode());
+      }, 80);
+      break;
+    }
+    case 'Home': {
+      e.preventDefault();
+      focusIndex = 0;
+      moveFocusRing(focusedNode());
+      highlightNode(focusedNode());
+      announce(focusedNode());
+      break;
+    }
+    case 'End': {
+      e.preventDefault();
+      focusIndex = nodesByAxis[focusAxis].length - 1;
+      moveFocusRing(focusedNode());
+      highlightNode(focusedNode());
+      announce(focusedNode());
+      break;
+    }
+    case 'Enter':
+    case ' ': {
+      e.preventDefault();
+      announce(focusedNode());
+      break;
+    }
+  }
+});
+
+// ── LEGEND ───────────────────────────────────────────────────────────────────
+const legendEl = document.getElementById('legend');
+legendEl.innerHTML = '<h4>Category</h4>' +
+  CATEGORIES.map((cat, i) =>
+    `<div class="leg-row">
+       <div class="leg-dot" style="background:${CAT_COLORS[i]}"></div>
+       <span>${cat}</span>
+     </div>`
+  ).join('');
+
+// ── INIT & RESIZE ─────────────────────────────────────────────────────────────
+render();
+
+const ro = new ResizeObserver(() => render());
+ro.observe(document.getElementById('chart'));
+</script>
+</body>
+</html>
