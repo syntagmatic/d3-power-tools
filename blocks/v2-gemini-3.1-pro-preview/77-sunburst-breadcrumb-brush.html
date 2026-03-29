@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Sunburst Breadcrumb Brush</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      margin: 0;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      background-color: #fff;
+    }
+    #breadcrumbs {
+      width: 100%;
+      max-width: 800px;
+      margin-bottom: 20px;
+      font-size: 16px;
+      min-height: 24px;
+    }
+    .crumb {
+      cursor: pointer;
+      color: #0077BB;
+      margin-right: 5px;
+      user-select: none;
+    }
+    .crumb:hover {
+      text-decoration: underline;
+    }
+    .crumb.active {
+      font-weight: bold;
+      color: #333;
+      cursor: default;
+      text-decoration: none;
+    }
+    #chart {
+      position: relative;
+    }
+    .arc {
+      cursor: pointer;
+      transition: filter 0.2s ease;
+    }
+    .arc:hover {
+      filter: brightness(1.1);
+    }
+    .arc.desaturated {
+      filter: saturate(0.2) opacity(0.3);
+    }
+  </style>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+</head>
+<body>
+  <div id="breadcrumbs"></div>
+  <div id="chart"></div>
+  <script>
+    const categories = ["Electronics", "Clothing", "Home", "Sports", "Health"];
+    const subcatPrefixes = ["Premium", "Basic", "Advanced", "Essential"];
+    const brands = ["Alpha", "Beta", "Gamma"];
+
+    let id = 0;
+    const data = {
+      name: "All Products",
+      children: categories.map(cat => ({
+        name: cat,
+        children: subcatPrefixes.map(sub => ({
+          name: `${sub} ${cat}`,
+          children: brands.map(brand => ({
+            name: `${brand} ${sub}`,
+            children: Array.from({length: Math.floor(Math.random() * 2) + 2}, () => ({
+              name: `Prod ${++id}`,
+              value: Math.floor(Math.random() * 100) + 10
+            }))
+          }))
+        }))
+      }))
+    };
+
+    const width = 800;
+    const height = 800;
+    const visibleLayers = 4;
+    const layerRadius = Math.min(width, height) / 2 / (visibleLayers + 2);
+
+    const svg = d3.select("#chart")
+      .append("svg")
+      .attr("width", width)
+      .attr("height", height)
+      .attr("viewBox", `0 0 ${width} ${height}`)
+      .style("max-width", "100%")
+      .style("height", "auto");
+
+    const g = svg.append("g")
+      .attr("transform", `translate(${width / 2},${height / 2})`);
+
+    const root = d3.hierarchy(data)
+      .sum(d => d.value)
+      .sort((a, b) => b.value - a.value);
+
+    d3.partition().size([1, root.height + 1])(root);
+
+    root.each(d => {
+      d.target = {
+        x0: d.x0 * 2 * Math.PI,
+        x1: d.x1 * 2 * Math.PI,
+        y0: d.y0,
+        y1: d.y1
+      };
+      d.current = { ...d.target };
+    });
+
+    const rootColor = d3.scaleOrdinal(d3.schemeTableau10);
+    function getColor(d) {
+      if (d.depth === 0) return "transparent";
+      let ancestor = d;
+      while (ancestor.depth > 1) ancestor = ancestor.parent;
+      const c = d3.color(rootColor(ancestor.data.name));
+      c.opacity = 1 - (d.depth - 1) * 0.15;
+      return c;
+    }
+
+    const arc = d3.arc()
+      .startAngle(d => d.current.x0)
+      .endAngle(d => d.current.x1)
+      .padAngle(d => Math.min((d.current.x1 - d.current.x0) / 2, 0.005))
+      .padRadius(layerRadius * 1.5)
+      .innerRadius(d => Math.max(0, d.current.y0 * layerRadius))
+      .outerRadius(d => Math.max(0, d.current.y1 * layerRadius - 1));
+
+    function arcVisible(d) {
+      return d.y1 <= visibleLayers + 1 && d.y0 >= 1 && d.x1 > d.x0;
+    }
+
+    const paths = g.append("g")
+      .selectAll("path")
+      .data(root.descendants().slice(1))
+      .join("path")
+      .attr("class", "arc")
+      .attr("fill", getColor)
+      .attr("fill-opacity", d => arcVisible(d.target) ? 1 : 0)
+      .attr("pointer-events", d => arcVisible(d.target) ? "auto" : "none")
+      .attr("d", d => arc(d.current))
+      .on("click", clicked);
+
+    paths.append("title")
+      .text(d => `${d.ancestors().map(d => d.data.name).reverse().join(" → ")}\nValue: ${d.value}`);
+
+    const parentCircle = g.append("circle")
+      .datum(root)
+      .attr("r", layerRadius)
+      .attr("fill", "transparent")
+      .attr("pointer-events", "all")
+      .style("cursor", "pointer")
+      .on("click", clicked);
+
+    const breadcrumbContainer = d3.select("#breadcrumbs");
+    
+    function updateBreadcrumbs(p) {
+      const ancestors = p.ancestors().reverse();
+      const crumbs = breadcrumbContainer.selectAll(".crumb")
+        .data(ancestors, d => d.data.name);
+        
+      crumbs.enter()
+        .append("span")
+        .attr("class", "crumb")
+        .text(d => d.data.name)
+        .on("click", (event, d) => clicked(event, d))
+        .merge(crumbs)
+        .text(d => d.data.name + (d === p ? "" : " / "))
+        .attr("class", d => d === p ? "crumb active" : "crumb");
+        
+      crumbs.exit().remove();
+    }
+    
+    updateBreadcrumbs(root);
+
+    let focus = root;
+
+    function clicked(event, p) {
+      if (!p) return;
+      focus = p;
+      
+      clearBrush();
+      
+      parentCircle.datum(p.parent || root);
+      updateBreadcrumbs(p);
+      
+      root.each(d => {
+        d.target = {
+          x0: Math.max(0, Math.min(1, (d.x0 - p.x0) / (p.x1 - p.x0))) * 2 * Math.PI,
+          x1: Math.max(0, Math.min(1, (d.x1 - p.x0) / (p.x1 - p.x0))) * 2 * Math.PI,
+          y0: Math.max(0, d.y0 - p.depth),
+          y1: Math.max(0, d.y1 - p.depth)
+        };
+      });
+
+      const t = svg.transition().duration(750);
+
+      paths.transition(t)
+        .tween("data", d => {
+          const i = d3.interpolate(d.current, d.target);
+          return t => d.current = i(t);
+        })
+        .filter(function(d) {
+          return +this.getAttribute("fill-opacity") || arcVisible(d.target);
+        })
+        .attr("fill-opacity", d => arcVisible(d.target) ? 1 : 0)
+        .attr("pointer-events", d => arcVisible(d.target) ? "auto" : "none")
+        .attrTween("d", d => () => arc(d.current));
+    }
+
+    const brushTrackInner = (visibleLayers + 1) * layerRadius + 15;
+    const brushTrackOuter = brushTrackInner + 30;
+
+    g.append("path")
+      .attr("d", d3.arc()({
+        innerRadius: brushTrackInner,
+        outerRadius: brushTrackOuter,
+        startAngle: 0,
+        endAngle: 2 * Math.PI
+      }))
+      .attr("fill", "#eef2f5")
+      .attr("stroke", "#d0d7de");
+
+    const brushSelection = g.append("path")
+      .attr("fill", "rgba(0, 119, 187, 0.4)")
+      .attr("stroke", "#0077BB")
+      .style("display", "none")
+      .attr("pointer-events", "none");
+      
+    const brushOverlay = g.append("path")
+      .attr("d", d3.arc()({
+        innerRadius: brushTrackInner,
+        outerRadius: brushTrackOuter + 20,
+        startAngle: 0,
+        endAngle: 2 * Math.PI
+      }))
+      .attr("fill", "transparent")
+      .style("cursor", "crosshair");
+
+    let brushStartAngle = null;
+    let accumulatedEnd = null;
+    let previousAngle = null;
+    let isBrushing = false;
+
+    function getEventAngle(event) {
+      let angle = Math.atan2(event.y, event.x) + Math.PI / 2;
+      if (angle < 0) angle += 2 * Math.PI;
+      return angle;
+    }
+
+    const drag = d3.drag()
+      .on("start", (event) => {
+        isBrushing = true;
+        brushStartAngle = getEventAngle(event);
+        previousAngle = brushStartAngle;
+        accumulatedEnd = brushStartAngle;
+        updateBrushVisuals();
+        applyBrush();
+      })
+      .on("drag", (event) => {
+        let currentAngle = getEventAngle(event);
+        let delta = currentAngle - previousAngle;
+        
+        if (delta > Math.PI) delta -= 2 * Math.PI;
+        else if (delta < -Math.PI) delta += 2 * Math.PI;
+        
+        accumulatedEnd += delta;
+        previousAngle = currentAngle;
+        
+        updateBrushVisuals();
+        applyBrush();
+      })
+      .on("end", (event) => {
+        if (Math.abs(accumulatedEnd - brushStartAngle) < 0.05) {
+          clearBrush();
+        }
+      });
+
+    brushOverlay.call(drag);
+
+    function updateBrushVisuals() {
+      if (brushStartAngle === null) {
+        brushSelection.style("display", "none");
+        return;
+      }
+      brushSelection.style("display", "block");
+      
+      let start = Math.min(brushStartAngle, accumulatedEnd);
+      let end = Math.max(brushStartAngle, accumulatedEnd);
+      
+      if (end - start >= 2 * Math.PI) {
+        end = start + 2 * Math.PI;
+      }
+      
+      brushSelection.attr("d", d3.arc()({
+        innerRadius: brushTrackInner,
+        outerRadius: brushTrackOuter,
+        startAngle: start,
+        endAngle: end
+      }));
+    }
+
+    function clearBrush() {
+      isBrushing = false;
+      brushStartAngle = null;
+      accumulatedEnd = null;
+      updateBrushVisuals();
+      paths.classed("desaturated", false);
+    }
+
+    function applyBrush() {
+      if (!isBrushing || brushStartAngle === null) {
+        paths.classed("desaturated", false);
+        return;
+      }
+      
+      let startUnnorm = Math.min(brushStartAngle, accumulatedEnd);
+      let endUnnorm = Math.max(brushStartAngle, accumulatedEnd);
+      
+      if (endUnnorm - startUnnorm >= 2 * Math.PI - 0.001) {
+        paths.classed("desaturated", false);
+        return;
+      }
+      
+      let s_norm = ((startUnnorm % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+      let e_norm = ((endUnnorm % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+      
+      paths.classed("desaturated", function(d) {
+        if (!arcVisible(d.target)) return false;
+        
+        const a0 = d.current.x0;
+        const a1 = d.current.x1;
+        
+        let isSelected = false;
+        if (s_norm <= e_norm) {
+          isSelected = Math.max(s_norm, a0) < Math.min(e_norm, a1);
+        } else {
+          const overlap1 = Math.max(s_norm, a0) < Math.min(2 * Math.PI, a1);
+          const overlap2 = Math.max(0, a0) < Math.min(e_norm, a1);
+          isSelected = overlap1 || overlap2;
+        }
+        
+        return !isSelected;
+      });
+    }
+  </script>
+</body>
+</html>

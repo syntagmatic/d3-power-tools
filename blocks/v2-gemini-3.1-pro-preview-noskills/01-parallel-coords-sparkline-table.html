@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Parallel Coordinates & Sparkline Table</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
+            margin: 20px; 
+            color: #333; 
+            background-color: #fcfcfc;
+        }
+        .container { 
+            display: flex; 
+            flex-direction: column; 
+            gap: 30px; 
+            max-width: 1000px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        }
+        h2 { margin-top: 0; color: #2c3e50; }
+        
+        #plot { width: 100%; overflow-x: auto; margin-bottom: 10px; }
+        svg { font-size: 11px; }
+        .axis line, .axis path { fill: none; stroke: #888; shape-rendering: crispEdges; }
+        .axis text { 
+            fill: #444; 
+            text-shadow: 0 1px 0 #fff, 1px 0 0 #fff, 0 -1px 0 #fff, -1px 0 0 #fff; 
+            cursor: default; 
+            font-weight: 500;
+        }
+        .path-foreground { fill: none; stroke-opacity: 0.6; stroke-width: 1.5px; }
+        .path-background { fill: none; stroke: #eee; stroke-opacity: 0.6; stroke-width: 1px; }
+        .brush .selection { fill: rgba(105, 179, 162, 0.3); stroke: #69b3a2; stroke-width: 1px; }
+        
+        table { 
+            border-collapse: collapse; 
+            width: 100%; 
+            font-variant-numeric: tabular-nums;
+        }
+        th, td { 
+            text-align: right; 
+            padding: 10px 12px; 
+            border-bottom: 1px solid #eaeaea; 
+        }
+        th:first-child, td:first-child { text-align: left; }
+        th { 
+            background-color: #f8f9fa; 
+            font-weight: 600; 
+            color: #495057;
+            border-top: 1px solid #eaeaea;
+        }
+        .badge { 
+            background: #4361ee; 
+            color: white; 
+            padding: 4px 10px; 
+            border-radius: 12px; 
+            font-size: 0.85em; 
+            font-weight: 600; 
+        }
+        .header-row { 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+            margin-bottom: 10px;
+        }
+        .header-row h3 { margin: 0; color: #2c3e50; }
+        .sparkline-svg { display: block; margin: 0 auto; }
+        .sparkline-cell { text-align: center; width: 140px; }
+        
+        .legend { display: flex; gap: 15px; margin-bottom: 15px; flex-wrap: wrap; }
+        .legend-item { display: flex; align-items: center; gap: 5px; font-size: 0.9em; }
+        .legend-color { width: 12px; height: 12px; border-radius: 50%; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div>
+        <h2>City Metrics Analysis</h2>
+        <p style="margin-top:-10px; color:#666; font-size:0.9em;">Drag vertically along axes to brush and filter. Intersections of all active brushes will be shown.</p>
+        <div class="legend" id="legend"></div>
+        <div id="plot"></div>
+    </div>
+    
+    <div>
+        <div class="header-row">
+            <h3>Metric Distribution Summary</h3>
+            <span class="badge" id="count-badge">Loading...</span>
+        </div>
+        <table id="summary-table">
+            <thead>
+                <tr>
+                    <th>Metric</th>
+                    <th style="text-align: center;">Distribution (Sparkline)</th>
+                    <th>Min</th>
+                    <th>Median</th>
+                    <th>Max</th>
+                </tr>
+            </thead>
+            <tbody>
+                <!-- Rows will be populated by JS -->
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+// Simple LCG for reproducible synthetic data
+const lcg = (seed) => () => (seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296;
+const random = lcg(42);
+
+// Data Generation
+const regions = ["North", "South", "East", "West", "Central", "Island"];
+const data = Array.from({ length: 150 }, (_, i) => {
+    const region = regions[i % 6];
+    let population = random() * 8000000 + 500000; 
+    let temp = random() * 35; 
+    let elevation = random() * 2500; 
+    let rainfall = random() * 1500 + 200; 
+    let gdp = population * (random() * 50000 + 15000) / 1000000; 
+    let density = population / (random() * 3000 + 500); 
+
+    // Inject correlations and regional biases
+    if (region === "Island") { elevation *= 0.2; rainfall += 1000; temp += 10; }
+    if (region === "North") { temp -= 10; elevation += 800; }
+    if (region === "South") { temp += 15; rainfall += 400; }
+    if (region === "Central") { rainfall -= 300; population += 2000000; }
+    
+    // Add noise
+    temp += (random() - 0.5) * 10;
+    
+    return {
+        id: i,
+        region: region,
+        population: population,
+        temp: temp,
+        elevation: elevation,
+        rainfall: rainfall,
+        gdp: gdp,
+        density: density
+    };
+});
+
+const dimensions = ["population", "temp", "elevation", "rainfall", "gdp", "density"];
+const dimLabels = {
+    population: "Population",
+    temp: "Avg Temp (°C)",
+    elevation: "Elevation (m)",
+    rainfall: "Rainfall (mm)",
+    gdp: "GDP (M$)",
+    density: "Density (pop/km²)"
+};
+
+const formatters = {
+    population: d3.format(",.0f"),
+    temp: d3.format(".1f"),
+    elevation: d3.format(",.0f"),
+    rainfall: d3.format(",.0f"),
+    gdp: d3.format(",.0f"),
+    density: d3.format(",.0f")
+};
+
+// Setup Parallel Coordinates
+const margin = {top: 40, right: 30, bottom: 20, left: 30},
+      width = 960 - margin.left - margin.right,
+      height = 350 - margin.top - margin.bottom;
+
+const svg = d3.select("#plot")
+  .append("svg")
+    .attr("width", "100%")
+    .attr("viewBox", `0 0 ${width + margin.left + margin.right} ${height + margin.top + margin.bottom}`)
+  .append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+const color = d3.scaleOrdinal()
+    .domain(regions)
+    .range(["#4e79a7", "#f28e2c", "#e15759", "#76b7b2", "#59a14f", "#edc949"]);
+
+// Render Legend
+const legend = d3.select("#legend");
+regions.forEach(r => {
+    const item = legend.append("div").attr("class", "legend-item");
+    item.append("div").attr("class", "legend-color").style("background-color", color(r));
+    item.append("span").text(r);
+});
+
+const y = {};
+for (const dim of dimensions) {
+    y[dim] = d3.scaleLinear()
+      .domain(d3.extent(data, d => d[dim]))
+      .range([height, 0]);
+}
+
+const x = d3.scalePoint()
+  .range([0, width])
+  .padding(0.5)
+  .domain(dimensions);
+
+function path(d) {
+    return d3.line()(dimensions.map(p => [x(p), y[p](d[p])]));
+}
+
+// Draw background lines
+const backgroundLines = svg.append("g")
+    .attr("class", "path-background")
+  .selectAll("path")
+  .data(data)
+  .join("path")
+    .attr("d", path);
+
+// Draw foreground lines
+const foregroundLines = svg.append("g")
+    .attr("class", "path-foreground")
+  .selectAll("path")
+  .data(data)
+  .join("path")
+    .attr("d", path)
+    .style("stroke", d => color(d.region));
+
+// Draw axes
+const axes = svg.selectAll("myAxis")
+  .data(dimensions).enter()
+  .append("g")
+  .attr("class", "axis")
+  .attr("transform", d => `translate(${x(d)})`)
+  .each(function(d) { d3.select(this).call(d3.axisLeft().scale(y[d]).ticks(5)); });
+
+axes.append("text")
+  .style("text-anchor", "middle")
+  .attr("y", -15)
+  .text(d => dimLabels[d])
+  .style("fill", "#2c3e50")
+  .style("font-size", "12px")
+  .style("font-weight", "600");
+
+// Brushing logic
+const extents = {};
+dimensions.forEach(d => extents[d] = null);
+
+const brushes = axes.append("g")
+  .attr("class", "brush")
+  .each(function(d) {
+      d3.select(this).call(d3.brushY()
+        .extent([[-12, 0], [12, height]])
+        .on("start brush end", (event) => brushEventHandler(event, d))
+      );
+  });
+
+function brushEventHandler(event, dimension) {
+    if (event.selection) {
+        const [y1, y2] = event.selection;
+        const val1 = y[dimension].invert(y1);
+        const val2 = y[dimension].invert(y2);
+        extents[dimension] = [Math.min(val1, val2), Math.max(val1, val2)];
+    } else {
+        extents[dimension] = null;
+    }
+    updateSelection();
+}
+
+function updateSelection() {
+    const activeDimensions = dimensions.filter(d => extents[d] !== null);
+    
+    let selectedData = data;
+    if (activeDimensions.length > 0) {
+        selectedData = data.filter(d => {
+            return activeDimensions.every(dim => {
+                return d[dim] >= extents[dim][0] && d[dim] <= extents[dim][1];
+            });
+        });
+    }
+
+    const selectedIds = new Set(selectedData.map(d => d.id));
+    
+    // Update parallel coordinates visualization
+    foregroundLines.style("display", d => selectedIds.has(d.id) ? null : "none");
+
+    // Update summary table
+    updateTable(selectedData);
+}
+
+// Table initialization and logic
+const tbody = d3.select("#summary-table tbody");
+const rows = tbody.selectAll("tr")
+    .data(dimensions)
+    .enter()
+    .append("tr");
+
+rows.append("td").text(d => dimLabels[d]);
+rows.append("td").attr("class", "sparkline-cell").attr("id", d => `sparkline-${d}`);
+rows.append("td").attr("class", "cell-min");
+rows.append("td").attr("class", "cell-median");
+rows.append("td").attr("class", "cell-max");
+
+function drawSparkline(containerId, dim, metricData, globalScale) {
+    const container = d3.select(`#${containerId}`);
+    container.selectAll("*").remove();
+    
+    if (metricData.length === 0) return;
+
+    const sWidth = 120, sHeight = 32;
+    const sSvg = container.append("svg")
+        .attr("width", sWidth)
+        .attr("height", sHeight)
+        .attr("class", "sparkline-svg");
+
+    const domain = globalScale.domain();
+    const sx = d3.scaleLinear().domain(domain).range([0, sWidth]);
+    
+    // Create bins based on global domain for consistent scale representation
+    const histogram = d3.bin()
+        .domain(sx.domain())
+        .thresholds(sx.ticks(20));
+        
+    const bins = histogram(metricData);
+    
+    const sy = d3.scaleLinear()
+        .domain([0, d3.max(bins, d => d.length) || 1])
+        .range([sHeight, 0]);
+
+    // Draw bars
+    sSvg.selectAll("rect")
+        .data(bins)
+        .enter()
+        .append("rect")
+        .attr("x", 1)
+        .attr("transform", d => `translate(${sx(d.x0)}, ${sy(d.length)})`)
+        .attr("width", d => Math.max(1, sx(d.x1) - sx(d.x0) - 1))
+        .attr("height", d => Math.max(0, sHeight - sy(d.length)))
+        .style("fill", "#69b3a2")
+        .style("opacity", 0.8);
+        
+    // Draw median line indicator
+    const medianVal = d3.median(metricData);
+    sSvg.append("line")
+        .attr("x1", sx(medianVal))
+        .attr("x2", sx(medianVal))
+        .attr("y1", 0)
+        .attr("y2", sHeight)
+        .attr("stroke", "#e15759")
+        .attr("stroke-width", 1.5)
+        .attr("stroke-dasharray", "2,2");
+}
+
+function updateTable(selectedData) {
+    d3.select("#count-badge").text(`${selectedData.length} of ${data.length} Cities`);
+
+    rows.each(function(dim) {
+        const row = d3.select(this);
+        const values = selectedData.map(d => d[dim]);
+        
+        if (values.length > 0) {
+            const min = d3.min(values);
+            const median = d3.median(values);
+            const max = d3.max(values);
+            
+            row.select(".cell-min").text(formatters[dim](min));
+            row.select(".cell-median").text(formatters[dim](median)).style("font-weight", "bold");
+            row.select(".cell-max").text(formatters[dim](max));
+            
+            drawSparkline(`sparkline-${dim}`, dim, values, y[dim]);
+        } else {
+            row.select(".cell-min").text("-");
+            row.select(".cell-median").text("-").style("font-weight", "normal");
+            row.select(".cell-max").text("-");
+            d3.select(`#sparkline-${dim}`).selectAll("*").remove();
+        }
+    });
+}
+
+// Initial draw
+updateSelection();
+
+</script>
+</body>
+</html>

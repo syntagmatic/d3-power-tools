@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quadtree Hit Detection</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #0f172a;
+            font-family: system-ui, -apple-system, sans-serif;
+            color: #e2e8f0;
+        }
+        #container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+        }
+        canvas, svg {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        svg {
+            pointer-events: all;
+            cursor: crosshair;
+        }
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(15, 23, 42, 0.85);
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid #334155;
+            backdrop-filter: blur(4px);
+            z-index: 10;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        }
+        .toggle-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        input[type="checkbox"] {
+            accent-color: #3b82f6;
+            width: 16px;
+            height: 16px;
+            cursor: pointer;
+        }
+        label {
+            cursor: pointer;
+            font-size: 14px;
+        }
+    </style>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+</head>
+<body>
+    <div id="container">
+        <!-- Canvases are appended here via D3 -->
+        <div id="ui">
+            <h2 style="margin: 0 0 10px 0; font-size: 16px;">Quadtree Hit Detection</h2>
+            <div class="toggle-row">
+                <input type="checkbox" id="voronoi-toggle">
+                <label for="voronoi-toggle">Voronoi Overlay</label>
+            </div>
+            <div style="margin-top: 10px; font-size: 12px; color: #94a3b8; line-height: 1.4;">
+                Scroll zoom with quadtree recompute.<br>
+                5000 points. Mouse move finds 10 nearest.
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+        const dpr = window.devicePixelRatio || 1;
+        const container = d3.select("#container");
+
+        function setupCanvas(id) {
+            const canvas = container.insert("canvas", "#ui")
+                .attr("id", id)
+                .attr("width", width * dpr)
+                .attr("height", height * dpr)
+                .style("width", `${width}px`)
+                .style("height", `${height}px`);
+            const ctx = canvas.node().getContext("2d");
+            ctx.scale(dpr, dpr);
+            return { canvas, ctx };
+        }
+
+        const { ctx: bgCtx } = setupCanvas("bg-canvas");
+        const { ctx: voronoiCtx } = setupCanvas("voronoi-canvas");
+        const { canvas: intCanvas, ctx: intCtx } = setupCanvas("int-canvas");
+
+        const svg = container.insert("svg", "#ui")
+            .attr("width", width)
+            .attr("height", height);
+
+        const numPoints = 5000;
+        const categories = 8;
+        const colors = ['#f43f5e', '#f97316', '#eab308', '#22c55e', '#0ea5e9', '#3b82f6', '#a855f7', '#ec4899'];
+        
+        const data = Array.from({ length: numPoints }, (_, i) => {
+            const cat = i % categories;
+            const angle = (cat / categories) * Math.PI * 2;
+            const dist = Math.random() * 0.4 * Math.min(width, height);
+            const cx = width / 2 + Math.cos(angle) * dist;
+            const cy = height / 2 + Math.sin(angle) * dist;
+            
+            return {
+                id: i,
+                x: cx + d3.randomNormal(0, 40)(),
+                y: cy + d3.randomNormal(0, 40)(),
+                category: cat,
+                color: colors[cat]
+            };
+        });
+
+        const xScale = d3.scaleLinear().domain([0, width]).range([0, width]);
+        const yScale = d3.scaleLinear().domain([0, height]).range([0, height]);
+
+        let currentTransform = d3.zoomIdentity;
+        let quadtree;
+        let showVoronoi = false;
+        let lastMousePos = null;
+
+        d3.select("#voronoi-toggle").on("change", function() {
+            showVoronoi = this.checked;
+            drawVoronoi();
+        });
+
+        function buildQuadtree(zx, zy) {
+            data.forEach(d => {
+                d.cx = zx(d.x);
+                d.cy = zy(d.y);
+            });
+            quadtree = d3.quadtree()
+                .x(d => d.cx)
+                .y(d => d.cy)
+                .addAll(data);
+        }
+
+        function drawBackground() {
+            bgCtx.clearRect(0, 0, width, height);
+            
+            const grouped = d3.group(data, d => d.category);
+            for (const [cat, points] of grouped) {
+                bgCtx.fillStyle = colors[cat] + '99'; 
+                bgCtx.beginPath();
+                for (const d of points) {
+                    bgCtx.moveTo(d.cx + 2, d.cy);
+                    bgCtx.arc(d.cx, d.cy, 2, 0, Math.PI * 2);
+                }
+                bgCtx.fill();
+            }
+        }
+
+        function drawVoronoi() {
+            voronoiCtx.clearRect(0, 0, width, height);
+            if (!showVoronoi) return;
+
+            voronoiCtx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+            voronoiCtx.lineWidth = 1;
+
+            const delaunay = d3.Delaunay.from(data, d => d.cx, d => d.cy);
+            const voronoi = delaunay.voronoi([0, 0, width, height]);
+
+            voronoiCtx.beginPath();
+            voronoi.render(voronoiCtx);
+            voronoiCtx.stroke();
+        }
+
+        function findKNearest(qt, x, y, k, maxRadius) {
+            const results = [];
+            let maxDist2 = maxRadius * maxRadius;
+
+            qt.visit((node, x0, y0, x1, y1) => {
+                if (!node.length) {
+                    do {
+                        const d = node.data;
+                        const dx = d.cx - x;
+                        const dy = d.cy - y;
+                        const dist2 = dx * dx + dy * dy;
+                        if (dist2 < maxDist2) {
+                            results.push({data: d, dist2: dist2});
+                            results.sort((a, b) => a.dist2 - b.dist2);
+                            if (results.length > k) results.pop();
+                            if (results.length === k) maxDist2 = results[results.length - 1].dist2;
+                        }
+                    } while ((node = node.next));
+                }
+                
+                const dx = x < x0 ? x0 - x : x > x1 ? x - x1 : 0;
+                const dy = y < y0 ? y0 - y : y > y1 ? y - y1 : 0;
+                return dx * dx + dy * dy >= maxDist2;
+            });
+            return results;
+        }
+
+        function drawInteraction() {
+            intCtx.clearRect(0, 0, width, height);
+            if (!lastMousePos) return;
+
+            const [mx, my] = lastMousePos;
+            const nearest = findKNearest(quadtree, mx, my, 10, width);
+
+            if (nearest.length === 0) return;
+
+            intCtx.lineWidth = 1;
+            for (const n of nearest) {
+                const d = n.data;
+                intCtx.strokeStyle = d.color;
+                intCtx.globalAlpha = 0.5;
+                intCtx.beginPath();
+                intCtx.moveTo(mx, my);
+                intCtx.lineTo(d.cx, d.cy);
+                intCtx.stroke();
+            }
+
+            intCtx.globalAlpha = 1.0;
+            intCtx.fillStyle = '#fff';
+            intCtx.beginPath();
+            intCtx.arc(mx, my, 3, 0, Math.PI * 2);
+            intCtx.fill();
+
+            for (const n of nearest) {
+                const d = n.data;
+                intCtx.shadowBlur = 12;
+                intCtx.shadowColor = d.color;
+                intCtx.fillStyle = d.color;
+                
+                intCtx.beginPath();
+                intCtx.arc(d.cx, d.cy, 4, 0, Math.PI * 2);
+                intCtx.fill();
+                
+                intCtx.shadowBlur = 0;
+                intCtx.strokeStyle = '#fff';
+                intCtx.lineWidth = 1.5;
+                intCtx.stroke();
+            }
+        }
+
+        const zoom = d3.zoom()
+            .scaleExtent([0.1, 10])
+            .on("zoom", (event) => {
+                currentTransform = event.transform;
+                const zx = currentTransform.rescaleX(xScale);
+                const zy = currentTransform.rescaleY(yScale);
+                
+                buildQuadtree(zx, zy);
+                drawBackground();
+                drawVoronoi();
+                drawInteraction();
+            });
+
+        svg.call(zoom);
+
+        svg.on("pointermove", (event) => {
+            lastMousePos = d3.pointer(event);
+            drawInteraction();
+        });
+
+        svg.on("pointerleave", () => {
+            lastMousePos = null;
+            drawInteraction();
+        });
+
+        const initialZx = currentTransform.rescaleX(xScale);
+        const initialZy = currentTransform.rescaleY(yScale);
+        buildQuadtree(initialZx, initialZy);
+        drawBackground();
+        drawVoronoi();
+    </script>
+</body>
+</html>

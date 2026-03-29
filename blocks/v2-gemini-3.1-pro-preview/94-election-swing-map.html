@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>US Election Swing Map</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/topojson-client@3"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; background: #eef2f5; color: #111; }
+  .container { display: flex; flex-direction: column; height: 100vh; padding: 20px; box-sizing: border-box; max-width: 1400px; margin: 0 auto; }
+  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; background: white; padding: 15px 25px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+  h1 { margin: 0; font-size: 1.5rem; color: #2c3e50; }
+  .controls { display: flex; align-items: center; gap: 20px; }
+  .slider-container { display: flex; align-items: center; gap: 15px; }
+  .slider-container input { width: 300px; cursor: pointer; }
+  #year-label { font-size: 1.5rem; font-weight: 700; color: #34495e; width: 60px; text-align: center; }
+  
+  .main { display: flex; flex: 1; gap: 20px; min-height: 0; }
+  .map-container { flex: 2; position: relative; background: white; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); overflow: hidden; }
+  .chart-container { flex: 1; display: flex; flex-direction: column; background: white; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); padding: 25px; }
+  
+  svg { width: 100%; height: 100%; display: block; }
+  
+  .tooltip { position: absolute; background: rgba(20, 25, 30, 0.9); color: #fff; padding: 10px 14px; border-radius: 6px; pointer-events: none; font-size: 0.85rem; font-weight: 500; opacity: 0; box-shadow: 0 4px 10px rgba(0,0,0,0.2); z-index: 10; line-height: 1.4; transform: translate(-50%, -100%); margin-top: -10px; transition: opacity 0.15s ease; }
+  
+  .chart-title { margin: 0 0 5px 0; font-size: 1.1rem; color: #2c3e50; text-align: center; font-weight: 600; }
+  .chart-subtitle { font-size: 0.85rem; color: #7f8c8d; text-align: center; margin-bottom: 20px; }
+  
+  #map-svg { background: #fff; }
+  
+  #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 1.2rem; color: #7f8c8d; }
+  
+  .brush .selection { fill: #2c3e50; fill-opacity: 0.15; stroke: #2c3e50; stroke-width: 1px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>US Presidential Elections (2004-2020)</h1>
+    <div class="controls">
+      <div class="slider-container">
+        <label for="year-slider" id="year-label">2004</label>
+        <input type="range" id="year-slider" min="0" max="4" step="1" value="0" disabled>
+      </div>
+    </div>
+  </div>
+  <div class="main">
+    <div class="map-container" id="map">
+      <div id="loading">Loading Map Data...</div>
+      <svg id="map-svg" viewBox="0 0 975 610" preserveAspectRatio="xMidYMid meet" style="opacity: 0; transition: opacity 0.5s;">
+        <g id="counties"></g>
+        <path id="states" fill="none" stroke="#fff" stroke-width="0.7" stroke-linejoin="round"></path>
+        <path id="nation" fill="none" stroke="#333" stroke-width="1.2" stroke-linejoin="round"></path>
+      </svg>
+      <div class="tooltip" id="tooltip"></div>
+    </div>
+    <div class="chart-container" id="chart">
+      <h3 class="chart-title">Margin Distribution</h3>
+      <div class="chart-subtitle">Brush to highlight counties on map</div>
+      <div style="flex: 1; position: relative;" id="histogram"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const years = [2004, 2008, 2012, 2016, 2020];
+let currentYearIndex = 0;
+let currentYear = years[currentYearIndex];
+let counties, states, nation;
+let currentSelection = null;
+
+function mulberry32(a) {
+  return function() {
+    var t = a += 0x6D2B79F5;
+    t = Math.imul(t ^ t >>> 15, t | 1);
+    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  }
+}
+
+const mapSvg = d3.select("#map-svg");
+const countiesGroup = mapSvg.select("#counties");
+const tooltip = d3.select("#tooltip");
+const path = d3.geoPath();
+
+const color = d3.scaleDiverging(t => d3.interpolateRdBu(1 - t)).domain([-60, 0, 60]);
+
+const histWidth = 500;
+const histHeight = 350;
+const margin = {top: 20, right: 20, bottom: 40, left: 50};
+const innerW = histWidth - margin.left - margin.right;
+const innerH = histHeight - margin.top - margin.bottom;
+
+const svgHist = d3.select("#histogram").append("svg")
+  .attr("viewBox", `0 0 ${histWidth} ${histHeight}`)
+  .style("width", "100%")
+  .style("height", "100%");
+
+const gHist = svgHist.append("g")
+  .attr("transform", `translate(${margin.left},${margin.top})`);
+
+const x = d3.scaleLinear().domain([-80, 80]).range([0, innerW]);
+const y = d3.scaleLinear().range([innerH, 0]);
+
+const xAxis = gHist.append("g")
+  .attr("transform", `translate(0,${innerH})`)
+  .call(d3.axisBottom(x).tickFormat(d => d > 0 ? \`R+\${d}\` : d < 0 ? \`D+\${-d}\` : '0'));
+  
+gHist.append("text")
+  .attr("x", innerW / 2)
+  .attr("y", innerH + 35)
+  .attr("text-anchor", "middle")
+  .style("font-size", "12px")
+  .style("fill", "#666")
+  .text("Margin (%)");
+
+const yAxisGroup = gHist.append("g");
+const barsGroup = gHist.append("g");
+
+const brush = d3.brushX()
+  .extent([[0, 0], [innerW, innerH]])
+  .on("start brush end", brushed);
+
+const brushGroup = gHist.append("g")
+  .attr("class", "brush")
+  .call(brush);
+
+let countyPaths;
+let bars;
+
+Promise.all([
+  d3.json("https://cdn.jsdelivr.net/npm/us-atlas@3/counties-10m.json")
+]).then(([us]) => {
+  document.getElementById("loading").style.display = "none";
+  document.getElementById("map-svg").style.opacity = "1";
+  document.getElementById("year-slider").disabled = false;
+  
+  counties = topojson.feature(us, us.objects.counties).features;
+  states = topojson.mesh(us, us.objects.states, (a, b) => a !== b);
+  nation = topojson.mesh(us, us.objects.nation);
+  
+  const areas = counties.map(d => path.area(d)).sort(d3.ascending);
+  const q90 = d3.quantile(areas, 0.9);
+  const nationalSwings = { 2004: 0, 2008: -7, 2012: 4, 2016: 2, 2020: -4 };
+  
+  counties.forEach(d => {
+    const prng = mulberry32(parseInt(d.id || "0") + 12345);
+    const a = path.area(d);
+    let areaFactor = Math.min(1, a / q90);
+    
+    let baseMargin = (areaFactor - 0.3) * 140 + (prng() - 0.5) * 40;
+    baseMargin = Math.max(-80, Math.min(80, baseMargin));
+    
+    d.properties.margins = {};
+    let currentM = baseMargin;
+    
+    years.forEach(year => {
+      currentM += nationalSwings[year] + (prng() - 0.5) * 15;
+      currentM = Math.max(-95, Math.min(95, currentM));
+      d.properties.margins[year] = currentM;
+    });
+  });
+  
+  mapSvg.select("#states").attr("d", path(states));
+  mapSvg.select("#nation").attr("d", path(nation));
+  
+  countyPaths = countiesGroup.selectAll("path")
+    .data(counties)
+    .join("path")
+    .attr("d", path)
+    .attr("stroke", "none")
+    .on("mousemove", function(event, d) {
+      const margin = d.properties.margins[currentYear];
+      const party = margin > 0 ? "Rep" : margin < 0 ? "Dem" : "Tied";
+      const absMargin = Math.abs(margin).toFixed(1);
+      
+      d3.select(this).attr("stroke", "#000").attr("stroke-width", 1.5).raise();
+      mapSvg.select("#states").raise();
+      mapSvg.select("#nation").raise();
+      
+      tooltip.style("opacity", 1)
+        .html(\`
+          <div style="font-size: 1.1em; font-weight: bold; margin-bottom: 4px;">
+            \${d.properties.name || "County"}
+          </div>
+          <div style="display: flex; justify-content: space-between; gap: 15px;">
+            <span>Margin:</span>
+            <span style="color: \${margin > 0 ? '#ff6b6b' : margin < 0 ? '#4dabf7' : '#fff'}; font-weight: bold;">
+              \${party} +\${absMargin}%
+            </span>
+          </div>
+        \`)
+        .style("left", event.pageX + "px")
+        .style("top", (event.pageY - 15) + "px");
+    })
+    .on("mouseleave", function(event, d) {
+      d3.select(this).attr("stroke", "none");
+      tooltip.style("opacity", 0);
+    });
+    
+  updateYear(0, false);
+});
+
+function getBarOpacity(d) {
+  if (!currentSelection) return 1;
+  const [x0, x1] = currentSelection.map(x.invert);
+  const mid = (d.x0 + d.x1) / 2;
+  return mid >= x0 && mid <= x1 ? 1 : 0.2;
+}
+
+function updateYear(index, animate = true) {
+  currentYearIndex = index;
+  currentYear = years[currentYearIndex];
+  d3.select("#year-label").text(currentYear);
+  
+  const t = animate ? d3.transition().duration(500) : null;
+  
+  (animate ? countyPaths.transition(t) : countyPaths)
+    .attr("fill", d => color(d.properties.margins[currentYear]))
+    .attr("opacity", d => {
+      if (!currentSelection) return 1;
+      const [x0, x1] = currentSelection.map(x.invert);
+      const val = d.properties.margins[currentYear];
+      return val >= x0 && val <= x1 ? 1 : 0.1;
+    });
+    
+  const histogram = d3.bin()
+    .value(d => d.properties.margins[currentYear])
+    .domain(x.domain())
+    .thresholds(x.ticks(40));
+    
+  const bins = histogram(counties);
+  y.domain([0, d3.max(bins, d => d.length)]).nice();
+  
+  (animate ? yAxisGroup.transition(t) : yAxisGroup)
+    .call(d3.axisLeft(y).ticks(6));
+    
+  bars = barsGroup.selectAll("rect").data(bins);
+  
+  bars.join(
+    enter => enter.append("rect")
+      .attr("x", d => x(d.x0) + 1)
+      .attr("width", d => Math.max(0, x(d.x1) - x(d.x0) - 1))
+      .attr("y", innerH)
+      .attr("height", 0)
+      .attr("fill", d => color((d.x0 + d.x1) / 2))
+      .attr("opacity", d => getBarOpacity(d))
+      .call(enter => animate ? enter.transition(t)
+        .attr("y", d => y(d.length))
+        .attr("height", d => innerH - y(d.length)) : enter
+        .attr("y", d => y(d.length))
+        .attr("height", d => innerH - y(d.length))),
+    update => update.call(update => animate ? update.transition(t)
+      .attr("y", d => y(d.length))
+      .attr("height", d => innerH - y(d.length))
+      .attr("fill", d => color((d.x0 + d.x1) / 2))
+      .attr("opacity", d => getBarOpacity(d)) : update
+      .attr("y", d => y(d.length))
+      .attr("height", d => innerH - y(d.length))
+      .attr("fill", d => color((d.x0 + d.x1) / 2))
+      .attr("opacity", d => getBarOpacity(d))),
+    exit => exit.call(exit => animate ? exit.transition(t)
+      .attr("y", innerH)
+      .attr("height", 0)
+      .remove() : exit.remove())
+  );
+}
+
+function brushed(event) {
+  currentSelection = event.selection;
+  
+  if (!currentSelection) {
+    countyPaths.attr("opacity", 1);
+    barsGroup.selectAll("rect").attr("opacity", 1);
+    return;
+  }
+  
+  const [x0, x1] = currentSelection.map(x.invert);
+  
+  countyPaths.attr("opacity", d => {
+    const val = d.properties.margins[currentYear];
+    return val >= x0 && val <= x1 ? 1 : 0.1;
+  });
+  
+  barsGroup.selectAll("rect").attr("opacity", d => getBarOpacity(d));
+}
+
+d3.select("#year-slider").on("input", function() {
+  updateYear(+this.value, true);
+});
+</script>
+</body>
+</html>

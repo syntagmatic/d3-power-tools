@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quadtree Hit Detection</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: #111;
+      color: #eee;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+    #ui {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      background: rgba(30, 30, 30, 0.85);
+      border: 1px solid #444;
+      padding: 16px;
+      border-radius: 8px;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+      backdrop-filter: blur(4px);
+      pointer-events: auto;
+      z-index: 10;
+    }
+    .title {
+      font-weight: 600;
+      font-size: 16px;
+      margin-bottom: 12px;
+      color: #fff;
+    }
+    label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      font-size: 14px;
+      user-select: none;
+    }
+    input[type="checkbox"] {
+      cursor: pointer;
+    }
+    .info {
+      margin-top: 12px;
+      font-size: 12px;
+      color: #aaa;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <div class="title">Quadtree Hit Detection</div>
+    <label>
+      <input type="checkbox" id="voronoiToggle">
+      Voronoi Overlay
+    </label>
+    <div class="info">
+      • 5000 Canvas Particles<br>
+      • 8 Categories<br>
+      • Scroll & drag to zoom/pan<br>
+      • Mousemove finds 10 nearest
+    </div>
+  </div>
+  <canvas id="canvas"></canvas>
+
+  <script>
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+    const voronoiToggle = document.getElementById("voronoiToggle");
+
+    let width = window.innerWidth;
+    let height = window.innerHeight;
+    canvas.width = width;
+    canvas.height = height;
+
+    const numParticles = 5000;
+    const categories = 8;
+    const colors = [
+      "#4e79a7", "#f28e2c", "#e15759", "#76b7b2",
+      "#59a14f", "#edc949", "#af7aa1", "#ff9da7"
+    ];
+
+    const worldWidth = width * 3;
+    const worldHeight = height * 3;
+
+    const points = Array.from({length: numParticles}, () => ({
+      worldX: (Math.random() - 0.5) * worldWidth,
+      worldY: (Math.random() - 0.5) * worldHeight,
+      r: Math.random() * 2 + 1.5,
+      cat: Math.floor(Math.random() * categories),
+      x: 0,
+      y: 0
+    }));
+
+    let transform = d3.zoomIdentity.translate(width / 2, height / 2);
+    let quadtree;
+    let delaunay;
+    let voronoi;
+    let nearestPoints = [];
+    let mouse = { x: -1000, y: -1000 };
+    let showVoronoi = false;
+
+    voronoiToggle.addEventListener('change', (e) => {
+      showVoronoi = e.target.checked;
+      if (showVoronoi) computeVoronoi();
+      draw();
+    });
+
+    function computeVoronoi() {
+      delaunay = d3.Delaunay.from(points.map(p => [p.x, p.y]));
+      voronoi = delaunay.voronoi([0, 0, width, height]);
+    }
+
+    function recompute() {
+      for (let i = 0; i < numParticles; i++) {
+        const p = points[i];
+        p.x = transform.applyX(p.worldX);
+        p.y = transform.applyY(p.worldY);
+      }
+
+      quadtree = d3.quadtree()
+        .x(d => d.x)
+        .y(d => d.y)
+        .addAll(points);
+        
+      if (showVoronoi) computeVoronoi();
+      updateNearest();
+    }
+
+    const zoom = d3.zoom()
+      .scaleExtent([0.1, 10])
+      .on("zoom", (e) => {
+        transform = e.transform;
+        recompute();
+        draw();
+      });
+
+    d3.select(canvas).call(zoom).call(zoom.transform, transform);
+
+    canvas.addEventListener("mousemove", (e) => {
+      mouse.x = e.clientX;
+      mouse.y = e.clientY;
+      updateNearest();
+      draw();
+    });
+
+    canvas.addEventListener("mouseleave", () => {
+      mouse.x = -1000;
+      mouse.y = -1000;
+      updateNearest();
+      draw();
+    });
+
+    window.addEventListener("resize", () => {
+      width = window.innerWidth;
+      height = window.innerHeight;
+      canvas.width = width;
+      canvas.height = height;
+      recompute();
+      draw();
+    });
+
+    function updateNearest() {
+      if (mouse.x < 0 || mouse.x > width || mouse.y < 0 || mouse.y > height) {
+        nearestPoints = [];
+        return;
+      }
+      
+      const k = 10;
+      nearestPoints = [];
+      let maxDistSq = Infinity;
+
+      quadtree.visit((node, x1, y1, x2, y2) => {
+        if (!node) return true;
+        
+        const dx = mouse.x < x1 ? x1 - mouse.x : mouse.x > x2 ? mouse.x - x2 : 0;
+        const dy = mouse.y < y1 ? y1 - mouse.y : mouse.y > y2 ? mouse.y - y2 : 0;
+        const distSq = dx * dx + dy * dy;
+
+        if (distSq > maxDistSq && nearestPoints.length === k) {
+          return true; 
+        }
+
+        if (!node.length) {
+          let curr = node;
+          do {
+            const dSq = (curr.data.x - mouse.x) ** 2 + (curr.data.y - mouse.y) ** 2;
+            if (dSq < maxDistSq || nearestPoints.length < k) {
+              nearestPoints.push({ data: curr.data, distSq: dSq });
+              nearestPoints.sort((a, b) => a.distSq - b.distSq);
+              if (nearestPoints.length > k) nearestPoints.pop();
+              if (nearestPoints.length === k) maxDistSq = nearestPoints[k - 1].distSq;
+            }
+          } while (curr = curr.next);
+        }
+      });
+    }
+
+    function draw() {
+      ctx.fillStyle = "#111";
+      ctx.fillRect(0, 0, width, height);
+      
+      if (showVoronoi && voronoi) {
+        ctx.beginPath();
+        voronoi.render(ctx);
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+      
+      if (nearestPoints.length > 0) {
+        ctx.beginPath();
+        for (let i = 0; i < nearestPoints.length; i++) {
+          ctx.moveTo(mouse.x, mouse.y);
+          ctx.lineTo(nearestPoints[i].data.x, nearestPoints[i].data.y);
+        }
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.4)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+      
+      const nearestSet = new Set(nearestPoints.map(n => n.data));
+      
+      for (let i = 0; i < numParticles; i++) {
+        const p = points[i];
+        
+        if (p.x < -10 || p.x > width + 10 || p.y < -10 || p.y > height + 10) continue;
+        
+        const isNearest = nearestSet.has(p);
+        const hasSelection = nearestPoints.length > 0;
+        
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, isNearest ? p.r * 1.5 : p.r, 0, 2 * Math.PI);
+        ctx.fillStyle = colors[p.cat];
+        
+        if (isNearest) {
+          ctx.shadowBlur = 12;
+          ctx.shadowColor = colors[p.cat];
+          ctx.fill();
+          
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r * 3, 0, 2 * Math.PI);
+          ctx.strokeStyle = colors[p.cat];
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+          
+          ctx.shadowBlur = 0;
+        } else {
+          ctx.globalAlpha = hasSelection ? 0.25 : 0.85;
+          ctx.fill();
+          ctx.globalAlpha = 1.0;
+        }
+      }
+    }
+
+    recompute();
+  </script>
+</body>
+</html>

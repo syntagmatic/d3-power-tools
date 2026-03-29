@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Textured Raincloud Plot</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background: #f4f4f9;
+            margin: 0;
+            padding: 40px;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 20px;
+            max-width: 800px;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+        p.desc {
+            color: #666;
+            line-height: 1.5;
+        }
+        .controls {
+            margin-bottom: 30px;
+        }
+        button {
+            background: #ffffff;
+            border: 2px solid #332288;
+            color: #332288;
+            border-radius: 6px;
+            padding: 10px 20px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        button:hover {
+            background: #e6e6f2;
+            transform: translateY(-1px);
+        }
+        button.active {
+            background: #332288;
+            color: #ffffff;
+            box-shadow: inset 0 2px 4px rgba(0,0,0,0.2);
+        }
+        .chart-container {
+            background: #ffffff;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 8px 16px rgba(0,0,0,0.05);
+        }
+        .grid line {
+            stroke: #e0e0e0;
+            stroke-opacity: 0.7;
+            shape-rendering: crispEdges;
+        }
+        .grid path {
+            stroke-width: 0;
+        }
+        .axis-label {
+            font-size: 14px;
+            font-weight: 600;
+            fill: #555;
+        }
+        #plot-svg {
+            transition: filter 0.4s ease;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Textured Raincloud Plot</h1>
+        <p class="desc">A combination of a half-violin plot (KDE), a box plot, and a jittered strip plot. Patterns and colors redundantly encode the 6 groups. Toggle the Deuteranopia simulation to verify that the patterns ensure accessibility even when color perception is limited.</p>
+    </div>
+    
+    <div class="controls">
+        <button id="toggle-filter">Simulate Deuteranopia</button>
+    </div>
+
+    <div class="chart-container" id="chart"></div>
+
+    <script>
+        const margin = {top: 30, right: 40, bottom: 60, left: 80},
+              width = 900 - margin.left - margin.right,
+              height = 700 - margin.top - margin.bottom;
+
+        const svg = d3.select("#chart")
+          .append("svg")
+            .attr("width", width + margin.left + margin.right)
+            .attr("height", height + margin.top + margin.bottom)
+            .attr("id", "plot-svg")
+          .append("g")
+            .attr("transform", `translate(${margin.left},${margin.top})`);
+
+        const defs = svg.append("defs");
+        
+        // Colorblind Filter Definition
+        defs.append("filter")
+            .attr("id", "deuteranopia")
+            .attr("color-interpolation-filters", "sRGB")
+            .append("feColorMatrix")
+            .attr("type", "matrix")
+            .attr("values", "0.367322 0.860646 -0.227968 0 0  0.280085 0.672501 0.047413 0 0  -0.011820 0.042940 0.968881 0 0  0 0 0 1 0");
+
+        // Tol Muted Palette
+        const colors = ["#332288", "#88CCEE", "#44AA99", "#DDCC77", "#CC6677", "#AA4499"];
+        const groups = ["A", "B", "C", "D", "E", "F"];
+
+        // SVG Patterns definition
+        const patternColor = "rgba(0, 0, 0, 0.4)";
+        const patterns = [
+            { id: "A", create: p => p.attr("patternTransform", "rotate(45)").append("rect").attr("width", 3).attr("height", 8).attr("fill", patternColor) },
+            { id: "B", create: p => p.append("circle").attr("cx", 4).attr("cy", 4).attr("r", 2.5).attr("fill", patternColor) },
+            { id: "C", create: p => {
+                p.attr("patternTransform", "rotate(45)");
+                p.append("rect").attr("width", 2).attr("height", 8).attr("fill", patternColor);
+                p.append("rect").attr("width", 8).attr("height", 2).attr("fill", patternColor);
+            }},
+            { id: "D", create: p => p.append("rect").attr("width", 3).attr("height", 8).attr("fill", patternColor) },
+            { id: "E", create: p => p.append("rect").attr("width", 8).attr("height", 3).attr("fill", patternColor) },
+            { id: "F", create: p => {
+                p.append("rect").attr("width", 4).attr("height", 4).attr("fill", patternColor);
+                p.append("rect").attr("x", 4).attr("y", 4).attr("width", 4).attr("height", 4).attr("fill", patternColor);
+            }}
+        ];
+
+        patterns.forEach(pt => {
+            const p = defs.append("pattern")
+                .attr("id", `pattern-${pt.id}`)
+                .attr("width", 8)
+                .attr("height", 8)
+                .attr("patternUnits", "userSpaceOnUse");
+            pt.create(p);
+        });
+
+        // Generate synthetic distributions
+        const data = [];
+        const distParams = [
+            { m: 20, s: 4, n: 180 },
+            { m: 35, s: 8, n: 250 },
+            { m: 25, s: 3, n: 150 },
+            { m: 45, s: 6, n: 200 },
+            { m: 30, s: 5, n: 190 },
+            { m: 50, s: 7, n: 160 }
+        ];
+
+        groups.forEach((g, i) => {
+            const { m, s, n } = distParams[i];
+            for(let j=0; j<n; j++) {
+                let u = 0, v = 0;
+                while(u === 0) u = Math.random();
+                while(v === 0) v = Math.random();
+                let num = Math.sqrt( -2.0 * Math.log( u ) ) * Math.cos( 2.0 * Math.PI * v );
+                let val = num * s + m;
+                data.push({ group: g, value: val });
+            }
+        });
+
+        const minVal = Math.max(0, d3.min(data, d => d.value) - 5);
+        const maxVal = d3.max(data, d => d.value) + 5;
+        
+        // Scales
+        const x = d3.scaleLinear()
+            .domain([minVal, maxVal])
+            .range([0, width]);
+
+        const y = d3.scaleBand()
+            .domain(groups)
+            .range([0, height])
+            .paddingInner(0.15);
+
+        // Grid lines
+        svg.append("g")
+            .attr("class", "grid")
+            .attr("transform", `translate(0,${height})`)
+            .call(d3.axisBottom(x)
+                .tickSize(-height)
+                .tickFormat("")
+            );
+
+        // Axes
+        svg.append("g")
+            .attr("transform", `translate(0,${height})`)
+            .call(d3.axisBottom(x).tickSizeOuter(0))
+            .attr("font-size", "13px")
+            .append("text")
+            .attr("x", width / 2)
+            .attr("y", 45)
+            .attr("class", "axis-label")
+            .attr("fill", "currentColor")
+            .text("Measured Value");
+
+        svg.append("g")
+            .call(d3.axisLeft(y).tickSizeOuter(0))
+            .attr("font-size", "14px")
+            .append("text")
+            .attr("transform", "rotate(-90)")
+            .attr("x", -height / 2)
+            .attr("y", -50)
+            .attr("class", "axis-label")
+            .attr("text-anchor", "middle")
+            .attr("fill", "currentColor")
+            .text("Groups");
+
+        // KDE functions
+        function kernelDensityEstimator(kernel, X) {
+            return function(V) {
+                return X.map(function(x) {
+                    return [x, d3.mean(V, function(v) { return kernel(x - v); })];
+                });
+            };
+        }
+        function kernelEpanechnikov(k) {
+            return function(v) {
+                return Math.abs(v /= k) <= 1 ? 0.75 * (1 - v * v) / k : 0;
+            };
+        }
+        
+        const ticks = d3.ticks(minVal, maxVal, 200);
+        const kde = kernelDensityEstimator(kernelEpanechnikov(2.5), ticks);
+        const groupData = d3.group(data, d => d.group);
+
+        // Sub-element sizing and spacing
+        const bandwidth = y.bandwidth();
+        const violinHeight = bandwidth * 0.55;
+        const boxCenter = bandwidth * 0.65;
+        const boxHeight = bandwidth * 0.15;
+        const jitterY = bandwidth * 0.8;
+        const jitterArea = bandwidth * 0.2;
+
+        groups.forEach((g, i) => {
+            const gData = groupData.get(g).map(d => d.value);
+            const density = kde(gData);
+            
+            // Filter out near-zero tails to avoid ugly flat lines extending too far
+            const filteredDensity = density.filter(d => d[1] > 1e-4);
+            if (filteredDensity.length > 0) {
+                filteredDensity.unshift([filteredDensity[0][0], 0]);
+                filteredDensity.push([filteredDensity[filteredDensity.length - 1][0], 0]);
+            }
+
+            const maxDensity = d3.max(filteredDensity, d => d[1]);
+            const gScale = d3.scaleLinear()
+                .domain([0, maxDensity])
+                .range([0, violinHeight]);
+
+            const yPos = y(g);
+            const groupEl = svg.append("g").attr("transform", `translate(0, ${yPos})`);
+            
+            // 1. Half Violin Plot
+            const area = d3.area()
+                .x(d => x(d[0]))
+                .y0(violinHeight)
+                .y1(d => violinHeight - gScale(d[1]))
+                .curve(d3.curveBasis);
+
+            // Violin base color
+            groupEl.append("path")
+                .datum(filteredDensity)
+                .attr("fill", colors[i])
+                .attr("d", area)
+                .attr("stroke", "none");
+
+            // Violin pattern
+            groupEl.append("path")
+                .datum(filteredDensity)
+                .attr("fill", `url(#pattern-${g})`)
+                .attr("d", area)
+                .attr("stroke", "#111")
+                .attr("stroke-width", 1.5);
+
+            // 2. Box Plot
+            const sortedData = gData.slice().sort(d3.ascending);
+            const q1 = d3.quantile(sortedData, 0.25);
+            const median = d3.quantile(sortedData, 0.5);
+            const q3 = d3.quantile(sortedData, 0.75);
+            const iqr = q3 - q1;
+            const min = Math.max(d3.min(gData), q1 - 1.5 * iqr);
+            const max = Math.min(d3.max(gData), q3 + 1.5 * iqr);
+
+            // Whisker line
+            groupEl.append("line")
+                .attr("x1", x(min))
+                .attr("x2", x(max))
+                .attr("y1", boxCenter)
+                .attr("y2", boxCenter)
+                .attr("stroke", "#111")
+                .attr("stroke-width", 1.5);
+
+            // Box base color
+            groupEl.append("rect")
+                .attr("x", x(q1))
+                .attr("width", x(q3) - x(q1))
+                .attr("y", boxCenter - boxHeight/2)
+                .attr("height", boxHeight)
+                .attr("fill", colors[i])
+                .attr("rx", 2);
+                
+            // Box pattern
+            groupEl.append("rect")
+                .attr("x", x(q1))
+                .attr("width", x(q3) - x(q1))
+                .attr("y", boxCenter - boxHeight/2)
+                .attr("height", boxHeight)
+                .attr("fill", `url(#pattern-${g})`)
+                .attr("stroke", "#111")
+                .attr("stroke-width", 1.5)
+                .attr("rx", 2);
+
+            // Median line
+            groupEl.append("line")
+                .attr("x1", x(median))
+                .attr("x2", x(median))
+                .attr("y1", boxCenter - boxHeight/2 - 2)
+                .attr("y2", boxCenter + boxHeight/2 + 2)
+                .attr("stroke", "#111")
+                .attr("stroke-width", 2.5);
+
+            // 3. Jittered Strip Plot
+            const pointsData = groupData.get(g);
+            const pointsGroup = groupEl.selectAll(`.point-g`)
+                .data(pointsData)
+                .enter()
+                .append("g")
+                .attr("transform", d => `translate(${x(d.value)},${jitterY + Math.random() * jitterArea})`);
+
+            // Point base color
+            pointsGroup.append("circle")
+                .attr("r", 3.5)
+                .attr("fill", colors[i])
+                .attr("opacity", 0.8);
+
+            // Point pattern
+            pointsGroup.append("circle")
+                .attr("r", 3.5)
+                .attr("fill", `url(#pattern-${g})`)
+                .attr("stroke", "#111")
+                .attr("stroke-width", 0.8)
+                .attr("opacity", 1);
+        });
+
+        // Interaction
+        const toggleBtn = document.getElementById("toggle-filter");
+        let isDeuteranopia = false;
+
+        toggleBtn.addEventListener("click", () => {
+            isDeuteranopia = !isDeuteranopia;
+            if (isDeuteranopia) {
+                d3.select("#plot-svg").style("filter", "url(#deuteranopia)");
+                toggleBtn.classList.add("active");
+                toggleBtn.textContent = "Disable Deuteranopia Simulation";
+            } else {
+                d3.select("#plot-svg").style("filter", "none");
+                toggleBtn.classList.remove("active");
+                toggleBtn.textContent = "Simulate Deuteranopia";
+            }
+        });
+    </script>
+</body>
+</html>

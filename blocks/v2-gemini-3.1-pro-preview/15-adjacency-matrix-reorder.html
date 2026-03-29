@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Adjacency Matrix Reorder</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: #ffffff;
+            margin: 0;
+            padding: 40px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            color: #333;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        h1 {
+            margin: 0 0 10px 0;
+            font-size: 24px;
+            font-weight: 600;
+        }
+        .controls {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            background: #f8f9fa;
+            padding: 12px 24px;
+            border-radius: 8px;
+            border: 1px solid #e9ecef;
+        }
+        .label {
+            font-weight: 500;
+            font-size: 14px;
+            color: #495057;
+        }
+        .btn {
+            padding: 8px 16px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            background: #ffffff;
+            border: 1px solid #ced4da;
+            border-radius: 6px;
+            color: #495057;
+            transition: all 0.2s ease;
+        }
+        .btn:hover {
+            background: #f1f3f5;
+            border-color: #adb5bd;
+        }
+        .btn.active {
+            background: #339af0;
+            color: white;
+            border-color: #339af0;
+            box-shadow: 0 2px 4px rgba(51, 154, 240, 0.2);
+        }
+        .chart-container {
+            position: relative;
+        }
+        text {
+            font-size: 11px;
+            transition: fill 0.2s, font-weight 0.2s;
+        }
+        text.active {
+            font-weight: 700;
+            fill: #e03131;
+        }
+        .cell {
+            transition: opacity 0.2s, stroke 0.2s, stroke-width 0.2s;
+        }
+        .bar {
+            transition: opacity 0.2s;
+        }
+        .bar-label {
+            font-size: 10px;
+            fill: #868e96;
+            transition: opacity 0.2s;
+        }
+        .chart-title {
+            font-size: 12px;
+            font-weight: 600;
+            fill: #495057;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Network Adjacency Matrix</h1>
+    </div>
+    <div class="controls">
+        <span class="label">Reorder Matrix:</span>
+        <button class="btn active" id="btn-name">Name</button>
+        <button class="btn" id="btn-degree">Degree</button>
+        <button class="btn" id="btn-community">Community</button>
+    </div>
+    <div id="chart" class="chart-container"></div>
+
+    <script>
+        // Matrix Configuration
+        const numNodes = 35;
+        const numCommunities = 5;
+        const targetEdges = 200;
+
+        // Data Generation
+        const nodes = Array.from({ length: numNodes }, (_, i) => ({
+            id: i,
+            name: `Node ${String(i + 1).padStart(2, '0')}`,
+            community: Math.floor(Math.random() * numCommunities),
+            degree: 0
+        }));
+
+        const matrix = [];
+        nodes.forEach(n => {
+            matrix[n.id] = d3.range(numNodes).map(j => ({ x: j, y: n.id, z: 0, sameCommunity: false }));
+        });
+
+        let edgeCount = 0;
+        while (edgeCount < targetEdges) {
+            const source = Math.floor(Math.random() * numNodes);
+            let target;
+            
+            // Bias towards intra-community edges
+            if (Math.random() < 0.8) {
+                const sameComm = nodes.filter(n => n.community === nodes[source].community && n.id !== source);
+                if (sameComm.length > 0) {
+                    target = sameComm[Math.floor(Math.random() * sameComm.length)].id;
+                } else {
+                    target = Math.floor(Math.random() * numNodes);
+                }
+            } else {
+                target = Math.floor(Math.random() * numNodes);
+            }
+            
+            if (source !== target && matrix[source][target].z === 0) {
+                const weight = Math.floor(Math.random() * 10) + 1;
+                matrix[source][target].z = weight;
+                matrix[target][source].z = weight;
+                matrix[source][target].sameCommunity = nodes[source].community === nodes[target].community;
+                matrix[target][source].sameCommunity = nodes[source].community === nodes[target].community;
+                nodes[source].degree += weight;
+                nodes[target].degree += weight;
+                edgeCount++;
+            }
+        }
+
+        // Layout Dimensions
+        const margin = { top: 90, right: 160, bottom: 20, left: 90 };
+        const width = 560;
+        const height = 560;
+
+        // Scales
+        const x = d3.scaleBand().range([0, width]).domain(d3.range(numNodes));
+        const y = d3.scaleBand().range([0, height]).domain(d3.range(numNodes));
+        const color = d3.scaleOrdinal(d3.schemeCategory10).domain(d3.range(numCommunities));
+        const opacity = d3.scaleLinear().domain([0, 10]).range([0.2, 1]);
+
+        const maxDegree = d3.max(nodes, d => d.degree);
+        const barX = d3.scaleLinear().domain([0, maxDegree]).range([0, 100]);
+
+        // Precompute orders
+        const orders = {
+            name: d3.range(numNodes).sort((a, b) => d3.ascending(nodes[a].name, nodes[b].name)),
+            degree: d3.range(numNodes).sort((a, b) => nodes[b].degree - nodes[a].degree),
+            community: d3.range(numNodes).sort((a, b) => nodes[a].community - nodes[b].community || nodes[b].degree - nodes[a].degree)
+        };
+
+        // Initialize default domain
+        x.domain(orders.name);
+        y.domain(orders.name);
+
+        // SVG Setup
+        const svg = d3.select("#chart").append("svg")
+            .attr("width", width + margin.left + margin.right)
+            .attr("height", height + margin.top + margin.bottom)
+            .append("g")
+            .attr("transform", `translate(${margin.left},${margin.top})`);
+
+        // Draw Matrix Base Background
+        svg.append("rect")
+            .attr("width", width)
+            .attr("height", height)
+            .style("fill", "#fff")
+            .style("stroke", "#dee2e6")
+            .style("stroke-width", "1px");
+
+        // Rows
+        const row = svg.selectAll(".row")
+            .data(matrix)
+            .enter().append("g")
+            .attr("class", "row")
+            .attr("transform", (d, i) => `translate(0,${y(i)})`);
+
+        row.selectAll(".cell")
+            .data(d => d)
+            .enter().append("rect")
+            .attr("class", "cell")
+            .attr("x", d => x(d.x))
+            .attr("width", x.bandwidth())
+            .attr("height", y.bandwidth())
+            .style("fill", d => d.z > 0 ? (d.sameCommunity ? color(nodes[d.x].community) : "#adb5bd") : "#f8f9fa")
+            .style("fill-opacity", d => d.z > 0 ? opacity(d.z) : 1)
+            .on("mouseover", mouseover)
+            .on("mouseout", mouseout);
+
+        row.append("line")
+            .attr("x2", width)
+            .attr("stroke", "#ffffff");
+
+        row.append("text")
+            .attr("x", -8)
+            .attr("y", y.bandwidth() / 2)
+            .attr("dy", ".32em")
+            .attr("text-anchor", "end")
+            .text((d, i) => nodes[i].name);
+
+        // Columns
+        const column = svg.selectAll(".column")
+            .data(matrix)
+            .enter().append("g")
+            .attr("class", "column")
+            .attr("transform", (d, i) => `translate(${x(i)},0) rotate(-90)`);
+
+        column.append("line")
+            .attr("x1", -height)
+            .attr("stroke", "#ffffff");
+
+        column.append("text")
+            .attr("x", 8)
+            .attr("y", x.bandwidth() / 2)
+            .attr("dy", ".32em")
+            .attr("text-anchor", "start")
+            .text((d, i) => nodes[i].name);
+
+        // Side Bar Chart
+        const barsGroup = svg.append("g")
+            .attr("class", "bars-group");
+
+        barsGroup.append("text")
+            .attr("class", "chart-title")
+            .attr("x", width + 25)
+            .attr("y", -10)
+            .text("Node Degree");
+
+        barsGroup.selectAll(".bar")
+            .data(nodes)
+            .enter().append("rect")
+            .attr("class", "bar")
+            .attr("x", width + 25)
+            .attr("y", d => y(d.id))
+            .attr("width", d => barX(d.degree))
+            .attr("height", Math.max(1, y.bandwidth() - 1))
+            .style("fill", d => color(d.community));
+
+        barsGroup.selectAll(".bar-label")
+            .data(nodes)
+            .enter().append("text")
+            .attr("class", "bar-label")
+            .attr("x", d => width + 25 + barX(d.degree) + 6)
+            .attr("y", d => y(d.id) + y.bandwidth() / 2)
+            .attr("dy", ".32em")
+            .text(d => d.degree);
+
+        // Interactions
+        function mouseover(event, d) {
+            d3.selectAll(".cell")
+                .style("opacity", p => (p.x === d.x || p.y === d.y) ? 1 : 0.1)
+                .style("stroke", p => (p.x === d.x && p.y === d.y) ? "#212529" : "none")
+                .style("stroke-width", p => (p.x === d.x && p.y === d.y) ? "2px" : "0");
+            
+            d3.selectAll(".row text").classed("active", (p, i) => i === d.y);
+            d3.selectAll(".column text").classed("active", (p, i) => i === d.x);
+            
+            d3.selectAll(".bar").style("opacity", p => (p.id === d.y || p.id === d.x) ? 1 : 0.15);
+            d3.selectAll(".bar-label").style("opacity", p => (p.id === d.y || p.id === d.x) ? 1 : 0.15);
+        }
+
+        function mouseout() {
+            d3.selectAll(".cell")
+                .style("opacity", 1)
+                .style("stroke", "none");
+            
+            d3.selectAll("text").classed("active", false);
+            d3.selectAll(".bar").style("opacity", 1);
+            d3.selectAll(".bar-label").style("opacity", 1);
+        }
+
+        // Reordering
+        function updateOrder(value) {
+            x.domain(orders[value]);
+            y.domain(orders[value]);
+
+            const t = svg.transition().duration(1200);
+
+            // Stagger animation based on distance for a wave effect
+            t.selectAll(".row")
+                .delay((d, i) => x(i) * 1.5)
+                .attr("transform", (d, i) => `translate(0,${y(i)})`)
+                .selectAll(".cell")
+                .delay(d => x(d.x) * 1.5)
+                .attr("x", d => x(d.x));
+
+            t.selectAll(".column")
+                .delay((d, i) => x(i) * 1.5)
+                .attr("transform", (d, i) => `translate(${x(i)},0) rotate(-90)`);
+
+            t.selectAll(".bar")
+                .delay((d, i) => y(d.id) * 1.5)
+                .attr("y", d => y(d.id));
+
+            t.selectAll(".bar-label")
+                .delay((d, i) => y(d.id) * 1.5)
+                .attr("y", d => y(d.id) + y.bandwidth() / 2);
+
+            // Update button states
+            d3.selectAll(".btn").classed("active", false);
+            d3.select(`#btn-${value}`).classed("active", true);
+        }
+
+        d3.select("#btn-name").on("click", () => updateOrder("name"));
+        d3.select("#btn-degree").on("click", () => updateOrder("degree"));
+        d3.select("#btn-community").on("click", () => updateOrder("community"));
+
+    </script>
+</body>
+</html>

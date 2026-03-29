@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Sunburst with Brush and Breadcrumbs</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            font-family: sans-serif;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: #f9f9f9;
+        }
+        #breadcrumbs {
+            height: 40px;
+            width: 800px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            background: #fff;
+            padding: 10px 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            box-sizing: border-box;
+        }
+        #chart {
+            background: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            padding: 20px;
+        }
+        .crumb {
+            display: flex;
+            align-items: center;
+        }
+        .crumb-text {
+            color: #fff;
+            padding: 6px 12px;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        .crumb-arrow {
+            color: #888;
+            margin: 0 8px;
+            font-size: 12px;
+        }
+        path {
+            cursor: pointer;
+            transition: filter 0.2s;
+        }
+        .brush-ring path {
+            cursor: crosshair;
+            transition: none;
+        }
+    </style>
+</head>
+<body>
+
+<div id="breadcrumbs"></div>
+<div id="chart"></div>
+
+<script>
+function generateData() {
+  const root = { name: "All Products", children: [] };
+  const categories = ["Electronics", "Clothing", "Home", "Sports"];
+  categories.forEach(cat => {
+    const cNode = { name: cat, children: [] };
+    for (let i = 1; i <= 4; i++) {
+      const sub = { name: `${cat} Sub ${i}`, children: [] };
+      for (let j = 1; j <= 3; j++) {
+        const subsub = { name: `${cat} ${i}-${j}`, children: [] };
+        for (let k = 1; k <= 3; k++) {
+          subsub.children.push({ name: `${cat.substring(0,3)}-${i}${j}${k}`, value: Math.floor(Math.random() * 50) + 10 });
+        }
+        sub.children.push(subsub);
+      }
+      cNode.children.push(sub);
+    }
+    root.children.push(cNode);
+  });
+  return root;
+}
+
+const data = generateData();
+
+const width = 800;
+const height = 800;
+const color = d3.scaleOrdinal(d3.quantize(d3.interpolateRainbow, 5));
+
+function getColor(d) {
+    if (d.depth === 0) return "#999";
+    let node = d;
+    while (node.depth > 1) node = node.parent;
+    return color(node.data.name);
+}
+
+const root = d3.hierarchy(data)
+    .sum(d => d.value)
+    .sort((a, b) => b.value - a.value);
+
+const maxDepth = root.height;
+const chartRadius = Math.min(width, height) / 2 - 60; 
+const radius = chartRadius / (maxDepth + 1);
+
+const partition = d3.partition()
+    .size([2 * Math.PI, root.height + 1]);
+
+partition(root);
+root.each(d => d.current = d);
+
+const arc = d3.arc()
+    .startAngle(d => d.x0)
+    .endAngle(d => d.x1)
+    .padAngle(d => Math.min((d.x1 - d.x0) / 2, 0.005))
+    .padRadius(radius * 1.5)
+    .innerRadius(d => d.y0 * radius)
+    .outerRadius(d => Math.max(d.y0 * radius, d.y1 * radius - 1));
+
+const svg = d3.select("#chart").append("svg")
+    .attr("width", width)
+    .attr("height", height)
+    .append("g")
+    .attr("transform", `translate(${width / 2},${height / 2})`);
+
+let currentRoot = root;
+
+const path = svg.append("g")
+  .selectAll("path")
+  .data(root.descendants())
+  .join("path")
+    .attr("fill", getColor)
+    .attr("fill-opacity", d => arcVisible(d.current) ? (d.children ? 0.8 : 0.6) : 0)
+    .attr("pointer-events", d => arcVisible(d.current) ? "auto" : "none")
+    .attr("d", d => arc(d.current))
+    .attr("class", "sunburst-arc")
+    .on("click", clicked)
+    .on("mouseover", (event, d) => updateBreadcrumbs(d))
+    .on("mouseleave", () => updateBreadcrumbs(currentRoot));
+
+function updateBreadcrumbs(d) {
+    const container = document.getElementById("breadcrumbs");
+    container.innerHTML = "";
+    if (!d) return;
+    
+    const sequence = d.ancestors().reverse();
+    
+    sequence.forEach((node, i) => {
+        const crumb = document.createElement("div");
+        crumb.className = "crumb";
+        
+        const text = document.createElement("div");
+        text.className = "crumb-text";
+        text.textContent = node.data.name;
+        text.style.backgroundColor = getColor(node);
+        
+        crumb.appendChild(text);
+        
+        if (i < sequence.length - 1) {
+            const arrow = document.createElement("div");
+            arrow.className = "crumb-arrow";
+            arrow.textContent = "▶";
+            crumb.appendChild(arrow);
+        }
+        
+        container.appendChild(crumb);
+    });
+}
+
+updateBreadcrumbs(currentRoot);
+
+function clicked(event, p) {
+  if (p === currentRoot && p.parent) {
+      p = p.parent;
+  }
+  currentRoot = p;
+  updateBreadcrumbs(p);
+  
+  startAngle = null;
+  endAngle = null;
+  selectionPath.attr("d", null);
+  path.style("filter", "none");
+
+  root.each(d => d.target = {
+    x0: Math.max(0, Math.min(1, (d.x0 - p.x0) / (p.x1 - p.x0))) * 2 * Math.PI,
+    x1: Math.max(0, Math.min(1, (d.x1 - p.x0) / (p.x1 - p.x0))) * 2 * Math.PI,
+    y0: Math.max(0, d.y0 - p.depth),
+    y1: Math.max(0, d.y1 - p.depth)
+  });
+
+  const t = svg.transition().duration(750);
+
+  path.transition(t)
+      .tween("data", d => {
+        const i = d3.interpolate(d.current, d.target);
+        return t => d.current = i(t);
+      })
+    .filter(function(d) {
+      return +this.getAttribute("fill-opacity") || arcVisible(d.target);
+    })
+      .attr("fill-opacity", d => arcVisible(d.target) ? (d.children ? 0.8 : 0.6) : 0)
+      .attr("pointer-events", d => arcVisible(d.target) ? "auto" : "none")
+      .attrTween("d", d => () => arc(d.current));
+}
+
+function arcVisible(d) {
+  return d.y1 <= maxDepth + 1 && d.y0 >= 0 && d.x1 > d.x0;
+}
+
+const brushOuterRadius = chartRadius + 45;
+const brushInnerRadius = chartRadius + 5;
+
+const brushRing = svg.append("g").attr("class", "brush-ring");
+
+const brushArc = d3.arc()
+    .innerRadius(brushInnerRadius)
+    .outerRadius(brushOuterRadius);
+
+brushRing.append("path")
+    .datum({startAngle: 0, endAngle: 2 * Math.PI})
+    .attr("d", brushArc)
+    .attr("fill", "#e0e0e0")
+    .attr("fill-opacity", 0.4)
+    .attr("stroke", "#ccc")
+    .call(d3.drag()
+        .on("start", brushStart)
+        .on("drag", brushed)
+        .on("end", brushEnd)
+    );
+
+const selectionPath = brushRing.append("path")
+    .attr("fill", "rgba(0, 120, 255, 0.4)")
+    .attr("stroke", "rgba(0, 120, 255, 0.8)")
+    .attr("pointer-events", "none");
+
+let startAngle = null;
+let endAngle = null;
+
+function getAngle(event) {
+    let angle = Math.atan2(event.y, event.x) + Math.PI / 2;
+    if (angle < 0) angle += 2 * Math.PI;
+    return angle;
+}
+
+function brushStart(event) {
+    const angle = getAngle(event);
+    startAngle = angle;
+    endAngle = angle;
+    selectionPath.attr("d", brushArc({startAngle, endAngle}));
+    applyDesaturation(startAngle, endAngle);
+}
+
+function brushed(event) {
+    let angle = getAngle(event);
+    let diff = angle - (endAngle % (2 * Math.PI));
+    if (diff > Math.PI) diff -= 2 * Math.PI;
+    else if (diff < -Math.PI) diff += 2 * Math.PI;
+    
+    endAngle += diff;
+    
+    let sa = Math.min(startAngle, endAngle);
+    let ea = Math.max(startAngle, endAngle);
+    if (ea - sa > 2 * Math.PI) {
+        if (endAngle > startAngle) ea = sa + 2 * Math.PI;
+        else sa = ea - 2 * Math.PI;
+    }
+    
+    selectionPath.attr("d", brushArc({startAngle: sa, endAngle: ea}));
+    applyDesaturation(sa, ea);
+}
+
+function brushEnd(event) {
+    if (Math.abs(startAngle - endAngle) < 0.05) {
+        startAngle = null;
+        endAngle = null;
+        selectionPath.attr("d", null);
+        applyDesaturation(null, null);
+    }
+}
+
+function applyDesaturation(sa, ea) {
+    if (sa === null || ea === null) {
+        path.style("filter", "none");
+        return;
+    }
+    
+    let minA = Math.min(sa, ea);
+    let maxA = Math.max(sa, ea);
+    let span = maxA - minA;
+    
+    if (span >= 2 * Math.PI - 0.01) {
+        path.style("filter", "none");
+        return;
+    }
+    
+    minA = ((minA % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+    maxA = minA + span;
+
+    path.style("filter", function(d) {
+        if (!arcVisible(d.current)) return "none";
+        
+        let nx0 = d.current.x0;
+        let nx1 = d.current.x1;
+        
+        let overlaps = (nx0 < maxA && nx1 > minA) || (nx0 < maxA - 2*Math.PI && nx1 > minA - 2*Math.PI);
+        
+        if (d.current.y0 === 0 && d.current.y1 > 0) return "none";
+        
+        return overlaps ? "none" : "grayscale(100%) opacity(0.3)";
+    });
+}
+</script>
+</body>
+</html>

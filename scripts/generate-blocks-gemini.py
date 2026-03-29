@@ -58,7 +58,7 @@ def run_block(idx, block):
     t0 = time.time()
 
     try:
-        cmd = ["gemini", "-p", prompt, "--sandbox", "--yolo"]
+        cmd = ["gemini", "-p", prompt, "--yolo"]
         if MODEL:
             cmd.extend(["--model", MODEL])
         result = subprocess.run(

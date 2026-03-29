@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Server Metrics</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --border: #334155;
+      --primary: #3b82f6;
+      --success: #22c55e;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --spark-stroke: #60a5fa;
+      --spark-fill: rgba(96, 165, 250, 0.2);
+    }
+    body {
+      margin: 0;
+      padding: 32px;
+      font-family: system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 24px;
+      font-weight: 600;
+    }
+    button {
+      background: var(--primary);
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 500;
+      transition: background 0.2s;
+    }
+    button:hover { background: #2563eb; }
+    
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 16px;
+      margin-bottom: 32px;
+    }
+    .kpi-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .kpi-header {
+      font-size: 14px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .kpi-value {
+      font-size: 32px;
+      font-weight: 600;
+      line-height: 1;
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+    }
+    .kpi-delta {
+      font-size: 14px;
+      font-weight: 500;
+    }
+    .kpi-delta.positive { color: var(--success); }
+    .kpi-delta.negative { color: var(--danger); }
+    .kpi-chart {
+      height: 48px;
+      width: 100%;
+    }
+    
+    .table-container {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: auto;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+    }
+    th, td {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    th {
+      font-size: 12px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      font-weight: 600;
+      position: sticky;
+      top: 0;
+      background: var(--card-bg);
+      z-index: 10;
+    }
+    th.num, td.num {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    td.spark-cell {
+      padding-top: 8px;
+      padding-bottom: 8px;
+    }
+    .badge {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .badge.healthy { background: rgba(34, 197, 94, 0.2); color: var(--success); }
+    .badge.warning { background: rgba(245, 158, 11, 0.2); color: var(--warning); }
+    .badge.critical { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
+    
+    .spark svg {
+      vertical-align: middle;
+      overflow: visible;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>System Overview</h1>
+    <button id="replay-btn">Replay Animations</button>
+  </header>
+  
+  <div class="kpi-grid">
+    <div class="kpi-card">
+      <div class="kpi-header">CPU Load</div>
+      <div class="kpi-value">42% <span class="kpi-delta negative">▲ 5%</span></div>
+      <div class="kpi-chart" id="kpi-cpu"></div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-header">Requests / sec</div>
+      <div class="kpi-value">1,240 <span class="kpi-delta positive">▲ 12%</span></div>
+      <div class="kpi-chart" id="kpi-req"></div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-header">Error Deviations</div>
+      <div class="kpi-value">0.1% <span class="kpi-delta positive">▼ 0.05%</span></div>
+      <div class="kpi-chart" id="kpi-err"></div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-header">Memory Usage</div>
+      <div class="kpi-value">68% <span class="kpi-delta">24GB / 32GB</span></div>
+      <div class="kpi-chart" id="kpi-mem"></div>
+    </div>
+  </div>
+
+  <div class="table-container">
+    <table id="metrics-table">
+      <thead>
+        <tr>
+          <th>Server</th>
+          <th>Region</th>
+          <th class="num">Uptime</th>
+          <th style="width: 120px;">CPU Trend</th>
+          <th style="width: 120px;">Mem Trend</th>
+          <th style="width: 120px;">Net Trend</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+      </tbody>
+    </table>
+  </div>
+
+  <script>
+    const randomWalk = (steps, start, volatility) => {
+      let val = start;
+      const data = [val];
+      for (let i = 1; i < steps; i++) {
+        val = Math.max(0, Math.min(100, val + (Math.random() - 0.5) * volatility));
+        data.push(val);
+      }
+      return data;
+    };
+
+    const generateBars = (steps, min, max) => Array.from({length: steps}, () => min + Math.random() * (max - min));
+    
+    const generateWinLoss = (steps) => Array.from({length: steps}, () => {
+      const r = Math.random();
+      return r > 0.8 ? -1 : (r > 0.2 ? 1 : 0);
+    });
+
+    const cpuData = randomWalk(30, 40, 15);
+    const reqData = generateBars(30, 800, 1500);
+    const errData = generateWinLoss(30);
+    
+    const servers = [
+      { id: 'web-01', region: 'us-east-1', uptime: '99.9%', status: 'healthy', cpu: randomWalk(24, 30, 10), mem: randomWalk(24, 60, 5), net: randomWalk(24, 20, 20) },
+      { id: 'web-02', region: 'us-east-2', uptime: '99.8%', status: 'healthy', cpu: randomWalk(24, 35, 12), mem: randomWalk(24, 65, 5), net: randomWalk(24, 25, 20) },
+      { id: 'db-01', region: 'eu-west-1', uptime: '99.9%', status: 'healthy', cpu: randomWalk(24, 60, 8), mem: randomWalk(24, 85, 3), net: randomWalk(24, 40, 15) },
+      { id: 'cache-01', region: 'us-east-1', uptime: '99.5%', status: 'warning', cpu: randomWalk(24, 85, 20), mem: randomWalk(24, 75, 15), net: randomWalk(24, 80, 25) },
+      { id: 'worker-01', region: 'ap-south-1', uptime: '98.2%', status: 'critical', cpu: randomWalk(24, 95, 5), mem: randomWalk(24, 90, 8), net: randomWalk(24, 10, 5) },
+      { id: 'worker-02', region: 'ap-south-1', uptime: '99.7%', status: 'healthy', cpu: randomWalk(24, 45, 15), mem: randomWalk(24, 50, 10), net: randomWalk(24, 15, 10) }
+    ];
+
+    const getRect = (sel) => document.querySelector(sel).getBoundingClientRect();
+
+    function drawKpiCpu() {
+      const container = d3.select('#kpi-cpu');
+      container.selectAll('*').remove();
+      const w = getRect('#kpi-cpu').width, h = 48;
+      
+      const svg = container.append('svg').attr('width', w).attr('height', h);
+      const x = d3.scaleLinear([0, cpuData.length - 1], [0, w]);
+      const y = d3.scaleLinear([0, 100], [h, 0]);
+      
+      const area = d3.area().x((d, i) => x(i)).y0(h).y1(d => y(d)).curve(d3.curveMonotoneX);
+      const line = d3.line().x((d, i) => x(i)).y(d => y(d)).curve(d3.curveMonotoneX);
+
+      const pathClip = svg.append('clipPath').attr('id', 'clip-cpu')
+        .append('rect').attr('width', 0).attr('height', h);
+
+      const g = svg.append('g').attr('clip-path', 'url(#clip-cpu)');
+      
+      g.append('path').datum(cpuData).attr('d', area).attr('fill', 'var(--spark-fill)');
+      g.append('path').datum(cpuData).attr('d', line)
+        .attr('fill', 'none').attr('stroke', 'var(--spark-stroke)').attr('stroke-width', 2);
+      
+      g.append('circle').attr('cx', x(cpuData.length - 1)).attr('cy', y(cpuData.at(-1)))
+        .attr('r', 3).attr('fill', 'var(--spark-stroke)');
+        
+      pathClip.transition().duration(1000).ease(d3.easeCubicInOut).attr('width', w);
+    }
+
+    function drawKpiReq() {
+      const container = d3.select('#kpi-req');
+      container.selectAll('*').remove();
+      const w = getRect('#kpi-req').width, h = 48;
+      const n = reqData.length, gap = 2;
+      const barW = Math.max(1, (w - gap * (n - 1)) / n);
+      
+      const svg = container.append('svg').attr('width', w).attr('height', h);
+      const y = d3.scaleLinear([0, d3.max(reqData)], [h, 0]);
+
+      svg.selectAll('rect').data(reqData).join('rect')
+        .attr('x', (d, i) => i * (barW + gap))
+        .attr('y', h)
+        .attr('width', barW)
+        .attr('height', 0)
+        .attr('fill', 'var(--success)')
+        .attr('opacity', 0.8)
+        .attr('rx', 1)
+        .transition().duration(600).delay((d, i) => i * 20).ease(d3.easeBackOut.overshoot(1.2))
+        .attr('y', d => y(d))
+        .attr('height', d => h - y(d));
+    }
+
+    function drawKpiErr() {
+      const container = d3.select('#kpi-err');
+      container.selectAll('*').remove();
+      const w = getRect('#kpi-err').width, h = 48;
+      const n = errData.length, gap = 2;
+      const barW = Math.max(1, (w - gap * (n - 1)) / n);
+      const mid = h / 2, barH = mid - 4;
+      
+      const svg = container.append('svg').attr('width', w).attr('height', h);
+      
+      svg.append('line').attr('x1', 0).attr('x2', w).attr('y1', mid).attr('y2', mid)
+        .attr('stroke', 'var(--border)').attr('stroke-width', 1);
+
+      svg.selectAll('rect.wl').data(errData).join('rect').attr('class', 'wl')
+        .attr('x', (d, i) => i * (barW + gap))
+        .attr('y', mid)
+        .attr('width', barW)
+        .attr('height', 0)
+        .attr('fill', d => d > 0 ? 'var(--success)' : d < 0 ? 'var(--danger)' : 'var(--border)')
+        .attr('rx', 1)
+        .transition().duration(500).delay((d, i) => i * 15).ease(d3.easeCubicOut)
+        .attr('y', d => d > 0 ? mid - barH : d < 0 ? mid + 1 : mid - 1)
+        .attr('height', d => d === 0 ? 2 : barH);
+    }
+
+    function drawKpiMem() {
+      const container = d3.select('#kpi-mem');
+      container.selectAll('*').remove();
+      const w = getRect('#kpi-mem').width, h = 48;
+      const svg = container.append('svg').attr('width', w).attr('height', h);
+      
+      const ranges = [100, 80, 60];
+      const x = d3.scaleLinear([0, 100], [0, w]);
+      const value = 68;
+      const target = 85;
+
+      const colors = ['rgba(255,255,255,0.05)', 'rgba(255,255,255,0.1)', 'rgba(255,255,255,0.15)'];
+      svg.selectAll('.range').data(ranges).join('rect')
+        .attr('class', 'range')
+        .attr('width', d => x(d))
+        .attr('height', h)
+        .attr('fill', (d, i) => colors[i])
+        .attr('rx', 4);
+
+      svg.append('rect')
+        .attr('y', h * 0.35)
+        .attr('height', h * 0.3)
+        .attr('fill', 'var(--primary)')
+        .attr('rx', 2)
+        .attr('width', 0)
+        .transition().duration(800).ease(d3.easeCubicOut)
+        .attr('width', x(value));
+
+      svg.append('line')
+        .attr('x1', x(target)).attr('x2', x(target))
+        .attr('y1', h * 0.15).attr('y2', h * 0.85)
+        .attr('stroke', 'var(--text)')
+        .attr('stroke-width', 2)
+        .attr('opacity', 0)
+        .transition().delay(600).duration(300)
+        .attr('opacity', 1);
+    }
+
+    function renderTable() {
+      const tbody = d3.select('#metrics-table tbody');
+      tbody.selectAll('*').remove();
+
+      const rows = tbody.selectAll('tr').data(servers, d => d.id).join('tr');
+
+      rows.append('td').text(d => d.id).style('font-weight', '500');
+      rows.append('td').text(d => d.region).style('color', 'var(--text-muted)');
+      rows.append('td').attr('class', 'num').text(d => d.uptime);
+      
+      const w = 100, h = 24;
+      const x = d3.scaleLinear([0, 23], [0, w]);
+      
+      const cpuDomain = d3.extent(servers.flatMap(s => s.cpu));
+      const memDomain = d3.extent(servers.flatMap(s => s.mem));
+      const netDomain = d3.extent(servers.flatMap(s => s.net));
+
+      const yCpu = d3.scaleLinear(cpuDomain, [h-2, 2]);
+      const yMem = d3.scaleLinear(memDomain, [h-2, 2]);
+      const yNet = d3.scaleLinear(netDomain, [h-2, 2]);
+
+      const createSparkline = (cell, data, y, color, delayOffset) => {
+        const svg = cell.append('svg').attr('width', w).attr('height', h).attr('class', 'spark');
+        
+        const line = d3.line().x((d, i) => x(i)).y(d => y(d)).curve(d3.curveMonotoneX);
+        const area = d3.area().x((d, i) => x(i)).y0(h).y1(d => y(d)).curve(d3.curveMonotoneX);
+
+        const clipId = `clip-${Math.random().toString(36).slice(2)}`;
+        const clipPath = svg.append('clipPath').attr('id', clipId)
+          .append('rect').attr('width', 0).attr('height', h);
+
+        const g = svg.append('g').attr('clip-path', `url(#${clipId})`);
+        
+        g.append('path').datum(data).attr('d', area).attr('fill', color).attr('opacity', 0.2);
+        g.append('path').datum(data).attr('d', line)
+          .attr('fill', 'none').attr('stroke', color).attr('stroke-width', 1.5);
+        
+        g.append('circle').attr('cx', x(data.length - 1)).attr('cy', y(data.at(-1)))
+          .attr('r', 2).attr('fill', color);
+          
+        clipPath.transition().delay(delayOffset).duration(800).ease(d3.easeCubicInOut).attr('width', w);
+      };
+
+      rows.each(function(d, i) {
+        const row = d3.select(this);
+        const delay = i * 100;
+        
+        createSparkline(row.append('td').attr('class', 'spark-cell'), d.cpu, yCpu, 'var(--primary)', delay);
+        createSparkline(row.append('td').attr('class', 'spark-cell'), d.mem, yMem, 'var(--warning)', delay + 50);
+        createSparkline(row.append('td').attr('class', 'spark-cell'), d.net, yNet, 'var(--success)', delay + 100);
+        
+        row.append('td').append('span')
+          .attr('class', `badge ${d.status}`)
+          .text(d.status.toUpperCase());
+      });
+    }
+
+    function init() {
+      drawKpiCpu();
+      drawKpiReq();
+      drawKpiErr();
+      drawKpiMem();
+      renderTable();
+    }
+
+    window.addEventListener('resize', () => {
+      drawKpiCpu();
+      drawKpiReq();
+      drawKpiErr();
+      drawKpiMem();
+    });
+
+    document.getElementById('replay-btn').addEventListener('click', init);
+
+    init();
+  </script>
+</body>
+</html>
