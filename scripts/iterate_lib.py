@@ -378,9 +378,16 @@ def generate_progress_html():
             "json_file": exp_file if (ITERATIONS_DIR / exp_file).exists() else None,
         })
 
+    # Block set lookup for linking to source blocks
+    block_sets = {}
+    if best_blocks.exists():
+        for tid, entry in json.loads(best_blocks.read_text()).items():
+            block_sets[tid] = entry.get("block_set", "")
+
     # Linked resources for the nav
     resources = {
         "history_tsv": "history.tsv",
+        "block_sets": block_sets,
         "best_blocks": "../../evals/best-blocks.json" if best_blocks.exists() else None,
         "best_prompts": "../../evals/best-prompts.json" if best_prompts.exists() else None,
         "audit_runs": [f.name for f in run_files[:20]],
@@ -403,7 +410,8 @@ def generate_progress_html():
 
   .target-section {{ margin-bottom: 48px; }}
   .target-header {{ display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }}
-  .target-title {{ font-size: 17px; font-weight: 600; margin: 0; }}
+  .target-title {{ font-size: 17px; font-weight: 600; margin: 0; color: #222; text-decoration: none; }}
+  a.target-title:hover {{ text-decoration: underline; }}
   .target-badge {{ font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: 600; }}
   .badge-block {{ background: #e3f2fd; color: #1565c0; }}
   .badge-prompt {{ background: #fce4ec; color: #c62828; }}
@@ -477,7 +485,13 @@ for (const [key, data] of groupEntries) {{
 
   // Header
   const header = section.append("div").attr("class", "target-header");
-  header.append("div").attr("class", "target-title").text(target);
+  const blockSet = resources.block_sets?.[target];
+  if (blockSet) {{
+    header.append("a").attr("class", "target-title")
+      .attr("href", `../../blocks/${{blockSet}}/${{target}}.html`).text(target);
+  }} else {{
+    header.append("div").attr("class", "target-title").text(target);
+  }}
   header.append("span").attr("class", `target-badge badge-${{track}}`).text(track);
 
   // data is reversed (newest first) for the table; chrono is oldest-first for the chart
