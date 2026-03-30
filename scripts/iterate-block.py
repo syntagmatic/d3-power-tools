@@ -76,14 +76,30 @@ def get_audit_scores(html_path, block_id, wait_for="svg", model="sonnet"):
     return run_data.get("blocks", {}).get(block_id)
 
 
-def build_proposer_prompt(html_path, lines, scores, history_lines):
+def build_proposer_prompt(html_path, lines, scores, history_lines, last_discard_scores=None):
     """Fill in the proposer template."""
     notes = []
     for dim in ("visual_critic", "encoding_integrity", "stress_test", "cognitive_load"):
         note = scores.get(f"{dim}_note", "")
         if note:
-            notes.append(f"  {dim}: {note}")
+            notes.append(f"  {dim} ({scores.get(dim, '?')}/10): {note}")
+    flags = scores.get("flags", [])
+    if flags:
+        notes.append(f"  flags: {'; '.join(flags)}")
     audit_notes = "\n".join(notes) if notes else "  (no notes)"
+
+    # If the last experiment was discarded, show why
+    discard_context = ""
+    if last_discard_scores:
+        discard_notes = []
+        for dim in ("visual_critic", "encoding_integrity", "stress_test", "cognitive_load"):
+            before = scores.get(dim, "?")
+            after = last_discard_scores.get(dim, "?")
+            if before != after:
+                note = last_discard_scores.get(f"{dim}_note", "")
+                discard_notes.append(f"  {dim}: {before}→{after}" + (f" — {note}" if note else ""))
+        if discard_notes:
+            discard_context = "\n\nLast experiment was DISCARDED (quality regression):\n" + "\n".join(discard_notes)
 
     history = "\n".join(history_lines[-10:]) if history_lines else "(first experiment)"
 
@@ -94,7 +110,7 @@ def build_proposer_prompt(html_path, lines, scores, history_lines):
         .replace("{{encoding_integrity}}", str(scores.get("encoding_integrity", "?"))) \
         .replace("{{stress_test}}", str(scores.get("stress_test", "?"))) \
         .replace("{{cognitive_load}}", str(scores.get("cognitive_load", "?"))) \
-        .replace("{{audit_notes}}", audit_notes) \
+        .replace("{{audit_notes}}", audit_notes + discard_context) \
         .replace("{{history}}", history)
 
 
@@ -187,6 +203,7 @@ def main():
     current_composite = baseline_composite
     current_lines = baseline_lines
     keeps = 0
+    last_discard_scores = None
 
     # Main loop
     for exp_num in range(args.max_experiments):
@@ -201,7 +218,7 @@ def main():
         backup = work_html.read_text()
 
         # Build and run proposer
-        prompt = build_proposer_prompt(work_html, current_lines, baseline_scores, history_lines)
+        prompt = build_proposer_prompt(work_html, current_lines, baseline_scores, history_lines, last_discard_scores)
         t0 = time.time()
         print("  Proposing change...", end=" ", flush=True)
         proposer_explanation = run_proposer(prompt, work_html)
@@ -272,6 +289,7 @@ def main():
             current_lines = new_lines
             baseline_scores = new_scores  # update for next proposer prompt
             keeps += 1
+            last_discard_scores = None  # clear discard context on keep
 
             # Update best-blocks.json
             update_best("block", args.target, {
@@ -286,6 +304,7 @@ def main():
         else:
             print(f"  DISCARD: {reason}")
             work_html.write_text(backup)
+            last_discard_scores = new_scores  # tell proposer what went wrong
 
         history_lines.append(f"exp {exp_id}: {decision}, {new_lines} lines, composite {new_composite}, {reason}")
 
