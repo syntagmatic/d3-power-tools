@@ -1,0 +1,32 @@
+{
+  "lines_before": 754,
+  "lines_after": 749,
+  "composite_before": 6.5,
+  "composite_after": 6.0,
+  "scores": {
+    "visual_critic": 6,
+    "encoding_integrity": 7,
+    "stress_test": 5,
+    "cognitive_load": 6,
+    "composite": 6.0,
+    "visual_critic_note": "Clean modern UI chrome with good typographic hierarchy and a warm Tableau10 palette, but the 900×900 SVG renders partially cropped in the viewport, and the full link bundle overlay creates dense visual clutter that undercuts readability of the hierarchical structure.",
+    "encoding_integrity_note": "Structurally honest: scaleSqrt used correctly for force-layout circle sizing, data-driven domains throughout, and key functions present on node and link joins — but hierarchy link join lacks a key function and the composite link key (first-to-last node id) risks collisions on shared paths, plus synthetic data caps confidence.",
+    "stress_test_note": "Easing-param sliders fire full 1500ms updateLayout() transitions on every input event without debouncing, and updateLayout() never calls .interrupt() on nodeSelection before creating a new svg.transition(), leaving mid-flight current_x/y state potentially inconsistent when layouts are switched rapidly.",
+    "cognitive_load_note": "Hierarchical color grouping and circle clusters read clearly, but 300 bundled edges at 8% tension collapse into a dense central tangle that is unreadable without hover/click interaction, and the 8-layout control strip adds navigational overhead that competes with the visualization itself.",
+    "flags": [
+      "update_storm",
+      "mid_flight_snap"
+    ]
+  },
+  "propose_time_s": 306.5,
+  "audit_time_s": 79.4,
+  "decision": "discard",
+  "reason": "quality regression",
+  "diff": "--- a/hierarchy-bundles.html\n+++ b/hierarchy-bundles.html\n@@ -364,14 +364,12 @@\n     const tree = d3.tree().size([2 * Math.PI, radius - 60]);\n     const cluster = d3.cluster().size([2 * Math.PI, radius - 60]);\n     const partition = d3.partition().size([2 * Math.PI, radius]);\n-    const icicleHeight = height / 2;\n-    const icicle = d3.partition().size([width, icicleHeight]).padding(1);\n+    const icicle = d3.partition().size([width, height / 2]).padding(1);\n     \n     const arc = d3.arc()\n-        .startAngle(d => d.x0)\n-        .endAngle(d => d.x1)\n-        .innerRadius(d => d.y0_scaled !== undefined ? d.y0_scaled : d.y0)\n-        .outerRadius(d => d.y1_scaled !== undefined ? d.y1_scaled : d.y1);\n+        .startAngle(d => d.x0).endAngle(d => d.x1)\n+        .innerRadius(d => d.y0_scaled ?? d.y0)\n+        .outerRadius(d => d.y1_scaled ?? d.y1);\n \n     // --- Link Drawing Functions ---\n     // Moved to global scope to be accessible by event listeners\n@@ -592,7 +590,7 @@\n             const posCalc = {\n                 pack: d => [d.x - width/2, d.y - height/2],\n                 treemap: d => [(d.x0+d.x1)/2 - width/2, (d.y0+d.y1)/2 - height/2],\n-                icicle: d => [(d.x0+d.x1)/2 - width/2, d.y0 - icicleHeight/2],\n+                icicle: d => [(d.x0+d.x1)/2 - width/2, d.y0 - height/4],\n                 dendrogram: d => [d.y - (width-100)/2, d.x - (height-100)/2],\n                 radial: polar, cluster: polar,\n                 partition: d => arc.centroid(d),\n@@ -602,17 +600,16 @@\n             root.descendants().forEach(d => {\n                 if (y_scale) { d.y0_scaled = y_scale(d.y0); d.y1_scaled = y_scale(d.y1); }\n                 else { delete d.y0_scaled; delete d.y1_scaled; }\n-                d.source_x = d.current_x;\n-                d.source_y = d.current_y;\n-                const [source_transform_x, source_transform_y] = noTransformPrev ? [0, 0] : [d.source_x, d.source_y];\n-                [d.target_x, d.target_y] = (posCalc[currentLayout] || (() => [d.current_x, d.current_y]))(d);\n-\n-                const [target_transform_x, target_transform_y] = currentLayout === 'partition' ? [0, 0]\n-                    : [d.target_x, currentLayout === 'icicle' ? (d.y0 + d.y1)/2 - icicleHeight/2 : d.target_y];\n-\n-                const dataInterpolator = d3.interpolate({x: d.source_x, y: d.source_y}, {x: d.target_x, y: d.target_y});\n-                const transformInterpolator = d3.interpolate({x: source_transform_x, y: source_transform_y}, {x: target_transform_x, y: target_transform_y});\n-                nodeInterpolators.set(d.id, { data: dataInterpolator, transform: transformInterpolator });\n+                const [sx, sy] = [d.current_x, d.current_y];\n+                [d.target_x, d.target_y] = (posCalc[currentLayout] || (() => [sx, sy]))(d);\n+\n+                const [ttx, tty] = currentLayout === 'partition' ? [0, 0]\n+                    : [d.target_x, currentLayout === 'icicle' ? (d.y0 + d.y1)/2 - height/4 : d.target_y];\n+\n+                nodeInterpolators.set(d.id, {\n+                    data: d3.interpolate({x: sx, y: sy}, {x: d.target_x, y: d.target_y}),\n+                    transform: d3.interpolate({x: noTransformPrev ? 0 : sx, y: noTransformPrev ? 0 : sy}, {x: ttx, y: tty})\n+                });\n             });\n \n             t.tween('render', () => {\n@@ -722,18 +719,16 @@\n         nodeSelection\n           .on(\"click\", (event, d) => {\n             event.stopPropagation();\n-            if (selectedNode === d) { selectedNode = null; clearHighlights(); }\n-            else { clearHighlights(); selectedNode = d; handleInteraction(d, false); }\n+            clearHighlights();\n+            selectedNode = selectedNode === d ? null : d;\n+            if (selectedNode) handleInteraction(d, false);\n           })\n           .on(\"mouseover\", (event, d) => {\n             if (selectedNode) return;\n             if (!d.children || d.children.every(c => !c.children)) handleInteraction(d, true);\n           })\n           .on(\"mouseout\", () => { if (!selectedNode) clearHighlights(); });\n-        svg.on(\"click\", () => {\n-             selectedNode = null; \n-             clearHighlights(); \n-        });\n+        svg.on(\"click\", () => { selectedNode = null; clearHighlights(); });\n     }\n     \n     d3.select(\"#links-toggle\").on(\"change\", function() {\n",
+  "proposer": "",
+  "git_sha": "22d1406",
+  "experiment_id": 75,
+  "track": "block",
+  "target": "hierarchy-bundles",
+  "timestamp": "2026-03-30T13:40:10"
+}
