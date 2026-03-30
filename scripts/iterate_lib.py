@@ -296,22 +296,31 @@ def check_features(html_path, features):
     return True
 
 
-# === Progress HTML ===
+# === Index HTML ===
 
-def generate_progress_html():
-    """Generate progress.html from history.tsv."""
-    ensure_iterations_dir()
+def _json_for_html(obj):
+    """Serialize to JSON safe for embedding in <script> blocks."""
+    return json.dumps(obj, ensure_ascii=False).replace("</", "<\\/")
+
+
+def _load_experiments():
+    """Load all experiment JSONs. Returns list of dicts sorted by exp id."""
+    experiments = []
+    for f in sorted(ITERATIONS_DIR.glob("*.json")):
+        try:
+            experiments.append(json.loads(f.read_text()))
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return experiments
+
+
+def _load_tsv_records():
+    """Parse history.tsv into records list."""
     path = tsv_path()
     if not path.exists():
-        return
-
-    lines = path.read_text().strip().split("\n")
-    if len(lines) <= 1:
-        return
-
-    # Parse TSV into records
+        return []
     records = []
-    for line in lines[1:]:
+    for line in path.read_text().strip().split("\n")[1:]:
         parts = line.split("\t")
         if len(parts) >= 8:
             records.append({
@@ -324,113 +333,261 @@ def generate_progress_html():
                 "cost": float(parts[6]),
                 "description": parts[7],
             })
+    return records
+
+
+def generate_progress_html():
+    """Generate iterations/index.html — master list of all experiments.
+
+    Includes: summary cards per target with sparkline chart, full experiment
+    table with expandable diffs, links to experiment JSONs and audit runs.
+    """
+    ensure_iterations_dir()
+    records = _load_tsv_records()
+    experiments = _load_experiments()
+    if not records:
+        return None
+
+    # Build a lookup from (track, target, exp_id) -> experiment data
+    exp_lookup = {}
+    for e in experiments:
+        key = (e.get("track", ""), e.get("target", ""), e.get("experiment_id", 0))
+        exp_lookup[key] = e
+
+    # Collect linked resources
+    runs_dir = PROJ / "evals" / "runs"
+    run_files = sorted(runs_dir.glob("*.json"), reverse=True) if runs_dir.exists() else []
+    best_blocks = BEST_DIR / "best-blocks.json"
+    best_prompts = BEST_DIR / "best-prompts.json"
+
+    # Build experiments array for JS (records + diffs + scores + links)
+    js_experiments = []
+    for r in records:
+        key = (r["track"], r["target"], r["exp"])
+        e = exp_lookup.get(key, {})
+        exp_file = f"{r['exp']:03d}-{r['track']}-{r['target']}.json"
+        js_experiments.append({
+            **r,
+            "scores": e.get("scores", {}),
+            "diff": e.get("diff", ""),
+            "timestamp": e.get("timestamp", ""),
+            "composite_before": e.get("composite_before"),
+            "composite_after": e.get("composite_after", e.get("composite")),
+            "lines_before": e.get("lines_before", e.get("lines")),
+            "lines_after": e.get("lines_after", e.get("lines")),
+            "json_file": exp_file if (ITERATIONS_DIR / exp_file).exists() else None,
+        })
+
+    # Linked resources for the nav
+    resources = {
+        "history_tsv": "history.tsv",
+        "best_blocks": "../../evals/best-blocks.json" if best_blocks.exists() else None,
+        "best_prompts": "../../evals/best-prompts.json" if best_prompts.exists() else None,
+        "audit_runs": [f.name for f in run_files[:20]],
+    }
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Iteration Progress</title>
+<title>Iterations Index</title>
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <style>
-  body {{ font-family: system-ui, sans-serif; padding: 32px; background: #fafafa; color: #222; }}
-  h1 {{ font-size: 22px; font-weight: 400; margin: 0 0 4px; }} h1 b {{ font-weight: 600; }}
-  .meta {{ color: #888; font-size: 13px; margin-bottom: 20px; }}
-  .target-section {{ margin-bottom: 40px; }}
-  .target-title {{ font-size: 16px; font-weight: 600; margin: 0 0 12px; }}
-  .target-meta {{ font-size: 12px; color: #888; margin-bottom: 8px; }}
-  svg {{ overflow: visible; }}
-  .dot-keep {{ fill: #2e7d32; }}
-  .dot-discard {{ fill: #bbb; }}
-  .dot-baseline {{ fill: #1565c0; }}
+  * {{ box-sizing: border-box; }}
+  body {{ font-family: system-ui, -apple-system, sans-serif; padding: 32px 40px; background: #fafafa; color: #222; max-width: 1100px; }}
+  h1 {{ font-size: 22px; font-weight: 400; margin: 0 0 2px; }} h1 b {{ font-weight: 600; }}
+  .page-meta {{ color: #888; font-size: 13px; margin-bottom: 8px; }}
+  .nav {{ display: flex; gap: 16px; font-size: 12px; margin-bottom: 28px; flex-wrap: wrap; }}
+  .nav a {{ color: #1565c0; text-decoration: none; }} .nav a:hover {{ text-decoration: underline; }}
+  .nav .sep {{ color: #ccc; }}
+
+  .target-section {{ margin-bottom: 48px; }}
+  .target-header {{ display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }}
+  .target-title {{ font-size: 17px; font-weight: 600; margin: 0; }}
+  .target-badge {{ font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: 600; }}
+  .badge-block {{ background: #e3f2fd; color: #1565c0; }}
+  .badge-prompt {{ background: #fce4ec; color: #c62828; }}
+  .target-meta {{ font-size: 12px; color: #888; margin-bottom: 12px; }}
+
+  svg {{ overflow: visible; display: block; margin-bottom: 8px; }}
+  .dot-keep {{ fill: #2e7d32; cursor: pointer; }} .dot-keep:hover {{ r: 6; }}
+  .dot-discard {{ fill: #bbb; cursor: pointer; }} .dot-discard:hover {{ r: 6; }}
+  .dot-baseline {{ fill: #1565c0; cursor: pointer; }} .dot-baseline:hover {{ r: 6; }}
   .best-line {{ stroke: #2e7d32; stroke-width: 1.5; fill: none; }}
   .axis text {{ font-size: 11px; fill: #666; }}
   .axis line, .axis path {{ stroke: #ddd; }}
-  table {{ border-collapse: collapse; font-size: 12px; margin-top: 12px; }}
-  th, td {{ padding: 4px 10px; text-align: left; border-bottom: 1px solid #eee; }}
-  th {{ font-weight: 600; color: #888; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; }}
+
+  table {{ border-collapse: collapse; font-size: 12px; margin-top: 4px; width: 100%; }}
+  th, td {{ padding: 5px 10px; text-align: left; border-bottom: 1px solid #eee; }}
+  th {{ font-weight: 600; color: #888; font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; position: sticky; top: 0; background: #fafafa; }}
   .keep {{ color: #2e7d32; font-weight: 600; }}
   .discard {{ color: #999; }}
   .baseline {{ color: #1565c0; }}
+  td.mono {{ font-family: "SF Mono", "Consolas", monospace; font-size: 11px; }}
+  td a {{ color: #1565c0; text-decoration: none; }} td a:hover {{ text-decoration: underline; }}
+
+  .score-bar {{ display: inline-flex; gap: 2px; align-items: center; }}
+  .score-pip {{ width: 6px; height: 14px; border-radius: 1px; }}
+
+  .diff-toggle {{ cursor: pointer; color: #1565c0; font-size: 11px; user-select: none; }}
+  .diff-toggle:hover {{ text-decoration: underline; }}
+  .diff-row {{ display: none; }}
+  .diff-row.open {{ display: table-row; }}
+  .diff-cell {{ padding: 0; }}
+  .diff-pre {{ margin: 0; padding: 8px 12px; background: #f5f5f5; font-family: "SF Mono", "Consolas", monospace;
+    font-size: 11px; line-height: 1.5; overflow-x: auto; max-height: 400px; overflow-y: auto; white-space: pre; border-top: 1px solid #eee; }}
+  .diff-pre .add {{ color: #2e7d32; background: #e8f5e9; display: inline; }}
+  .diff-pre .del {{ color: #c62828; background: #ffebee; display: inline; }}
+  .diff-pre .hunk {{ color: #6a1b9a; font-weight: 600; }}
 </style>
 </head>
 <body>
-<h1><b>Iteration Progress</b></h1>
-<p class="meta">{len(records)} experiments &middot; generated {time.strftime("%Y-%m-%d %H:%M")}</p>
+<h1><b>Iterations</b></h1>
+<p class="page-meta">{len(records)} experiments across {len(set((r['track'], r['target']) for r in records))} targets &middot; generated {time.strftime("%Y-%m-%d %H:%M")}</p>
+<div class="nav" id="nav"></div>
+<div id="content"></div>
 <script>
-const records = {json.dumps(records, ensure_ascii=False)};
+const experiments = {_json_for_html(js_experiments)};
+const resources = {_json_for_html(resources)};
 
-// Group by track+target
-const groups = d3.group(records, d => `${{d.track}}/${{d.target}}`);
+// --- Nav ---
+const nav = d3.select("#nav");
+nav.append("a").attr("href", "history.tsv").text("history.tsv");
+if (resources.best_blocks) nav.append("span").attr("class","sep").text("·"),
+  nav.append("a").attr("href", resources.best_blocks).text("best-blocks.json");
+if (resources.best_prompts) nav.append("span").attr("class","sep").text("·"),
+  nav.append("a").attr("href", resources.best_prompts).text("best-prompts.json");
+if (resources.audit_runs.length) {{
+  nav.append("span").attr("class","sep").text("·");
+  const dd = nav.append("details").style("display","inline");
+  dd.append("summary").style("cursor","pointer").style("font-size","12px").text(`${{resources.audit_runs.length}} audit runs`);
+  const ul = dd.append("div").style("padding","4px 0 0 8px");
+  resources.audit_runs.forEach(f => ul.append("a").attr("href", `../runs/${{f}}`).text(f).append("br"));
+}}
+
+// --- Group by track/target ---
+const groups = d3.group(experiments, d => `${{d.track}}/${{d.target}}`);
+const content = d3.select("#content");
 
 for (const [key, data] of groups) {{
   const [track, target] = key.split("/", 2);
-  const section = d3.select("body").append("div").attr("class", "target-section");
+  const section = content.append("div").attr("class", "target-section");
+
+  // Header
+  const header = section.append("div").attr("class", "target-header");
+  header.append("div").attr("class", "target-title").text(target);
+  header.append("span").attr("class", `target-badge badge-${{track}}`).text(track);
 
   const keeps = data.filter(d => d.decision === "keep");
+  const discards = data.filter(d => d.decision === "discard");
   const totalCost = d3.sum(data, d => d.cost);
-  section.append("div").attr("class", "target-title").text(`${{track}}: ${{target}}`);
+  const first = data[0], last = data[data.length - 1];
+  const metricLabel = track === "block" ? "lines" : "time";
   section.append("div").attr("class", "target-meta")
-    .text(`${{data.length}} experiments, ${{keeps.length}} kept, $${{totalCost.toFixed(2)}} spent`);
+    .text(`${{data.length}} experiments · ${{keeps.length}} kept · ${{discards.length}} discarded · $${{totalCost.toFixed(2)}} · ${{metricLabel}}: ${{first.metric}}→${{last.decision === "keep" || last.decision === "baseline" ? last.metric : keeps.length ? keeps[keeps.length-1].metric : first.metric}}`);
 
-  // Chart
-  const margin = {{top: 12, right: 20, bottom: 28, left: 50}};
-  const width = 600, height = 180;
+  // --- Sparkline chart ---
+  const margin = {{top: 10, right: 16, bottom: 24, left: 44}};
+  const width = 520, height = 120;
   const svg = section.append("svg")
     .attr("width", width + margin.left + margin.right)
     .attr("height", height + margin.top + margin.bottom)
     .append("g").attr("transform", `translate(${{margin.left}},${{margin.top}})`);
 
-  const x = d3.scaleLinear()
-    .domain([0, data.length - 1]).range([0, width]);
-  const y = d3.scaleLinear()
-    .domain(d3.extent(data, d => d.metric)).nice().range([height, 0]);
+  const x = d3.scaleLinear().domain([0, data.length - 1]).range([0, width]);
+  const yExtent = d3.extent(data, d => d.metric);
+  const y = d3.scaleLinear().domain(yExtent).nice().range([height, 0]);
 
-  svg.append("g").attr("class", "axis")
-    .attr("transform", `translate(0,${{height}})`)
-    .call(d3.axisBottom(x).ticks(Math.min(data.length, 10)).tickFormat(d3.format("d")));
-  svg.append("g").attr("class", "axis").call(d3.axisLeft(y).ticks(5));
+  svg.append("g").attr("class", "axis").attr("transform", `translate(0,${{height}})`)
+    .call(d3.axisBottom(x).ticks(Math.min(data.length, 8)).tickFormat(d3.format("d")));
+  svg.append("g").attr("class", "axis").call(d3.axisLeft(y).ticks(4));
 
-  // Running best line
   let best = data[0]?.metric || 0;
-  const isLowerBetter = track === "prompt"; // gen time: lower better. LOC: lower better for blocks too.
-  const bestPoints = [];
-  for (let i = 0; i < data.length; i++) {{
-    const d = data[i];
-    if (d.decision === "keep" || d.decision === "baseline") {{
-      best = d.metric;
-    }}
-    bestPoints.push({{ i, best }});
-  }}
-
+  const bestPts = data.map((d, i) => {{
+    if (d.decision === "keep" || d.decision === "baseline") best = d.metric;
+    return {{ i, best }};
+  }});
   svg.append("path").attr("class", "best-line")
-    .attr("d", d3.line().x((d, i) => x(d.i)).y(d => y(d.best))(bestPoints));
+    .attr("d", d3.line().x(d => x(d.i)).y(d => y(d.best))(bestPts));
 
-  // Dots
   svg.selectAll(".dot").data(data).join("circle")
     .attr("cx", (d, i) => x(i)).attr("cy", d => y(d.metric)).attr("r", 4)
-    .attr("class", d => d.decision === "keep" ? "dot-keep" : d.decision === "baseline" ? "dot-baseline" : "dot-discard");
+    .attr("class", d => `dot-${{d.decision === "keep" ? "keep" : d.decision === "baseline" ? "baseline" : "discard"}}`);
 
-  // Table
+  // --- Experiment table ---
   const table = section.append("table");
-  table.append("thead").append("tr").selectAll("th")
-    .data(["#", "Decision", "Metric", "Delta", "Cost", "Description"])
-    .join("th").text(d => d);
-  const rows = table.append("tbody").selectAll("tr").data(data).join("tr");
-  rows.each(function(d) {{
-    const tr = d3.select(this);
+  const cols = ["#", "Decision", metricLabel, "Δ", "Composite", "Scores", "Cost", "Description", "Diff", "JSON"];
+  table.append("thead").append("tr").selectAll("th").data(cols).join("th").text(d => d);
+  const tbody = table.append("tbody");
+
+  const scoreDims = ["visual_critic", "encoding_integrity", "stress_test", "cognitive_load"];
+  const scoreColor = d3.scaleLinear().domain([1, 5, 10]).range(["#c62828", "#f9a825", "#2e7d32"]);
+
+  data.forEach((d, idx) => {{
     const cls = d.decision === "keep" ? "keep" : d.decision === "baseline" ? "baseline" : "discard";
+    const tr = tbody.append("tr");
     tr.append("td").text(d.exp);
     tr.append("td").attr("class", cls).text(d.decision);
-    tr.append("td").text(d.metric);
-    tr.append("td").text(d.delta);
-    tr.append("td").text(`$${{d.cost.toFixed(2)}}`);
+    tr.append("td").attr("class", "mono").text(d.metric || "–");
+    tr.append("td").attr("class", "mono").text(d.delta || "–");
+
+    // Composite
+    const comp = d.composite_after ?? d.scores?.composite;
+    tr.append("td").attr("class", "mono").text(comp != null ? comp.toFixed(1) : "–");
+
+    // Score pips
+    const scoreCell = tr.append("td");
+    if (d.scores && Object.keys(d.scores).length) {{
+      const bar = scoreCell.append("span").attr("class", "score-bar");
+      scoreDims.forEach(dim => {{
+        const v = d.scores[dim];
+        if (v != null) bar.append("span").attr("class", "score-pip")
+          .attr("title", `${{dim}}: ${{v}}`).style("background", scoreColor(v));
+      }});
+    }} else scoreCell.text("–");
+
+    tr.append("td").attr("class", "mono").text(`$${{d.cost.toFixed(2)}}`);
     tr.append("td").text(d.description);
+
+    // Diff toggle
+    const diffCell = tr.append("td");
+    if (d.diff) {{
+      diffCell.append("span").attr("class", "diff-toggle").text("show")
+        .on("click", function() {{
+          const row = d3.select(`#diff-${{d.track}}-${{d.exp}}`);
+          const open = row.classed("open");
+          row.classed("open", !open);
+          d3.select(this).text(open ? "show" : "hide");
+        }});
+    }} else diffCell.text("–");
+
+    // JSON link
+    const jsonCell = tr.append("td");
+    if (d.json_file) jsonCell.append("a").attr("href", d.json_file).text("json");
+    else jsonCell.text("–");
+
+    // Diff row (hidden by default)
+    if (d.diff) {{
+      const diffRow = tbody.append("tr").attr("class", "diff-row").attr("id", `diff-${{d.track}}-${{d.exp}}`);
+      const pre = diffRow.append("td").attr("class", "diff-cell").attr("colspan", cols.length)
+        .append("pre").attr("class", "diff-pre");
+      // Syntax-highlight the diff
+      d.diff.split("\\n").forEach(line => {{
+        if (line.startsWith("+") && !line.startsWith("+++"))
+          pre.append("span").attr("class", "add").text(line + "\\n");
+        else if (line.startsWith("-") && !line.startsWith("---"))
+          pre.append("span").attr("class", "del").text(line + "\\n");
+        else if (line.startsWith("@@"))
+          pre.append("span").attr("class", "hunk").text(line + "\\n");
+        else pre.append("span").text(line + "\\n");
+      }});
+    }}
   }});
 }}
 </script>
 </body>
 </html>"""
 
-    out = ITERATIONS_DIR / "progress.html"
+    out = ITERATIONS_DIR / "index.html"
     out.write_text(html)
     return out
