@@ -476,6 +476,7 @@ def generate_progress_html():
   .baseline {{ color: #1565c0; }}
   td.mono {{ font-family: "SF Mono", "Consolas", monospace; font-size: 11px; }}
   td a {{ color: #1565c0; text-decoration: none; }} td a:hover {{ text-decoration: underline; }}
+  .proposer-cell {{ max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: #555; }}
 
   .score-cell {{ position: relative; cursor: default; }}
   .score-bar {{ display: inline-flex; gap: 3px; align-items: center; }}
@@ -484,7 +485,7 @@ def generate_progress_html():
 
   .score-tip {{ display: none; position: absolute; left: 0; top: 100%; z-index: 10;
     background: #fff; border: 1px solid #ddd; border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.12);
-    padding: 10px 14px; width: 380px; font-size: 12px; line-height: 1.5; color: #333; }}
+    padding: 10px 14px; width: 380px; font-size: 12px; line-height: 1.5; color: #333; pointer-events: none; }}
   .score-cell:hover .score-tip, .score-cell:focus-within .score-tip {{ display: block; }}
   .score-tip .tip-dim {{ margin-bottom: 8px; }}
   .score-tip .tip-dim:last-child {{ margin-bottom: 0; }}
@@ -593,7 +594,7 @@ for (const [key, data] of groupEntries) {{
 
   // --- Experiment table ---
   const table = section.append("table");
-  const cols = ["#", "Decision", metricLabel, "Δ", "Composite", "Scores", "Description", "Diff", "JSON"];
+  const cols = ["#", "Decision", metricLabel, "Δ", "Composite", "Scores", "Proposer", "Diff", "JSON"];
   table.append("thead").append("tr").selectAll("th").data(cols).join("th").text(d => d);
   const tbody = table.append("tbody");
 
@@ -651,7 +652,10 @@ for (const [key, data] of groupEntries) {{
       }});
     }} else scoreCell.text("–");
 
-    tr.append("td").text(d.description);
+    // Proposer summary (truncated)
+    const propCell = tr.append("td").attr("class", "proposer-cell");
+    const propText = d.proposer || d.description || "–";
+    propCell.attr("title", propText).text(propText.length > 80 ? propText.slice(0, 77) + "…" : propText);
 
     // Diff toggle (show if there's a diff or proposer explanation)
     const hasDiffContent = d.diff || d.proposer;
