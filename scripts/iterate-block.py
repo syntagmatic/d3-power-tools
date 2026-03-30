@@ -252,8 +252,11 @@ def main():
             "composite_after": new_composite,
             "scores": {k: new_scores.get(k) for k in
                        ("visual_critic", "encoding_integrity", "stress_test", "cognitive_load", "composite",
-                        "visual_critic_note", "encoding_integrity_note", "stress_test_note", "cognitive_load_note")
+                        "visual_critic_note", "encoding_integrity_note", "stress_test_note", "cognitive_load_note",
+                        "flags")
                        if new_scores.get(k) is not None},
+            "propose_time_s": round(propose_time, 1),
+            "audit_time_s": round(audit_time, 1),
             "decision": decision,
             "reason": reason,
             "diff": diff_text,

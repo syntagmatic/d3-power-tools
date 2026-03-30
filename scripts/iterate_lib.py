@@ -402,6 +402,9 @@ def generate_progress_html():
             "lines_after": e.get("lines_after", e.get("lines")),
             "git_sha": e.get("git_sha", ""),
             "proposer": e.get("proposer", ""),
+            "propose_time_s": e.get("propose_time_s"),
+            "audit_time_s": e.get("audit_time_s"),
+            "flags": e.get("scores", {}).get("flags", []),
             "json_file": exp_file if (ITERATIONS_DIR / exp_file).exists() else None,
         })
 
@@ -504,6 +507,8 @@ def generate_progress_html():
     font-size: 11px; line-height: 1.5; overflow-x: auto; max-height: 400px; overflow-y: auto; white-space: pre; border-top: 1px solid #eee; }}
   .proposer-note {{ padding: 10px 14px; background: #f0f4ff; border-top: 1px solid #e0e4ee;
     font-size: 12px; line-height: 1.6; color: #333; white-space: pre-wrap; }}
+  .flags-row {{ padding: 6px 14px; background: #fff8e1; border-top: 1px solid #f0e4b8; display: flex; flex-wrap: wrap; gap: 6px; }}
+  .flag-tag {{ font-size: 11px; padding: 2px 8px; border-radius: 4px; background: #fff3cd; color: #856404; border: 1px solid #f0dca0; }}
   .diff-pre .add {{ color: #2e7d32; background: #e8f5e9; display: inline; }}
   .diff-pre .del {{ color: #c62828; background: #ffebee; display: inline; }}
   .diff-pre .hunk {{ color: #6a1b9a; font-weight: 600; }}
@@ -594,7 +599,7 @@ for (const [key, data] of groupEntries) {{
 
   // --- Experiment table ---
   const table = section.append("table");
-  const cols = ["#", "Decision", metricLabel, "Δ", "Composite", "Scores", "Proposer", "Diff", "JSON"];
+  const cols = ["#", "Decision", metricLabel, "Δ", "Composite", "Scores", "Time", "Proposer", "Diff", "JSON"];
   table.append("thead").append("tr").selectAll("th").data(cols).join("th").text(d => d);
   const tbody = table.append("tbody");
 
@@ -652,15 +657,24 @@ for (const [key, data] of groupEntries) {{
       }});
     }} else scoreCell.text("–");
 
+    // Time (propose + audit)
+    const timeCell = tr.append("td").attr("class", "mono");
+    if (d.propose_time_s != null && d.audit_time_s != null) {{
+      const total = d.propose_time_s + d.audit_time_s;
+      timeCell.attr("title", `propose: ${{d.propose_time_s}}s  audit: ${{d.audit_time_s}}s`)
+        .text(`${{Math.round(total)}}s`);
+    }} else timeCell.text("–");
+
     // Proposer summary (truncated)
     const propCell = tr.append("td").attr("class", "proposer-cell");
     const propText = d.proposer || "–";
     propCell.attr("title", propText).text(propText.length > 80 ? propText.slice(0, 77) + "…" : propText);
 
-    // Diff toggle (show if there's a diff or proposer explanation)
+    // Diff toggle (show if there's a diff, proposer, or flags)
     const hasDiffContent = d.diff || d.proposer;
+    const hasFlags = d.flags && d.flags.length;
     const diffCell = tr.append("td");
-    if (hasDiffContent) {{
+    if (hasDiffContent || hasFlags) {{
       diffCell.append("span").attr("class", "diff-toggle").text("show")
         .on("click", function() {{
           const row = d3.select(`#diff-${{d.track}}-${{d.exp}}`);
@@ -675,14 +689,21 @@ for (const [key, data] of groupEntries) {{
     if (d.json_file) jsonCell.append("a").attr("href", d.json_file).text("json");
     else jsonCell.text("–");
 
-    // Detail row (hidden by default): proposer explanation + diff
-    if (hasDiffContent) {{
+    // Detail row (hidden by default): proposer explanation + flags + diff
+    const hasFlagsOrContent = hasDiffContent || (d.flags && d.flags.length);
+    if (hasFlagsOrContent) {{
       const diffRow = tbody.append("tr").attr("class", "diff-row").attr("id", `diff-${{d.track}}-${{d.exp}}`);
       const container = diffRow.append("td").attr("class", "diff-cell").attr("colspan", cols.length);
 
       // Proposer explanation
       if (d.proposer) {{
         container.append("div").attr("class", "proposer-note").text(d.proposer);
+      }}
+
+      // Stress test flags
+      if (d.flags && d.flags.length) {{
+        const flagsDiv = container.append("div").attr("class", "flags-row");
+        d.flags.forEach(f => flagsDiv.append("span").attr("class", "flag-tag").text(f));
       }}
 
       // Syntax-highlighted diff
