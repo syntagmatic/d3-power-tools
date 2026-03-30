@@ -476,8 +476,9 @@ def generate_progress_html():
   td.mono {{ font-family: "SF Mono", "Consolas", monospace; font-size: 11px; }}
   td a {{ color: #1565c0; text-decoration: none; }} td a:hover {{ text-decoration: underline; }}
 
-  .score-bar {{ display: inline-flex; gap: 2px; align-items: center; }}
-  .score-pip {{ width: 6px; height: 14px; border-radius: 1px; }}
+  .score-bar {{ display: inline-flex; gap: 3px; align-items: center; }}
+  .score-num {{ display: inline-block; min-width: 18px; height: 18px; line-height: 18px; border-radius: 3px;
+    text-align: center; font-size: 10px; font-weight: 600; color: #fff; cursor: default; }}
 
   .diff-toggle {{ cursor: pointer; color: #1565c0; font-size: 11px; user-select: none; }}
   .diff-toggle:hover {{ text-decoration: underline; }}
@@ -606,14 +607,20 @@ for (const [key, data] of groupEntries) {{
     const comp = d.composite_after ?? d.scores?.composite;
     tr.append("td").attr("class", "mono").text(comp != null ? comp.toFixed(1) : "–");
 
-    // Score pips
+    // Scores: numerical values with colored backgrounds and note tooltips
     const scoreCell = tr.append("td");
     if (d.scores && Object.keys(d.scores).length) {{
       const bar = scoreCell.append("span").attr("class", "score-bar");
       scoreDims.forEach(dim => {{
         const v = d.scores[dim];
-        if (v != null) bar.append("span").attr("class", "score-pip")
-          .attr("title", `${{dim}}: ${{v}}`).style("background", scoreColor(v));
+        if (v != null) {{
+          const note = d.scores[dim + "_note"] || "";
+          const label = dim.replace("_", " ").replace(/\b\w/g, c => c.toUpperCase()).replace(/_/g, " ");
+          const tip = note ? `${{label}}: ${{v}}/10\n\n${{note}}` : `${{label}}: ${{v}}/10`;
+          bar.append("span").attr("class", "score-num")
+            .attr("title", tip).style("background", scoreColor(v))
+            .style("color", v >= 4 && v <= 6 ? "#333" : "#fff").text(v);
+        }}
       }});
     }} else scoreCell.text("–");
 

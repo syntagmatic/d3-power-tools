@@ -168,7 +168,9 @@ def main():
         "lines": baseline_lines,
         "composite": baseline_composite,
         "scores": {k: baseline_scores.get(k) for k in
-                   ("visual_critic", "encoding_integrity", "stress_test", "cognitive_load", "composite")},
+                   ("visual_critic", "encoding_integrity", "stress_test", "cognitive_load", "composite",
+                    "visual_critic_note", "encoding_integrity_note", "stress_test_note", "cognitive_load_note")
+                   if baseline_scores.get(k) is not None},
         "decision": "baseline",
         "git_sha": git_sha(),
     })
@@ -246,7 +248,9 @@ def main():
             "composite_before": current_composite,
             "composite_after": new_composite,
             "scores": {k: new_scores.get(k) for k in
-                       ("visual_critic", "encoding_integrity", "stress_test", "cognitive_load", "composite")},
+                       ("visual_critic", "encoding_integrity", "stress_test", "cognitive_load", "composite",
+                        "visual_critic_note", "encoding_integrity_note", "stress_test_note", "cognitive_load_note")
+                       if new_scores.get(k) is not None},
             "decision": decision,
             "reason": reason,
             "diff": diff_text,
