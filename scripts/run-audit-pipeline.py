@@ -27,7 +27,7 @@ PROJ = Path(__file__).resolve().parent.parent
 TEST_SCRIPT = PROJ / "scripts" / "test-viz.py"
 ANCHORS_FILE = PROJ / "evals" / "anchors.json"
 RUNS_DIR = PROJ / "evals" / "runs"
-SCREENSHOT_DIR = PROJ / "temp" / "audit-screenshots"
+SCREENSHOT_BASE = PROJ / "temp" / "audit-screenshots"
 REPORT_FILE = PROJ / "evals" / "report.html"
 
 TOOLS = {
@@ -96,13 +96,13 @@ def parse_block_range(spec):
 
 # === Phase 1: Render ===
 
-def run_render(blocks, block_set):
-    SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+def run_render(blocks, block_set, ss_dir):
+    ss_dir.mkdir(parents=True, exist_ok=True)
     results = {}
     for b in blocks:
         bid = b["id"]
         html = PROJ / "blocks" / block_set / f"{bid}.html"
-        ss = SCREENSHOT_DIR / f"{bid}.png"
+        ss = ss_dir / f"{bid}.png"
         wait = b.get("wait_for", "svg")
         print(f"  render {bid}...", end=" ", flush=True)
         try:
@@ -166,8 +166,8 @@ def run_one_audit(bid, tool, skill_path, ss_path, html_path, out_path, model):
     return None
 
 
-def run_audits(blocks, render_results, block_set, model, parallel):
-    tmp_dir = SCREENSHOT_DIR.parent / "audit-tmp"
+def run_audits(blocks, render_results, block_set, model, parallel, ss_dir):
+    tmp_dir = ss_dir.parent / "audit-tmp" / block_set
     tmp_dir.mkdir(parents=True, exist_ok=True)
     results = {}  # bid -> {tool: audit_data}
     tasks = []
@@ -177,7 +177,7 @@ def run_audits(blocks, render_results, block_set, model, parallel):
         bid = b["id"]
         if not render_results.get(bid):
             continue
-        ss = SCREENSHOT_DIR / f"{bid}.png"
+        ss = ss_dir / f"{bid}.png"
         html = PROJ / "blocks" / block_set / f"{bid}.html"
         if not ss.exists():
             continue
@@ -436,17 +436,19 @@ def main():
     print(f"Model: {MODEL_IDS.get(args.model, args.model)}")
     print(f"Git: {git_sha()}\n")
 
+    ss_dir = SCREENSHOT_BASE / args.block_set
+
     # Phase 1
-    if args.skip_render and any(SCREENSHOT_DIR.glob("*.png")):
-        render_results = {b["id"]: (SCREENSHOT_DIR / f"{b['id']}.png").exists() for b in blocks}
+    if args.skip_render and ss_dir.exists() and any(ss_dir.glob("*.png")):
+        render_results = {b["id"]: (ss_dir / f"{b['id']}.png").exists() for b in blocks}
         print(f"Phase 1: Reusing {sum(render_results.values())} screenshots\n")
     else:
         print("Phase 1: Render")
-        render_results = run_render(blocks, args.block_set)
+        render_results = run_render(blocks, args.block_set, ss_dir)
 
     # Phase 2
     print("Phase 2: Audit")
-    audit_results = run_audits(blocks, render_results, args.block_set, args.model, args.parallel)
+    audit_results = run_audits(blocks, render_results, args.block_set, args.model, args.parallel, ss_dir)
 
     # Phase 3
     print("Phase 3: Write run")
