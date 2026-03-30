@@ -96,12 +96,13 @@ def parse_block_range(spec):
 
 # === Phase 1: Render ===
 
-def run_render(blocks, block_set, ss_dir):
+def run_render(blocks, block_set, ss_dir, block_dir=None):
     ss_dir.mkdir(parents=True, exist_ok=True)
+    bdir = Path(block_dir) if block_dir else PROJ / "blocks" / block_set
     results = {}
     for b in blocks:
         bid = b["id"]
-        html = PROJ / "blocks" / block_set / f"{bid}.html"
+        html = bdir / f"{bid}.html"
         ss = ss_dir / f"{bid}.png"
         wait = b.get("wait_for", "svg")
         print(f"  render {bid}...", end=" ", flush=True)
@@ -166,9 +167,10 @@ def run_one_audit(bid, tool, skill_path, ss_path, html_path, out_path, model):
     return None
 
 
-def run_audits(blocks, render_results, block_set, model, parallel, ss_dir):
+def run_audits(blocks, render_results, block_set, model, parallel, ss_dir, block_dir=None):
     tmp_dir = ss_dir.parent / "audit-tmp" / block_set
     tmp_dir.mkdir(parents=True, exist_ok=True)
+    bdir = Path(block_dir) if block_dir else PROJ / "blocks" / block_set
     results = {}  # bid -> {tool: audit_data}
     tasks = []
     stats = {"pass": 0, "fail": 0}
@@ -178,7 +180,7 @@ def run_audits(blocks, render_results, block_set, model, parallel, ss_dir):
         if not render_results.get(bid):
             continue
         ss = ss_dir / f"{bid}.png"
-        html = PROJ / "blocks" / block_set / f"{bid}.html"
+        html = bdir / f"{bid}.html"
         if not ss.exists():
             continue
         results[bid] = {}
@@ -410,6 +412,7 @@ def main():
     ap = argparse.ArgumentParser(description="Audit pipeline")
     ap.add_argument("--blocks", default="85-93")
     ap.add_argument("--block-set", default="v1", help="e.g. v1-claude-sonnet-4-6")
+    ap.add_argument("--block-dir", default=None, help="Override block directory (default: blocks/{block-set})")
     ap.add_argument("--model", default="sonnet", help="sonnet, opus, or haiku")
     ap.add_argument("--parallel", type=int, default=4)
     ap.add_argument("--skip-render", action="store_true")
@@ -424,7 +427,7 @@ def main():
     if not blocks:
         print(f"No blocks match '{args.blocks}'"); sys.exit(1)
 
-    block_dir = PROJ / "blocks" / args.block_set
+    block_dir = Path(args.block_dir) if args.block_dir else PROJ / "blocks" / args.block_set
     if not block_dir.is_dir():
         print(f"Not found: {block_dir}"); sys.exit(1)
 
@@ -433,6 +436,8 @@ def main():
 
     print(f"=== Audit: {tag} ===")
     print(f"Blocks: {args.blocks} ({len(blocks)}, set: {args.block_set})")
+    if args.block_dir:
+        print(f"Block dir: {block_dir}")
     print(f"Model: {MODEL_IDS.get(args.model, args.model)}")
     print(f"Git: {git_sha()}\n")
 
@@ -444,11 +449,11 @@ def main():
         print(f"Phase 1: Reusing {sum(render_results.values())} screenshots\n")
     else:
         print("Phase 1: Render")
-        render_results = run_render(blocks, args.block_set, ss_dir)
+        render_results = run_render(blocks, args.block_set, ss_dir, block_dir=str(block_dir))
 
     # Phase 2
     print("Phase 2: Audit")
-    audit_results = run_audits(blocks, render_results, args.block_set, args.model, args.parallel, ss_dir)
+    audit_results = run_audits(blocks, render_results, args.block_set, args.model, args.parallel, ss_dir, block_dir=str(block_dir))
 
     # Phase 3
     print("Phase 3: Write run")
