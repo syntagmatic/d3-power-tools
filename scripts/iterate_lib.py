@@ -507,6 +507,9 @@ def generate_progress_html():
     font-size: 11px; line-height: 1.5; overflow-x: auto; max-height: 400px; overflow-y: auto; white-space: pre; border-top: 1px solid #eee; }}
   .proposer-note {{ padding: 10px 14px; background: #f0f4ff; border-top: 1px solid #e0e4ee;
     font-size: 12px; line-height: 1.6; color: #333; white-space: pre-wrap; }}
+  .flags-cell {{ max-width: 180px; }}
+  .flag-tag-sm {{ display: inline-block; font-size: 10px; padding: 1px 5px; border-radius: 3px; background: #fff3cd; color: #856404;
+    border: 1px solid #f0dca0; margin: 1px 2px; cursor: default; white-space: nowrap; }}
   .flags-row {{ padding: 6px 14px; background: #fff8e1; border-top: 1px solid #f0e4b8; display: flex; flex-wrap: wrap; gap: 6px; }}
   .flag-tag {{ font-size: 11px; padding: 2px 8px; border-radius: 4px; background: #fff3cd; color: #856404; border: 1px solid #f0dca0; }}
   .diff-pre .add {{ color: #2e7d32; background: #e8f5e9; display: inline; }}
@@ -599,7 +602,7 @@ for (const [key, data] of groupEntries) {{
 
   // --- Experiment table ---
   const table = section.append("table");
-  const cols = ["#", "Decision", metricLabel, "Δ", "Composite", "Scores", "Time", "Proposer", "Diff", "JSON"];
+  const cols = ["#", "Decision", metricLabel, "Δ", "Composite", "Scores", "Propose", "Audit", "Flags", "Proposer", "Diff", "JSON"];
   table.append("thead").append("tr").selectAll("th").data(cols).join("th").text(d => d);
   const tbody = table.append("tbody");
 
@@ -657,13 +660,18 @@ for (const [key, data] of groupEntries) {{
       }});
     }} else scoreCell.text("–");
 
-    // Time (propose + audit)
-    const timeCell = tr.append("td").attr("class", "mono");
-    if (d.propose_time_s != null && d.audit_time_s != null) {{
-      const total = d.propose_time_s + d.audit_time_s;
-      timeCell.attr("title", `propose: ${{d.propose_time_s}}s  audit: ${{d.audit_time_s}}s`)
-        .text(`${{Math.round(total)}}s`);
-    }} else timeCell.text("–");
+    // Propose / Audit durations
+    tr.append("td").attr("class", "mono").text(d.propose_time_s != null ? `${{Math.round(d.propose_time_s)}}s` : "–");
+    tr.append("td").attr("class", "mono").text(d.audit_time_s != null ? `${{Math.round(d.audit_time_s)}}s` : "–");
+
+    // Flags (inline)
+    const flagsCell = tr.append("td").attr("class", "flags-cell");
+    if (d.flags && d.flags.length) {{
+      d.flags.forEach(f => {{
+        const short = f.split("(")[0].trim();
+        flagsCell.append("span").attr("class", "flag-tag-sm").attr("title", f).text(short);
+      }});
+    }} else flagsCell.text("–");
 
     // Proposer summary (truncated)
     const propCell = tr.append("td").attr("class", "proposer-cell");
