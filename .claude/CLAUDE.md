@@ -76,6 +76,27 @@ python3 scripts/generate-blocks-gemini.py v2-gemini-3-flash-preview   # Gemini
 ```
 Both read manifest, run 5 parallel workers, skip existing files. Safe to re-run for retries.
 
+## Iterating Blocks
+
+`scripts/iterate-block.py` compacts a block's code while preserving audit quality. It uses a git worktree so the main checkout stays untouched.
+
+```bash
+# Compact a block (6 experiments, sonnet auditor)
+python3 scripts/iterate-block.py --target 04-bee-swarm-census --block-set v2-claude-opus-4-6 --max-experiments 6 --model sonnet
+
+# Longer run for large blocks
+python3 scripts/iterate-block.py --target hierarchy-bundles --block-set standalone --max-experiments 50 --model sonnet
+```
+
+The loop: propose compaction via `claude -p` → audit → keep if LOC drops and composite holds → repeat. On completion, squash-merges the iterate branch to main.
+
+- **Index page:** `evals/iterations/index.html` — master list with sparkline charts, expandable diffs, score tooltips with auditor feedback, proposer explanations, stress test flags, durations
+- **Experiment data:** `evals/iterations/{NNN}-block-{id}.json` — per-experiment scores, diffs, proposer explanation, flags
+- **History:** `evals/iterations/history.tsv` — append-only log
+- **Shared lib:** `scripts/iterate_lib.py` — TSV logging, keep/discard decisions, worktree helpers, index generation
+
+`scripts/iterate-prompt.py` is the prompt track equivalent (optimizes generation time instead of LOC).
+
 ## Multi-Session Coordination
 
 When working alongside other Claude sessions, use `scripts/coord.sh` to coordinate. State lives in `.git/coordination/` (shared across worktrees, containers, and host).
