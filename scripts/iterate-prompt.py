@@ -17,9 +17,9 @@ from pathlib import Path
 
 from iterate_lib import (
     PROJ, CostTracker, append_tsv, check_convergence, check_features,
-    decide_prompt, ensure_iterations_dir, generate_progress_html,
-    git_commit, git_create_branch, git_sha, next_experiment_id,
-    update_best, write_experiment,
+    compute_diff, decide_prompt, ensure_iterations_dir,
+    generate_progress_html, git_commit, git_create_branch, git_sha,
+    git_squash_merge, next_experiment_id, update_best, write_experiment,
 )
 from staging import create_staging_dir, cleanup_staging_dir
 
@@ -63,6 +63,7 @@ def generate_block(prompt_text, block, iter_dir, model=None):
             "--disallowedTools", "Bash,Glob,Grep,Agent",
             "--max-turns", "25",
             "--output-format", "stream-json",
+            "--verbose",
         ]
         if model:
             cmd.extend(["--model", model])
@@ -106,9 +107,9 @@ def run_proposer(current_prompt, gen_time, features, history_lines, out_path):
 
     r = subprocess.run(
         [CLAUDE_BIN, "-p", prompt,
-         "--allowedTools", "Read,Write",
+         "--allowedTools", "Read,Edit,Write",
          "--max-turns", "10",
-         "--output-format", "stream-json"],
+         "--output-format", "json"],
         capture_output=True, text=True, timeout=300,
         cwd=str(out_path.parent))
     return r
@@ -180,6 +181,7 @@ def main():
 
     history_lines = [f"exp {exp_id}: baseline, {baseline_time:.0f}s, {len(current_prompt)} chars"]
     current_time = baseline_time
+    keeps = 0
 
     # Main loop
     for exp_num in range(args.max_experiments):
@@ -242,6 +244,9 @@ def main():
         delta = new_time - current_time
         description = f"{reason} ({current_time:.0f}s→{new_time:.0f}s, {len(new_prompt)} chars)"
 
+        # Compute diff for history regardless of decision
+        diff_text = compute_diff(current_prompt, new_prompt, "prompt.txt")
+
         append_tsv(exp_id, "prompt", args.target, round(new_time, 1), round(delta, 1),
                    decision, gen_cost, description)
         write_experiment(exp_id, "prompt", args.target, {
@@ -253,6 +258,7 @@ def main():
             "prompt": new_prompt,
             "decision": decision,
             "reason": reason,
+            "diff": diff_text,
             "git_sha": git_sha(),
         })
 
@@ -261,6 +267,7 @@ def main():
             current_prompt = new_prompt
             current_time = new_time
             prompt_file.write_text(current_prompt)
+            keeps += 1
 
             # Update best-prompts.json
             update_best("prompt", args.target, {
@@ -271,9 +278,6 @@ def main():
                 "iteration": f"exp-{exp_id}",
                 "git_sha": git_sha(),
             })
-
-            git_commit(f"iterate-prompt exp-{exp_id}: {reason}",
-                       [str(prompt_file)])
         else:
             print(f"  DISCARD: {reason}")
 
@@ -284,6 +288,28 @@ def main():
 
     # Generate progress
     progress = generate_progress_html()
+
+    # Commit all changes and squash-merge back to main
+    if keeps > 0:
+        artifacts = [str(prompt_file)]
+        evals_dir = PROJ / "evals"
+        for pattern in ["iterations/", "runs/", "best-prompts.json"]:
+            p = evals_dir / pattern
+            if p.exists():
+                artifacts.append(str(p))
+        if progress:
+            artifacts.append(str(progress))
+
+        git_commit(f"iterate-prompt {args.target}: {baseline_time:.0f}→{current_time:.0f}s, {keeps} keeps",
+                   artifacts)
+
+        merge_msg = (f"Iterate prompt {args.target}: {baseline_time:.0f}→{current_time:.0f}s "
+                     f"({keeps} keeps, {len(current_prompt)} chars)")
+        print(f"\n  Squash-merging to main...")
+        if git_squash_merge(branch, "main", merge_msg):
+            print(f"  Merged: {merge_msg}")
+        else:
+            print(f"  Squash-merge failed. Changes remain on branch: {branch}")
 
     print(f"\n=== Done ===")
     print(f"Final: {current_time:.0f}s (was {baseline_time:.0f}s), {len(current_prompt)} chars")

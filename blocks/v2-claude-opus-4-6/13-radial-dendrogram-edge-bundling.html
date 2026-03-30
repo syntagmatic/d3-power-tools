@@ -66,7 +66,6 @@
   .node--hover circle { fill: #55aaff; }
   .node--hover text { fill: #ddeeff; font-weight: 600; }
   .node--connected circle { fill: #55aaff; }
-  .node--target circle { fill: #ff7744; }
   .link--faded { stroke-opacity: 0.04; }
   .node--faded text { fill-opacity: 0.15; }
   .node--faded circle { fill-opacity: 0.2; }
@@ -127,7 +126,6 @@ for (const [pkg, modules] of Object.entries(packages)) {
 
 // Generate ~80 cross-module dependency edges
 const rng = d3.randomLcg(42);
-const rand = d3.randomUniform.source(rng)(0, 1);
 const dependencies = [];
 const depPairs = new Set();
 
@@ -144,52 +142,34 @@ const affinities = [
 ];
 
 function pickLeaf(pkg) {
-  const prefix = pkg + ".";
-  const candidates = leafIds.filter(id => id.startsWith(prefix) && !id.slice(prefix.length).includes("."));
-  return candidates[Math.floor(rand() * candidates.length)];
+  const candidates = leafIds.filter(id => id.startsWith(pkg + ".") && !id.slice(pkg.length + 1).includes("."));
+  return candidates[Math.floor(rng() * candidates.length)];
+}
+
+function addDep(s, t) {
+  if (s && t && s !== t) {
+    const key = s < t ? `${s}|${t}` : `${t}|${s}`;
+    if (!depPairs.has(key)) { depPairs.add(key); dependencies.push({ source: s, target: t }); }
+  }
 }
 
 for (const [srcPkg, tgtPkg] of affinities) {
-  const count = Math.floor(rand() * 3) + 1;
-  for (let i = 0; i < count; i++) {
-    const s = pickLeaf(srcPkg);
-    const t = pickLeaf(tgtPkg);
-    if (s && t && s !== t) {
-      const key = s < t ? `${s}|${t}` : `${t}|${s}`;
-      if (!depPairs.has(key)) {
-        depPairs.add(key);
-        dependencies.push({ source: s, target: t });
-      }
-    }
-  }
+  const count = Math.floor(rng() * 3) + 1;
+  for (let i = 0; i < count; i++) addDep(pickLeaf(srcPkg), pickLeaf(tgtPkg));
 }
-
-// Add a few random long-range edges
-while (dependencies.length < 80) {
-  const s = leafIds[Math.floor(rand() * leafIds.length)];
-  const t = leafIds[Math.floor(rand() * leafIds.length)];
-  if (s !== t) {
-    const key = s < t ? `${s}|${t}` : `${t}|${s}`;
-    if (!depPairs.has(key)) {
-      depPairs.add(key);
-      dependencies.push({ source: s, target: t });
-    }
-  }
-}
+while (dependencies.length < 80)
+  addDep(leafIds[Math.floor(rng() * leafIds.length)], leafIds[Math.floor(rng() * leafIds.length)]);
 
 // --- Layout ---
 const width = 860, height = 860;
 const radius = width / 2 - 120;
 
 const root = d3.stratify()
-  .id(d => d.id)
   .parentId(d => d.parent || null)(nodes);
 
-const cluster = d3.cluster()
+d3.cluster()
   .size([2 * Math.PI, radius])
-  .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth);
-
-cluster(root);
+  .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth)(root);
 
 // Build node map and LCA paths
 const nodesById = new Map(root.descendants().map(d => [d.data.id, d]));
@@ -201,12 +181,10 @@ const links = dependencies.map(c => {
 }).filter(Boolean);
 
 // Build adjacency for highlight
-const connectedTo = new Map(); // leafId -> Set of leafIds
-for (const dep of dependencies) {
-  if (!connectedTo.has(dep.source)) connectedTo.set(dep.source, new Set());
-  if (!connectedTo.has(dep.target)) connectedTo.set(dep.target, new Set());
-  connectedTo.get(dep.source).add(dep.target);
-  connectedTo.get(dep.target).add(dep.source);
+const connectedTo = new Map();
+for (const {source, target} of dependencies) {
+  (connectedTo.get(source) ?? connectedTo.set(source, new Set()).get(source)).add(target);
+  (connectedTo.get(target) ?? connectedTo.set(target, new Set()).get(target)).add(source);
 }
 
 // --- SVG ---
@@ -215,10 +193,8 @@ const svg = d3.select("#chart").append("svg")
   .attr("height", height)
   .attr("viewBox", [-width / 2, -height / 2, width, height]);
 
-let beta = 0.15; // default tension 0.85
-
 const line = d3.lineRadial()
-  .curve(d3.curveBundle.beta(beta))
+  .curve(d3.curveBundle.beta(0.15))
   .radius(d => d.y)
   .angle(d => d.x);
 
@@ -258,62 +234,31 @@ nodeSelection
     const id = d.data.id;
     const targets = connectedTo.get(id) || new Set();
 
+    const isSrc = link => link[0].data.id === id;
+    const isTgt = link => link[link.length - 1].data.id === id;
     linkSelection
-      .classed("link--faded", true)
-      .classed("link--highlight", false)
-      .classed("link--source", false)
-      .classed("link--target", false)
-      .filter(link => {
-        const src = link[0].data.id;
-        const tgt = link[link.length - 1].data.id;
-        return src === id || tgt === id;
-      })
-      .classed("link--faded", false)
-      .classed("link--highlight", true)
-      .classed("link--source", link => link[0].data.id === id)
-      .classed("link--target", link => link[link.length - 1].data.id === id)
-      .raise();
+      .classed("link--faded", link => !isSrc(link) && !isTgt(link))
+      .classed("link--highlight", link => isSrc(link) || isTgt(link))
+      .classed("link--source", isSrc)
+      .classed("link--target", isTgt);
+    linkSelection.filter(".link--highlight").raise();
 
     nodeSelection
-      .classed("node--faded", true)
-      .classed("node--hover", false)
-      .classed("node--connected", false)
-      .classed("node--target", false);
-
-    nodeSelection
-      .filter(n => n.data.id === id)
-      .classed("node--faded", false)
-      .classed("node--hover", true);
-
-    nodeSelection
-      .filter(n => targets.has(n.data.id))
-      .classed("node--faded", false)
-      .classed("node--connected", true);
+      .classed("node--faded", n => n.data.id !== id && !targets.has(n.data.id))
+      .classed("node--hover", n => n.data.id === id)
+      .classed("node--connected", n => targets.has(n.data.id));
   })
   .on("mouseleave", () => {
-    linkSelection
-      .classed("link--faded", false)
-      .classed("link--highlight", false)
-      .classed("link--source", false)
-      .classed("link--target", false);
-
-    nodeSelection
-      .classed("node--faded", false)
-      .classed("node--hover", false)
-      .classed("node--connected", false)
-      .classed("node--target", false);
+    linkSelection.attr("class", "link");
+    nodeSelection.attr("class", "node");
   });
 
 // --- Tension slider ---
-const slider = document.getElementById("tension-slider");
 const tensionVal = document.getElementById("tension-val");
-
-slider.addEventListener("input", () => {
-  const tension = +slider.value / 100;
-  beta = 1 - tension;
+document.getElementById("tension-slider").addEventListener("input", function() {
+  const tension = +this.value / 100;
   tensionVal.textContent = tension.toFixed(2);
-
-  line.curve(d3.curveBundle.beta(beta));
+  line.curve(d3.curveBundle.beta(1 - tension));
   linkSelection.attr("d", line);
 });
 </script>

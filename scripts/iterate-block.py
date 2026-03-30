@@ -16,10 +16,11 @@ import time
 from pathlib import Path
 
 from iterate_lib import (
-    PROJ, CostTracker, append_tsv, check_convergence, decide_block,
-    ensure_iterations_dir, generate_progress_html, git_branch_name,
-    git_commit, git_create_branch, git_discard, git_sha, next_experiment_id,
-    render_block, update_best, write_experiment,
+    PROJ, CostTracker, append_tsv, check_convergence, compute_diff,
+    decide_block, ensure_iterations_dir, generate_progress_html,
+    git_branch_name, git_commit, git_create_branch, git_discard, git_sha,
+    git_squash_merge, next_experiment_id, render_block, update_best,
+    write_experiment,
 )
 
 MANIFEST = json.loads((PROJ / "blocks" / "manifest.json").read_text())
@@ -102,9 +103,9 @@ def run_proposer(prompt, html_path):
     """Call claude -p to propose a block compaction."""
     r = subprocess.run(
         [CLAUDE_BIN, "-p", prompt,
-         "--allowedTools", "Read,Write",
+         "--allowedTools", "Read,Edit,Write",
          "--max-turns", "10",
-         "--output-format", "stream-json"],
+         "--output-format", "json"],
         capture_output=True, text=True, timeout=300,
         cwd=str(html_path.parent))
     return r
@@ -180,6 +181,7 @@ def main():
 
     current_composite = baseline_composite
     current_lines = baseline_lines
+    keeps = 0
 
     # Main loop
     for exp_num in range(args.max_experiments):
@@ -240,6 +242,9 @@ def main():
         delta = new_lines - current_lines
         description = f"{reason} (composite {current_composite}→{new_composite})"
 
+        # Compute diff for history regardless of decision
+        diff_text = compute_diff(backup, new_content, f"{args.target}.html")
+
         append_tsv(exp_id, "block", args.target, new_lines, delta, decision, est_cost, description)
         write_experiment(exp_id, "block", args.target, {
             "lines_before": current_lines,
@@ -250,17 +255,18 @@ def main():
                        ("visual_critic", "encoding_integrity", "stress_test", "cognitive_load", "composite")},
             "decision": decision,
             "reason": reason,
+            "diff": diff_text,
             "git_sha": git_sha(),
         })
 
         if decision == "keep":
             print(f"  KEEP: {reason}")
-            # Copy improved block back to source and commit
+            # Copy improved block to source (committed later via squash merge)
             shutil.copy2(work_html, source_html)
-            git_commit(f"iterate-block exp-{exp_id}: {reason}", [str(source_html)])
             current_composite = new_composite
             current_lines = new_lines
             baseline_scores = new_scores  # update for next proposer prompt
+            keeps += 1
 
             # Update best-blocks.json
             update_best("block", args.target, {
@@ -283,6 +289,30 @@ def main():
 
     # Generate progress
     progress = generate_progress_html()
+
+    # Commit all changes and squash-merge back to main
+    if keeps > 0:
+        # Stage all tracked artifacts
+        artifacts = [str(source_html)]
+        evals_dir = PROJ / "evals"
+        for pattern in ["iterations/", "runs/", "best-blocks.json"]:
+            p = evals_dir / pattern
+            if p.exists():
+                artifacts.append(str(p))
+        if progress:
+            artifacts.append(str(progress))
+
+        git_commit(f"iterate-block {args.target}: {baseline_lines}→{current_lines} lines, {keeps} keeps",
+                   artifacts)
+
+        # Squash-merge to main
+        merge_msg = (f"Iterate block {args.target}: {baseline_lines}→{current_lines} lines "
+                     f"({keeps} keeps, composite {baseline_composite}→{current_composite})")
+        print(f"\n  Squash-merging to main...")
+        if git_squash_merge(branch, "main", merge_msg):
+            print(f"  Merged: {merge_msg}")
+        else:
+            print(f"  Squash-merge failed. Changes remain on branch: {branch}")
 
     print(f"\n=== Done ===")
     print(f"Final: {current_lines} lines (was {baseline_lines}), composite {current_composite}")

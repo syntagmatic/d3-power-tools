@@ -3,6 +3,7 @@
 Provides TSV logging, keep/discard decisions, cost tracking,
 git helpers, and progress HTML generation.
 """
+import difflib
 import json
 import os
 import subprocess
@@ -35,12 +36,16 @@ def git_branch_name(cwd=None):
 
 
 def git_create_branch(name, cwd=None):
-    """Create and checkout a new branch. No-op if already on it."""
+    """Create and checkout a new branch, or switch to it if it already exists."""
     current = git_branch_name(cwd)
     if current == name:
         return
-    subprocess.run(["git", "checkout", "-b", name],
-                   capture_output=True, text=True, cwd=cwd or str(PROJ))
+    r = subprocess.run(["git", "checkout", "-b", name],
+                       capture_output=True, text=True, cwd=cwd or str(PROJ))
+    if r.returncode != 0:
+        # Branch already exists — just check it out
+        subprocess.run(["git", "checkout", name],
+                       capture_output=True, text=True, cwd=cwd or str(PROJ))
 
 
 def git_checkout_branch(name, cwd=None):
@@ -70,6 +75,24 @@ def git_diff_stat(files, cwd=None):
     r = subprocess.run(["git", "diff", "--stat"] + [str(f) for f in files],
                        capture_output=True, text=True, cwd=d)
     return r.stdout.strip()
+
+
+def git_squash_merge(branch, base, message, cwd=None):
+    """Squash-merge branch onto base. Returns True on success."""
+    d = cwd or str(PROJ)
+    subprocess.run(["git", "checkout", base], capture_output=True, text=True, cwd=d)
+    r = subprocess.run(["git", "merge", "--squash", branch],
+                       capture_output=True, text=True, cwd=d)
+    if r.returncode != 0:
+        return False
+    r = subprocess.run(["git", "commit", "-m", message],
+                       capture_output=True, text=True, cwd=d)
+    if r.returncode != 0:
+        return False
+    # Clean up the branch
+    subprocess.run(["git", "branch", "-D", branch],
+                   capture_output=True, text=True, cwd=d)
+    return True
 
 
 # === Keep/discard decisions ===
@@ -134,6 +157,17 @@ def append_tsv(exp_id, track, target, metric, delta, decision, cost, description
     with open(path, "a") as f:
         delta_str = f"{delta:+.1f}" if isinstance(delta, float) else str(delta)
         f.write(f"{exp_id}\t{track}\t{target}\t{metric}\t{delta_str}\t{decision}\t{cost:.2f}\t{description}\n")
+
+
+# === Diff utilities ===
+
+def compute_diff(before_text, after_text, filename="file"):
+    """Compute a unified diff between two strings. Returns diff string."""
+    before_lines = before_text.splitlines(keepends=True)
+    after_lines = after_text.splitlines(keepends=True)
+    diff = difflib.unified_diff(before_lines, after_lines,
+                                fromfile=f"a/{filename}", tofile=f"b/{filename}")
+    return "".join(diff)
 
 
 # === Per-experiment JSON ===
@@ -239,8 +273,12 @@ def render_block(html_path, screenshot_path, wait_for="svg"):
             ["python3", str(test_script), str(html_path),
              "--out", str(screenshot_path), "--wait-for", wait_for],
             capture_output=True, text=True, timeout=30, cwd=str(PROJ))
+        if "PASS" not in r.stdout:
+            print(f"    render stderr: {r.stderr.strip()}" if r.stderr.strip() else "")
+            print(f"    render stdout: {r.stdout.strip()}" if r.stdout.strip() else "")
         return "PASS" in r.stdout
     except subprocess.TimeoutExpired:
+        print(f"    render timed out after 30s")
         return False
 
 
