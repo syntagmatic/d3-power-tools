@@ -654,7 +654,7 @@ for (const [key, data] of groupEntries) {{
 
     // Proposer summary (truncated)
     const propCell = tr.append("td").attr("class", "proposer-cell");
-    const propText = d.proposer || d.description || "–";
+    const propText = d.proposer || "–";
     propCell.attr("title", propText).text(propText.length > 80 ? propText.slice(0, 77) + "…" : propText);
 
     // Diff toggle (show if there's a diff or proposer explanation)
