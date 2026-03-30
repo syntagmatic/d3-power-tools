@@ -401,6 +401,7 @@ def generate_progress_html():
             "lines_before": e.get("lines_before", e.get("lines")),
             "lines_after": e.get("lines_after", e.get("lines")),
             "git_sha": e.get("git_sha", ""),
+            "proposer": e.get("proposer", ""),
             "json_file": exp_file if (ITERATIONS_DIR / exp_file).exists() else None,
         })
 
@@ -500,6 +501,8 @@ def generate_progress_html():
   .diff-cell {{ padding: 0; }}
   .diff-pre {{ margin: 0; padding: 8px 12px; background: #f5f5f5; font-family: "SF Mono", "Consolas", monospace;
     font-size: 11px; line-height: 1.5; overflow-x: auto; max-height: 400px; overflow-y: auto; white-space: pre; border-top: 1px solid #eee; }}
+  .proposer-note {{ padding: 10px 14px; background: #f0f4ff; border-top: 1px solid #e0e4ee;
+    font-size: 12px; line-height: 1.6; color: #333; white-space: pre-wrap; }}
   .diff-pre .add {{ color: #2e7d32; background: #e8f5e9; display: inline; }}
   .diff-pre .del {{ color: #c62828; background: #ffebee; display: inline; }}
   .diff-pre .hunk {{ color: #6a1b9a; font-weight: 600; }}
@@ -650,9 +653,10 @@ for (const [key, data] of groupEntries) {{
 
     tr.append("td").text(d.description);
 
-    // Diff toggle
+    // Diff toggle (show if there's a diff or proposer explanation)
+    const hasDiffContent = d.diff || d.proposer;
     const diffCell = tr.append("td");
-    if (d.diff) {{
+    if (hasDiffContent) {{
       diffCell.append("span").attr("class", "diff-toggle").text("show")
         .on("click", function() {{
           const row = d3.select(`#diff-${{d.track}}-${{d.exp}}`);
@@ -667,21 +671,29 @@ for (const [key, data] of groupEntries) {{
     if (d.json_file) jsonCell.append("a").attr("href", d.json_file).text("json");
     else jsonCell.text("–");
 
-    // Diff row (hidden by default)
-    if (d.diff) {{
+    // Detail row (hidden by default): proposer explanation + diff
+    if (hasDiffContent) {{
       const diffRow = tbody.append("tr").attr("class", "diff-row").attr("id", `diff-${{d.track}}-${{d.exp}}`);
-      const pre = diffRow.append("td").attr("class", "diff-cell").attr("colspan", cols.length)
-        .append("pre").attr("class", "diff-pre");
-      // Syntax-highlight the diff
-      d.diff.split("\\n").forEach(line => {{
-        if (line.startsWith("+") && !line.startsWith("+++"))
-          pre.append("span").attr("class", "add").text(line + "\\n");
-        else if (line.startsWith("-") && !line.startsWith("---"))
-          pre.append("span").attr("class", "del").text(line + "\\n");
-        else if (line.startsWith("@@"))
-          pre.append("span").attr("class", "hunk").text(line + "\\n");
-        else pre.append("span").text(line + "\\n");
-      }});
+      const container = diffRow.append("td").attr("class", "diff-cell").attr("colspan", cols.length);
+
+      // Proposer explanation
+      if (d.proposer) {{
+        container.append("div").attr("class", "proposer-note").text(d.proposer);
+      }}
+
+      // Syntax-highlighted diff
+      if (d.diff) {{
+        const pre = container.append("pre").attr("class", "diff-pre");
+        d.diff.split("\\n").forEach(line => {{
+          if (line.startsWith("+") && !line.startsWith("+++"))
+            pre.append("span").attr("class", "add").text(line + "\\n");
+          else if (line.startsWith("-") && !line.startsWith("---"))
+            pre.append("span").attr("class", "del").text(line + "\\n");
+          else if (line.startsWith("@@"))
+            pre.append("span").attr("class", "hunk").text(line + "\\n");
+          else pre.append("span").text(line + "\\n");
+        }});
+      }}
     }}
   }});
 }}

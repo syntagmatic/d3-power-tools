@@ -99,7 +99,7 @@ def build_proposer_prompt(html_path, lines, scores, history_lines):
 
 
 def run_proposer(prompt, html_path):
-    """Call claude -p to propose a block compaction."""
+    """Call claude -p to propose a block compaction. Returns explanation string."""
     r = subprocess.run(
         [CLAUDE_BIN, "-p", prompt,
          "--allowedTools", "Read,Edit,Write",
@@ -107,7 +107,10 @@ def run_proposer(prompt, html_path):
          "--output-format", "json"],
         capture_output=True, text=True, timeout=300,
         cwd=str(html_path.parent))
-    return r
+    try:
+        return json.loads(r.stdout).get("result", "")
+    except (json.JSONDecodeError, ValueError):
+        return ""
 
 
 def main():
@@ -201,7 +204,7 @@ def main():
         prompt = build_proposer_prompt(work_html, current_lines, baseline_scores, history_lines)
         t0 = time.time()
         print("  Proposing change...", end=" ", flush=True)
-        run_proposer(prompt, work_html)
+        proposer_explanation = run_proposer(prompt, work_html)
         propose_time = time.time() - t0
         print(f"({propose_time:.0f}s)")
 
@@ -254,6 +257,7 @@ def main():
             "decision": decision,
             "reason": reason,
             "diff": diff_text,
+            "proposer": proposer_explanation,
             "git_sha": git_sha(),
         })
 
