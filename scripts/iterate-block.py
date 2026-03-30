@@ -16,9 +16,9 @@ import time
 from pathlib import Path
 
 from iterate_lib import (
-    PROJ, CostTracker, append_tsv, check_convergence, compute_diff,
-    decide_block, ensure_iterations_dir, generate_progress_html,
-    git_branch_name, git_commit, git_create_branch, git_discard, git_sha,
+    PROJ, append_tsv, check_convergence, compute_diff, decide_block,
+    ensure_iterations_dir, generate_progress_html, git_branch_name,
+    git_commit, git_create_branch, git_discard, git_sha,
     git_squash_merge, next_experiment_id, render_block, update_best,
     write_experiment,
 )
@@ -116,7 +116,6 @@ def main():
     ap.add_argument("--target", required=True, help="Block ID, e.g. 47-hierarchical-edge-bundling")
     ap.add_argument("--block-set", required=True, help="Source block set, e.g. v2-claude-opus-4-6")
     ap.add_argument("--max-experiments", type=int, default=15)
-    ap.add_argument("--budget", type=float, default=80.0, help="Max spend in USD")
     ap.add_argument("--model", default="sonnet", help="Model for auditing")
     ap.add_argument("--convergence-discards", type=int, default=3)
     ap.add_argument("--delay", type=float, default=5.0, help="Seconds between API calls")
@@ -144,13 +143,11 @@ def main():
     branch = f"iterate/block-{args.target}"
     git_create_branch(branch)
 
-    cost = CostTracker(args.budget)
     ensure_iterations_dir()
 
     print(f"=== Block Iteration: {args.target} ===")
     print(f"Source: {args.block_set}")
     print(f"Branch: {branch}")
-    print(f"Budget: ${args.budget:.0f}")
     print()
 
     # Establish baseline
@@ -163,7 +160,7 @@ def main():
     baseline_lines = len(work_html.read_text().splitlines())
 
     exp_id = next_experiment_id()
-    append_tsv(exp_id, "block", args.target, baseline_lines, 0, "baseline", 0, "Initial baseline")
+    append_tsv(exp_id, "block", args.target, baseline_lines, 0, "baseline", "Initial baseline")
     write_experiment(exp_id, "block", args.target, {
         "lines": baseline_lines,
         "composite": baseline_composite,
@@ -185,10 +182,6 @@ def main():
 
     # Main loop
     for exp_num in range(args.max_experiments):
-        if cost.over_budget():
-            print(f"\nBudget exhausted ({cost.summary()}). Stopping.")
-            break
-
         if check_convergence("block", args.target, args.convergence_discards):
             print(f"\nConverged ({args.convergence_discards} consecutive discards). Stopping.")
             break
@@ -212,7 +205,7 @@ def main():
         new_lines = len(new_content.splitlines())
         if new_content == backup:
             print("  No change made. Skipping.")
-            append_tsv(exp_id, "block", args.target, new_lines, 0, "discard", 0, "No change")
+            append_tsv(exp_id, "block", args.target, new_lines, 0, "discard", "No change")
             history_lines.append(f"exp {exp_id}: discard, no change")
             continue
 
@@ -228,13 +221,11 @@ def main():
         if not new_scores or new_scores.get("composite") is None:
             print("  Audit failed. Reverting.")
             work_html.write_text(backup)
-            append_tsv(exp_id, "block", args.target, new_lines, 0, "discard", 0, "Audit failed")
+            append_tsv(exp_id, "block", args.target, new_lines, 0, "discard", "Audit failed")
             history_lines.append(f"exp {exp_id}: discard, audit failed")
             continue
 
         new_composite = new_scores["composite"]
-        est_cost = 1.0  # rough per-experiment estimate
-        cost.add(est_cost)
 
         # Decide
         decision, reason = decide_block(current_composite, new_composite, current_lines, new_lines)
@@ -245,7 +236,7 @@ def main():
         # Compute diff for history regardless of decision
         diff_text = compute_diff(backup, new_content, f"{args.target}.html")
 
-        append_tsv(exp_id, "block", args.target, new_lines, delta, decision, est_cost, description)
+        append_tsv(exp_id, "block", args.target, new_lines, delta, decision, description)
         write_experiment(exp_id, "block", args.target, {
             "lines_before": current_lines,
             "lines_after": new_lines,
@@ -316,7 +307,6 @@ def main():
 
     print(f"\n=== Done ===")
     print(f"Final: {current_lines} lines (was {baseline_lines}), composite {current_composite}")
-    print(f"Cost: {cost.summary()}")
     if progress:
         print(f"Progress: {progress}")
 

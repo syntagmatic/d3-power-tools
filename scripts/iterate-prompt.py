@@ -16,10 +16,10 @@ import time
 from pathlib import Path
 
 from iterate_lib import (
-    PROJ, CostTracker, append_tsv, check_convergence, check_features,
-    compute_diff, decide_prompt, ensure_iterations_dir,
-    generate_progress_html, git_commit, git_create_branch, git_sha,
-    git_squash_merge, next_experiment_id, update_best, write_experiment,
+    PROJ, append_tsv, check_convergence, check_features, compute_diff,
+    decide_prompt, ensure_iterations_dir, generate_progress_html,
+    git_commit, git_create_branch, git_sha, git_squash_merge,
+    next_experiment_id, update_best, write_experiment,
 )
 from staging import create_staging_dir, cleanup_staging_dir
 
@@ -36,7 +36,7 @@ def find_block(target):
 
 
 def generate_block(prompt_text, block, iter_dir, model=None):
-    """Generate a block from a prompt. Returns (html_path, elapsed_s, cost) or (None, elapsed, 0)."""
+    """Generate a block from a prompt. Returns (html_path, elapsed_s) or (None, elapsed)."""
     bid = block["id"]
     outfile = iter_dir / f"{bid}.html"
     if outfile.exists():
@@ -71,26 +71,16 @@ def generate_block(prompt_text, block, iter_dir, model=None):
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=600, cwd=str(staging))
         elapsed = time.time() - t0
 
-        # Parse cost from stream-json
-        cost = 0
-        for line in (r.stdout or "").splitlines():
-            try:
-                event = json.loads(line)
-                if event.get("type") == "result":
-                    cost = event.get("total_cost_usd", 0) or 0
-            except (json.JSONDecodeError, ValueError):
-                pass
-
     except subprocess.TimeoutExpired:
         elapsed = time.time() - t0
         cleanup_staging_dir(staging)
-        return None, elapsed, 0
+        return None, elapsed
     finally:
         cleanup_staging_dir(staging)
 
     if outfile.exists() and outfile.stat().st_size > 100:
-        return outfile, elapsed, cost
-    return None, elapsed, cost
+        return outfile, elapsed
+    return None, elapsed
 
 
 def run_proposer(current_prompt, gen_time, features, history_lines, out_path):
@@ -121,7 +111,6 @@ def main():
     ap.add_argument("--block-set", required=True, help="Source block set for reference")
     ap.add_argument("--features", nargs="+", default=[], help="Required feature grep patterns")
     ap.add_argument("--max-experiments", type=int, default=10)
-    ap.add_argument("--budget", type=float, default=80.0)
     ap.add_argument("--model", default=None, help="Model for generation")
     ap.add_argument("--convergence-discards", type=int, default=3)
     ap.add_argument("--delay", type=float, default=5.0)
@@ -139,7 +128,6 @@ def main():
     branch = f"iterate/prompt-{args.target}"
     git_create_branch(branch)
 
-    cost = CostTracker(args.budget)
     ensure_iterations_dir()
 
     current_prompt = block["prompt"]
@@ -149,13 +137,11 @@ def main():
     print(f"=== Prompt Iteration: {args.target} ===")
     print(f"Features: {args.features}")
     print(f"Branch: {branch}")
-    print(f"Budget: ${args.budget:.0f}")
     print()
 
     # Establish baseline: generate with original prompt
     print("Phase 0: Baseline generation")
-    html_path, baseline_time, gen_cost = generate_block(current_prompt, block, iter_dir, args.model)
-    cost.add(gen_cost)
+    html_path, baseline_time = generate_block(current_prompt, block, iter_dir, args.model)
 
     if not html_path:
         print("Baseline generation failed. Aborting."); sys.exit(1)
@@ -165,7 +151,7 @@ def main():
         print(f"WARNING: Baseline block missing required features. Continuing anyway.")
 
     exp_id = next_experiment_id()
-    append_tsv(exp_id, "prompt", args.target, round(baseline_time, 1), 0, "baseline", gen_cost,
+    append_tsv(exp_id, "prompt", args.target, round(baseline_time, 1), 0, "baseline",
                f"Initial baseline ({len(current_prompt)} chars)")
     write_experiment(exp_id, "prompt", args.target, {
         "gen_time_s": round(baseline_time, 1),
@@ -185,10 +171,6 @@ def main():
 
     # Main loop
     for exp_num in range(args.max_experiments):
-        if cost.over_budget():
-            print(f"\nBudget exhausted ({cost.summary()}). Stopping.")
-            break
-
         if check_convergence("prompt", args.target, args.convergence_discards):
             print(f"\nConverged ({args.convergence_discards} consecutive discards). Stopping.")
             break
@@ -209,14 +191,14 @@ def main():
 
         if not proposed_file.exists() or proposed_file.stat().st_size < 10:
             print("  No prompt produced. Skipping.")
-            append_tsv(exp_id, "prompt", args.target, 0, 0, "discard", 0, "No prompt produced")
+            append_tsv(exp_id, "prompt", args.target, 0, 0, "discard", "No prompt produced")
             history_lines.append(f"exp {exp_id}: discard, no prompt produced")
             continue
 
         new_prompt = proposed_file.read_text().strip()
         if new_prompt == current_prompt:
             print("  Prompt unchanged. Skipping.")
-            append_tsv(exp_id, "prompt", args.target, 0, 0, "discard", 0, "Prompt unchanged")
+            append_tsv(exp_id, "prompt", args.target, 0, 0, "discard", "Prompt unchanged")
             history_lines.append(f"exp {exp_id}: discard, unchanged")
             continue
 
@@ -224,13 +206,12 @@ def main():
 
         # Generate with new prompt
         print("  Generating...", end=" ", flush=True)
-        html_path, new_time, gen_cost = generate_block(new_prompt, block, iter_dir, args.model)
-        cost.add(gen_cost)
+        html_path, new_time = generate_block(new_prompt, block, iter_dir, args.model)
         print(f"({new_time:.0f}s)")
 
         if not html_path:
             print("  Generation failed. Discarding.")
-            append_tsv(exp_id, "prompt", args.target, 0, 0, "discard", gen_cost, "Generation failed")
+            append_tsv(exp_id, "prompt", args.target, 0, 0, "discard", "Generation failed")
             history_lines.append(f"exp {exp_id}: discard, generation failed")
             continue
 
@@ -248,7 +229,7 @@ def main():
         diff_text = compute_diff(current_prompt, new_prompt, "prompt.txt")
 
         append_tsv(exp_id, "prompt", args.target, round(new_time, 1), round(delta, 1),
-                   decision, gen_cost, description)
+                   decision, description)
         write_experiment(exp_id, "prompt", args.target, {
             "gen_time_before": round(current_time, 1),
             "gen_time_after": round(new_time, 1),
@@ -313,7 +294,6 @@ def main():
 
     print(f"\n=== Done ===")
     print(f"Final: {current_time:.0f}s (was {baseline_time:.0f}s), {len(current_prompt)} chars")
-    print(f"Cost: {cost.summary()}")
     if progress:
         print(f"Progress: {progress}")
 

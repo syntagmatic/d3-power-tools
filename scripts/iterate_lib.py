@@ -1,6 +1,6 @@
 """Shared utilities for autoresearch-style iteration scripts.
 
-Provides TSV logging, keep/discard decisions, cost tracking,
+Provides TSV logging, keep/discard decisions,
 git helpers, and progress HTML generation.
 """
 import difflib
@@ -116,26 +116,6 @@ def decide_prompt(time_before, time_after, features_pass):
     return "keep", f"-{time_before - time_after:.0f}s"
 
 
-# === Cost tracking ===
-
-class CostTracker:
-    def __init__(self, budget_usd):
-        self.budget_usd = budget_usd
-        self.spent_usd = 0.0
-
-    def add(self, cost_usd):
-        self.spent_usd += cost_usd
-
-    def remaining(self):
-        return self.budget_usd - self.spent_usd
-
-    def over_budget(self):
-        return self.spent_usd >= self.budget_usd
-
-    def summary(self):
-        return f"${self.spent_usd:.2f} / ${self.budget_usd:.2f}"
-
-
 # === TSV logging ===
 
 def ensure_iterations_dir():
@@ -146,17 +126,17 @@ def tsv_path():
     return ITERATIONS_DIR / "history.tsv"
 
 
-TSV_HEADER = "exp\ttrack\ttarget\tmetric\tdelta\tdecision\tcost\tdescription\n"
+TSV_HEADER = "exp\ttrack\ttarget\tmetric\tdelta\tdecision\tdescription\n"
 
 
-def append_tsv(exp_id, track, target, metric, delta, decision, cost, description):
+def append_tsv(exp_id, track, target, metric, delta, decision, description):
     ensure_iterations_dir()
     path = tsv_path()
     if not path.exists():
         path.write_text(TSV_HEADER)
     with open(path, "a") as f:
         delta_str = f"{delta:+.1f}" if isinstance(delta, float) else str(delta)
-        f.write(f"{exp_id}\t{track}\t{target}\t{metric}\t{delta_str}\t{decision}\t{cost:.2f}\t{description}\n")
+        f.write(f"{exp_id}\t{track}\t{target}\t{metric}\t{delta_str}\t{decision}\t{description}\n")
 
 
 # === Diff utilities ===
@@ -322,7 +302,7 @@ def _load_tsv_records():
     records = []
     for line in path.read_text().strip().split("\n")[1:]:
         parts = line.split("\t")
-        if len(parts) >= 8:
+        if len(parts) >= 7:
             records.append({
                 "exp": int(parts[0]),
                 "track": parts[1],
@@ -330,8 +310,7 @@ def _load_tsv_records():
                 "metric": float(parts[3]) if parts[3].replace(".", "").replace("-", "").isdigit() else 0,
                 "delta": parts[4],
                 "decision": parts[5],
-                "cost": float(parts[6]),
-                "description": parts[7],
+                "description": parts[6],
             })
     return records
 
@@ -498,12 +477,11 @@ for (const [key, data] of groupEntries) {{
   const chrono = [...data].reverse();
   const keeps = data.filter(d => d.decision === "keep");
   const discards = data.filter(d => d.decision === "discard");
-  const totalCost = d3.sum(data, d => d.cost);
   const oldest = chrono[0], newest = chrono[chrono.length - 1];
   const metricLabel = track === "block" ? "lines" : "time";
   const currentBest = newest.decision === "keep" || newest.decision === "baseline" ? newest.metric : keeps.length ? keeps[0].metric : oldest.metric;
   section.append("div").attr("class", "target-meta")
-    .text(`${{data.length}} experiments · ${{keeps.length}} kept · ${{discards.length}} discarded · $${{totalCost.toFixed(2)}} · ${{metricLabel}}: ${{oldest.metric}}→${{currentBest}}`);
+    .text(`${{data.length}} experiments · ${{keeps.length}} kept · ${{discards.length}} discarded · ${{metricLabel}}: ${{oldest.metric}}→${{currentBest}}`);
 
   // --- Sparkline chart (chronological: oldest left, newest right) ---
   const margin = {{top: 10, right: 16, bottom: 24, left: 44}};
@@ -535,7 +513,7 @@ for (const [key, data] of groupEntries) {{
 
   // --- Experiment table ---
   const table = section.append("table");
-  const cols = ["#", "Decision", metricLabel, "Δ", "Composite", "Scores", "Cost", "Description", "Diff", "JSON"];
+  const cols = ["#", "Decision", metricLabel, "Δ", "Composite", "Scores", "Description", "Diff", "JSON"];
   table.append("thead").append("tr").selectAll("th").data(cols).join("th").text(d => d);
   const tbody = table.append("tbody");
 
@@ -565,7 +543,6 @@ for (const [key, data] of groupEntries) {{
       }});
     }} else scoreCell.text("–");
 
-    tr.append("td").attr("class", "mono").text(`$${{d.cost.toFixed(2)}}`);
     tr.append("td").text(d.description);
 
     // Diff toggle
