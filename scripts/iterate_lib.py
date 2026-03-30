@@ -78,8 +78,12 @@ def git_diff_stat(files, cwd=None):
 
 
 def git_squash_merge(branch, base, message, cwd=None):
-    """Squash-merge branch onto base. Returns True on success."""
-    d = cwd or str(PROJ)
+    """Squash-merge branch onto base. Returns True on success.
+
+    Always operates from PROJ (the main worktree) so it's safe to call
+    while a secondary worktree is checked out on a different branch.
+    """
+    d = str(PROJ)
     subprocess.run(["git", "checkout", base], capture_output=True, text=True, cwd=d)
     r = subprocess.run(["git", "merge", "--squash", branch],
                        capture_output=True, text=True, cwd=d)
@@ -93,6 +97,48 @@ def git_squash_merge(branch, base, message, cwd=None):
     subprocess.run(["git", "branch", "-D", branch],
                    capture_output=True, text=True, cwd=d)
     return True
+
+
+# === Worktree helpers ===
+
+WORKTREES_DIR = PROJ / "temp" / "worktrees"
+
+
+def worktree_create(branch):
+    """Create a git worktree on a new branch. Returns worktree path.
+
+    If the branch/worktree already exists, reuses it.
+    """
+    wt_path = WORKTREES_DIR / branch.replace("/", "-")
+    if wt_path.exists():
+        # Already exists — verify it's valid
+        r = subprocess.run(["git", "worktree", "list", "--porcelain"],
+                           capture_output=True, text=True, cwd=str(PROJ))
+        if str(wt_path) in r.stdout:
+            return wt_path
+        # Stale directory — remove and recreate
+        import shutil
+        shutil.rmtree(wt_path, ignore_errors=True)
+
+    WORKTREES_DIR.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(["git", "worktree", "add", "-b", branch, str(wt_path)],
+                       capture_output=True, text=True, cwd=str(PROJ))
+    if r.returncode != 0:
+        # Branch may already exist
+        r = subprocess.run(["git", "worktree", "add", str(wt_path), branch],
+                           capture_output=True, text=True, cwd=str(PROJ))
+        if r.returncode != 0:
+            raise RuntimeError(f"Failed to create worktree: {r.stderr}")
+    return wt_path
+
+
+def worktree_remove(wt_path):
+    """Remove a git worktree and clean up."""
+    subprocess.run(["git", "worktree", "remove", "--force", str(wt_path)],
+                   capture_output=True, text=True, cwd=str(PROJ))
+    # Prune in case of stale entries
+    subprocess.run(["git", "worktree", "prune"],
+                   capture_output=True, text=True, cwd=str(PROJ))
 
 
 # === Keep/discard decisions ===

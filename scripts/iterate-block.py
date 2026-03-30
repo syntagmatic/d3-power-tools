@@ -2,6 +2,7 @@
 """Iterate on a single block to reduce code size while preserving quality.
 
 Autoresearch-style loop: propose compaction → audit → keep/discard → repeat.
+Uses a git worktree so the main working tree stays on its current branch.
 
 Usage:
   python3 scripts/iterate-block.py --target 47-hierarchical-edge-bundling --block-set v2-claude-opus-4-6
@@ -17,10 +18,9 @@ from pathlib import Path
 
 from iterate_lib import (
     PROJ, append_tsv, check_convergence, compute_diff, decide_block,
-    ensure_iterations_dir, generate_progress_html, git_branch_name,
-    git_commit, git_create_branch, git_discard, git_sha,
+    ensure_iterations_dir, generate_progress_html, git_commit, git_sha,
     git_squash_merge, next_experiment_id, render_block, update_best,
-    write_experiment,
+    worktree_create, worktree_remove, write_experiment,
 )
 
 MANIFEST = json.loads((PROJ / "blocks" / "manifest.json").read_text())
@@ -130,30 +130,34 @@ def main():
 
     wait_for = block.get("wait_for", "svg")
 
-    # Set up iteration directory
+    # Create isolated worktree for this iteration
+    branch = f"iterate/block-{args.target}"
+    wt_path = worktree_create(branch)
+
+    # source_html in the worktree (where git commits will land)
+    wt_source = wt_path / "blocks" / args.block_set / f"{args.target}.html"
+
+    # Working copy in temp/ (not tracked, used by proposer and auditor)
     iter_dir = PROJ / "temp" / "iterate" / f"block-{args.target}"
     iter_dir.mkdir(parents=True, exist_ok=True)
     work_html = iter_dir / f"{args.target}.html"
-
-    # Copy source block to working location
     shutil.copy2(source_html, work_html)
-
-    # Create git branch
-    branch = f"iterate/block-{args.target}"
-    git_create_branch(branch)
 
     ensure_iterations_dir()
 
     print(f"=== Block Iteration: {args.target} ===")
     print(f"Source: {args.block_set}")
     print(f"Branch: {branch}")
+    print(f"Worktree: {wt_path}")
     print()
 
     # Establish baseline
     print("Phase 0: Baseline audit")
     baseline_scores = get_audit_scores(work_html, args.target, wait_for, args.model)
     if not baseline_scores or baseline_scores.get("composite") is None:
-        print("Failed to get baseline scores. Aborting."); sys.exit(1)
+        print("Failed to get baseline scores. Aborting.")
+        worktree_remove(wt_path)
+        sys.exit(1)
 
     baseline_composite = baseline_scores["composite"]
     baseline_lines = len(work_html.read_text().splitlines())
@@ -251,8 +255,8 @@ def main():
 
         if decision == "keep":
             print(f"  KEEP: {reason}")
-            # Copy improved block to source (committed later via squash merge)
-            shutil.copy2(work_html, source_html)
+            # Copy improved block to worktree source (committed later)
+            shutil.copy2(work_html, wt_source)
             current_composite = new_composite
             current_lines = new_lines
             baseline_scores = new_scores  # update for next proposer prompt
@@ -277,25 +281,18 @@ def main():
         if args.delay > 0:
             time.sleep(args.delay)
 
-    # Generate progress
+    # Generate index
     progress = generate_progress_html()
 
-    # Commit all changes and squash-merge back to main
+    # Commit in worktree and squash-merge back to main
     if keeps > 0:
-        # Stage all tracked artifacts
-        artifacts = [str(source_html)]
-        evals_dir = PROJ / "evals"
-        for pattern in ["iterations/", "runs/", "best-blocks.json"]:
-            p = evals_dir / pattern
-            if p.exists():
-                artifacts.append(str(p))
-        if progress:
-            artifacts.append(str(progress))
+        # Commit the modified block in the worktree
+        wt_rel_source = f"blocks/{args.block_set}/{args.target}.html"
+        git_commit(
+            f"iterate-block {args.target}: {baseline_lines}→{current_lines} lines, {keeps} keeps",
+            [wt_rel_source], cwd=str(wt_path))
 
-        git_commit(f"iterate-block {args.target}: {baseline_lines}→{current_lines} lines, {keeps} keeps",
-                   artifacts)
-
-        # Squash-merge to main
+        # Squash-merge to main (operates from PROJ)
         merge_msg = (f"Iterate block {args.target}: {baseline_lines}→{current_lines} lines "
                      f"({keeps} keeps, composite {baseline_composite}→{current_composite})")
         print(f"\n  Squash-merging to main...")
@@ -303,6 +300,21 @@ def main():
             print(f"  Merged: {merge_msg}")
         else:
             print(f"  Squash-merge failed. Changes remain on branch: {branch}")
+
+        # Commit evals artifacts on main
+        artifacts = []
+        evals_dir = PROJ / "evals"
+        for pattern in ["iterations/", "runs/", "best-blocks.json"]:
+            p = evals_dir / pattern
+            if p.exists():
+                artifacts.append(str(p))
+        if progress:
+            artifacts.append(str(progress))
+        if artifacts:
+            git_commit(f"Add iteration artifacts for {args.target}", artifacts)
+
+    # Clean up worktree
+    worktree_remove(wt_path)
 
     print(f"\n=== Done ===")
     print(f"Final: {current_lines} lines (was {baseline_lines}), composite {current_composite}")

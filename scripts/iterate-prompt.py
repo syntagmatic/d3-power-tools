@@ -18,8 +18,7 @@ from pathlib import Path
 from iterate_lib import (
     PROJ, append_tsv, check_convergence, check_features, compute_diff,
     decide_prompt, ensure_iterations_dir, generate_progress_html,
-    git_commit, git_create_branch, git_sha, git_squash_merge,
-    next_experiment_id, update_best, write_experiment,
+    git_commit, git_sha, next_experiment_id, update_best, write_experiment,
 )
 from staging import create_staging_dir, cleanup_staging_dir
 
@@ -124,10 +123,6 @@ def main():
     iter_dir = PROJ / "temp" / "iterate" / f"prompt-{args.target}"
     iter_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create git branch
-    branch = f"iterate/prompt-{args.target}"
-    git_create_branch(branch)
-
     ensure_iterations_dir()
 
     current_prompt = block["prompt"]
@@ -136,7 +131,6 @@ def main():
 
     print(f"=== Prompt Iteration: {args.target} ===")
     print(f"Features: {args.features}")
-    print(f"Branch: {branch}")
     print()
 
     # Establish baseline: generate with original prompt
@@ -269,28 +263,6 @@ def main():
 
     # Generate progress
     progress = generate_progress_html()
-
-    # Commit all changes and squash-merge back to main
-    if keeps > 0:
-        artifacts = [str(prompt_file)]
-        evals_dir = PROJ / "evals"
-        for pattern in ["iterations/", "runs/", "best-prompts.json"]:
-            p = evals_dir / pattern
-            if p.exists():
-                artifacts.append(str(p))
-        if progress:
-            artifacts.append(str(progress))
-
-        git_commit(f"iterate-prompt {args.target}: {baseline_time:.0f}→{current_time:.0f}s, {keeps} keeps",
-                   artifacts)
-
-        merge_msg = (f"Iterate prompt {args.target}: {baseline_time:.0f}→{current_time:.0f}s "
-                     f"({keeps} keeps, {len(current_prompt)} chars)")
-        print(f"\n  Squash-merging to main...")
-        if git_squash_merge(branch, "main", merge_msg):
-            print(f"  Merged: {merge_msg}")
-        else:
-            print(f"  Squash-merge failed. Changes remain on branch: {branch}")
 
     print(f"\n=== Done ===")
     print(f"Final: {current_time:.0f}s (was {baseline_time:.0f}s), {len(current_prompt)} chars")
