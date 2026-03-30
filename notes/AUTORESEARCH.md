@@ -104,10 +104,32 @@ def decide_prompt(time_before, time_after, features_pass):
 | 04-bee-swarm-census | 265 | 241 | 6 | 5 | 7.7→7.7 |
 | 32-shape-morphing-gallery | 451 | 360 | 12 | 9 | 6.6→6.3 |
 
-## Future enhancements
+## Next steps
 
-- **Skill track**: Iterate on SKILL.md to improve audit composites of generated blocks
-- **Diminishing returns detector**: Stop when last N keeps average below a threshold
-- **Visual regression check**: Pixel-diff or perceptual hash between iterations
-- **Batch runner**: Iterate across multiple blocks in sequence overnight
-- **Proposer prompt iteration**: The proposer prompt itself could be iterated on
+### 1. Batch runner (highest leverage)
+
+A wrapper script that takes a list of block targets and runs iterate-block sequentially overnight. Pick the 20 blocks with worst audit composites, run 15 experiments each. Could be as simple as a shell loop, but a Python script could prioritize by composite score, skip already-iterated blocks, and generate a summary report.
+
+### 2. Visual regression detection
+
+Audit scores are abstract — a block can score 7.0 while having a broken layout. Screenshots already exist at `temp/audit-screenshots/iterate/`. Two approaches:
+- **Perceptual hash** (fast, cheap): compare phash of before/after screenshots, flag if delta exceeds threshold. Catches major layout breakage.
+- **LLM comparison** (slower, richer): show the auditor both screenshots side-by-side and ask "did the visualization regress?" This catches subtle issues like lost labels or color changes.
+
+Either could be a new gate in `decide_block` — discard if visual regression detected regardless of composite score.
+
+### 3. Diminishing returns detection
+
+Current stop conditions: max experiments, 3 consecutive discards. But blocks often enter a zone where keeps are -2, -3 lines — technically improving but not worth the API cost. Add a check: if the last N keeps (e.g. 5) average below a threshold (e.g. 5 lines), stop and move to the next target. This matters most for the batch runner.
+
+### 4. Prompt track exercise
+
+`iterate-prompt.py` exists but hasn't been tested end-to-end since the early bug fixes. It optimizes prompt text to reduce generation time while preserving required features. Run it on a block with known slow generation (>120s) to validate the pipeline.
+
+### 5. Proposer prompt iteration
+
+`proposer-prompts/block.md` is static. Its effectiveness can be measured by keep rate and average LOC reduction per keep — currently ~75% keep rate with diminishing returns in later experiments. The prompt could be A/B tested: run the same block with two different proposer prompts and compare keep rates. Or just manually tune it based on patterns in the discard reasons.
+
+### 6. Skill track (hardest)
+
+Iterate on SKILL.md files to improve audit composites of blocks generated with those skills. Noisy because each experiment requires generating and auditing multiple blocks (4-6 per skill) to get a stable signal. Longest cycle time (~15-20 min per experiment). Worth attempting once the batch runner exists and we have baseline composites across all 105 blocks.

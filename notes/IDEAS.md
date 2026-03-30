@@ -36,12 +36,19 @@ Deleted `notes/archive/` (178K, 7 files). Lessons in CONVICTIONS.md, content in 
 
 ## Autoresearch iteration
 
-Pipeline built and tested. See `AUTORESEARCH.md` for details.
+Pipeline built and tested. See `AUTORESEARCH.md` for full details and next steps.
 
-- `iterate-block.py` compacts blocks (LOC ↓, composite holds). 5 blocks done, ~15-20% reduction typical.
-- `iterate-prompt.py` optimizes prompts (gen time ↓, features preserved). Not yet exercised.
+- `iterate-block.py` compacts blocks (LOC ↓, composite holds). 5 blocks done, ~15-20% reduction typical, ~75% keep rate.
+- `iterate-prompt.py` optimizes prompts (gen time ↓, features preserved). Not yet exercised end-to-end.
 - Skill track deferred until block/prompt tracks prove out.
-- **Next:** Batch runs across more blocks. Visual regression detection. Diminishing returns detector.
+
+**Next steps (in priority order):**
+1. **Batch runner** — iterate across 20 worst-scoring blocks overnight. Highest leverage.
+2. **Visual regression detection** — screenshot diff as a gate in decide_block. Catches layout breakage that composite scores miss.
+3. **Diminishing returns stop** — stop when last 5 keeps average <5 lines. Saves budget for the batch runner.
+4. **Exercise prompt track** — run iterate-prompt on a slow-generating block.
+5. **Proposer prompt tuning** — A/B test different proposer prompts, measure keep rate.
+6. **Skill track** — iterate SKILL.md files (noisiest, needs multi-block averaging).
 
 ## From v2 findings
 
