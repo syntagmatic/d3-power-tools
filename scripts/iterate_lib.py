@@ -476,9 +476,22 @@ def generate_progress_html():
   td.mono {{ font-family: "SF Mono", "Consolas", monospace; font-size: 11px; }}
   td a {{ color: #1565c0; text-decoration: none; }} td a:hover {{ text-decoration: underline; }}
 
+  .score-cell {{ position: relative; cursor: default; }}
   .score-bar {{ display: inline-flex; gap: 3px; align-items: center; }}
   .score-num {{ display: inline-block; min-width: 18px; height: 18px; line-height: 18px; border-radius: 3px;
-    text-align: center; font-size: 10px; font-weight: 600; color: #fff; cursor: default; }}
+    text-align: center; font-size: 10px; font-weight: 600; color: #fff; }}
+
+  .score-tip {{ display: none; position: absolute; left: 0; top: 100%; z-index: 10;
+    background: #fff; border: 1px solid #ddd; border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.12);
+    padding: 10px 14px; width: 380px; font-size: 12px; line-height: 1.5; color: #333; }}
+  .score-cell:hover .score-tip, .score-cell:focus-within .score-tip {{ display: block; }}
+  .score-tip .tip-dim {{ margin-bottom: 8px; }}
+  .score-tip .tip-dim:last-child {{ margin-bottom: 0; }}
+  .score-tip .tip-label {{ font-weight: 600; font-size: 11px; }}
+  .score-tip .tip-score {{ display: inline-block; min-width: 16px; height: 16px; line-height: 16px;
+    border-radius: 3px; text-align: center; font-size: 10px; font-weight: 600; color: #fff;
+    vertical-align: middle; margin-left: 4px; }}
+  .score-tip .tip-note {{ color: #555; margin-top: 2px; }}
 
   .diff-toggle {{ cursor: pointer; color: #1565c0; font-size: 11px; user-select: none; }}
   .diff-toggle:hover {{ text-decoration: underline; }}
@@ -607,20 +620,31 @@ for (const [key, data] of groupEntries) {{
     const comp = d.composite_after ?? d.scores?.composite;
     tr.append("td").attr("class", "mono").text(comp != null ? comp.toFixed(1) : "–");
 
-    // Scores: numerical values with colored backgrounds and note tooltips
-    const scoreCell = tr.append("td");
-    if (d.scores && Object.keys(d.scores).length) {{
+    // Scores: numerical badges with rich tooltip showing auditor feedback
+    const scoreCell = tr.append("td").attr("class", "score-cell").attr("tabindex", "0");
+    const hasScores = d.scores && scoreDims.some(dim => d.scores[dim] != null);
+    if (hasScores) {{
       const bar = scoreCell.append("span").attr("class", "score-bar");
       scoreDims.forEach(dim => {{
         const v = d.scores[dim];
-        if (v != null) {{
-          const note = d.scores[dim + "_note"] || "";
-          const label = dim.replace("_", " ").replace(/\b\w/g, c => c.toUpperCase()).replace(/_/g, " ");
-          const tip = note ? `${{label}}: ${{v}}/10\n\n${{note}}` : `${{label}}: ${{v}}/10`;
-          bar.append("span").attr("class", "score-num")
-            .attr("title", tip).style("background", scoreColor(v))
-            .style("color", v >= 4 && v <= 6 ? "#333" : "#fff").text(v);
-        }}
+        if (v != null) bar.append("span").attr("class", "score-num")
+          .style("background", scoreColor(v))
+          .style("color", v >= 4 && v <= 6 ? "#333" : "#fff").text(v);
+      }});
+      // Rich tooltip
+      const tip = scoreCell.append("div").attr("class", "score-tip");
+      scoreDims.forEach(dim => {{
+        const v = d.scores[dim];
+        if (v == null) return;
+        const note = d.scores[dim + "_note"] || "";
+        const label = dim.split("_").map(w => w[0].toUpperCase() + w.slice(1)).join(" ");
+        const dd = tip.append("div").attr("class", "tip-dim");
+        const hdr = dd.append("div");
+        hdr.append("span").attr("class", "tip-label").text(label);
+        hdr.append("span").attr("class", "tip-score")
+          .style("background", scoreColor(v))
+          .style("color", v >= 4 && v <= 6 ? "#333" : "#fff").text(v);
+        if (note) dd.append("div").attr("class", "tip-note").text(note);
       }});
     }} else scoreCell.text("–");
 
