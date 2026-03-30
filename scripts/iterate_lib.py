@@ -400,6 +400,7 @@ def generate_progress_html():
             "composite_after": e.get("composite_after", e.get("composite")),
             "lines_before": e.get("lines_before", e.get("lines")),
             "lines_after": e.get("lines_after", e.get("lines")),
+            "git_sha": e.get("git_sha", ""),
             "json_file": exp_file if (ITERATIONS_DIR / exp_file).exists() else None,
         })
 
@@ -409,10 +410,26 @@ def generate_progress_html():
         for tid, entry in json.loads(best_blocks.read_text()).items():
             block_sets[tid] = entry.get("block_set", "")
 
+    # Detect GitHub remote for source links
+    github_url = ""
+    try:
+        r = subprocess.run(["git", "remote", "get-url", "origin"],
+                           capture_output=True, text=True, cwd=str(PROJ))
+        remote = r.stdout.strip()
+        if "github.com" in remote:
+            # git@github.com:user/repo.git or https://github.com/user/repo.git
+            remote = remote.replace("git@github.com:", "https://github.com/")
+            if remote.endswith(".git"):
+                remote = remote[:-4]
+            github_url = remote
+    except Exception:
+        pass
+
     # Linked resources for the nav
     resources = {
         "history_tsv": "history.tsv",
         "block_sets": block_sets,
+        "github_url": github_url,
         "best_blocks": "../../evals/best-blocks.json" if best_blocks.exists() else None,
         "best_prompts": "../../evals/best-prompts.json" if best_prompts.exists() else None,
         "audit_runs": [f.name for f in run_files[:20]],
@@ -566,11 +583,22 @@ for (const [key, data] of groupEntries) {{
   const scoreDims = ["visual_critic", "encoding_integrity", "stress_test", "cognitive_load"];
   const scoreColor = d3.scaleLinear().domain([1, 5, 10]).range(["#c62828", "#f9a825", "#2e7d32"]);
 
+  // Per-block numbering: baseline=1, ascending in chronological order
+  const blockNum = new Map();
+  chrono.forEach((d, i) => blockNum.set(d.exp, i + 1));
+
   data.forEach((d, idx) => {{
     const cls = d.decision === "keep" ? "keep" : d.decision === "baseline" ? "baseline" : "discard";
     const tr = tbody.append("tr");
-    tr.append("td").text(d.exp);
-    tr.append("td").attr("class", cls).text(d.decision);
+    tr.append("td").text(blockNum.get(d.exp));
+    const decisionCell = tr.append("td").attr("class", cls);
+    if (d.decision === "baseline" && resources.github_url && blockSet && d.git_sha) {{
+      decisionCell.append("a")
+        .attr("href", `${{resources.github_url}}/blob/${{d.git_sha}}/blocks/${{blockSet}}/${{target}}.html`)
+        .attr("target", "_blank").text("baseline ↗");
+    }} else {{
+      decisionCell.text(d.decision);
+    }}
     tr.append("td").attr("class", "mono").text(d.metric || "–");
     tr.append("td").attr("class", "mono").text(d.delta || "–");
 
