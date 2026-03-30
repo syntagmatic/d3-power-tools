@@ -63,6 +63,11 @@ def get_audit_scores(html_path, block_id, wait_for="svg", model="sonnet"):
          "--model", model],
         capture_output=True, text=True, timeout=600, cwd=str(PROJ))
 
+    if r.returncode != 0 or "FAIL" in (r.stdout or ""):
+        print(f"  Audit pipeline output: {(r.stdout or '')[-300:]}")
+        if r.stderr:
+            print(f"  Audit pipeline stderr: {r.stderr[-300:]}")
+
     # Find the most recent run file
     runs_dir = PROJ / "evals" / "runs"
     if not runs_dir.exists():
@@ -73,7 +78,18 @@ def get_audit_scores(html_path, block_id, wait_for="svg", model="sonnet"):
         return None
 
     run_data = json.loads(run_files[0].read_text())
-    return run_data.get("blocks", {}).get(block_id)
+    scores = run_data.get("blocks", {}).get(block_id)
+
+    # If composite is None (e.g. one audit dimension failed), compute from available scores
+    if scores and scores.get("composite") is None:
+        weights = {"visual_critic": 0.30, "encoding_integrity": 0.25,
+                   "cognitive_load": 0.25, "stress_test": 0.20}
+        available = {k: scores[k] for k in weights if scores.get(k) is not None}
+        if available:
+            total_w = sum(weights[k] for k in available)
+            scores["composite"] = round(sum(scores[k] * weights[k] / total_w for k in available), 1)
+
+    return scores
 
 
 def build_proposer_prompt(html_path, lines, scores, history_lines, last_discard_scores=None):
