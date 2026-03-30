@@ -2,105 +2,82 @@
 
 Karpathy's [autoresearch](https://github.com/karpathy/autoresearch) is an autonomous AI research system: an agent modifies `train.py`, runs a 5-minute experiment, checks if `val_bpb` improved, keeps or discards, and loops forever. You wake up to ~100 experiments and a better model.
 
-d3-power-tools has all the infrastructure for a similar loop but doesn't close it. We generate blocks, audit them with 4 scoring skills, track results — but there's no automated feedback from scores back into improvement. The pipeline is open-loop.
+d3-power-tools applies the same pattern to D3 visualizations: propose a code change, audit quality, keep or discard, repeat.
 
-## The autoresearch pattern
-
-Three files matter:
-
-- **`prepare.py`** — fixed constants, data prep, evaluation metric. Read-only.
-- **`train.py`** — the single file the agent edits. Architecture, optimizer, hyperparameters.
-- **`program.md`** — agent instructions. The human edits this.
-
-The loop:
+## The loop
 
 ```
-1. Read current train.py + results history
-2. Propose a change
-3. git commit
-4. uv run train.py > run.log 2>&1  (5 min fixed budget)
-5. Extract val_bpb from log
-6. If improved: keep commit
-   If worse: git reset
-7. Log to results.tsv
-8. GOTO 1 (never stop, human may be sleeping)
+1. Copy block to git worktree on iterate branch
+2. Baseline audit (4 inspection skills → composite score)
+3. Propose compaction via claude -p (reads file, makes ONE change, writes it back)
+4. Audit the modified block
+5. If LOC dropped and composite held (within 0.3): keep
+   If quality regressed or code grew: discard, feed regression details to next proposer
+6. Log to history.tsv + experiment JSON (with diff, proposer explanation, audit notes, flags)
+7. GOTO 3 (until max experiments or 3 consecutive discards)
+8. Squash-merge iterate branch to main, clean up worktree
 ```
-
-Key design choices:
-- **Single metric** (`val_bpb`) — deterministic, vocab-size independent
-- **Fixed time budget** (5 min) — all experiments directly comparable
-- **Single file** — diffs are reviewable, attribution is clear
-- **Simplicity criterion** — "0.001 improvement from 20 lines of hacky code? Not worth it. From deleting code? Definitely keep."
-- **Git-based state** — commits for keeps, resets for discards, full history
-- **TSV results log** — simple, appendable, human-readable
-- **Progress chart** — running best over experiments, green dots for keeps, gray for discards
-- **Autonomous overnight** — ~12 experiments/hour, ~100 in 8 hours
 
 ## Iteration tracks
 
-Three parallel tracks for closing the loop. **Build blocks and prompts first; skills deferred.**
+| Track | Script | Target | Primary metric | Constraint |
+|-------|--------|--------|----------------|------------|
+| **Block** | `iterate-block.py` | HTML file | LOC (lower is better) | Composite can't drop > 0.3 |
+| **Prompt** | `iterate-prompt.py` | Prompt text | Generation time (seconds) | Must pass structural feature checks |
+| **Skill** | (deferred) | SKILL.md | Composite (avg across test blocks) | Generation time can't regress > 20% |
 
-| Track | Target file | Primary metric | Constraint | Cycle time |
-|-------|------------|----------------|------------|------------|
-| **Block** | The HTML file directly | LOC (lower is better) | Audit composite can't drop > 0.3 | ~3-5 min |
-| **Prompt** | Prompt text (in campaign config) | Generation time (seconds) | Must pass structural feature checks | ~5-10 min |
-| **Skill** (deferred) | SKILL.md content | Audit composite (avg across test blocks) | Generation time can't regress > 20% | ~15-20 min |
+## Usage
 
-Each track has its own script, proposer prompt, and metric — but shares logging, keep/discard logic, git strategy, and cost tracking via `scripts/iterate_lib.py`.
+```bash
+# Compact a block
+python3 scripts/iterate-block.py \
+  --target 04-bee-swarm-census \
+  --block-set v2-claude-opus-4-6 \
+  --max-experiments 12 \
+  --model sonnet
 
-### Block track
+# Iterate on a prompt
+python3 scripts/iterate-prompt.py \
+  --target 47-hierarchical-edge-bundling \
+  --block-set v2-claude-opus-4-6 \
+  --features "d3.cluster|d3.tree" "d3.curveBundle|bundle"
+```
 
-The most natural autoresearch analog. One file, direct modification, low noise.
+## Key design choices
 
-- Agent reads the HTML, rewrites for compactness/readability, writes it back
-- No staging or generation pipeline — direct `claude -p` with proposer prompt
-- Metric: LOC reduction while audit composite holds
-- Invocation: `claude -p "$(cat scripts/proposer-prompts/block.md)" --allowedTools Read,Write --max-turns 10`
+- **Git worktrees** — iterate branch lives in `temp/worktrees/`, main checkout untouched. Safe to run in background while doing other work.
+- **Squash-merge** — all experiment commits collapsed into one clean commit on main.
+- **Single file** — proposer reads and rewrites one HTML file. Diffs are reviewable.
+- **Proposer gets context** — current audit scores with notes, stress test flags, and if the last experiment was discarded, which dimensions regressed and why.
+- **Experiment JSONs** — each experiment saves scores, diff, proposer explanation, audit notes, flags, durations. Self-contained record of what happened.
+- **TSV log** — append-only, human-readable history across all runs.
 
-### Prompt track
+## Artifacts
 
-Iterates on prompt text to minimize generation time while ensuring required features appear.
+```
+evals/iterations/
+  index.html          — master list: sparkline charts, score tooltips, expandable diffs
+  history.tsv         — append-only experiment log
+  {NNN}-block-{id}.json — per-experiment data (scores, diff, proposer, flags, durations)
 
-- Features specified as grep patterns in campaign config (not in manifest.json)
-- Constraint gate: all feature patterns must match in generated HTML or automatic discard
-- Uses generation pipeline (`generate-blocks-claude.py`) for each experiment
+evals/best-blocks.json — best composite + lines per target (auto-updated on keep)
+evals/runs/            — raw audit run output from run-audit-pipeline.py
 
-### Skill track (deferred)
+scripts/
+  iterate-block.py     — block compaction loop
+  iterate-prompt.py    — prompt optimization loop
+  iterate_lib.py       — shared: TSV logging, keep/discard, worktree helpers, index generation
+  proposer-prompts/
+    block.md           — proposer instructions for block compaction
+    prompt.md          — proposer instructions for prompt rewriting
+```
 
-Iterates on SKILL.md to improve audit composites of generated blocks.
-
-- Noisy: requires test-set averaging over 4-6 blocks per skill
-- Test block selection: TBD (future enhancement)
-- Highest noise, longest cycle, most expensive — build after proving the other tracks work
-
-## Architecture decisions
-
-### Scripts
-
-Three iterate scripts + shared module:
-
-- `scripts/iterate-block.py` (~150 lines)
-- `scripts/iterate-prompt.py` (~150 lines)
-- `scripts/iterate-skill.py` (~150 lines, deferred)
-- `scripts/iterate_lib.py` — shared logging, keep/discard, cost tracking, progress HTML
-
-### Proposer prompts
-
-`program.md`-style instruction files, versioned in the repo:
-
-- `scripts/proposer-prompts/block.md`
-- `scripts/proposer-prompts/prompt.md`
-- `scripts/proposer-prompts/skill.md` (deferred)
-
-The human iterates on these; the agent iterates on the target. Keeps proposer logic reviewable.
-
-### Keep/discard logic
+## Keep/discard logic
 
 ```python
 # Block track: optimize LOC, constrain composite
 def decide_block(composite_before, composite_after, lines_before, lines_after):
-    composite_delta = composite_after - composite_before
-    if composite_delta < -0.3:
+    if composite_after - composite_before < -0.3:
         return "discard"  # quality regression
     if lines_after >= lines_before:
         return "discard"  # didn't get shorter
@@ -113,124 +90,24 @@ def decide_prompt(time_before, time_after, features_pass):
     if time_after >= time_before * 0.85:
         return "discard"  # not meaningfully faster
     return "keep"
-
-# Skill track (deferred): optimize composite, constrain time
-def decide_skill(composite_before, composite_after, lines_before, lines_after):
-    delta = composite_after - composite_before
-    if delta >= 0.3:
-        if lines_after > lines_before * 1.5 and delta < 0.6:
-            return "discard"  # improvement not worth complexity
-        return "keep"
-    if delta > -0.3 and lines_after < lines_before * 0.8:
-        return "keep"  # simpler with same quality
-    return "discard"
 ```
 
-### Convergence
+**Convergence:** 3 consecutive discards stops the run (configurable via `--convergence-discards`).
 
-- **3 consecutive discards** = converged for this target
-- **Per-track cost cap** within budget
-- **$80/night total budget** cap across all tracks
+## Results so far (2026-03-30)
 
-### Git strategy
-
-- Branch-and-merge: `iterate/block-{target}`, `iterate/prompt-{target}`
-- Iterate scripts create the branch, commit on keep, checkout on discard
-- Human reviews and merges to main when satisfied
-
-### Experiment artifacts
-
-Blocks generated during iteration go to `temp/iterate/{track}-{experiment}/`. The `blocks/` directory stays clean — only human-promoted block sets live there.
-
-Requires adding `--block-dir` flag to `run-audit-pipeline.py` (currently hardcodes `blocks/` prefix).
-
-### Campaign config
-
-Sequential execution, config-driven. Lives in `evals/campaigns/`:
-
-```json
-{
-  "budget_usd": 80,
-  "convergence_discards": 3,
-  "delay_between_calls_s": 5,
-  "model": "sonnet",
-  "tracks": [
-    {
-      "track": "block",
-      "target": "47-hierarchical-edge-bundling",
-      "block_set": "v2-claude-opus-4-6",
-      "max_experiments": 15
-    },
-    {
-      "track": "prompt",
-      "target": "47-hierarchical-edge-bundling",
-      "features": ["d3.cluster|d3.tree", "d3.curveBundle|bundle", "transition"],
-      "max_experiments": 10
-    }
-  ]
-}
-```
-
-### Best-of tracking
-
-Three auto-updated JSON files in `evals/`:
-
-- `evals/best-blocks.json`
-- `evals/best-prompts.json`
-- `evals/best-skills.json` (deferred)
-
-Updated automatically on every "keep" decision. Optional `"promoted": true` flag for human-verified entries.
-
-```json
-{
-  "47-hierarchical-edge-bundling": {
-    "block_set": "v2-claude-opus-4-6",
-    "composite": 8.1,
-    "lines": 247,
-    "scores": {"visual_critic": 8, "encoding_integrity": 9, "stress_test": 7, "cognitive_load": 8},
-    "iteration": "exp-12",
-    "git_sha": "abc1234"
-  }
-}
-```
-
-## Results tracking
-
-**TSV log** (`evals/iterations/history.tsv`):
-```
-exp  track    target                           metric  delta  decision  cost   description
-1    block    47-hierarchical-edge-bundling     342     0      baseline  0.00   Initial baseline
-2    block    47-hierarchical-edge-bundling     298     -44    keep      0.80   Inlined helper functions
-3    block    47-hierarchical-edge-bundling     301     +3     discard   0.75   Tried extracting constants
-```
-
-**Per-experiment JSON** (`evals/iterations/{exp}-{track}-{target}.json`):
-Full audit details, git shas, proposer context.
-
-**Progress visualization** (`evals/iterations/progress.html`):
-Running best per target over experiments. Staircase pattern like autoresearch's `progress.png`.
-
-## Infrastructure changes
-
-- **New**: `scripts/iterate-block.py`, `scripts/iterate-prompt.py`, `scripts/iterate_lib.py`
-- **New**: `scripts/proposer-prompts/block.md`, `scripts/proposer-prompts/prompt.md`
-- **New**: `evals/campaigns/`, `evals/iterations/`, `evals/best-*.json`
-- **Modify**: `scripts/run-audit-pipeline.py` — add `--block-dir` flag
-- **Unchanged**: `scripts/generate-blocks-claude.py`, `scripts/staging.py`, `scripts/test-viz.py`
+| Block | Before | After | Experiments | Keeps | Composite |
+|-------|--------|-------|-------------|-------|-----------|
+| 13-radial-dendrogram-edge-bundling | 321 | 266 | 5 | 5 | 7.2→7.0 |
+| 02-linked-scatterplot-matrix | 344 | 306 | 5 | 3 | 6.6→6.9 |
+| hierarchy-bundles | 1012 | 846 | 13 | 11 | 5.2→5.7 |
+| 04-bee-swarm-census | 265 | 241 | 6 | 5 | 7.7→7.7 |
+| 32-shape-morphing-gallery | 451 | 360 | 12 | 9 | 6.6→6.3 |
 
 ## Future enhancements
 
-- **Skill track**: Build after proving block and prompt tracks work
-- **Orchestration strategies**: Round-robin, worst-first, or diminishing-returns scheduling (start with sequential)
-- **Auto-derive test blocks for skills**: From manifest skill frequency + score distribution
-- **Adaptive thresholds**: Based on observed score variance per track
-- **Iterating on audit skills**: Meta-optimization of the scoring skills themselves
-- **Iterating on staging CLAUDE.md**: Improve skill triggering rate
-- **Visual diffing**: Compare screenshots between iterations to catch rendering regressions
-- **Holdout validation**: Periodically run full block set to catch overfitting to test set
-
-## Open questions
-
-1. **Is 0.3 the right composite threshold?** Needs empirical validation with first 10 manual experiments.
-2. **What does "readability" mean for blocks?** Currently proxied by "composite holds while LOC drops." May need a dedicated readability metric later.
-3. **How aggressive should prompt compression be?** Speed vs. specificity tradeoff — shorter prompts generate faster but may miss nuances.
+- **Skill track**: Iterate on SKILL.md to improve audit composites of generated blocks
+- **Diminishing returns detector**: Stop when last N keeps average below a threshold
+- **Visual regression check**: Pixel-diff or perceptual hash between iterations
+- **Batch runner**: Iterate across multiple blocks in sequence overnight
+- **Proposer prompt iteration**: The proposer prompt itself could be iterated on

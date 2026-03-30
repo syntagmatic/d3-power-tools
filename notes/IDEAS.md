@@ -34,6 +34,15 @@ Deleted `notes/archive/` (178K, 7 files). Lessons in CONVICTIONS.md, content in 
 - **Choreography Skill:** Formalize multi-stage sequencing using `async/await` with `transition.end()`. Include staggering patterns and the "Sticky Graphic" scrollytelling layout as a standard orchestration pattern.
 - **Self-visualization as regression suite.** Skill dependency graph, block × skill matrix, audit scorecard. The project should be its own best test case.
 
+## Autoresearch iteration
+
+Pipeline built and tested. See `AUTORESEARCH.md` for details.
+
+- `iterate-block.py` compacts blocks (LOC ↓, composite holds). 5 blocks done, ~15-20% reduction typical.
+- `iterate-prompt.py` optimizes prompts (gen time ↓, features preserved). Not yet exercised.
+- Skill track deferred until block/prompt tracks prove out.
+- **Next:** Batch runs across more blocks. Visual regression detection. Diminishing returns detector.
+
 ## From v2 findings
 
 See `V2-FINDINGS.md` for full data.
