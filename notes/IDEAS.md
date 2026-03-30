@@ -34,4 +34,13 @@ Deleted `notes/archive/` (178K, 7 files). Lessons in CONVICTIONS.md, content in 
 - **Choreography Skill:** Formalize multi-stage sequencing using `async/await` with `transition.end()`. Include staggering patterns and the "Sticky Graphic" scrollytelling layout as a standard orchestration pattern.
 - **Self-visualization as regression suite.** Skill dependency graph, block × skill matrix, audit scorecard. The project should be its own best test case.
 
+## From v2 findings
+
+See `V2-FINDINGS.md` for full data.
+
+- **Compressed skill summaries.** Skills help quality (+0.06 to +0.45 composite) but hurt sonnet completion rate (skills take too long to read). A one-page cheat sheet per skill would preserve quality gains without the time cost. Highest-value next step for skill effectiveness.
+- **Strengthen stress-test patterns.** All models score lowest on interaction robustness (6.0-7.0). Skills should include explicit RAF coalescing, debounced brush handlers, and transition conflict guards. The patterns exist in the stress-test audit criteria but not in the content skills.
+- **Sonnet with longer timeout.** Sonnet quality matches opus (7.06 vs 7.04 composite) but 64% of blocks timeout at 300s. Most pass at 600s. Worth completing the full 105 at 600s to get a proper quality comparison.
+- **Full 105-block audit comparison.** Currently 52 opus blocks audited. Running opus+skills for all 105 would give a definitive quality baseline for the skills.
+
 **Ship it.** Distribution, discovery, onboarding.

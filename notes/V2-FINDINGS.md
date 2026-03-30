@@ -1,6 +1,6 @@
 # v2 Generation Findings
 
-Observations from v2 block generation runs (2026-03-29/30). 40 blocks tested across 6 configs: opus 4.6 and sonnet 4.6 (each with/without skills), gemini 3.1 pro preview (with/without skills).
+Observations from v2 block generation and audit runs (2026-03-29/30). 40 blocks tested across 6 configs: opus 4.6 and sonnet 4.6 (each with/without skills), gemini 3.1 pro preview (with/without skills). Audits run with sonnet 4.6 as evaluator across 4 dimensions.
 
 ## Pass rates
 
@@ -35,18 +35,49 @@ Opus noskills is 98% (39/40) averaging 344 lines — only 34 fewer than with ski
 
 ## Gemini is competitive
 
-11/12 pass rate both configs (one timeout on shape-morphing-gallery). Line counts are comparable to opus. Small sample — needs more blocks and audit scoring to compare quality.
+11/12 pass rate both configs (one timeout on shape-morphing-gallery). Line counts are comparable to opus.
 
 ## Cost
 
 Opus: ~$0.38/block (one measured, projected ~$40 for full 105). Sonnet passes: not yet measured but expected cheaper per token, offset by longer wall time.
 
+## Audit scores
+
+Audits run with sonnet 4.6 as evaluator across 4 inspection tools (visual-critic, encoding-integrity, stress-test, cognitive-load).
+
+| Config | Rendered | Vis Critic | Encoding | Stress | Cognitive | Composite |
+|--------|----------|-----------|----------|--------|-----------|-----------|
+| opus + skills | 52/61 | 6.6 | 7.4 | 7.0 | 7.3 | **7.04** |
+| opus + noskills | 31/39 | 6.5 | 7.4 | 6.8 | 7.3 | 6.98 |
+| sonnet + skills | 14/15 | 6.7 | 7.6 | 6.1 | 7.6 | **7.06** |
+| sonnet + noskills | 18/21 | 6.4 | 7.6 | 6.4 | 7.4 | 6.93 |
+| gemini + skills | 8/11 | 6.6 | 7.5 | 6.4 | 7.5 | **7.01** |
+| gemini + noskills | 8/11 | 5.6 | 7.0 | 6.4 | 7.4 | 6.56 |
+
+### Skills consistently improve quality
+
+Skills advantage by model: opus +0.06, sonnet +0.13, gemini +0.45 composite. The effect is consistent but varies in magnitude. Per-block comparison on 27 shared opus blocks: skills win 12, lose 6, tie 9 (threshold ±0.3).
+
+### Biggest impact: visual critic
+
+Skills most improve the visual-critic dimension (design polish, whitespace, typography). Gemini drops from 6.6 to 5.6 without skills — the largest single-dimension swing. This makes sense: skills encode palette choices, small-area chroma boosts, and layout conventions that models don't reliably produce from training alone.
+
+### Sonnet quality matches opus when it completes
+
+Sonnet+skills composite (7.06) slightly exceeds opus+skills (7.04). The problem is purely completion rate (36% vs 100%), not output quality. Sonnet's higher encoding (7.6) and cognitive (7.6) scores suggest it may produce more careful, well-reasoned visualizations when given enough time.
+
+### Stress test is the weak dimension
+
+All configs score lowest on stress-test (6.0-7.0). Common failures: unthrottled brush/mousemove handlers, missing RAF coalescing, stale closures on scale inversion. This is the dimension where skills should help most, and opus+skills (7.0) does lead — but there's room to improve the stress-test patterns in the skills themselves.
+
 ## Implications
 
-**Compressed skills.** Sonnet would benefit from a single-page cheat sheet per skill instead of the full SKILL.md. A `--skill-summary` flag or pre-compressed format could cut skill read time by 60-80%.
+**Compressed skills.** Sonnet would benefit from a single-page cheat sheet per skill instead of the full SKILL.md. A `--skill-summary` flag or pre-compressed format could cut skill read time by 60-80%. This would address sonnet's timeout problem without sacrificing the quality gains skills provide.
 
 **Pre-loaded skills.** Injecting skills into the system prompt (via `--append-system-prompt`) instead of file reads would save turns entirely. Trade-off: larger prompt, no selective reading.
 
-**Audit is the real test.** Pass/fail measures reliability, not quality. Running the audit pipeline (visual-critic, encoding-integrity, stress-test, cognitive-load) on skills-vs-noskills pairs would show whether skills improve the actual visualization quality.
+**Stress-test patterns need strengthening.** The skills should include more explicit interaction robustness patterns: RAF coalescing, debounced brush handlers, transition conflict guards. This is the dimension with the most room to improve.
 
-**Timeout should scale with model.** Opus needs ~100s, sonnet ~400s. A `--timeout` flag would be cleaner than one constant. The remaining 19 sonnet failures at 300s would likely mostly pass at 600s.
+**Timeout should scale with model.** Opus needs ~100s, sonnet ~400s. A `--timeout` flag would be cleaner than one constant. The remaining sonnet failures at 300s would likely mostly pass at 600s.
+
+**Sonnet is the right auditor model.** It's cheaper than opus and produces calibrated scores. Using sonnet as evaluator and opus as generator is a good division of labor.
