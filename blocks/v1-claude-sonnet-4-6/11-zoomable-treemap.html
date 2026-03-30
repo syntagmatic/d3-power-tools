@@ -31,6 +31,10 @@
   #legend .swatch { width: 12px; height: 12px; border-radius: 2px; }
 
   svg { display: block; }
+  #chart text { pointer-events: none; }
+  .group-label { fill: #fff; font-size: 12px; font-weight: 600; }
+  .leaf-label { fill: #333; font-size: 10px; }
+  .leaf-size { fill: #666; font-size: 9px; font-family: monospace; }
 
   #tooltip {
     position: absolute; pointer-events: none; display: none;
@@ -125,9 +129,7 @@ for (const dir of topDirs) {
 const fsData = { name: "root", children };
 
 // ── Layout ──
-const margin = { top: 2, right: 2, bottom: 2, left: 2 };
-const width = 1200 - margin.left - margin.right;
-const height = 660 - margin.top - margin.bottom;
+const m = 2, width = 1196, height = 656;
 
 const root = d3.hierarchy(fsData)
   .sum(d => d.size || 0)
@@ -135,31 +137,20 @@ const root = d3.hierarchy(fsData)
 
 d3.treemap()
   .size([width, height])
-  .paddingTop(22)
-  .paddingRight(2)
-  .paddingBottom(2)
-  .paddingLeft(2)
+  .paddingOuter(2).paddingTop(22)
   .paddingInner(1)
   .tile(d3.treemapResquarify)
   (root);
 
 // ── Color: categorical by top-level ancestor ──
-const topNames = topDirs;
-const color = d3.scaleOrdinal().domain(topNames).range(palette);
-
-const branchOf = (d) => {
-  let n = d;
-  while (n.depth > 1) n = n.parent;
-  return n;
-};
+const color = d3.scaleOrdinal().domain(topDirs).range(palette);
 
 const cellFill = (d) => {
-  const base = d3.hcl(color(branchOf(d).data.name));
-  if (d.depth === 1) { base.l = 45; base.c *= 0.9; return base.toString(); }
-  if (d.depth === 2) { base.l = 60; base.c *= 0.7; return base.toString(); }
-  // leaf
-  base.l = 72 + rng() * 10;
-  base.c *= 0.5;
+  let n = d; while (n.depth > 1) n = n.parent;
+  const base = d3.hcl(color(n.data.name));
+  if (d.depth === 1) { base.l = 45; base.c *= 0.9; }
+  else if (d.depth === 2) { base.l = 60; base.c *= 0.7; }
+  else { base.l = 72 + rng() * 10; base.c *= 0.5; }
   return base.toString();
 };
 
@@ -175,27 +166,17 @@ document.getElementById("totalSize").textContent =
   `${totalFiles} files across ${topDirs.length} directories — ${fmt(root.value)} total`;
 
 // ── Legend ──
-const legendEl = document.getElementById("legend");
-topNames.forEach(name => {
-  const item = document.createElement("div");
-  item.className = "item";
-  const sw = document.createElement("div");
-  sw.className = "swatch";
-  sw.style.background = color(name);
-  item.appendChild(sw);
-  item.appendChild(document.createTextNode(name));
-  legendEl.appendChild(item);
-});
+d3.select("#legend").selectAll(".item").data(topDirs).join("div")
+  .attr("class", "item")
+  .html(name => `<div class="swatch" style="background:${color(name)}"></div>${name}`);
 
 // ── SVG ──
 const svg = d3.select("#chart").append("svg")
-  .attr("width", width + margin.left + margin.right)
-  .attr("height", height + margin.top + margin.bottom)
-  .attr("viewBox", `0 0 ${width + margin.left + margin.right} ${height + margin.top + margin.bottom}`)
+  .attr("width", width + 2 * m).attr("height", height + 2 * m)
+  .attr("viewBox", `0 0 ${width + 2 * m} ${height + 2 * m}`)
   .style("max-width", "100%");
 
-const g = svg.append("g")
-  .attr("transform", `translate(${margin.left},${margin.top})`);
+const g = svg.append("g").attr("transform", `translate(${m},${m})`);
 
 // Clip path so transitions stay clean
 g.append("clipPath")
@@ -214,25 +195,8 @@ const y = d3.scaleLinear().domain([root.y0, root.y1]).rangeRound([0, height]);
 let currentFocus = root;
 
 // ── Render ──
-// Show: current focus's descendants (depth 1-2 relative to focus, plus focus itself as background)
-const getVisibleNodes = (focus) => {
-  if (focus.depth === 0) {
-    // Show depth 1 (dirs) + depth 2 (subdirs) + depth 3 (leaves that are large enough)
-    return root.descendants().filter(d => d.depth > 0);
-  }
-  if (focus.depth === 1) {
-    // Zoomed into a top dir: show its children (subdirs) and their children (files)
-    return focus.descendants().filter(d => d !== focus);
-  }
-  // Zoomed into a subdir: show its children (files)
-  return focus.descendants().filter(d => d !== focus);
-};
-
-// Build all cells at start (we show/hide via opacity)
-const allNodes = root.descendants().filter(d => d.depth > 0);
-
 const cell = container.selectAll("g")
-  .data(allNodes, d => d.data.name + d.depth + (d.parent ? d.parent.data.name : ""))
+  .data(root.descendants().slice(1), d => d.data.name + d.depth + (d.parent ? d.parent.data.name : ""))
   .join("g")
     .attr("transform", d => `translate(${x(d.x0)},${y(d.y0)})`);
 
@@ -243,100 +207,47 @@ cell.append("rect")
   .attr("stroke", "#fff")
   .attr("stroke-width", d => d.height > 0 ? 1.5 : 0.5);
 
-// Group labels (depth 1 and 2 headers)
 cell.filter(d => d.height > 0).append("text")
   .attr("class", "group-label")
-  .attr("x", 4)
-  .attr("y", 15)
-  .attr("fill", "#fff")
-  .attr("font-size", "12px")
-  .attr("font-weight", 600)
-  .attr("pointer-events", "none")
+  .attr("x", 4).attr("y", 15)
   .text(d => d.data.name);
 
-// Leaf labels
-cell.filter(d => d.height === 0).append("text")
+const leaves = cell.filter(d => d.height === 0);
+leaves.append("text")
   .attr("class", "leaf-label")
-  .attr("x", 3)
-  .attr("y", 13)
-  .attr("fill", "#333")
-  .attr("font-size", "10px")
-  .attr("pointer-events", "none")
+  .attr("x", 3).attr("y", 13)
   .text(d => d.data.name);
 
-// Leaf size labels
-cell.filter(d => d.height === 0).append("text")
+leaves.append("text")
   .attr("class", "leaf-size")
-  .attr("x", 3)
-  .attr("y", 24)
-  .attr("fill", "#666")
-  .attr("font-size", "9px")
-  .attr("font-family", "monospace")
-  .attr("pointer-events", "none")
+  .attr("x", 3).attr("y", 24)
   .text(d => fmt(d.value));
 
 // ── Visibility + label fitting ──
 const updateVisibility = (focus, duration) => {
-  const isVisible = (d) => {
-    // Always show descendants of focus
-    let n = d;
-    while (n) {
-      if (n === focus) return true;
-      n = n.parent;
-    }
-    return false;
-  };
-
   cell.each(function(d) {
-    const vis = isVisible(d);
+    const vis = d.ancestors().includes(focus);
     const el = d3.select(this);
     const sw = Math.max(0, x(d.x1) - x(d.x0));
     const sh = Math.max(0, y(d.y1) - y(d.y0));
-
-    if (duration > 0) {
-      el.transition("opacity").duration(duration)
-        .attr("opacity", vis ? 1 : 0);
-    } else {
-      el.attr("opacity", vis ? 1 : 0);
-    }
+    (duration > 0 ? el.transition("opacity").duration(duration) : el).attr("opacity", vis ? 1 : 0);
     el.style("pointer-events", vis ? "auto" : "none");
-
-    // Label fitting
-    el.select(".group-label")
-      .attr("opacity", (sw > 40 && sh > 18) ? 1 : 0);
-
-    el.select(".leaf-label")
-      .attr("opacity", (sw > 30 && sh > 16) ? 1 : 0);
-
-    el.select(".leaf-size")
-      .attr("opacity", (sw > 40 && sh > 28) ? 1 : 0);
+    [[".group-label",40,18],[".leaf-label",30,16],[".leaf-size",40,28]]
+      .forEach(([c,mw,mh]) => el.select(c).attr("opacity", sw > mw && sh > mh ? 1 : 0));
   });
 };
 
 updateVisibility(currentFocus, 0);
 
 // ── Breadcrumb ──
-const breadcrumbEl = document.getElementById("breadcrumb");
-
 const updateBreadcrumb = (focus) => {
-  breadcrumbEl.innerHTML = "";
   const path = focus.ancestors().reverse();
-  path.forEach((d, i) => {
-    if (i > 0) {
-      const sep = document.createElement("span");
-      sep.className = "sep";
-      sep.textContent = "/";
-      breadcrumbEl.appendChild(sep);
-    }
-    const span = document.createElement("span");
-    span.textContent = d.depth === 0 ? "root" : d.data.name;
-    if (d === focus) {
-      span.className = "current";
-    } else {
-      span.addEventListener("click", () => zoomTo(d));
-    }
-    breadcrumbEl.appendChild(span);
-  });
+  const items = path.flatMap((d, i) => i ? [{sep: true}, d] : [d]);
+  d3.select("#breadcrumb").selectAll("span").data(items).join("span")
+    .attr("class", d => d.sep ? "sep" : d === focus ? "current" : null)
+    .text(d => d.sep ? "/" : d.depth === 0 ? "root" : d.data.name)
+    .style("cursor", d => d.sep || d === focus ? null : "pointer")
+    .on("click", (event, d) => { if (!d.sep && d !== focus) zoomTo(d); });
 };
 
 updateBreadcrumb(currentFocus);
@@ -344,21 +255,14 @@ updateBreadcrumb(currentFocus);
 // ── Tooltip ──
 const tooltip = d3.select("#tooltip");
 
-const pathOf = (d) => {
-  const parts = d.ancestors().reverse().slice(1).map(a => a.data.name);
-  return "/" + parts.join("/");
-};
-
 cell.on("pointerenter", (event, d) => {
   tooltip.style("display", "block")
-    .html(`<div class="path">${pathOf(d)}</div>
+    .html(`<div class="path">/${d.ancestors().reverse().slice(1).map(a => a.data.name).join("/")}</div>
            <div><strong>${d.data.name}</strong></div>
            <div class="size">${fmt(d.value)}${d.height > 0 ? ` (${d.leaves().length} files)` : ""}</div>`);
 })
-.on("pointermove", (event) => {
-  tooltip
-    .style("left", (event.pageX + 14) + "px")
-    .style("top", (event.pageY - 10) + "px");
+.on("pointermove", ({pageX, pageY}) => {
+  tooltip.style("left", pageX + 14 + "px").style("top", pageY - 10 + "px");
 })
 .on("pointerleave", () => {
   tooltip.style("display", "none");
@@ -366,19 +270,11 @@ cell.on("pointerenter", (event, d) => {
 
 // ── Zoom interaction ──
 const zoomTo = (target) => {
-  if (target === currentFocus) {
-    // If clicking current focus and it has a parent, zoom out
-    if (target.parent) {
-      zoomTo(target.parent);
-    }
-    return;
-  }
+  if (target === currentFocus) { if (target.parent) zoomTo(target.parent); return; }
 
   currentFocus = target;
 
-  // Interrupt any running transitions
-  cell.interrupt("zoom");
-  cell.interrupt("opacity");
+  cell.interrupt("zoom").interrupt("opacity");
 
   // Update scale domains to the target's bounds
   x.domain([target.x0, target.x1]);
@@ -401,20 +297,9 @@ const zoomTo = (target) => {
   updateBreadcrumb(currentFocus);
 };
 
-// Click handler: zoom into groups, zoom out on leaves
 cell.on("click", (event, d) => {
   event.stopPropagation();
-  if (d.height > 0) {
-    // Group node: zoom in
-    zoomTo(d);
-  } else {
-    // Leaf: zoom to parent if we're not already there
-    if (d.parent && d.parent !== currentFocus) {
-      zoomTo(d.parent);
-    } else if (currentFocus.parent) {
-      zoomTo(currentFocus.parent);
-    }
-  }
+  zoomTo(d.height > 0 ? d : d.parent);
 });
 
 // Click on background to zoom out
@@ -422,12 +307,7 @@ svg.on("click", () => {
   if (currentFocus.parent) zoomTo(currentFocus.parent);
 });
 
-// Style: pointer cursor on groups
-cell.filter(d => d.height > 0)
-  .style("cursor", "pointer");
-
-cell.filter(d => d.height === 0)
-  .style("cursor", "pointer");
+cell.style("cursor", "pointer");
 </script>
 </body>
 </html>
