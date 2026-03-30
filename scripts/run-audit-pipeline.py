@@ -91,7 +91,8 @@ def parse_block_range(spec):
     if spec.isdigit():
         num = int(spec)
         return [b for b in MANIFEST["blocks"] if int(b["id"].split("-")[0]) == num]
-    return []
+    # Match by full ID or ID prefix
+    return [b for b in MANIFEST["blocks"] if b["id"] == spec or b["id"].startswith(spec)]
 
 
 # === Phase 1: Render ===

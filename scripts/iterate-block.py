@@ -48,7 +48,6 @@ def get_audit_scores(html_path, block_id, wait_for="svg", model="sonnet"):
     # Run audit pipeline
     audit_script = PROJ / "scripts" / "run-audit-pipeline.py"
     block_dir = html_path.parent
-    bid_num = block_id.split("-")[0]
 
     # Clear previous audit tmp files for this block to force re-audit
     audit_tmp = PROJ / "temp" / "audit-screenshots" / "audit-tmp" / "iterate"
@@ -58,7 +57,7 @@ def get_audit_scores(html_path, block_id, wait_for="svg", model="sonnet"):
 
     r = subprocess.run(
         ["python3", str(audit_script),
-         "--blocks", bid_num,
+         "--blocks", block_id,
          "--block-set", "iterate",
          "--block-dir", str(block_dir),
          "--model", model],
