@@ -37,6 +37,8 @@
   .col-link { text-align: center; width: 50px; }
   .col-link a { color: var(--color-link); text-decoration: none; font-size: 12px; }
   .col-link a:hover { text-decoration: underline; }
+  .col-link .cell-wrap { display: inline-flex; align-items: center; gap: 2px; }
+  .col-link .spark-bars { vertical-align: middle; }
   a.status-fail { color: var(--color-danger, #d33); font-size: 12px; text-decoration: none; }
   a.status-fail:hover { color: var(--color-danger, #d33); text-decoration: underline; }
   .block-table thead th[colspan] { text-align: center; border-bottom: 1px solid var(--color-border-light); }
@@ -66,6 +68,9 @@
   .audit-mid { background: #fff8e1; color: #f57f17; }
   .audit-low { background: #fde; color: #d33; }
   .audit-composite { font-weight: 600; }
+  .card-spark { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--color-border-light, #eee); }
+  .card-spark-label { font-size: 10px; color: var(--color-text-faint, #999); margin-bottom: 2px; }
+  .card-spark svg { display: block; }
 </style>
 </head>
 <body>
@@ -119,7 +124,75 @@
     document.body.appendChild(card);
     let cardTimer = null;
 
-    function showCard(el, d) {
+    const versionKeys = [
+      ["v0_opus", "v0 op", "#7b68ee"],
+      ["v0_gemini", "v0 ge", "#4ecdc4"],
+      ["v1_sonnet", "v1 so", "#ff6b6b"],
+      ["v1_gemini", "v1 ge", "#4ecdc4"],
+      ["v2_opus", "v2 op", "#7b68ee"],
+      ["v2_opus_noskills", "v2 op∅", "#b8a9f0"],
+      ["v2_sonnet", "v2 so", "#ff6b6b"],
+      ["v2_sonnet_noskills", "v2 so∅", "#ffb3b3"],
+      ["v2_gemini", "v2 ge", "#4ecdc4"],
+      ["v2_gemini_noskills", "v2 ge∅", "#a8e6e0"],
+    ];
+
+    function barColor(v) {
+      return v >= 8 ? "#2e7d32" : v >= 6 ? "#f9a825" : "#d33";
+    }
+
+    function sparkAuditBars(dims) {
+      // Horizontal bar chart: 4 bars, scale 0-10
+      const w = 240, barH = 12, gap = 3, labelW = 55, maxBarW = w - labelW - 24;
+      const h = dims.length * (barH + gap) - gap;
+      const bars = dims.map((d, i) => {
+        const y = i * (barH + gap);
+        const bw = (d.value / 10) * maxBarW;
+        return `<text x="${labelW - 4}" y="${y + barH - 2}" text-anchor="end" font-size="9" fill="currentColor" opacity="0.5">${d.label}</text>` +
+          `<rect x="${labelW}" y="${y}" width="${maxBarW}" height="${barH}" rx="2" fill="currentColor" opacity="0.07"/>` +
+          `<rect x="${labelW}" y="${y}" width="${bw}" height="${barH}" rx="2" fill="${barColor(d.value)}"/>` +
+          `<text x="${labelW + bw + 3}" y="${y + barH - 2}" font-size="9" fill="currentColor" opacity="0.6">${d.value}</text>`;
+      }).join("");
+      return `<div class="card-spark"><svg width="${w}" height="${h}" style="overflow:visible">${bars}</svg></div>`;
+    }
+
+    function sparkVersionDots(block) {
+      // Dot strip comparing composite audit scores across all versions
+      const pts = versionKeys
+        .filter(([k]) => block[k] && typeof block[k] === "object" && block[k].audit_composite != null)
+        .map(([k, label, color]) => ({ label, color, value: block[k].audit_composite }));
+      if (pts.length < 2) return "";
+      const w = 240, pad = 20, plotW = w - pad * 2;
+      // Sort by value for consistent stagger
+      pts.sort((a, b) => a.value - b.value);
+      // Stagger labels when dots are close
+      const dotY = 11;
+      pts.forEach((p, i) => {
+        p.x = pad + (p.value / 10) * plotW;
+        p.labelRow = 0;
+      });
+      // Assign label rows to avoid overlap (check ~18px proximity)
+      for (let i = 1; i < pts.length; i++) {
+        if (Math.abs(pts[i].x - pts[i - 1].x) < 18) {
+          pts[i].labelRow = (pts[i - 1].labelRow + 1) % 2;
+        }
+      }
+      const maxRow = Math.max(...pts.map(p => p.labelRow));
+      const h = 20 + (maxRow + 1) * 10;
+      const dots = pts.map(p => {
+        const ly = 22 + p.labelRow * 10;
+        return `<circle cx="${p.x}" cy="${dotY}" r="4" fill="${p.color}" stroke="#fff" stroke-width="1"/>` +
+          `<text x="${p.x}" y="${ly}" text-anchor="middle" font-size="8" fill="currentColor" opacity="0.5">${p.label}</text>`;
+      }).join("");
+      const ticks = [0, 5, 10].map(v => {
+        const x = pad + (v / 10) * plotW;
+        return `<line x1="${x}" y1="4" x2="${x}" y2="18" stroke="currentColor" opacity="0.1"/>` +
+          `<text x="${x}" y="3" text-anchor="middle" font-size="7" fill="currentColor" opacity="0.3">${v}</text>`;
+      }).join("");
+      return `<div class="card-spark"><div class="card-spark-label">across versions</div><svg width="${w}" height="${h}" style="overflow:visible">${ticks}${dots}</svg></div>`;
+    }
+
+    function showCard(el, d, block) {
       if (!d || typeof d === "string") {
         card.innerHTML = `<div class="card-status pass">${(d || "").toUpperCase()}</div>`;
       } else {
@@ -157,12 +230,20 @@
         const compositeHtml = d.audit_composite != null
           ? `<div class="card-row"><span class="label">audit</span> <span class="audit-composite">${d.audit_composite.toFixed(1)}</span></div>` : "";
 
+        // Spark bar chart for audit dimensions
+        const auditBarData = auditDims
+          .filter(([k]) => d[k] != null)
+          .map(([k, label]) => ({ label, value: d[k] }));
+        const auditSparkHtml = auditBarData.length ? sparkAuditBars(auditBarData) : "";
+
         card.innerHTML = `
           <div class="card-status ${status}">${status === "fail" ? "FAIL" + (d.error ? ": " + d.error : "") : "PASS"}</div>
           ${rows.map(r => `<div class="card-row">${r}</div>`).join("")}
           ${compositeHtml}
+          ${auditSparkHtml}
           ${auditParts.length ? `<div class="card-audit">${auditParts.join(" ")}</div>` : ""}
-          ${skillsHtml.length ? `<div class="card-skills">${skillsHtml.join(" · ")}</div>` : ""}`;
+          ${skillsHtml.length ? `<div class="card-skills">${skillsHtml.join(" · ")}</div>` : ""}
+          ${block ? sparkVersionDots(block) : ""}`;
       }
       const r = el.getBoundingClientRect();
       card.style.display = "";
@@ -183,8 +264,9 @@
       if (!a) return;
       clearTimeout(cardTimer);
       const [bidx, key] = a.dataset.vc.split("|");
-      const d = blocks[+bidx]?.[key];
-      if (d) showCard(a, d);
+      const b = blocks[+bidx];
+      const d = b?.[key];
+      if (d) showCard(a, d, b);
     });
     document.addEventListener("pointerout", e => {
       if (e.target.closest("[data-vc]")) cardTimer = setTimeout(hideCard, 200);
@@ -192,14 +274,31 @@
     card.addEventListener("pointerover", () => clearTimeout(cardTimer));
     card.addEventListener("pointerout", () => cardTimer = setTimeout(hideCard, 200));
 
+    function miniAuditSvg(d) {
+      if (!d || typeof d === "string") return "";
+      const dims = [d.audit_visual_critic, d.audit_encoding_integrity, d.audit_stress_test, d.audit_cognitive_load];
+      if (dims.every(v => v == null)) return "";
+      const bw = 4, gap = 1, maxH = 14, w = dims.length * (bw + gap) - gap;
+      const bars = dims.map((v, i) => {
+        if (v == null) return "";
+        const h = Math.max(1, (v / 10) * maxH);
+        const x = i * (bw + gap);
+        const y = maxH - h;
+        const fill = v >= 8 ? "#2e7d32" : v >= 6 ? "#f9a825" : "#d33";
+        return `<rect x="${x}" y="${y}" width="${bw}" height="${h}" rx="1" fill="${fill}"/>`;
+      }).join("");
+      return `<svg class="spark-bars" width="${w}" height="${maxH}" style="display:inline-block">${bars}</svg>`;
+    }
+
     function vcell(b, key, dir) {
       const d = b[key];
       if (!d) return "";
       const status = typeof d === "string" ? d : d.status;
       if (!status) return "";
       const vc = `data-vc="${blocks.indexOf(b)}|${key}"`;
-      if (status === "pass") return `<a href="${dir}/${b.id}.html" ${vc}>\u2713</a>`;
-      if (status === "fail") return `<a href="${dir}/failures/${b.id}.html" class="status-fail" ${vc}>\u2717</a>`;
+      const spark = miniAuditSvg(d);
+      if (status === "pass") return `<span class="cell-wrap"><a href="${dir}/${b.id}.html" ${vc}>\u2713</a>${spark}</span>`;
+      if (status === "fail") return `<span class="cell-wrap"><a href="${dir}/failures/${b.id}.html" class="status-fail" ${vc}>\u2717</a>${spark}</span>`;
       return "";
     }
 
