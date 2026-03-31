@@ -17,14 +17,14 @@ import time
 from pathlib import Path
 
 from iterate_lib import (
-    PROJ, append_tsv, check_convergence, compute_diff, decide_block,
+    PROJ, append_tsv, check_convergence, compute_diff, decide_block, decide_redesign,
     ensure_iterations_dir, generate_progress_html, git_commit, git_sha,
     git_squash_merge, next_experiment_id, render_block, update_best,
     worktree_create, worktree_is_active, worktree_remove, write_experiment,
 )
 
 MANIFEST = json.loads((PROJ / "blocks" / "manifest.json").read_text())
-PROPOSER_TEMPLATE = (PROJ / "scripts" / "proposer-prompts" / "block-lines.md").read_text()
+PROPOSER_DIR = PROJ / "scripts" / "proposer-prompts"
 CLAUDE_BIN = shutil.which("claude") or "/usr/local/share/npm-global/bin/claude"
 
 
@@ -153,7 +153,17 @@ def main():
     ap.add_argument("--model", default="sonnet", help="Model for auditing")
     ap.add_argument("--convergence-discards", type=int, default=3)
     ap.add_argument("--delay", type=float, default=5.0, help="Seconds between API calls")
+    ap.add_argument("--proposer", default="block-lines",
+                    help="Proposer prompt template name (block-lines, block-redesign)")
     args = ap.parse_args()
+
+    # Load proposer template
+    proposer_path = PROPOSER_DIR / f"{args.proposer}.md"
+    if not proposer_path.exists():
+        print(f"Proposer template not found: {proposer_path}"); sys.exit(1)
+    global PROPOSER_TEMPLATE
+    PROPOSER_TEMPLATE = proposer_path.read_text()
+    is_redesign = args.proposer == "block-redesign"
 
     block = find_block(args.target)
     if not block:
@@ -282,7 +292,10 @@ def main():
         new_composite = new_scores["composite"]
 
         # Decide
-        decision, reason = decide_block(current_composite, new_composite, current_lines, new_lines)
+        if is_redesign:
+            decision, reason = decide_redesign(current_composite, new_composite, current_lines, new_lines)
+        else:
+            decision, reason = decide_block(current_composite, new_composite, current_lines, new_lines)
 
         delta = new_lines - current_lines
         description = f"{reason} (composite {current_composite}→{new_composite})"

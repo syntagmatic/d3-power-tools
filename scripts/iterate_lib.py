@@ -168,6 +168,17 @@ def decide_block(composite_before, composite_after, lines_before, lines_after):
     return "keep", f"-{lines_before - lines_after} lines"
 
 
+def decide_redesign(composite_before, composite_after, lines_before, lines_after):
+    """Redesign track: optimize composite, constrain LOC growth."""
+    line_growth = lines_after - lines_before
+    if line_growth > 20:
+        return "discard", f"+{line_growth} lines (max +20)"
+    composite_delta = composite_after - composite_before
+    if composite_delta < 0.1:
+        return "discard", "no quality improvement"
+    return "keep", f"+{composite_delta:.1f} composite"
+
+
 def decide_prompt(time_before, time_after, features_pass):
     """Prompt track: optimize gen time, constrain features."""
     if not features_pass:
