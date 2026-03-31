@@ -29,6 +29,7 @@
   .dot-discard { fill: #bbb; cursor: pointer; } .dot-discard:hover { r: 6; }
   .dot-baseline { fill: #1565c0; cursor: pointer; } .dot-baseline:hover { r: 6; }
   .best-line { stroke: #2e7d32; stroke-width: 1.5; fill: none; }
+  .chart-legend text { font-size: 10px; fill: #666; }
   .axis text { font-size: 11px; fill: #666; }
   .axis line, .axis path { stroke: #ddd; }
 
@@ -80,7 +81,7 @@
 </head>
 <body>
 <h1><b>Iterations</b></h1>
-<p class="page-meta">200 experiments across 10 targets &middot; generated 2026-03-31 17:05</p>
+<p class="page-meta">200 experiments across 10 targets &middot; generated 2026-03-31 17:11</p>
 <div class="nav" id="nav"></div>
 <div id="content"></div>
 <script>
@@ -117,15 +118,30 @@ for (const [key, data] of groupEntries) {
   header.append("a").attr("class", "target-title")
     .attr("href", `../../blocks/${target}.html`).text(target);
 
-  // Infer run type from keep reasons: "+X composite" = redesign, "-X lines" = refactor
-  const keepReasons = data.filter(d => d.decision === "keep").map(d => d.description || "");
-  const isRedesign = keepReasons.some(r => /composite/.test(r) && !/lines/.test(r));
-  const runType = isRedesign ? "redesign" : "refactor";
-  header.append("span").attr("class", `target-badge badge-${track}`).text(track);
-  header.append("span").attr("class", `target-badge badge-${runType}`).text(runType);
-
   // data is reversed (newest first) for the table; chrono is oldest-first for the chart
   const chrono = [...data].reverse();
+
+  // Segment into runs (split on baselines), infer run type per segment
+  const runs = [];
+  chrono.forEach((d, i) => {
+    if (d.decision === "baseline" || i === 0) runs.push({ start: i, end: i, type: "refactor", exps: [] });
+    runs[runs.length - 1].end = i;
+    runs[runs.length - 1].exps.push(d);
+  });
+  runs.forEach(run => {
+    const keeps = run.exps.filter(d => d.decision === "keep").map(d => d.description || "");
+    if (keeps.some(r => /composite/.test(r) && !/lines/.test(r))) run.type = "redesign";
+  });
+  // Tag each experiment with its run type
+  const runTypeByIdx = new Map();
+  runs.forEach(run => run.exps.forEach((d, j) => runTypeByIdx.set(run.start + j, run.type)));
+
+  // Badges: one per distinct run type
+  header.append("span").attr("class", `target-badge badge-${track}`).text(track);
+  const runTypes = [...new Set(runs.map(r => r.type))];
+  runTypes.forEach(rt => header.append("span").attr("class", `target-badge badge-${rt}`).text(rt));
+  const hasRedesign = runTypes.includes("redesign");
+
   const keeps = data.filter(d => d.decision === "keep");
   const discards = data.filter(d => d.decision === "discard");
   const oldest = chrono[0], newest = chrono[chrono.length - 1];
@@ -134,7 +150,7 @@ for (const [key, data] of groupEntries) {
   const meta = section.append("div").attr("class", "target-meta");
   meta.append("span")
     .text(`${data.length} experiments · ${keeps.length} kept · ${discards.length} discarded · ${metricLabel}: ${oldest.metric}→${currentBest}`);
-  if (isRedesign && keeps.length > 0) {
+  if (hasRedesign && keeps.length > 0) {
     meta.append("span").text(" · ");
     meta.append("a")
       .attr("href", `/evals/iterations/baselines/${target}.html`)
@@ -157,6 +173,19 @@ for (const [key, data] of groupEntries) {
   const yExtent = d3.extent(chrono, d => d.metric);
   const y = d3.scaleLinear().domain(yExtent).nice().range([height, 0]);
 
+  // Background bands per run segment
+  if (runs.length > 1 || runs[0]?.type === "redesign") {
+    runs.forEach(run => {
+      const x0 = run.start === 0 ? -margin.left : (x(run.start - 1) + x(run.start)) / 2;
+      const x1 = run.end === chrono.length - 1 ? width + margin.right : (x(run.end) + x(run.end + 1)) / 2;
+      svg.append("rect")
+        .attr("x", x0).attr("y", -margin.top)
+        .attr("width", x1 - x0).attr("height", height + margin.top + margin.bottom)
+        .attr("fill", run.type === "redesign" ? "#fff3e0" : "#e3f2fd")
+        .attr("opacity", 0.5);
+    });
+  }
+
   svg.append("g").attr("class", "axis").attr("transform", `translate(0,${height})`)
     .call(d3.axisBottom(x).ticks(Math.min(chrono.length, 8)).tickFormat(d3.format("d")));
   svg.append("g").attr("class", "axis").call(d3.axisLeft(y).ticks(4));
@@ -169,9 +198,32 @@ for (const [key, data] of groupEntries) {
   svg.append("path").attr("class", "best-line")
     .attr("d", d3.line().x(d => x(d.i)).y(d => y(d.best))(bestPts));
 
-  svg.selectAll(".dot").data(chrono).join("circle")
-    .attr("cx", (d, i) => x(i)).attr("cy", d => y(d.metric)).attr("r", 4)
-    .attr("class", d => `dot-${d.decision === "keep" ? "keep" : d.decision === "baseline" ? "baseline" : "discard"}`);
+  // Dots: circles for refactor, diamonds for redesign
+  const diamond = d3.symbol().type(d3.symbolDiamond).size(48);
+  svg.selectAll(".dot").data(chrono).join(enter => {
+    return enter.append(d => {
+      const rt = runTypeByIdx.get(chrono.indexOf(d));
+      return document.createElementNS("http://www.w3.org/2000/svg", rt === "redesign" ? "path" : "circle");
+    });
+  })
+    .each(function(d, i) {
+      const rt = runTypeByIdx.get(i);
+      const cls = `dot-${d.decision === "keep" ? "keep" : d.decision === "baseline" ? "baseline" : "discard"}`;
+      if (rt === "redesign") {
+        d3.select(this).attr("d", diamond).attr("transform", `translate(${x(i)},${y(d.metric)})`).attr("class", cls);
+      } else {
+        d3.select(this).attr("cx", x(i)).attr("cy", y(d.metric)).attr("r", 4).attr("class", cls);
+      }
+    });
+
+  // Legend (only when both run types present)
+  if (runTypes.length > 1) {
+    const lg = svg.append("g").attr("class", "chart-legend").attr("transform", `translate(${width - 130},${-2})`);
+    lg.append("rect").attr("width", 10).attr("height", 10).attr("fill", "#e3f2fd").attr("opacity", 0.7);
+    lg.append("text").attr("x", 14).attr("y", 9).text("refactor");
+    lg.append("rect").attr("x", 66).attr("width", 10).attr("height", 10).attr("fill", "#fff3e0").attr("opacity", 0.7);
+    lg.append("text").attr("x", 80).attr("y", 9).text("redesign");
+  }
 
   // --- Experiment table ---
   const table = section.append("table");
