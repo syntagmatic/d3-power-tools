@@ -109,7 +109,7 @@
   #colors .brush .selection { fill: #fff; fill-opacity: 0.1; stroke: #aaa; stroke-width: 1; }
 
   /* --- Network & Colors --- */
-  #network canvas, #colors canvas, #network svg, #colors svg, #right-panel > .panel-view canvas, #right-panel > .panel-view svg {
+  #network canvas, #colors canvas, #network svg, #colors svg {
     position: absolute;
     top: 0;
     left: 0;
@@ -123,6 +123,8 @@
   #blocklist {
     overflow-y: auto;
     overflow-x: hidden;
+    height: 100%;
+    padding-top: 24px;
   }
   .block-row {
     display: flex;
@@ -220,7 +222,7 @@
   }
   .panel-tab:hover { color: #bbb; }
   .panel-tab.active { background: #333; color: #ccc; border-color: #666; }
-  .panel-view { display: none; position: absolute; inset: 0; }
+  .panel-view { display: none; position: absolute; inset: 0; overflow: hidden; }
   .panel-view.active { display: block; }
 
   /* --- Thumbnail wall --- */
@@ -279,19 +281,20 @@
     <div id="network" class="panel">
       <span class="panel-label">D3 API co-occurrence</span>
     </div>
-    <div id="right-panel" class="panel">
-      <span class="panel-label" id="right-label">Color usage</span>
-      <div class="panel-tabs">
-        <button class="panel-tab active" data-view="colors">Colors</button>
-        <button class="panel-tab" data-view="thumbs">Thumbnails</button>
-      </div>
-      <div id="colors" class="panel-view active"></div>
-      <div id="thumbs" class="panel-view">
-        <div class="thumb-wall" id="thumb-wall"></div>
-      </div>
+    <div id="colors" class="panel">
+      <span class="panel-label" id="colors-label">Color usage</span>
     </div>
   </div>
-  <div id="blocklist" class="panel"></div>
+  <div id="bottom-panel" class="panel">
+    <div class="panel-tabs">
+      <button class="panel-tab" data-view="blocklist">List</button>
+      <button class="panel-tab active" data-view="thumbs">Thumbnails</button>
+    </div>
+    <div id="blocklist" class="panel-view"></div>
+    <div id="thumbs" class="panel-view active">
+      <div class="thumb-wall" id="thumb-wall"></div>
+    </div>
+  </div>
 </div>
 
 <div class="loading-overlay" id="loading">
@@ -491,28 +494,30 @@ function createNetwork(container, blocks, graph, bitFilter) {
 
   const nodes = graph.nodes.map(d => ({ ...d }));
   const links = graph.links.map(d => ({ ...d }));
-  const rScale = d3.scaleSqrt().domain(d3.extent(nodes, d => d.count)).range([3, 16]);
-  const wScale = d3.scaleLinear().domain(d3.extent(links, d => d.weight)).range([0.3, 2.5]);
+  const rScale = d3.scaleSqrt().domain(d3.extent(nodes, d => d.count)).range([3, 20]);
+  const wScale = d3.scaleLinear().domain(d3.extent(links, d => d.weight)).range([0.5, 8]);
+  // Scale forces to panel size so nodes spread to fill
+  const forcePad = Math.min(innerW, innerH) * 0.1;
   const simulation = d3.forceSimulation(nodes)
     .force("link", d3.forceLink(links).id(d => d.id)
-      .distance(d => 60 / Math.sqrt(Math.max(1, d.weight / 50))))
-    .force("charge", d3.forceManyBody().strength(-80).distanceMax(250))
+      .distance(d => Math.min(innerW, innerH) * 0.15 / Math.sqrt(Math.max(1, d.weight / 50))))
+    .force("charge", d3.forceManyBody().strength(-350).distanceMax(Math.max(innerW, innerH)))
     .force("center", d3.forceCenter(innerW / 2, innerH / 2))
-    .force("collide", d3.forceCollide(d => rScale(d.count) + 3))
-    .force("x", d3.forceX(innerW / 2).strength(0.05))
-    .force("y", d3.forceY(innerH / 2).strength(0.05))
+    .force("collide", d3.forceCollide(d => rScale(d.count) + 6))
+    .force("x", d3.forceX(innerW / 2).strength(0.02))
+    .force("y", d3.forceY(innerH / 2).strength(0.02))
     .stop();
 
-  for (let i = 0; i < 300; i++) simulation.tick();
+  for (let i = 0; i < 400; i++) simulation.tick();
   for (const n of nodes) {
     const r = rScale(n.count);
-    n.x = Math.max(r, Math.min(innerW - r, n.x));
-    n.y = Math.max(r, Math.min(innerH - r, n.y));
+    n.x = Math.max(r + forcePad, Math.min(innerW - r - forcePad, n.x));
+    n.y = Math.max(r + forcePad, Math.min(innerH - r - forcePad, n.y));
   }
 
   const { ctx, svg } = setupLayers(el, width, height);
 
-  const topNodes = nodes.slice().sort((a, b) => b.count - a.count).slice(0, 15);
+  const topNodes = nodes.slice().sort((a, b) => b.count - a.count).slice(0, 20);
   svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`)
     .selectAll(".node-label").data(topNodes).join("text")
     .attr("class", "node-label").attr("text-anchor", "middle")
@@ -559,6 +564,11 @@ function createNetwork(container, blocks, graph, bitFilter) {
     }
   }
 
+  // Precompute link lookup for fast co-occurrence counting
+  const linkKey = (a, b) => a < b ? a + "|" + b : b + "|" + a;
+  const linkMap = new Map();
+  for (const l of links) linkMap.set(linkKey(l.source.id, l.target.id), l);
+
   function draw() {
     ctx.clearRect(0, 0, width, height);
     ctx.save();
@@ -568,14 +578,32 @@ function createNetwork(container, blocks, graph, bitFilter) {
     const indices = state.filteredIndices;
     const hasFilter = indices !== null;
 
-    // Compute which nodes are "hot" — used by filtered blocks
-    const hotNodes = new Set();
+    // Recount node usage and co-occurrence within filtered set
+    const filteredCounts = new Map();
+    const filteredCooc = new Map();
     if (hasFilter) {
       for (const n of nodes) {
         const bset = apiToBlocks.get(n.id);
-        if (bset) for (const bi of bset) if (indices.has(bi)) { hotNodes.add(n.id); break; }
+        let c = 0;
+        if (bset) for (const bi of bset) if (indices.has(bi)) c++;
+        filteredCounts.set(n.id, c);
+      }
+      // Recount co-occurrence for links
+      for (const b of blocks) {
+        if (!indices.has(b.idx)) continue;
+        const funcs = Object.keys(b.api).filter(f => apiToBlocks.has(f));
+        for (let i = 0; i < funcs.length; i++) for (let j = i + 1; j < funcs.length; j++) {
+          const key = linkKey(funcs[i], funcs[j]);
+          if (linkMap.has(key)) filteredCooc.set(key, (filteredCooc.get(key) || 0) + 1);
+        }
       }
     }
+
+    // Dynamic scales for filtered counts
+    const maxFilteredCount = hasFilter ? Math.max(1, ...filteredCounts.values()) : 1;
+    const maxFilteredCooc = hasFilter && filteredCooc.size ? Math.max(1, ...filteredCooc.values()) : 1;
+    const rFiltered = d3.scaleSqrt().domain([0, maxFilteredCount]).range([2, 20]);
+    const wFiltered = d3.scaleLinear().domain([0, maxFilteredCooc]).range([0.3, 8]);
 
     // Selected-node neighbors
     const connectedNodes = new Set(selectedApi ? [selectedApi] : []);
@@ -585,30 +613,30 @@ function createNetwork(container, blocks, graph, bitFilter) {
     }
 
     for (const l of links) {
+      const key = linkKey(l.source.id, l.target.id);
       const selActive = !selectedApi ||
         (connectedNodes.has(l.source.id) && connectedNodes.has(l.target.id));
-      const filterActive = !hasFilter ||
-        (hotNodes.has(l.source.id) && hotNodes.has(l.target.id));
-      const active = selActive && filterActive;
+      const fc = hasFilter ? (filteredCooc.get(key) || 0) : l.weight;
+      const active = selActive && (!hasFilter || fc > 0);
       ctx.beginPath();
       ctx.moveTo(l.source.x, l.source.y);
       ctx.lineTo(l.target.x, l.target.y);
-      ctx.strokeStyle = active ? "rgba(68,119,170,0.4)" : "rgba(68,119,170,0.06)";
-      ctx.lineWidth = active ? wScale(l.weight) : 0.3;
+      ctx.strokeStyle = active ? "rgba(68,119,170,0.5)" : "rgba(68,119,170,0.04)";
+      ctx.lineWidth = active ? (hasFilter ? wFiltered(fc) : wScale(l.weight)) : 0.3;
       ctx.stroke();
     }
 
     for (const n of nodes) {
-      const r = rScale(n.count);
+      const fc = hasFilter ? (filteredCounts.get(n.id) || 0) : n.count;
+      const r = hasFilter ? rFiltered(fc) : rScale(n.count);
       const selActive = !selectedApi || connectedNodes.has(n.id);
-      const filterActive = !hasFilter || hotNodes.has(n.id);
-      const active = selActive && filterActive;
+      const active = selActive && (!hasFilter || fc > 0);
       const hovered = n === hoveredNode;
       const selected = n.id === selectedApi;
       ctx.beginPath();
       ctx.arc(n.x, n.y, hovered ? r + 2 : r, 0, Math.PI * 2);
       ctx.fillStyle = selected ? "#4477AA" : hovered ? "#6699CC"
-        : active ? "rgba(68,119,170,0.7)" : "rgba(68,119,170,0.15)";
+        : active ? "rgba(68,119,170,0.8)" : "rgba(68,119,170,0.1)";
       ctx.fill();
       if (selected) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke(); }
     }
@@ -621,8 +649,7 @@ function createNetwork(container, blocks, graph, bitFilter) {
 }
 function createColorView(container, blocks, colorMap, bitFilter) {
   const el = document.getElementById(container);
-  const parent = el.closest(".panel");
-  const { width, height } = parent.getBoundingClientRect();
+  const { width, height } = el.getBoundingClientRect();
   const margin = { top: 28, right: 12, bottom: 24, left: 40 };
   const innerW = width - margin.left - margin.right;
   const innerH = height - margin.top - margin.bottom;
@@ -769,15 +796,13 @@ async function main() {
   loadingEl.classList.add("hidden");
   setTimeout(() => loadingEl.remove(), 500);
 
-  // Tab switching
-  const tabs = document.querySelectorAll("#right-panel .panel-tab");
-  const views = document.querySelectorAll("#right-panel .panel-view");
-  const rightLabel = document.getElementById("right-label");
+  // Tab switching (bottom panel)
+  const tabs = document.querySelectorAll("#bottom-panel .panel-tab");
+  const bottomViews = document.querySelectorAll("#bottom-panel .panel-view");
   tabs.forEach(tab => tab.addEventListener("click", () => {
     const target = tab.dataset.view;
     tabs.forEach(t => t.classList.toggle("active", t === tab));
-    views.forEach(v => v.classList.toggle("active", v.id === target));
-    rightLabel.textContent = target === "colors" ? "Color usage" : "Thumbnails";
+    bottomViews.forEach(v => v.classList.toggle("active", v.id === target));
     if (target === "thumbs") updateThumbWall();
   }));
 
@@ -790,13 +815,14 @@ async function main() {
     thumbWall.innerHTML = withThumbs.map(b =>
       `<img src="${b.thumbnail}" loading="lazy" title="${b.description || b.userId + '/' + b.id}" onerror="this.remove()">`
     ).join("");
-    rightLabel.textContent = `Thumbnails (${withThumbs.length})`;
   }
   updaters.thumbs = () => {
-    if (document.querySelector('#right-panel .panel-tab[data-view="thumbs"]').classList.contains("active")) {
+    if (document.querySelector('#bottom-panel .panel-tab[data-view="thumbs"]').classList.contains("active")) {
       updateThumbWall();
     }
   };
+  // Render initial thumbnail wall
+  updateThumbWall();
 
   try {
     const rawColors = await fetchWithProgress(
@@ -805,9 +831,9 @@ async function main() {
     );
     const colorMap = new Map(rawColors.filter(d => d.colors && d.id).map(d => [d.id, d.colors]));
     colorParts = createColorView("colors", blocks, colorMap, bitFilter);
-    d3.select("#right-label").text(`Color usage (${d3.format(",")(colorMap.size)} blocks)`);
+    d3.select("#colors-label").text(`Color usage (${d3.format(",")(colorMap.size)} blocks)`);
   } catch (e) {
-    d3.select("#right-label").text("Color data unavailable");
+    d3.select("#colors-label").text("Color data unavailable");
     console.warn("Failed to load colors:", e);
   }
 }
