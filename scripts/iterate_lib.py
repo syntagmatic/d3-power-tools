@@ -613,11 +613,11 @@ for (const [key, data] of groupEntries) {{
   if (isRedesign && keeps.length > 0) {{
     meta.append("span").text(" · ");
     meta.append("a")
-      .attr("href", `baselines/${{target}}.html`)
+      .attr("href", `/evals/iterations/baselines/${{target}}.html`)
       .attr("target", "_blank").text("before");
     meta.append("span").text(" → ");
     meta.append("a")
-      .attr("href", `../../blocks/${{target}}.html`)
+      .attr("href", `/blocks/${{target}}.html`)
       .attr("target", "_blank").text("after");
   }}
 
