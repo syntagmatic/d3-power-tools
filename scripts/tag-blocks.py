@@ -132,8 +132,22 @@ Read the file, then output the JSON."""
     except (json.JSONDecodeError, ValueError):
         result_text = r.stdout or ""
 
-    # Find JSON in the result text
-    for candidate in [result_text, r.stdout]:
+    # The result field may itself be a JSON string that needs parsing
+    candidates = [result_text]
+    if result_text:
+        try:
+            parsed_inner = json.loads(result_text)
+            if isinstance(parsed_inner, dict):
+                candidates.insert(0, parsed_inner)
+        except (json.JSONDecodeError, ValueError):
+            pass
+    candidates.append(r.stdout or "")
+
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            if "tags" in candidate:
+                return candidate
+            continue
         if not candidate:
             continue
         # Try to find JSON object boundaries
