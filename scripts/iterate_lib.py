@@ -692,7 +692,7 @@ for (const [key, data] of groupEntries) {{
     const flagsCell = tr.append("td").attr("class", "flags-cell");
     if (d.flags && d.flags.length) {{
       d.flags.forEach(f => {{
-        const short = f.split("(")[0].trim();
+        const short = f.split(" — ")[0].split("(")[0].trim();
         flagsCell.append("span").attr("class", "flag-tag-sm").attr("title", f).text(short);
       }});
     }} else flagsCell.text("–");
