@@ -240,6 +240,7 @@ def cross_validate(X, y, k=5):
 def main():
     ap = argparse.ArgumentParser(description="Train score-prediction discriminator")
     ap.add_argument("--target", default="composite", help="Score dimension to predict")
+    ap.add_argument("--top-k", type=int, default=None, help="Prune to top-k features by importance")
     ap.add_argument("--out", default=None, help="Write model + results to JSON")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
@@ -280,7 +281,25 @@ def main():
 
     # Fit model on all data
     model = fit_linear(X, y)
-    print(f"=== Ridge Regression (all data) ===")
+    active_names = list(FEATURE_NAMES)
+
+    # Feature pruning: fit all, then refit with top-k
+    if args.top_k and args.top_k < len(FEATURE_NAMES):
+        imp_all = sorted(zip(range(len(FEATURE_NAMES)), FEATURE_NAMES, model["importances"]),
+                         key=lambda x: -x[2])
+        keep_indices = [idx for idx, name, imp in imp_all[:args.top_k]]
+        keep_names = [name for idx, name, imp in imp_all[:args.top_k]]
+        dropped = [name for idx, name, imp in imp_all[args.top_k:]]
+        print(f"=== Feature Pruning: {len(FEATURE_NAMES)} → {args.top_k} ===")
+        print(f"Keeping: {', '.join(keep_names)}")
+        print(f"Dropped: {', '.join(dropped[:10])}{'...' if len(dropped) > 10 else ''}")
+        print()
+
+        X = [[row[i] for i in keep_indices] for row in X]
+        active_names = keep_names
+        model = fit_linear(X, y)
+
+    print(f"=== Ridge Regression ({len(active_names)} features) ===")
     print(f"R²: {model['r2']:.3f}")
     print(f"RMSE: {model['rmse']:.3f}")
 
@@ -291,7 +310,7 @@ def main():
     print(f"RMSE (CV): {cv_rmse:.3f}")
 
     # Feature importances
-    imp = list(zip(FEATURE_NAMES, model["importances"], model["coefs"]))
+    imp = list(zip(active_names, model["importances"], model["coefs"]))
     imp.sort(key=lambda x: -x[1])
     print(f"\n=== Feature Importances (|standardized coef|) ===")
     for name, importance, coef in imp[:15]:
@@ -316,7 +335,7 @@ def main():
             "target": args.target,
             "n_observations": len(observations),
             "n_training": len(X),
-            "feature_names": FEATURE_NAMES,
+            "feature_names": active_names,
             "model": {
                 "type": "ridge_regression",
                 "weights": model["weights"],
@@ -330,7 +349,7 @@ def main():
                 "cv_rmse": cv_rmse,
             },
             "feature_importances": {name: {"importance": imp, "coef": coef}
-                                     for name, imp, coef in zip(FEATURE_NAMES, model["importances"], model["coefs"])},
+                                     for name, imp, coef in zip(active_names, model["importances"], model["coefs"])},
             "predictions": {bid: {"actual": float(y[i]), "predicted": float(y_hat[i])}
                            for i, bid in enumerate(block_ids)},
         }
