@@ -83,14 +83,20 @@ def run_tag(block_set, model):
     return f"{ts}-{block_set.replace('/', '-')}-{model}"
 
 
+def _block_num(bid):
+    """Extract leading numeric prefix from block ID, or -1 if none."""
+    prefix = bid.split("-")[0]
+    return int(prefix) if prefix.isdigit() else -1
+
+
 def parse_block_range(spec):
     parts = spec.split("-", 1) if "-" in spec and not spec.startswith("0") else None
     if parts and len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
         lo, hi = int(parts[0]), int(parts[1])
-        return [b for b in MANIFEST["blocks"] if lo <= int(b["id"].split("-")[0]) <= hi]
+        return [b for b in MANIFEST["blocks"] if lo <= _block_num(b["id"]) <= hi]
     if spec.isdigit():
         num = int(spec)
-        return [b for b in MANIFEST["blocks"] if int(b["id"].split("-")[0]) == num]
+        return [b for b in MANIFEST["blocks"] if _block_num(b["id"]) == num]
     # Match by full ID or ID prefix
     return [b for b in MANIFEST["blocks"] if b["id"] == spec or b["id"].startswith(spec)]
 
