@@ -440,6 +440,7 @@ def generate_progress_html():
             "propose_time_s": e.get("propose_time_s"),
             "audit_time_s": e.get("audit_time_s"),
             "flags": e.get("scores", {}).get("flags", []),
+            "proposer_type": e.get("proposer_type", ""),
             "json_file": exp_file if (ITERATIONS_DIR / exp_file).exists() else None,
         })
 
@@ -605,8 +606,14 @@ for (const [key, data] of groupEntries) {{
     runs[runs.length - 1].exps.push(d);
   }});
   runs.forEach(run => {{
-    const keeps = run.exps.filter(d => d.decision === "keep").map(d => d.description || "");
-    if (keeps.some(r => /composite/.test(r) && !/lines/.test(r))) run.type = "redesign";
+    // Explicit proposer_type takes priority
+    const types = run.exps.map(d => d.proposer_type).filter(Boolean);
+    if (types.includes("block-redesign")) {{ run.type = "redesign"; return; }}
+    if (types.includes("block-lines")) return; // already "refactor"
+    // Fallback: infer from descriptions
+    const descs = run.exps.filter(d => d.decision !== "baseline").map(d => d.description || "");
+    if (descs.some(r => /composite/.test(r) && !/lines/.test(r)) ||
+        descs.every(r => /no quality improvement/.test(r))) run.type = "redesign";
   }});
   // Tag each experiment with its run type
   const runTypeByIdx = new Map();

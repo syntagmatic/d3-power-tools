@@ -240,6 +240,7 @@ def main():
                    if baseline_scores.get(k) is not None},
         "decision": "baseline",
         "git_sha": git_sha(),
+        "proposer_type": args.proposer,
     })
 
     print(f"  Baseline: {baseline_lines} lines, composite {baseline_composite}")
@@ -330,6 +331,7 @@ def main():
             "diff": diff_text,
             "proposer": proposer_explanation,
             "git_sha": git_sha(),
+            "proposer_type": args.proposer,
         })
 
         if decision == "keep":
