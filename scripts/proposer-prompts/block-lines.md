@@ -37,6 +37,12 @@ Bad changes:
 - Adding abstractions "for clarity" that increase line count
 - Changing the data or visual encoding
 
+## Watch out for
+
+- If the block uses brushing or force simulation, prioritize RAF coalescing and event debouncing — unthrottled update storms are the #1 stress_test failure
+- If the block uses geo projections, don't remove projection configuration or graticule setup — these are often wrongly identified as "dead code" but affect rendering correctness
+- Avoid increasing function_count — prefer inlining one-use helpers over extracting new ones
+
 ## Experiment history
 
 {{history}}

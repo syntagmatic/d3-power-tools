@@ -24,7 +24,7 @@ from iterate_lib import (
 )
 
 MANIFEST = json.loads((PROJ / "blocks" / "manifest.json").read_text())
-PROPOSER_TEMPLATE = (PROJ / "scripts" / "proposer-prompts" / "block.md").read_text()
+PROPOSER_TEMPLATE = (PROJ / "scripts" / "proposer-prompts" / "block-lines.md").read_text()
 CLAUDE_BIN = shutil.which("claude") or "/usr/local/share/npm-global/bin/claude"
 
 
