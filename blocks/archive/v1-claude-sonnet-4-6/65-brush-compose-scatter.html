@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Brush Composition Scatterplots</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #fafafa; font-family: system-ui, -apple-system, sans-serif; color: #333; }
+  .container { width: 1200px; margin: 0 auto; padding: 12px 0; }
+  header { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; padding: 0 0 6px; }
+  header h1 { font-size: 17px; font-weight: 700; letter-spacing: -0.3px; }
+  .subtitle { font-size: 12px; color: #777; margin-top: 2px; }
+  .controls { display: flex; align-items: center; gap: 12px; margin-left: auto; }
+  .mode-btn { padding: 3px 10px; border: 1.5px solid #4477AA; border-radius: 4px; cursor: pointer;
+    background: #fff; font-size: 12px; font-family: inherit; color: #4477AA; font-weight: 600;
+    transition: background 0.15s, color 0.15s; }
+  .mode-btn:hover { background: #4477AA; color: #fff; }
+  .mode-btn.active { background: #4477AA; color: #fff; }
+  .counter { font-size: 12px; color: #555; font-family: "SF Mono", Monaco, "Cascadia Code", monospace; }
+  .legend { display: flex; gap: 12px; font-size: 12px; color: #555; }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .legend-swatch { width: 10px; height: 10px; border-radius: 50%; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 4px; }
+  svg text { font-family: system-ui, -apple-system, sans-serif; }
+  .panel-label { font-size: 11px; font-weight: 600; fill: #444; }
+  .axis text { font-size: 10px; fill: #666; }
+  .axis line, .axis path { stroke: #ccc; }
+  .tick line { stroke: #e8e8e8; }
+  .badge-bg { rx: 4; }
+  .crosshair { stroke-dasharray: 3 2; pointer-events: none; }
+  .outlier-ring { fill: none; pointer-events: none; }
+  .outlier-flag { font-size: 9px; font-weight: 700; pointer-events: none;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace; }
+  .brush-g .selection { fill: #4477AA; fill-opacity: 0.08; stroke: #4477AA; stroke-width: 1.2; }
+  .brush-g .handle { fill: #4477AA; fill-opacity: 0.25; }
+  .anno-fade-in { opacity: 0; animation: fadeIn 0.3s ease-out forwards; }
+  @keyframes fadeIn { to { opacity: 1; } }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div>
+      <h1>Health Metrics: Brush Composition Explorer</h1>
+      <div class="subtitle">Brush any panel. Toggle union/intersection to compose selections across views.</div>
+    </div>
+    <div class="controls">
+      <button class="mode-btn active" id="unionBtn">Union</button>
+      <button class="mode-btn" id="interBtn">Intersect</button>
+      <span class="counter" id="counter">300 points</span>
+    </div>
+  </header>
+  <div class="legend" id="legend"></div>
+  <div class="grid" id="grid"></div>
+</div>
+<script>
+(() => {
+  // --- Tol palette ---
+  const TOL = ["#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE", "#AA3377", "#BBBBBB"];
+  const groups = ["Active", "Moderate", "Sedentary"];
+  const groupColor = new Map(groups.map((g, i) => [g, TOL[i]]));
+
+  // --- Legend ---
+  const legendDiv = d3.select("#legend");
+  groups.forEach((g, i) => {
+    const item = legendDiv.append("span").attr("class", "legend-item");
+    item.append("span").attr("class", "legend-swatch").style("background", TOL[i]);
+    item.append("span").text(g);
+  });
+
+  // --- Metric definitions ---
+  const metrics = ["height", "weight", "age", "resting_hr", "systolic_bp", "cholesterol", "vo2max"];
+  const metricLabel = {
+    height: "Height (cm)", weight: "Weight (kg)", age: "Age",
+    resting_hr: "Resting HR (bpm)", systolic_bp: "Systolic BP",
+    cholesterol: "Cholesterol (mg/dL)", vo2max: "VO2 Max"
+  };
+
+  // --- Synthetic data with realistic correlations ---
+  const N = 300;
+  const rng = d3.randomLcg(42);
+  const randn = () => {
+    let u = 0, v = 0;
+    while (!u) u = rng();
+    v = rng();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+  const data = d3.range(N).map(i => {
+    const gi = Math.floor(rng() * 3);
+    const g = groups[gi];
+    // Group-specific base profiles
+    const profiles = [
+      { height: 175, weight: 70, age: 32, resting_hr: 56, systolic_bp: 115, cholesterol: 175, vo2max: 48 },
+      { height: 170, weight: 80, age: 42, resting_hr: 70, systolic_bp: 128, cholesterol: 210, vo2max: 36 },
+      { height: 168, weight: 92, age: 48, resting_hr: 80, systolic_bp: 140, cholesterol: 245, vo2max: 26 }
+    ];
+    const p = profiles[gi];
+    const noise = () => randn();
+
+    let height = p.height + noise() * 9;
+    let weight = p.weight + noise() * 11;
+    let age = p.age + noise() * 10;
+    // Correlated: older -> higher BP, higher cholesterol
+    let cholesterol = p.cholesterol + (age - p.age) * 1.2 + noise() * 22;
+    let systolic_bp = p.systolic_bp + (cholesterol - p.cholesterol) * 0.15 + (age - p.age) * 0.5 + noise() * 8;
+    let resting_hr = p.resting_hr + (weight - p.weight) * 0.3 + noise() * 6;
+    // vo2max inversely correlated with resting HR and weight
+    let vo2max = p.vo2max - (resting_hr - p.resting_hr) * 0.4 - (weight - p.weight) * 0.2 + noise() * 5;
+
+    // Inject a few outliers
+    if (rng() < 0.03) { cholesterol += 60; systolic_bp += 20; }
+    if (rng() < 0.03) { vo2max += 18; resting_hr -= 15; }
+
+    return {
+      id: i, group: g,
+      height: clamp(Math.round(height * 10) / 10, 145, 205),
+      weight: clamp(Math.round(weight * 10) / 10, 48, 135),
+      age: clamp(Math.round(age), 18, 72),
+      resting_hr: clamp(Math.round(resting_hr), 40, 105),
+      systolic_bp: clamp(Math.round(systolic_bp), 90, 185),
+      cholesterol: clamp(Math.round(cholesterol), 120, 330),
+      vo2max: clamp(Math.round(vo2max * 10) / 10, 14, 65)
+    };
+  });
+
+  // --- Panel definitions: 3x2 grid ---
+  const panels = [
+    { x: "height", y: "weight" },
+    { x: "age", y: "cholesterol" },
+    { x: "vo2max", y: "resting_hr" },
+    { x: "cholesterol", y: "systolic_bp" },
+    { x: "weight", y: "vo2max" },
+    { x: "age", y: "systolic_bp" }
+  ];
+
+  // --- State ---
+  let mode = "union";
+  const brushSelections = new Map(); // panelIdx -> Set<id>
+
+  // --- Mode toggle ---
+  const unionBtn = d3.select("#unionBtn");
+  const interBtn = d3.select("#interBtn");
+  unionBtn.on("click", () => { mode = "union"; unionBtn.classed("active", true); interBtn.classed("active", false); updateAll(); });
+  interBtn.on("click", () => { mode = "intersect"; interBtn.classed("active", true); unionBtn.classed("active", false); updateAll(); });
+
+  // --- Layout ---
+  const cellW = 384, cellH = 310;
+  const margin = { top: 28, right: 18, bottom: 38, left: 50 };
+  const plotW = cellW - margin.left - margin.right;
+  const plotH = cellH - margin.top - margin.bottom;
+
+  // --- Build panels ---
+  const gridDiv = d3.select("#grid");
+  const panelState = [];
+
+  panels.forEach((spec, pi) => {
+    const svg = gridDiv.append("svg")
+      .attr("width", cellW).attr("height", cellH)
+      .style("background", "#fff")
+      .style("border-radius", "4px")
+      .style("border", "1px solid #e8e8e8");
+
+    const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+    // Scales - shared domain from full data
+    const sx = d3.scaleLinear()
+      .domain(d3.extent(data, d => d[spec.x])).nice()
+      .range([0, plotW]);
+    const sy = d3.scaleLinear()
+      .domain(d3.extent(data, d => d[spec.y])).nice()
+      .range([plotH, 0]);
+
+    // Gridlines
+    g.append("g").attr("class", "tick")
+      .selectAll("line").data(sy.ticks(5)).join("line")
+      .attr("x1", 0).attr("x2", plotW)
+      .attr("y1", d => sy(d)).attr("y2", d => sy(d));
+    g.append("g").attr("class", "tick")
+      .selectAll("line").data(sx.ticks(5)).join("line")
+      .attr("y1", 0).attr("y2", plotH)
+      .attr("x1", d => sx(d)).attr("x2", d => sx(d));
+
+    // Axes
+    const xAxis = g.append("g").attr("class", "axis")
+      .attr("transform", `translate(0,${plotH})`)
+      .call(d3.axisBottom(sx).ticks(5).tickSize(-3));
+    xAxis.select(".domain").remove();
+
+    const yAxis = g.append("g").attr("class", "axis")
+      .call(d3.axisLeft(sy).ticks(5).tickSize(-3));
+    yAxis.select(".domain").remove();
+
+    // Axis labels
+    svg.append("text")
+      .attr("x", margin.left + plotW / 2).attr("y", cellH - 6)
+      .attr("text-anchor", "middle").attr("font-size", 10).attr("fill", "#777")
+      .text(metricLabel[spec.x]);
+    svg.append("text")
+      .attr("transform", `translate(13,${margin.top + plotH / 2}) rotate(-90)`)
+      .attr("text-anchor", "middle").attr("font-size", 10).attr("fill", "#777")
+      .text(metricLabel[spec.y]);
+
+    // Panel title
+    svg.append("text").attr("class", "panel-label")
+      .attr("x", margin.left).attr("y", 16)
+      .text(`${metricLabel[spec.x]} vs ${metricLabel[spec.y]}`);
+
+    // Points
+    const dots = g.selectAll("circle.dot").data(data).join("circle")
+      .attr("class", "dot")
+      .attr("cx", d => sx(d[spec.x]))
+      .attr("cy", d => sy(d[spec.y]))
+      .attr("r", 3.5)
+      .attr("fill", d => groupColor.get(d.group))
+      .attr("opacity", 0.65)
+      .attr("stroke", "#fff")
+      .attr("stroke-width", 0.5);
+
+    // Annotation layer (above dots, below brush handles)
+    const annoG = g.append("g").attr("class", "anno-layer");
+
+    // Brush
+    const brush = d3.brush()
+      .extent([[0, 0], [plotW, plotH]])
+      .on("brush end", (event) => {
+        if (!event.sourceEvent) return;
+        if (event.selection) {
+          const [[x0, y0], [x1, y1]] = event.selection;
+          const ids = new Set();
+          data.forEach(d => {
+            const px = sx(d[spec.x]), py = sy(d[spec.y]);
+            if (px >= x0 && px <= x1 && py >= y0 && py <= y1) ids.add(d.id);
+          });
+          brushSelections.set(pi, ids);
+        } else {
+          brushSelections.delete(pi);
+        }
+        updateAll();
+      });
+
+    g.append("g").attr("class", "brush-g").call(brush);
+
+    panelState.push({ svg, g, dots, sx, sy, spec, annoG, brush });
+  });
+
+  // --- Compute combined selection ---
+  const getSelected = () => {
+    const active = [...brushSelections.values()].filter(s => s.size > 0);
+    if (active.length === 0) return null;
+    if (mode === "union") {
+      const union = new Set();
+      active.forEach(s => s.forEach(id => union.add(id)));
+      return union;
+    } else {
+      let result = new Set(active[0]);
+      for (let i = 1; i < active.length; i++) {
+        const next = new Set();
+        for (const id of result) if (active[i].has(id)) next.add(id);
+        result = next;
+      }
+      return result;
+    }
+  };
+
+  // --- Progressive annotation timers ---
+  let annoTimers = [];
+
+  const updateAll = () => {
+    // Cancel pending progressive annotations
+    annoTimers.forEach(t => t.stop());
+    annoTimers = [];
+
+    const selected = getSelected();
+    const nBrushes = brushSelections.size;
+
+    // Update counter
+    const counterEl = d3.select("#counter");
+    if (!selected) {
+      counterEl.text(`${N} points`);
+    } else {
+      counterEl.text(`${selected.size}/${N} selected (${nBrushes} brush${nBrushes > 1 ? "es" : ""})`);
+    }
+
+    // Update dots across all panels
+    panelState.forEach(ps => {
+      ps.dots
+        .transition().duration(80).ease(d3.easeExpOut)
+        .attr("opacity", d => !selected || selected.has(d.id) ? 0.7 : 0.08)
+        .attr("r", d => !selected ? 3.5 : selected.has(d.id) ? 4 : 2.5)
+        .attr("stroke-width", d => !selected ? 0.5 : selected.has(d.id) ? 0.8 : 0);
+
+      // Clear annotations
+      ps.annoG.selectAll("*").remove();
+    });
+
+    if (!selected || selected.size === 0) return;
+
+    const selArr = data.filter(d => selected.has(d.id));
+
+    // === Stage 1: Count badge (immediate) ===
+    panelState.forEach(ps => {
+      const badgeG = ps.annoG.append("g").attr("class", "anno-fade-in");
+      const text = badgeG.append("text")
+        .attr("x", plotW - 4).attr("y", -8)
+        .attr("text-anchor", "end")
+        .attr("font-size", 11).attr("font-weight", 700)
+        .attr("font-family", '"SF Mono", Monaco, "Cascadia Code", monospace')
+        .attr("fill", "#4477AA")
+        .text(`${selArr.length} selected`);
+    });
+
+    // === Stage 2: Centroid crosshair (+400ms) ===
+    const t1 = d3.timeout(() => {
+      panelState.forEach(ps => {
+        const mx = d3.mean(selArr, d => d[ps.spec.x]);
+        const my = d3.mean(selArr, d => d[ps.spec.y]);
+        const px = ps.sx(mx), py = ps.sy(my);
+
+        const chG = ps.annoG.append("g").attr("class", "anno-fade-in");
+
+        // Horizontal line
+        chG.append("line").attr("class", "crosshair")
+          .attr("x1", 0).attr("x2", plotW)
+          .attr("y1", py).attr("y2", py)
+          .attr("stroke", "#EE6677").attr("stroke-width", 0.8)
+          .attr("stroke-opacity", 0.6);
+
+        // Vertical line
+        chG.append("line").attr("class", "crosshair")
+          .attr("x1", px).attr("x2", px)
+          .attr("y1", 0).attr("y2", plotH)
+          .attr("stroke", "#EE6677").attr("stroke-width", 0.8)
+          .attr("stroke-opacity", 0.6);
+
+        // Centroid dot
+        chG.append("circle")
+          .attr("cx", px).attr("cy", py).attr("r", 5)
+          .attr("fill", "none").attr("stroke", "#EE6677")
+          .attr("stroke-width", 2);
+
+        // Centroid label
+        const labelX = px + 8;
+        const labelY = py - 10;
+        const xVal = ps.spec.x === "age" ? Math.round(mx) : mx.toFixed(1);
+        const yVal = ps.spec.y === "age" ? Math.round(my) : my.toFixed(1);
+        chG.append("text")
+          .attr("x", Math.min(labelX, plotW - 60)).attr("y", Math.max(labelY, 12))
+          .attr("font-size", 9).attr("fill", "#EE6677").attr("font-weight", 600)
+          .attr("font-family", '"SF Mono", Monaco, "Cascadia Code", monospace')
+          .text(`(${xVal}, ${yVal})`);
+      });
+    }, 400);
+    annoTimers.push(t1);
+
+    // === Stage 3: Outlier flags (+900ms) ===
+    const t2 = d3.timeout(() => {
+      panelState.forEach(ps => {
+        const mx = d3.mean(selArr, d => d[ps.spec.x]);
+        const my = d3.mean(selArr, d => d[ps.spec.y]);
+        const sdx = d3.deviation(selArr, d => d[ps.spec.x]) || 1;
+        const sdy = d3.deviation(selArr, d => d[ps.spec.y]) || 1;
+
+        const outlierG = ps.annoG.append("g").attr("class", "anno-fade-in");
+        let count = 0;
+
+        selArr.forEach(d => {
+          const zx = Math.abs(d[ps.spec.x] - mx) / sdx;
+          const zy = Math.abs(d[ps.spec.y] - my) / sdy;
+          const z = Math.sqrt(zx * zx + zy * zy);
+          if (z > 2.2 && count < 8) { // Cap at 8 outlier flags per panel
+            count++;
+            const px = ps.sx(d[ps.spec.x]), py = ps.sy(d[ps.spec.y]);
+
+            // Diamond marker
+            const size = 7;
+            outlierG.append("path")
+              .attr("class", "outlier-ring")
+              .attr("d", `M${px},${py - size}L${px + size},${py}L${px},${py + size}L${px - size},${py}Z`)
+              .attr("stroke", "#AA3377").attr("stroke-width", 1.5);
+
+            // Flag text offset to avoid overlap with dot
+            const tx = px > plotW / 2 ? px - 12 : px + 12;
+            const ty = py > plotH / 2 ? py + 14 : py - 8;
+            outlierG.append("text").attr("class", "outlier-flag")
+              .attr("x", tx).attr("y", ty)
+              .attr("text-anchor", px > plotW / 2 ? "end" : "start")
+              .attr("fill", "#AA3377")
+              .text(`z=${z.toFixed(1)}`);
+          }
+        });
+      });
+    }, 900);
+    annoTimers.push(t2);
+  };
+
+  // Initial render
+  updateAll();
+})();
+</script>
+</body>
+</html>

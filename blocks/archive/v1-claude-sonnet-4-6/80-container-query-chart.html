@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Container Query Chart — 6 Sizes</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa; color: #333;
+    padding: 24px 28px;
+  }
+  h1 { font-size: 17px; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { font-size: 12px; color: #777; margin-bottom: 20px; }
+
+  .grid {
+    display: grid;
+    gap: 14px;
+    margin-bottom: 14px;
+  }
+  .row-large { grid-template-columns: 640px 400px; }
+  .row-medium { grid-template-columns: 300px 180px 130px 80px; }
+
+  .chart-wrapper {
+    container-type: inline-size;
+    border: 1px solid #d8d8d8;
+    border-radius: 6px;
+    background: #fff;
+    position: relative;
+    overflow: hidden;
+  }
+  .chart-inner {
+    padding: 12px;
+    width: 100%;
+    height: 100%;
+  }
+  .size-badge {
+    position: absolute; top: 6px; right: 8px;
+    font-size: 9px; color: #aaa; font-weight: 600;
+    letter-spacing: 0.5px; z-index: 3;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+  }
+  .mode-badge {
+    position: absolute; top: 6px; left: 8px;
+    font-size: 8px; color: #fff; font-weight: 600;
+    background: #4477AA; border-radius: 3px;
+    padding: 1px 5px; z-index: 3;
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
+
+  /* Container query CSS adaptations */
+  @container (min-width: 600px) {
+    .chart-inner { padding: 14px 16px; }
+  }
+  @container (max-width: 299px) {
+    .cq-legend { display: none !important; }
+    .cq-annotation { display: none !important; }
+    .cq-axis-label { display: none !important; }
+  }
+  @container (max-width: 149px) {
+    .chart-svg { display: none !important; }
+    .kpi { display: flex !important; }
+  }
+  @container (min-width: 150px) {
+    .kpi { display: none !important; }
+  }
+
+  .kpi {
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 70px;
+    gap: 2px;
+  }
+  .kpi-value {
+    font-size: 18px; font-weight: 700;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    color: #4477AA;
+  }
+  .kpi-label { font-size: 8px; color: #888; text-transform: uppercase; letter-spacing: 0.3px; }
+  .kpi-delta { font-size: 9px; font-weight: 600; }
+  .kpi-delta.positive { color: #228833; }
+  .kpi-delta.negative { color: #EE6677; }
+
+  .tooltip {
+    position: fixed;
+    pointer-events: none;
+    background: rgba(255,255,255,0.96);
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    padding: 6px 9px;
+    font-size: 11px;
+    line-height: 1.5;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+    z-index: 100;
+    display: none;
+    font-family: system-ui, -apple-system, sans-serif;
+  }
+  .tooltip .tt-cat { font-weight: 600; }
+  .tooltip .tt-val { font-family: "SF Mono", Monaco, monospace; }
+</style>
+</head>
+<body>
+<h1>Container Query Chart — Same Data at 6 Sizes</h1>
+<p class="subtitle">One reusable scatter chart adapts via CSS container queries + ResizeObserver. Hover any panel to see linked highlighting.</p>
+<div class="grid row-large" id="row1"></div>
+<div class="grid row-medium" id="row2"></div>
+<div class="tooltip" id="tooltip"></div>
+<script>
+(() => {
+  const TOL = ["#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE"];
+  const categories = ["Engineering", "Design", "Sales", "Marketing", "Support"];
+  const rng = d3.randomLcg(42);
+
+  // Generate 60 employee-like records with clusters
+  const data = d3.range(60).map(i => {
+    const catIdx = Math.min(4, Math.floor(rng() * 5));
+    // Each category has a different experience-salary profile
+    const baseSalary = [85, 72, 68, 62, 55][catIdx] * 1000;
+    const baseExp = [8, 6, 7, 5, 4][catIdx];
+    const experience = Math.max(1, baseExp + (rng() - 0.5) * 12);
+    const salary = Math.max(35000, baseSalary + experience * 4200 + (rng() - 0.5) * 30000);
+    return {
+      id: i,
+      experience: +experience.toFixed(1),
+      salary: Math.round(salary),
+      category: categories[catIdx],
+      catIdx,
+      label: `E${String(i).padStart(2, "0")}`
+    };
+  });
+
+  // Summary stats
+  const meanSalary = d3.mean(data, d => d.salary);
+  const xVals = data.map(d => d.experience);
+  const yVals = data.map(d => d.salary);
+  const xMean = d3.mean(xVals);
+  const yMean = d3.mean(yVals);
+  const slope = d3.sum(data, d => (d.experience - xMean) * (d.salary - yMean))
+               / d3.sum(data, d => (d.experience - xMean) ** 2);
+  const intercept = yMean - slope * xMean;
+  const r2 = (() => {
+    const ssRes = d3.sum(data, d => (d.salary - (slope * d.experience + intercept)) ** 2);
+    const ssTot = d3.sum(data, d => (d.salary - yMean) ** 2);
+    return 1 - ssRes / ssTot;
+  })();
+
+  // Top earner for annotation
+  const topEarner = data.reduce((a, b) => a.salary > b.salary ? a : b);
+
+  // Sizes: widths for the 6 panels
+  const panelConfigs = [
+    { width: 640, label: "640px", mode: "Full" },
+    { width: 380, label: "380px", mode: "Simplified" },
+    { width: 300, label: "300px", mode: "Simplified" },
+    { width: 180, label: "180px", mode: "Sparkline" },
+    { width: 130, label: "130px", mode: "KPI" },
+    { width: 80,  label: "80px",  mode: "KPI" }
+  ];
+
+  const tooltip = document.getElementById("tooltip");
+  let hoveredId = null;
+  const charts = [];
+
+  // Build containers
+  panelConfigs.forEach((cfg, i) => {
+    const parent = i < 2
+      ? document.getElementById("row1")
+      : document.getElementById("row2");
+    const wrapper = document.createElement("div");
+    wrapper.className = "chart-wrapper";
+    wrapper.style.minHeight = "60px";
+    wrapper.innerHTML = `
+      <span class="size-badge">${cfg.label}</span>
+      <span class="mode-badge">${cfg.mode}</span>
+      <div class="chart-inner">
+        <div class="kpi">
+          <span class="kpi-value">$${Math.round(meanSalary / 1000)}k</span>
+          <span class="kpi-label">Avg Salary</span>
+          <span class="kpi-delta ${slope > 0 ? 'positive' : 'negative'}">${slope > 0 ? '\u25B2' : '\u25BC'} $${d3.format(",.0f")(slope)}/yr exp</span>
+        </div>
+      </div>`;
+    parent.appendChild(wrapper);
+    charts.push({ wrapper, inner: wrapper.querySelector(".chart-inner") });
+  });
+
+  const renderChart = (container, idx) => {
+    const inner = container.inner;
+    const rect = inner.getBoundingClientRect();
+    const cw = Math.floor(rect.width);
+    const maxH = idx < 2 ? 340 : 200;
+    const ch = Math.min(Math.round(cw * 0.65), maxH);
+
+    // Remove old SVG
+    d3.select(inner).selectAll("svg").remove();
+
+    if (cw < 150) return; // KPI mode, handled by CSS
+
+    const isSparkline = cw < 260;
+    const isSimplified = cw >= 260 && cw < 550;
+    const isFull = cw >= 550;
+
+    const m = isSparkline
+      ? { top: 6, right: 6, bottom: 6, left: 6 }
+      : isSimplified
+        ? { top: 12, right: 12, bottom: 30, left: 48 }
+        : { top: 16, right: 110, bottom: 40, left: 56 };
+
+    const w = cw - m.left - m.right;
+    const h = ch - m.top - m.bottom;
+    if (w < 10 || h < 10) return;
+
+    const svg = d3.select(inner).append("svg")
+      .attr("class", "chart-svg")
+      .attr("width", cw)
+      .attr("height", ch)
+      .style("display", "block");
+
+    const g = svg.append("g").attr("transform", `translate(${m.left},${m.top})`);
+
+    const xScale = d3.scaleLinear()
+      .domain(d3.extent(data, d => d.experience)).nice()
+      .range([0, w]);
+    const yScale = d3.scaleLinear()
+      .domain(d3.extent(data, d => d.salary)).nice()
+      .range([h, 0]);
+
+    // Grid lines (full + simplified)
+    if (!isSparkline) {
+      g.append("g").attr("class", "grid-y")
+        .call(d3.axisLeft(yScale)
+          .tickSize(-w).tickFormat("")
+          .ticks(Math.max(3, Math.floor(h / 50))))
+        .call(gg => gg.select(".domain").remove())
+        .call(gg => gg.selectAll("line")
+          .attr("stroke", "#eee").attr("stroke-width", 0.5));
+    }
+
+    // Trend line
+    const xExt = d3.extent(data, d => d.experience);
+    g.append("line")
+      .attr("x1", xScale(xExt[0]))
+      .attr("y1", yScale(slope * xExt[0] + intercept))
+      .attr("x2", xScale(xExt[1]))
+      .attr("y2", yScale(slope * xExt[1] + intercept))
+      .attr("stroke", "#bbb")
+      .attr("stroke-width", isSparkline ? 1 : 1.5)
+      .attr("stroke-dasharray", isSparkline ? "3,2" : "5,4");
+
+    // Data dots
+    const dotRadius = isSparkline ? 2.2 : isFull ? 4.5 : 3.5;
+    const dots = g.selectAll("circle.dot")
+      .data(data, d => d.id)
+      .join("circle")
+        .attr("class", "dot")
+        .attr("cx", d => xScale(d.experience))
+        .attr("cy", d => yScale(d.salary))
+        .attr("r", dotRadius)
+        .attr("fill", d => TOL[d.catIdx])
+        .attr("fill-opacity", d => hoveredId !== null ? (d.id === hoveredId ? 1 : 0.2) : 0.75)
+        .attr("stroke", d => hoveredId === d.id ? "#333" : "none")
+        .attr("stroke-width", 1.5)
+        .style("cursor", isSparkline ? "default" : "pointer");
+
+    if (isSparkline) return;
+
+    // Axes
+    g.append("g").attr("transform", `translate(0,${h})`)
+      .call(d3.axisBottom(xScale)
+        .ticks(Math.max(3, Math.floor(w / 80)))
+        .tickFormat(d => d + "yr"))
+      .call(gg => gg.select(".domain").attr("stroke", "#ccc"))
+      .call(gg => gg.selectAll("text").attr("fill", "#666").attr("font-size", isSimplified ? 9 : 11));
+
+    g.append("g")
+      .call(d3.axisLeft(yScale)
+        .ticks(Math.max(3, Math.floor(h / 50)), "$~s"))
+      .call(gg => gg.select(".domain").attr("stroke", "#ccc"))
+      .call(gg => gg.selectAll("text").attr("fill", "#666").attr("font-size", isSimplified ? 9 : 11));
+
+    if (isFull) {
+      // Axis labels
+      g.append("text").attr("class", "cq-axis-label")
+        .attr("x", w / 2).attr("y", h + 34)
+        .attr("text-anchor", "middle")
+        .attr("font-size", 11).attr("fill", "#777")
+        .text("Years of Experience");
+      g.append("text").attr("class", "cq-axis-label")
+        .attr("transform", "rotate(-90)")
+        .attr("x", -h / 2).attr("y", -42)
+        .attr("text-anchor", "middle")
+        .attr("font-size", 11).attr("fill", "#777")
+        .text("Annual Salary");
+
+      // Legend
+      const legend = svg.append("g").attr("class", "cq-legend")
+        .attr("transform", `translate(${cw - 100}, ${m.top + 8})`);
+      categories.forEach((cat, ci) => {
+        const row = legend.append("g").attr("transform", `translate(0,${ci * 17})`);
+        row.append("circle").attr("r", 4).attr("cx", 0).attr("cy", 0).attr("fill", TOL[ci]);
+        row.append("text").attr("x", 10).attr("y", 4)
+          .text(cat).attr("font-size", 10).attr("fill", "#666");
+      });
+
+      // Annotation: top earner
+      const tx = xScale(topEarner.experience);
+      const ty = yScale(topEarner.salary);
+      const annG = g.append("g").attr("class", "cq-annotation");
+      annG.append("line")
+        .attr("x1", tx + 6).attr("y1", ty - 6)
+        .attr("x2", tx + 20).attr("y2", ty - 22)
+        .attr("stroke", "#999").attr("stroke-width", 1);
+      annG.append("text")
+        .attr("x", tx + 22).attr("y", ty - 24)
+        .attr("font-size", 10).attr("fill", "#555")
+        .text(`Top: ${d3.format("$,.0f")(topEarner.salary)}`);
+
+      // R² annotation
+      annG.append("text")
+        .attr("x", w - 4).attr("y", h - 6)
+        .attr("text-anchor", "end")
+        .attr("font-size", 9).attr("fill", "#aaa")
+        .attr("font-family", '"SF Mono", Monaco, monospace')
+        .text(`R² = ${r2.toFixed(2)}`);
+    }
+
+    if (isSimplified) {
+      // Compact legend at bottom
+      const legend = svg.append("g").attr("class", "cq-legend")
+        .attr("transform", `translate(${m.left}, ${ch - 4})`);
+      const legendW = w / categories.length;
+      categories.forEach((cat, ci) => {
+        const xOff = ci * legendW;
+        legend.append("circle").attr("r", 3).attr("cx", xOff).attr("cy", 0).attr("fill", TOL[ci]);
+        legend.append("text").attr("x", xOff + 7).attr("y", 3)
+          .text(cat.slice(0, 4))
+          .attr("font-size", 8).attr("fill", "#888");
+      });
+    }
+
+    // Interaction overlay (not sparkline)
+    const voronoi = d3.Delaunay
+      .from(data, d => xScale(d.experience), d => yScale(d.salary))
+      .voronoi([0, 0, w, h]);
+
+    g.append("g")
+      .selectAll("path")
+      .data(data)
+      .join("path")
+        .attr("d", (d, i) => voronoi.renderCell(i))
+        .attr("fill", "none")
+        .attr("pointer-events", "all")
+        .style("cursor", "pointer")
+        .on("pointerenter", (event, d) => {
+          hoveredId = d.id;
+          updateAllHighlights();
+          const fmt = d3.format("$,.0f");
+          tooltip.innerHTML = `
+            <div class="tt-cat" style="color:${TOL[d.catIdx]}">${d.category}</div>
+            <div><span class="tt-val">${d.experience.toFixed(1)}</span> yrs exp</div>
+            <div><span class="tt-val">${fmt(d.salary)}</span> salary</div>`;
+          tooltip.style.display = "block";
+          tooltip.style.left = (event.clientX + 12) + "px";
+          tooltip.style.top = (event.clientY - 10) + "px";
+        })
+        .on("pointermove", (event) => {
+          tooltip.style.left = (event.clientX + 12) + "px";
+          tooltip.style.top = (event.clientY - 10) + "px";
+        })
+        .on("pointerleave", () => {
+          hoveredId = null;
+          updateAllHighlights();
+          tooltip.style.display = "none";
+        });
+  };
+
+  const updateAllHighlights = () => {
+    charts.forEach((c, i) => {
+      d3.select(c.inner).selectAll("circle.dot")
+        .attr("fill-opacity", d => hoveredId !== null ? (d.id === hoveredId ? 1 : 0.15) : 0.75)
+        .attr("stroke", d => hoveredId === d.id ? "#333" : "none")
+        .attr("r", d => {
+          const cw = c.inner.getBoundingClientRect().width;
+          const base = cw < 260 ? 2.2 : cw >= 500 ? 4.5 : 3.5;
+          return hoveredId === d.id ? base + 2 : base;
+        });
+    });
+  };
+
+  // Initial render + ResizeObserver per container
+  charts.forEach((c, i) => {
+    renderChart(c, i);
+    const ro = new ResizeObserver(([entry]) => {
+      if (entry.contentRect.width > 0) renderChart(c, i);
+    });
+    ro.observe(c.inner);
+  });
+})();
+</script>
+</body>
+</html>

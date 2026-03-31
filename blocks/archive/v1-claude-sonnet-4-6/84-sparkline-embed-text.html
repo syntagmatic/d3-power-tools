@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sparklines Embedded in Text</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa; color: #222; line-height: 1.75;
+  }
+  .container { max-width: 820px; margin: 0 auto; padding: 28px 24px; }
+  h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.01em; margin-bottom: 2px; }
+  .subtitle { font-size: 0.78rem; color: #777; margin-bottom: 22px; }
+  .narrative { font-size: 0.9rem; color: #333; margin-bottom: 32px; }
+  .narrative p { margin-bottom: 12px; }
+
+  /* Inline sparklines */
+  .spark { display: inline; white-space: nowrap; }
+  .spark svg {
+    display: inline-block; vertical-align: middle; margin: 0 2px;
+    cursor: default;
+  }
+
+  /* Tooltip for inline sparklines */
+  .spark-tip {
+    position: fixed; pointer-events: none; z-index: 100;
+    background: #fff; border: 1px solid #ccc; border-radius: 4px;
+    padding: 3px 7px; font-size: 0.72rem; color: #333;
+    font-variant-numeric: tabular-nums; box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+    opacity: 0; transition: opacity 0.15s;
+  }
+  .spark-tip.visible { opacity: 1; }
+
+  /* Table */
+  .table-section { margin-top: 8px; }
+  .table-title { font-size: 0.88rem; font-weight: 600; margin-bottom: 8px; }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 0.78rem; }
+  thead { position: sticky; top: 0; z-index: 2; }
+  th {
+    background: #f0f0f0; border-bottom: 2px solid #d4d4d4;
+    padding: 6px 10px; text-align: left; font-weight: 600;
+    cursor: pointer; user-select: none; white-space: nowrap;
+    position: relative;
+  }
+  th:hover { background: #e6e6e6; }
+  th[aria-sort="ascending"]::after { content: " \25B2"; font-size: 0.6rem; color: #555; }
+  th[aria-sort="descending"]::after { content: " \25BC"; font-size: 0.6rem; color: #555; }
+  td { padding: 5px 10px; border-bottom: 1px solid #eaeaea; white-space: nowrap; }
+  tr:nth-child(odd) td { background: #fff; }
+  tr:nth-child(even) td { background: #f8f8f8; }
+  tr:hover td { background: #eef4fc; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.spark-cell { text-align: center; }
+  th.spark-cell { text-align: center; }
+  .change-pos { color: #228833; }
+  .change-neg { color: #EE6677; }
+  .metric-label { font-weight: 500; }
+
+  .sr-only {
+    position: absolute; width: 1px; height: 1px;
+    overflow: hidden; clip: rect(0,0,0,0); border: 0;
+  }
+
+  @media (max-width: 599px) {
+    th:first-child, td:first-child {
+      position: sticky; left: 0; z-index: 1; background: inherit;
+    }
+    th:first-child { z-index: 3; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Q4 2024 Business Review</h1>
+  <p class="subtitle">Eight key metrics with 24-month inline trends &middot; Jan 2023 &ndash; Dec 2024</p>
+  <div class="narrative" id="narrative"></div>
+  <div class="table-section">
+    <div class="table-title">Metric Summary</div>
+    <div class="table-wrap">
+      <table id="data-table" role="grid">
+        <thead><tr id="thead-row" role="row"></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
+  <div id="live-region" class="sr-only" aria-live="polite"></div>
+  <div class="spark-tip" id="spark-tip"></div>
+</div>
+<script>
+(() => {
+  // --- Seeded PRNG for reproducibility ---
+  const mulberry32 = (seed) => () => {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  const genSeries = (start, end, n, volatility, seed) => {
+    const rng = mulberry32(seed);
+    const values = [];
+    let v = start;
+    const drift = (end - start) / (n - 1);
+    for (let i = 0; i < n; i++) {
+      values.push(+v.toFixed(3));
+      v += drift + (rng() - 0.5) * volatility * 2;
+    }
+    // Nudge last value toward target
+    values[n - 1] = +end.toFixed(3);
+    return values;
+  };
+
+  // --- 8 Metrics with structurally interesting data ---
+  const metrics = [
+    {
+      id: "revenue", name: "Revenue", unit: "$M",
+      values: genSeries(8.2, 12.4, 24, 0.35, 101),
+      fmt: d3.format("$.1f"), suffix: "M"
+    },
+    {
+      id: "gross_margin", name: "Gross Margin", unit: "%",
+      values: genSeries(41.2, 43.8, 24, 0.9, 202),
+      fmt: d3.format(".1f"), suffix: "%"
+    },
+    {
+      id: "customers", name: "Customers", unit: "K",
+      values: genSeries(14.8, 22.3, 24, 0.6, 303),
+      fmt: d3.format(".1f"), suffix: "K"
+    },
+    {
+      id: "churn", name: "Churn Rate", unit: "%",
+      values: (() => {
+        const v = genSeries(5.1, 3.6, 24, 0.25, 404);
+        v[13] = 6.9; // pricing restructure spike
+        v[14] = 5.8; // recovery
+        return v;
+      })(),
+      fmt: d3.format(".1f"), suffix: "%", inverted: true
+    },
+    {
+      id: "nps", name: "NPS", unit: "pts",
+      values: genSeries(34, 53, 24, 4, 505),
+      fmt: d3.format(".0f"), suffix: ""
+    },
+    {
+      id: "aov", name: "Avg Order Value", unit: "$",
+      values: genSeries(124, 131, 24, 2.5, 606),
+      fmt: d3.format("$.0f"), suffix: ""
+    },
+    {
+      id: "tickets", name: "Support Tickets", unit: "/mo",
+      values: genSeries(4.8, 2.7, 24, 0.25, 707),
+      fmt: d3.format(".1f"), suffix: "K", inverted: true
+    },
+    {
+      id: "headcount", name: "Headcount", unit: "",
+      values: (() => {
+        // Step-function growth: Series B at month 8, Series C at month 17
+        const rng = mulberry32(808);
+        return d3.range(24).map(i => {
+          const base = i < 8 ? 342 : i < 17 ? 372 : 413;
+          return base + Math.round((rng() - 0.5) * 6);
+        });
+      })(),
+      fmt: d3.format(","), suffix: ""
+    }
+  ];
+
+  // Derived stats
+  metrics.forEach(m => {
+    m.latest = m.values.at(-1);
+    m.prev = m.values[11]; // 12 months prior
+    m.yoy = (m.latest - m.prev) / Math.abs(m.prev);
+    m.min = d3.min(m.values);
+    m.max = d3.max(m.values);
+    m.avg = d3.mean(m.values);
+    // "Good" direction: for inverted metrics, decrease is good
+    m.good = m.inverted ? m.latest < m.prev : m.latest > m.prev;
+  });
+
+  const TOL = { blue: "#4477AA", red: "#EE6677", green: "#228833", grey: "#BBBBBB" };
+  const months = d3.range(24).map(i => {
+    const d = new Date(2023, i);
+    return d3.timeFormat("%b %Y")(d);
+  });
+
+  // --- Sparkline renderer ---
+  const drawSparkline = (container, values, opts = {}) => {
+    const { w = 60, h = 12, good = true, showDot = true, interactive = false } = opts;
+    const svg = d3.select(container).append("svg")
+      .attr("width", w).attr("height", h)
+      .attr("role", "img")
+      .attr("aria-label", `Trend: ${values[0].toFixed(1)} to ${values.at(-1).toFixed(1)}`);
+
+    const pad = 1.5;
+    const x = d3.scaleLinear([0, values.length - 1], [pad, w - pad]);
+    const ext = d3.extent(values);
+    const y = d3.scaleLinear(
+      ext[0] === ext[1] ? [ext[0] - 1, ext[1] + 1] : ext,
+      [h - pad, pad]
+    );
+    const line = d3.line((d, i) => x(i), d => y(d)).curve(d3.curveMonotoneX);
+
+    svg.append("path").datum(values)
+      .attr("d", line).attr("fill", "none")
+      .attr("stroke", good ? TOL.blue : TOL.red)
+      .attr("stroke-width", 1.5)
+      .attr("stroke-linecap", "round");
+
+    if (showDot) {
+      svg.append("circle")
+        .attr("cx", x(values.length - 1))
+        .attr("cy", y(values.at(-1)))
+        .attr("r", 1.5)
+        .attr("fill", good ? TOL.blue : TOL.red);
+    }
+
+    // Hover interaction for inline sparklines
+    if (interactive) {
+      const tip = document.getElementById("spark-tip");
+      svg.style("cursor", "crosshair")
+        .on("pointermove", (event) => {
+          const [px] = d3.pointer(event);
+          const idx = Math.round(x.invert(px));
+          const ci = Math.max(0, Math.min(values.length - 1, idx));
+          tip.textContent = `${months[ci]}: ${values[ci].toFixed(1)}`;
+          tip.style.left = `${event.clientX + 12}px`;
+          tip.style.top = `${event.clientY - 24}px`;
+          tip.classList.add("visible");
+        })
+        .on("pointerleave", () => {
+          tip.classList.remove("visible");
+        });
+    }
+
+    return svg.node();
+  };
+
+  // --- Narrative with inline sparklines ---
+  const sparkTag = (idx) => `<span class="spark" data-metric="${idx}"></span>`;
+  const fmtVal = (m) => m.fmt(m.latest) + m.suffix;
+
+  const narrativeHTML = `
+    <p>Revenue grew to ${fmtVal(metrics[0])} over the past two years, a ${d3.format("+.0%")(metrics[0].yoy)} year-over-year
+    gain\u2009${sparkTag(0)}\u2009while gross margins held steady near ${metrics[1].fmt(metrics[1].avg)}%\u2009${sparkTag(1)}.
+    Margin stability during rapid growth reflects disciplined pricing and expanding operational leverage.
+    The customer base expanded to ${fmtVal(metrics[2])}\u2009${sparkTag(2)}, driven by
+    strong product-market fit in the mid-market segment.</p>
+
+    <p>Churn declined from ${metrics[3].fmt(metrics[3].values[0])}% to ${fmtVal(metrics[3])}\u2009${sparkTag(3)},
+    though a notable spike in February 2024 coincided with the pricing restructure.
+    Net Promoter Score climbed to ${fmtVal(metrics[4])}\u2009${sparkTag(4)}, validating the team's investment in
+    customer experience. Average order value was essentially flat at ${fmtVal(metrics[5])}\u2009${sparkTag(5)},
+    suggesting growth came from new logos rather than upselling existing accounts.</p>
+
+    <p>Support ticket volume dropped ${d3.format(".0%")(Math.abs(metrics[6].yoy))} year-over-year to
+    ${fmtVal(metrics[6])}/mo\u2009${sparkTag(6)}, a direct result of the self-service portal launched in
+    Q2 2023. The team grew to ${fmtVal(metrics[7])} people\u2009${sparkTag(7)}\u2009in two step-changes
+    aligned with Series B and C funding rounds, maintaining a healthy revenue-per-employee ratio
+    throughout the expansion.</p>
+  `;
+
+  document.getElementById("narrative").innerHTML = narrativeHTML;
+
+  // Render inline sparklines (interactive — hover shows value)
+  document.querySelectorAll(".spark").forEach(span => {
+    const m = metrics[+span.dataset.metric];
+    drawSparkline(span, m.values, { good: m.good, interactive: true });
+  });
+
+  // --- Sortable data table ---
+  const pctFmt = d3.format("+.1%");
+
+  const columns = [
+    { key: "name", label: "Metric", type: "string", cls: "" },
+    { key: "latest", label: "Latest", type: "number", cls: "num" },
+    { key: "yoy", label: "YoY Change", type: "number", cls: "num" },
+    { key: "trend", label: "24-mo Trend", type: "sparkline", cls: "spark-cell" },
+    { key: "min", label: "Min", type: "number", cls: "num" },
+    { key: "max", label: "Max", type: "number", cls: "num" },
+    { key: "avg", label: "Avg", type: "number", cls: "num" }
+  ];
+
+  // Build header
+  const theadRow = d3.select("#thead-row");
+  theadRow.selectAll("th").data(columns).join("th")
+    .attr("class", d => d.cls)
+    .attr("role", "columnheader")
+    .attr("tabindex", 0)
+    .attr("aria-sort", "none")
+    .text(d => d.label)
+    .on("click", (e, col) => sortBy(col))
+    .on("keydown", (e, col) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); sortBy(col); }
+    });
+
+  let sortState = { col: null, asc: true };
+  let sorted = [...metrics];
+
+  const formatCell = (m, key) => {
+    if (key === "latest") return m.fmt(m.latest) + m.suffix;
+    if (key === "yoy") return pctFmt(m.yoy);
+    if (key === "min") return m.fmt(m.min) + m.suffix;
+    if (key === "max") return m.fmt(m.max) + m.suffix;
+    if (key === "avg") return m.fmt(m.avg) + m.suffix;
+    return m[key];
+  };
+
+  const renderTable = () => {
+    const tbody = d3.select("#tbody");
+    const rows = tbody.selectAll("tr")
+      .data(sorted, d => d.id)
+      .join("tr")
+      .attr("role", "row");
+
+    rows.each(function(m) {
+      const tr = d3.select(this);
+      // Use selectAll + data join for cells by column index
+      const cells = tr.selectAll("td").data(columns).join("td");
+
+      cells.each(function(col) {
+        const td = d3.select(this);
+        td.attr("class", col.cls);
+
+        if (col.key === "name") {
+          td.attr("class", "metric-label").text(m.name);
+        } else if (col.key === "trend") {
+          td.html(""); // clear previous sparkline
+          drawSparkline(this, m.values, { w: 80, h: 16, good: m.good, showDot: true });
+        } else if (col.key === "yoy") {
+          const cls = m.good ? "change-pos" : "change-neg";
+          td.attr("class", `num ${cls}`).text(pctFmt(m.yoy));
+        } else {
+          td.attr("class", "num").text(formatCell(m, col.key));
+        }
+      });
+    });
+  };
+
+  const sortBy = (col) => {
+    const live = document.getElementById("live-region");
+    if (sortState.col === col) {
+      sortState.asc = !sortState.asc;
+    } else {
+      sortState.col = col;
+      sortState.asc = true;
+    }
+
+    // Update aria-sort on headers
+    theadRow.selectAll("th").attr("aria-sort", function(d) {
+      if (d !== sortState.col) return "none";
+      return sortState.asc ? "ascending" : "descending";
+    });
+
+    const accessor = col.key === "trend" ? d => d.yoy
+      : col.type === "string" ? d => d[col.key]
+      : d => d[col.key];
+    const cmp = sortState.asc ? d3.ascending : d3.descending;
+    sorted = [...metrics].sort((a, b) => cmp(accessor(a), accessor(b)));
+
+    renderTable();
+    live.textContent = `Sorted by ${col.label}, ${sortState.asc ? "ascending" : "descending"}`;
+  };
+
+  renderTable();
+})();
+</script>
+</body>
+</html>

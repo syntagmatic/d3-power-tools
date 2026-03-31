@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Score Ridge Plot: Before & After Calibration</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #fafafa;
+    font-family: system-ui, -apple-system, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px;
+  }
+  #chart { max-width: 960px; width: 100%; }
+  svg { display: block; width: 100%; height: auto; }
+  .title { font-size: 18px; font-weight: 700; fill: #1a1a1a; }
+  .subtitle { font-size: 12px; fill: #666; }
+  .row-label { font-size: 12px; font-weight: 600; fill: #333; }
+  .axis text { font-size: 10px; fill: #666; }
+  .axis line, .axis path { stroke: #ccc; }
+  .legend-label { font-size: 11px; fill: #444; }
+  .toggle-btn {
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 13px;
+    padding: 6px 18px;
+    border: 1.5px solid #4477AA;
+    border-radius: 4px;
+    background: #fff;
+    color: #4477AA;
+    cursor: pointer;
+    font-weight: 600;
+    transition: background 0.2s, color 0.2s;
+    margin-top: 8px;
+  }
+  .toggle-btn:hover { background: #4477AA; color: #fff; }
+  .toggle-btn.active { background: #4477AA; color: #fff; }
+</style>
+</head>
+<body>
+<div id="chart"></div>
+<script type="module">
+
+// --- Seeded PRNG ---
+const lcg = d3.randomLcg(2024);
+const normal = d3.randomNormal.source(lcg);
+const uniform = d3.randomUniform.source(lcg);
+
+// --- Evaluation criteria (rows in the ridgeline) ---
+const criteria = [
+  { name: "Color Fidelity",     beforeMean: 62, beforeSd: 18, afterMean: 74, afterSd: 10 },
+  { name: "Layout Accuracy",    beforeMean: 55, beforeSd: 22, afterMean: 71, afterSd: 12 },
+  { name: "Interaction Polish",  beforeMean: 48, beforeSd: 20, afterMean: 68, afterSd: 11 },
+  { name: "Data Integrity",     beforeMean: 70, beforeSd: 15, afterMean: 82, afterSd: 9  },
+  { name: "Responsiveness",     beforeMean: 44, beforeSd: 24, afterMean: 65, afterSd: 13 },
+  { name: "Annotation Quality", beforeMean: 50, beforeSd: 19, afterMean: 72, afterSd: 10 },
+  { name: "Perceptual Clarity", beforeMean: 58, beforeSd: 21, afterMean: 78, afterSd: 11 },
+  { name: "Code Idiom",         beforeMean: 65, beforeSd: 16, afterMean: 76, afterSd: 9  },
+  { name: "Accessibility",      beforeMean: 38, beforeSd: 25, afterMean: 64, afterSd: 14 },
+  { name: "Overall Score",      beforeMean: 54, beforeSd: 20, afterMean: 73, afterSd: 10 },
+];
+
+// Generate synthetic scores — add some skew to "before" via mixture
+function generateScores(mean, sd, n, addSkew) {
+  const rng = normal(mean, sd);
+  const rngLow = normal(mean - sd * 1.2, sd * 0.6);
+  const u = uniform(0, 1);
+  return Array.from({ length: n }, () => {
+    const v = addSkew && u() < 0.25 ? rngLow() : rng();
+    return Math.max(0, Math.min(100, v));
+  });
+}
+
+const N = 120;
+const data = criteria.map(c => ({
+  name: c.name,
+  before: generateScores(c.beforeMean, c.beforeSd, N, true),
+  after: generateScores(c.afterMean, c.afterSd, N, false),
+}));
+
+// --- KDE ---
+function kde(kernel, thresholds, data) {
+  return thresholds.map(t => [t, d3.mean(data, d => kernel(t - d))]);
+}
+function epanechnikov(bandwidth) {
+  return x => {
+    x /= bandwidth;
+    return Math.abs(x) <= 1 ? 0.75 * (1 - x * x) / bandwidth : 0;
+  };
+}
+
+// --- Dimensions ---
+const margin = { top: 60, right: 30, bottom: 40, left: 140 };
+const width = 960;
+const rowHeight = 52;
+const overlap = 0.65; // fraction of overlap between rows
+const bandStep = rowHeight * (1 - overlap) + rowHeight * overlap;
+const innerHeight = data.length * bandStep + rowHeight * overlap;
+const height = innerHeight + margin.top + margin.bottom;
+
+const x = d3.scaleLinear().domain([0, 100]).range([margin.left, width - margin.right]);
+const thresholds = d3.range(0, 101, 1);
+const bandwidth = 6;
+
+// Compute densities
+const densities = data.map(d => ({
+  name: d.name,
+  before: kde(epanechnikov(bandwidth), thresholds, d.before),
+  after: kde(epanechnikov(bandwidth), thresholds, d.after),
+}));
+
+const maxDensity = d3.max(densities, d =>
+  Math.max(d3.max(d.before, p => p[1]), d3.max(d.after, p => p[1]))
+);
+
+const yDensity = d3.scaleLinear()
+  .domain([0, maxDensity])
+  .range([0, rowHeight]);
+
+// Tol Bright palette
+const colorBefore = "#EE6677"; // rose
+const colorAfter = "#4477AA";  // blue
+
+// --- SVG ---
+const svg = d3.select("#chart")
+  .append("svg")
+  .attr("viewBox", [0, 0, width, height]);
+
+// Title
+svg.append("text")
+  .attr("class", "title")
+  .attr("x", margin.left)
+  .attr("y", 24)
+  .text("Score Distributions: Before & After Calibration");
+
+svg.append("text")
+  .attr("class", "subtitle")
+  .attr("x", margin.left)
+  .attr("y", 42)
+  .text("Ridgeline plot of evaluation scores across 10 criteria · 120 blocks per criterion");
+
+// Legend
+const legendX = width - margin.right - 200;
+const legendG = svg.append("g").attr("transform", `translate(${legendX}, 18)`);
+
+[{ label: "Before calibration", color: colorBefore },
+ { label: "After calibration", color: colorAfter }].forEach((d, i) => {
+  const g = legendG.append("g").attr("transform", `translate(${i * 130}, 0)`);
+  g.append("rect")
+    .attr("width", 14).attr("height", 14).attr("rx", 2)
+    .attr("fill", d.color).attr("opacity", 0.7);
+  g.append("text")
+    .attr("class", "legend-label")
+    .attr("x", 20).attr("y", 11)
+    .text(d.label);
+});
+
+// Area generator
+const area = d3.area()
+  .curve(d3.curveBasis)
+  .x(d => x(d[0]))
+  .y0(0)
+  .y1(d => -yDensity(d[1]));
+
+// Rows
+const rows = svg.append("g")
+  .selectAll("g")
+  .data(densities)
+  .join("g")
+  .attr("transform", (d, i) => `translate(0, ${margin.top + i * bandStep + rowHeight})`);
+
+// Row labels
+rows.append("text")
+  .attr("class", "row-label")
+  .attr("x", margin.left - 12)
+  .attr("y", 0)
+  .attr("text-anchor", "end")
+  .attr("dy", "0.35em")
+  .text(d => d.name);
+
+// Baseline
+rows.append("line")
+  .attr("x1", margin.left).attr("x2", width - margin.right)
+  .attr("stroke", "#e0e0e0").attr("stroke-width", 0.5);
+
+// Before density (drawn first, behind)
+const beforePaths = rows.append("path")
+  .attr("d", d => area(d.before))
+  .attr("fill", colorBefore)
+  .attr("fill-opacity", 0.55)
+  .attr("stroke", colorBefore)
+  .attr("stroke-width", 0.8)
+  .attr("stroke-opacity", 0.7);
+
+// After density (drawn on top)
+const afterPaths = rows.append("path")
+  .attr("d", d => area(d.after))
+  .attr("fill", colorAfter)
+  .attr("fill-opacity", 0.6)
+  .attr("stroke", colorAfter)
+  .attr("stroke-width", 0.8)
+  .attr("stroke-opacity", 0.8);
+
+// Median markers
+function medianMark(sel, key, color) {
+  sel.append("line")
+    .attr("class", `median-${key}`)
+    .attr("x1", d => x(d3.median(key === "before"
+      ? data.find(dd => dd.name === d.name).before
+      : data.find(dd => dd.name === d.name).after)))
+    .attr("x2", d => x(d3.median(key === "before"
+      ? data.find(dd => dd.name === d.name).before
+      : data.find(dd => dd.name === d.name).after)))
+    .attr("y1", 0)
+    .attr("y2", d => {
+      const med = d3.median(key === "before"
+        ? data.find(dd => dd.name === d.name).before
+        : data.find(dd => dd.name === d.name).after);
+      const density = (key === "before" ? d.before : d.after)
+        .reduce((best, p) => Math.abs(p[0] - med) < Math.abs(best[0] - med) ? p : best);
+      return -yDensity(density[1]);
+    })
+    .attr("stroke", color)
+    .attr("stroke-width", 1.8)
+    .attr("stroke-opacity", 0.9)
+    .attr("stroke-dasharray", "2,2");
+}
+
+medianMark(rows, "before", "#b8444e");
+medianMark(rows, "after", "#2c5a8a");
+
+// X axis
+svg.append("g")
+  .attr("class", "axis")
+  .attr("transform", `translate(0, ${height - margin.bottom})`)
+  .call(d3.axisBottom(x).ticks(10).tickFormat(d => d))
+  .call(g => g.select(".domain").remove())
+  .call(g => g.append("text")
+    .attr("x", (margin.left + width - margin.right) / 2)
+    .attr("y", 32)
+    .attr("fill", "#555")
+    .attr("font-size", "12px")
+    .attr("text-anchor", "middle")
+    .text("Score"));
+
+// --- Animation: toggle between states ---
+let showingAfter = true;
+
+// Flat area (zero density) for entrance animation
+const flatDensity = thresholds.map(t => [t, 0]);
+
+// Animate entrance: start flat, transition to full
+beforePaths
+  .attr("d", area(flatDensity))
+  .transition()
+  .duration(800)
+  .delay((d, i) => i * 60)
+  .ease(d3.easeCubicOut)
+  .attr("d", d => area(d.before));
+
+afterPaths
+  .attr("d", area(flatDensity))
+  .transition()
+  .duration(800)
+  .delay((d, i) => i * 60 + 200)
+  .ease(d3.easeCubicOut)
+  .attr("d", d => area(d.after));
+
+// Median lines also animate in
+rows.selectAll(".median-before, .median-after")
+  .attr("opacity", 0)
+  .transition()
+  .duration(400)
+  .delay((d, i) => 600)
+  .attr("opacity", 1);
+
+// Toggle button for before/after comparison
+const btn = d3.select("#chart")
+  .append("button")
+  .attr("class", "toggle-btn active")
+  .text("Show Before Only")
+  .on("click", function () {
+    showingAfter = !showingAfter;
+    d3.select(this)
+      .classed("active", showingAfter)
+      .text(showingAfter ? "Show Before Only" : "Show After");
+
+    if (showingAfter) {
+      // Show after curves
+      afterPaths.transition().duration(600).ease(d3.easeCubicInOut)
+        .attr("fill-opacity", 0.6)
+        .attr("stroke-opacity", 0.8)
+        .attr("d", d => area(d.after));
+      rows.selectAll(".median-after")
+        .transition().duration(400).attr("opacity", 1);
+      // Restore before opacity
+      beforePaths.transition().duration(600)
+        .attr("fill-opacity", 0.55).attr("stroke-opacity", 0.7);
+      rows.selectAll(".median-before")
+        .transition().duration(400).attr("opacity", 1);
+    } else {
+      // Hide after curves
+      afterPaths.transition().duration(600).ease(d3.easeCubicInOut)
+        .attr("fill-opacity", 0)
+        .attr("stroke-opacity", 0)
+        .attr("d", d => area(flatDensity));
+      rows.selectAll(".median-after")
+        .transition().duration(400).attr("opacity", 0);
+      // Boost before visibility
+      beforePaths.transition().duration(600)
+        .attr("fill-opacity", 0.7).attr("stroke-opacity", 0.9);
+      rows.selectAll(".median-before")
+        .transition().duration(400).attr("opacity", 1);
+    }
+  });
+
+</script>
+</body>
+</html>

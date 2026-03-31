@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Global Migration Flows</title>
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;background:#1c1c2e;color:#d8d8e8;padding:20px 28px}
+h1{font-size:24px;font-weight:700;letter-spacing:-.4px;color:#ede8f0;margin-bottom:2px}
+.subtitle{font-size:13px;color:#7a7a9a;margin-bottom:16px}
+.layout{display:flex;gap:20px;align-items:flex-start;max-width:1200px}
+.chord-panel{flex:0 0 55%}
+.right-panel{flex:0 0 42%;display:flex;flex-direction:column;gap:12px}
+.area-panel{background:#24243a;border-radius:8px;padding:16px 20px}
+.area-title{font-size:14px;font-weight:600;color:#b8b8d0;margin-bottom:8px}
+.slider-panel{display:flex;align-items:center;gap:16px;margin-top:12px;padding:8px 0}
+.slider-panel label{font-size:13px;color:#8a8aa0;font-weight:600}
+.decade-label{font-size:16px;font-weight:700;color:#ede8f0;min-width:40px;font-variant-numeric:tabular-nums}
+input[type=range]{flex:1;max-width:500px;accent-color:#88aadd;height:6px}
+.tooltip{position:fixed;pointer-events:none;background:rgba(30,30,50,0.95);color:#e0e0f0;padding:8px 14px;border-radius:5px;font-size:12px;z-index:100;opacity:0;transition:opacity .15s;line-height:1.6;border:1px solid rgba(255,255,255,0.1)}
+svg text{fill:#c0c0d8}
+.legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:8px;font-size:12px;color:#8a8aa0}
+.legend-item{display:flex;align-items:center;gap:5px}
+.legend-swatch{width:14px;height:14px;border-radius:3px}
+</style>
+</head>
+<body>
+<h1>Global Migration Flows</h1>
+<p class="subtitle">Hover regions to explore flows. Drag slider to change decade.</p>
+<div class="layout">
+  <div class="chord-panel">
+    <svg id="chord"></svg>
+  </div>
+  <div class="right-panel">
+    <div class="area-panel">
+      <div class="area-title" id="area-title">Total Global Migration Flows</div>
+      <svg id="stacked-area"></svg>
+    </div>
+  </div>
+</div>
+<div class="slider-panel">
+  <label>Decade:</label>
+  <span class="decade-label" id="decade-label">1980</span>
+  <input type="range" id="slider" min="0" max="4" step="1" value="0">
+</div>
+<div class="legend" id="legend"></div>
+<div class="tooltip" id="tooltip"></div>
+
+<script type="module">
+// --- DATA ---
+const regions = [
+  "North America","South America","Europe","Middle East",
+  "Sub-Saharan Africa","South Asia","East Asia","Oceania"
+];
+const regionColors = [
+  "#77aadd","#ee8866","#eedd88","#ffaabb",
+  "#99ddff","#44bb99","#bbcc33","#aaaa00"
+];
+const decades = [1980,1990,2000,2010,2020];
+
+// Generate flow matrices (from row i to col j)
+// Flows in thousands
+function genMatrix(year) {
+  const n = 8;
+  const m = Array.from({length:n}, ()=>Array(n).fill(0));
+  const base = {
+    // [from][to] base flows
+    // NA(0) SA(1) EU(2) ME(3) SSA(4) SA(5) EA(6) OC(7)
+  };
+  // Build realistic patterns
+  const r = (lo,hi) => Math.round(lo + Math.random()*(hi-lo));
+  const yearFactor = (year - 1980) / 40; // 0 to 1
+
+  // Intra-regional (large)
+  m[2][2] = r(2000,3500) + yearFactor*r(500,1500); // intra-Europe
+  m[5][5] = r(800,1500); // intra-South Asia
+  m[6][6] = r(1000,2000); // intra-East Asia
+  m[4][4] = r(600,1200); // intra-SSA
+
+  // South→North increasing
+  m[1][0] = r(800,1200) + yearFactor*r(500,2000); // SA→NA
+  m[5][3] = r(500,900) + yearFactor*r(800,2500);  // South Asia→ME workers
+  m[4][2] = r(300,600) + yearFactor*r(400,1200);  // SSA→Europe
+  m[6][0] = r(400,700) + yearFactor*r(300,800);   // EA→NA
+  m[5][2] = r(200,500) + yearFactor*r(300,900);   // SA→Europe
+  m[1][2] = r(200,400) + yearFactor*r(200,600);   // SA→Europe
+
+  // Other significant flows
+  m[2][0] = r(400,800);   // EU→NA
+  m[0][2] = r(200,500);   // NA→EU
+  m[6][7] = r(300,600) + yearFactor*r(200,500); // EA→Oceania
+  m[5][6] = r(200,400);   // SA→EA
+  m[4][3] = r(200,500) + yearFactor*r(100,400); // SSA→ME
+  m[6][2] = r(200,400) + yearFactor*r(100,300); // EA→EU
+  m[3][2] = r(300,600) + yearFactor*r(200,800); // ME→EU (refugees increase)
+  m[0][7] = r(100,200);   // NA→OC
+  m[2][7] = r(150,300);   // EU→OC
+  m[3][5] = r(100,300);   // ME→SA
+  m[7][6] = r(100,250);   // OC→EA
+  m[0][1] = r(100,200);   // NA→SA
+  m[5][0] = r(300,500) + yearFactor*r(200,700); // SA→NA
+
+  // Small scattered flows
+  for(let i=0;i<n;i++) for(let j=0;j<n;j++) {
+    if(i!==j && m[i][j]===0) m[i][j]=r(50,200);
+  }
+  // Diagonal = 0
+  for(let i=0;i<n;i++) m[i][i]=0;
+
+  return m;
+}
+
+const matrices = {};
+decades.forEach(y => { matrices[y] = genMatrix(y); });
+
+let currentDecade = 1980;
+let hoveredRegion = -1;
+const tooltip = document.getElementById("tooltip");
+
+// --- CHORD DIAGRAM ---
+const chordSvg = d3.select("#chord");
+const chordSize = 480;
+const outerR = chordSize / 2 - 40;
+const innerR = outerR - 20;
+chordSvg.attr("width", chordSize).attr("height", chordSize).attr("viewBox",`0 0 ${chordSize} ${chordSize}`);
+chordSvg.append("title").text("Chord diagram of global migration flows between world regions");
+const chordG = chordSvg.append("g").attr("transform",`translate(${chordSize/2},${chordSize/2})`);
+
+const chord = d3.chord().padAngle(0.04).sortSubgroups(d3.descending);
+const arc = d3.arc().innerRadius(innerR).outerRadius(outerR);
+const ribbon = d3.ribbon().radius(innerR - 2);
+
+let prevChordData = null;
+
+function getMatrix() { return matrices[currentDecade]; }
+
+function drawChord(animate=true) {
+  const m = getMatrix();
+  const chords = chord(m);
+
+  // Arcs (groups)
+  const groups = chordG.selectAll(".group")
+    .data(chords.groups, d=>d.index);
+
+  const gEnter = groups.enter().append("g").attr("class","group");
+  gEnter.append("path");
+  gEnter.append("text");
+
+  const gMerge = groups.merge(gEnter);
+
+  gMerge.select("path")
+    .transition().duration(animate?800:0).ease(d3.easeCubicInOut)
+    .attrTween("d", function(d) {
+      const prev = this._prev || d;
+      const interp = d3.interpolate(prev, d);
+      this._prev = d;
+      return t => arc(interp(t));
+    })
+    .attr("fill", d => regionColors[d.index])
+    .attr("stroke", "rgba(0,0,0,0.3)")
+    .attr("stroke-width",1);
+
+  gMerge.select("text")
+    .transition().duration(animate?800:0).ease(d3.easeCubicInOut)
+    .attr("transform", d => {
+      const a = (d.startAngle + d.endAngle) / 2;
+      return `rotate(${a*180/Math.PI-90}) translate(${outerR+12}) ${a>Math.PI?"rotate(180)":""}`;
+    })
+    .attr("text-anchor", d => ((d.startAngle+d.endAngle)/2>Math.PI?"end":"start"))
+    .attr("font-size",10)
+    .attr("fill",d=>regionColors[d.index])
+    .text(d=>regions[d.index].replace("Sub-Saharan ","SS "));
+
+  groups.exit().remove();
+
+  // Hover on arcs
+  gMerge.select("path")
+    .on("mouseenter", function(event, d) {
+      hoveredRegion = d.index;
+      updateHighlight(chords);
+      updateAreaChart();
+      const outbound = d3.sum(m[d.index]);
+      const inbound = d3.sum(m.map(row=>row[d.index]));
+      const net = inbound - outbound;
+      tooltip.innerHTML = `<strong>${regions[d.index]}</strong><br>Outbound: ${d3.format(",")(outbound)}K<br>Inbound: ${d3.format(",")(inbound)}K<br>Net: ${net>=0?"+":""}${d3.format(",")(net)}K`;
+      tooltip.style.opacity = 1;
+      tooltip.style.left = event.clientX + 14 + "px";
+      tooltip.style.top = event.clientY - 10 + "px";
+    })
+    .on("mousemove", (event) => {
+      tooltip.style.left = event.clientX + 14 + "px";
+      tooltip.style.top = event.clientY - 10 + "px";
+    })
+    .on("mouseleave", function() {
+      hoveredRegion = -1;
+      updateHighlight(chords);
+      updateAreaChart();
+      tooltip.style.opacity = 0;
+    });
+
+  // Ribbons
+  const ribbons = chordG.selectAll(".ribbon")
+    .data(chords, d=>`${d.source.index}-${d.target.index}`);
+
+  const rEnter = ribbons.enter().append("path").attr("class","ribbon");
+  const rMerge = ribbons.merge(rEnter);
+
+  rMerge
+    .transition().duration(animate?800:0).ease(d3.easeCubicInOut)
+    .attrTween("d", function(d) {
+      const prev = this._prev || d;
+      const interp = d3.interpolate(prev, d);
+      this._prev = d;
+      return t => ribbon(interp(t));
+    })
+    .attr("fill", d => regionColors[d.source.index])
+    .attr("fill-opacity", 0.45)
+    .attr("stroke","rgba(0,0,0,0.1)");
+
+  ribbons.exit().remove();
+
+  // Ribbon hover
+  rMerge
+    .on("mouseenter", function(event, d) {
+      const m = getMatrix();
+      const val = m[d.source.index][d.target.index];
+      tooltip.innerHTML = `${regions[d.source.index]} → ${regions[d.target.index]}<br><strong>${d3.format(",")(val)}K</strong> people`;
+      tooltip.style.opacity = 1;
+      tooltip.style.left = event.clientX + 14 + "px";
+      tooltip.style.top = event.clientY - 10 + "px";
+      d3.select(this).attr("fill-opacity", 0.8);
+    })
+    .on("mousemove", (event)=>{
+      tooltip.style.left = event.clientX + 14 + "px";
+      tooltip.style.top = event.clientY - 10 + "px";
+    })
+    .on("mouseleave", function() {
+      tooltip.style.opacity = 0;
+      d3.select(this).attr("fill-opacity", d => {
+        if(hoveredRegion===-1) return 0.45;
+        return (d.source.index===hoveredRegion||d.target.index===hoveredRegion)?0.6:0.05;
+      });
+    });
+
+  updateHighlight(chords);
+  prevChordData = chords;
+}
+
+function updateHighlight(chords) {
+  chordG.selectAll(".ribbon")
+    .attr("fill-opacity", d => {
+      if(hoveredRegion===-1) return 0.45;
+      return (d.source.index===hoveredRegion||d.target.index===hoveredRegion)?0.65:0.04;
+    });
+  chordG.selectAll(".group path")
+    .attr("opacity", d => {
+      if(hoveredRegion===-1) return 1;
+      return d.index===hoveredRegion?1:0.4;
+    });
+}
+
+drawChord(false);
+
+// --- STACKED AREA ---
+const areaSvg = d3.select("#stacked-area");
+const am = {top:20,right:16,bottom:30,left:50};
+const aW = 420, aH = 260;
+areaSvg.attr("width",aW).attr("height",aH);
+areaSvg.append("title").text("Stacked area chart of migration flows over time");
+const aG = areaSvg.append("g").attr("transform",`translate(${am.left},${am.top})`);
+const aw = aW-am.left-am.right, ah = aH-am.top-am.bottom;
+
+const ax = d3.scaleLinear().domain([1980,2020]).range([0,aw]);
+const ay = d3.scaleLinear().range([ah,0]);
+
+const axisX = aG.append("g").attr("transform",`translate(0,${ah})`);
+const axisY = aG.append("g");
+
+function updateAreaChart() {
+  const areaTitle = document.getElementById("area-title");
+
+  if (hoveredRegion === -1) {
+    areaTitle.textContent = "Total Global Migration Flows";
+    // Show total flows stacked by destination
+    const data = decades.map(y => {
+      const m = matrices[y];
+      const obj = {year:y};
+      regions.forEach((r,j)=>{
+        obj[r]=d3.sum(m.map(row=>row[j])); // total inbound to j
+      });
+      return obj;
+    });
+
+    const stack = d3.stack().keys(regions)(data);
+    const maxY = d3.max(stack, s=>d3.max(s, d=>d[1]));
+    ay.domain([0,maxY*1.05]);
+
+    axisX.call(d3.axisBottom(ax).tickValues(decades).tickFormat(d3.format("d")));
+    axisY.call(d3.axisLeft(ay).ticks(5).tickFormat(d=>d3.format(".0f")(d)+"K"));
+
+    const area = d3.area()
+      .x(d=>ax(d.data.year))
+      .y0(d=>ay(d[0]))
+      .y1(d=>ay(d[1]))
+      .curve(d3.curveMonotoneX);
+
+    const paths = aG.selectAll(".area-band").data(stack, d=>d.key);
+    paths.enter().append("path").attr("class","area-band")
+      .merge(paths)
+      .transition().duration(400)
+      .attr("d",area)
+      .attr("fill",(d,i)=>regionColors[i])
+      .attr("fill-opacity",0.6)
+      .attr("stroke",(d,i)=>regionColors[i])
+      .attr("stroke-width",0.5);
+    paths.exit().remove();
+  } else {
+    areaTitle.textContent = `${regions[hoveredRegion]} — Outbound Flows`;
+    const ri = hoveredRegion;
+    const otherRegions = regions.filter((_,i)=>i!==ri);
+
+    const data = decades.map(y => {
+      const m = matrices[y];
+      const obj = {year:y};
+      regions.forEach((r,j) => {
+        if (j!==ri) obj[r] = m[ri][j];
+      });
+      return obj;
+    });
+
+    const stack = d3.stack().keys(otherRegions)(data);
+    const maxY = d3.max(stack, s=>d3.max(s, d=>d[1]));
+    ay.domain([0, maxY*1.1]);
+
+    axisX.call(d3.axisBottom(ax).tickValues(decades).tickFormat(d3.format("d")));
+    axisY.call(d3.axisLeft(ay).ticks(5).tickFormat(d=>d3.format(".0f")(d)+"K"));
+
+    const area = d3.area()
+      .x(d=>ax(d.data.year))
+      .y0(d=>ay(d[0]))
+      .y1(d=>ay(d[1]))
+      .curve(d3.curveMonotoneX);
+
+    const paths = aG.selectAll(".area-band").data(stack, d=>d.key);
+    paths.enter().append("path").attr("class","area-band")
+      .merge(paths)
+      .transition().duration(400)
+      .attr("d",area)
+      .attr("fill",d=>regionColors[regions.indexOf(d.key)])
+      .attr("fill-opacity",0.6)
+      .attr("stroke",d=>regionColors[regions.indexOf(d.key)])
+      .attr("stroke-width",0.5);
+    paths.exit().remove();
+  }
+
+  // Current decade indicator
+  aG.selectAll(".decade-line").remove();
+  aG.append("line").attr("class","decade-line")
+    .attr("x1",ax(currentDecade)).attr("x2",ax(currentDecade))
+    .attr("y1",0).attr("y2",ah)
+    .attr("stroke","rgba(255,255,255,0.4)").attr("stroke-width",1.5)
+    .attr("stroke-dasharray","4,3");
+}
+
+updateAreaChart();
+
+// --- SLIDER ---
+const slider = document.getElementById("slider");
+const decadeLabel = document.getElementById("decade-label");
+
+slider.addEventListener("input", function() {
+  const idx = +this.value;
+  currentDecade = decades[idx];
+  decadeLabel.textContent = currentDecade;
+  drawChord(true);
+  updateAreaChart();
+});
+
+// --- LEGEND ---
+const legendEl = document.getElementById("legend");
+regions.forEach((r, i) => {
+  const item = document.createElement("div");
+  item.className = "legend-item";
+  item.innerHTML = `<div class="legend-swatch" style="background:${regionColors[i]}"></div>${r}`;
+  legendEl.appendChild(item);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>2D Density Contour Heatmap</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a2e;
+    color: #e0e0e0;
+    font-family: system-ui, -apple-system, sans-serif;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+  }
+  .container {
+    position: relative;
+    background: #16213e;
+    border-radius: 8px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+    padding: 16px;
+  }
+  .chart-wrapper { position: relative; }
+  canvas, svg { position: absolute; top: 0; left: 0; }
+  svg { pointer-events: all; }
+  h1 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 4px;
+    color: #e8e8e8;
+  }
+  .subtitle {
+    font-size: 12px;
+    color: #8899aa;
+    margin-bottom: 12px;
+  }
+  .legend {
+    display: flex;
+    gap: 16px;
+    margin-top: 8px;
+    font-size: 12px;
+    color: #aabbcc;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .legend-swatch {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+  }
+  .instructions {
+    font-size: 11px;
+    color: #667788;
+    margin-top: 6px;
+  }
+  .tick text {
+    font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+    font-size: 11px;
+    fill: #8899aa;
+  }
+  .tick line { stroke: #2a3a5e; }
+  .domain { stroke: #2a3a5e; }
+  .axis-label {
+    font-size: 12px;
+    fill: #8899aa;
+    font-family: system-ui, -apple-system, sans-serif;
+  }
+  .brush .selection {
+    fill: rgba(100, 160, 255, 0.15);
+    stroke: rgba(100, 160, 255, 0.6);
+    stroke-width: 1.5;
+    stroke-dasharray: 4 2;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>2D Density Contour Heatmap</h1>
+  <div class="subtitle">8,000 points from 3 bivariate normal clusters &mdash; brush to zoom, double-click to reset</div>
+  <div class="chart-wrapper" id="chart"></div>
+  <div class="legend" id="legend"></div>
+  <div class="instructions">Drag to select a region &bull; Contours recompute at zoomed scale &bull; Double-click to reset</div>
+</div>
+
+<script>
+(() => {
+  // --- Dimensions ---
+  const margin = { top: 20, right: 20, bottom: 50, left: 60 };
+  const width = 1080;
+  const height = 680;
+  const innerW = width - margin.left - margin.right;
+  const innerH = height - margin.top - margin.bottom;
+
+  // --- Tol colorblind-safe palette (muted qualitative) ---
+  const tolColors = ["#332288", "#44AA99", "#CC6677"];
+  const tolFills = ["rgba(51,34,136,0.25)", "rgba(68,170,153,0.25)", "rgba(204,102,119,0.25)"];
+
+  // --- Seeded PRNG (mulberry32) ---
+  const seed = (s) => {
+    let t = s + 0x6D2B79F5;
+    return () => {
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  };
+  const rand = seed(42);
+
+  // Box-Muller transform using seeded PRNG
+  const boxMuller = () => {
+    const u1 = rand(), u2 = rand();
+    return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  };
+
+  // --- Generate 3 bivariate normal clusters (unequal sizes) ---
+  const clusters = [
+    { n: 4000, mx: 2.0, my: 3.0, sx: 1.2, sy: 0.8, rho: 0.4, label: "Cluster A" },
+    { n: 2500, mx: -1.5, my: -1.0, sx: 0.9, sy: 1.5, rho: -0.3, label: "Cluster B" },
+    { n: 1500, mx: 3.5, my: -2.0, sx: 0.7, sy: 0.6, rho: 0.0, label: "Cluster C" },
+  ];
+
+  const data = [];
+  clusters.forEach((c, ci) => {
+    for (let i = 0; i < c.n; i++) {
+      const z1 = boxMuller(), z2 = boxMuller();
+      const x = c.mx + c.sx * z1;
+      const y = c.my + c.sy * (c.rho * z1 + Math.sqrt(1 - c.rho * c.rho) * z2);
+      data.push({ x, y, cluster: ci });
+    }
+  });
+
+  // --- Full domain with padding ---
+  const xExtent = d3.extent(data, d => d.x);
+  const yExtent = d3.extent(data, d => d.y);
+  const xPad = (xExtent[1] - xExtent[0]) * 0.05;
+  const yPad = (yExtent[1] - yExtent[0]) * 0.05;
+  const fullXDomain = [xExtent[0] - xPad, xExtent[1] + xPad];
+  const fullYDomain = [yExtent[0] - yPad, yExtent[1] + yPad];
+
+  // --- Scales ---
+  const xScale = d3.scaleLinear().domain(fullXDomain).range([0, innerW]);
+  const yScale = d3.scaleLinear().domain(fullYDomain).range([innerH, 0]);
+
+  // --- Canvas setup (for raw points) ---
+  const chartDiv = d3.select("#chart")
+    .style("width", `${width}px`)
+    .style("height", `${height}px`);
+
+  const dpr = devicePixelRatio;
+  const canvas = chartDiv.append("canvas")
+    .attr("width", width * dpr)
+    .attr("height", height * dpr)
+    .style("width", `${width}px`)
+    .style("height", `${height}px`)
+    .node();
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  // --- SVG overlay (contours, axes, brush) ---
+  const svg = chartDiv.append("svg")
+    .attr("width", width)
+    .attr("height", height);
+
+  const g = svg.append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+  // Contour group (below axes)
+  const contourGroup = g.append("g").attr("class", "contours");
+
+  // Axes
+  const xAxisG = g.append("g")
+    .attr("class", "x-axis")
+    .attr("transform", `translate(0,${innerH})`);
+
+  const yAxisG = g.append("g")
+    .attr("class", "y-axis");
+
+  // Axis labels
+  g.append("text")
+    .attr("class", "axis-label")
+    .attr("x", innerW / 2)
+    .attr("y", innerH + 40)
+    .attr("text-anchor", "middle")
+    .text("X");
+
+  g.append("text")
+    .attr("class", "axis-label")
+    .attr("x", -innerH / 2)
+    .attr("y", -45)
+    .attr("text-anchor", "middle")
+    .attr("transform", "rotate(-90)")
+    .text("Y");
+
+  // Brush group
+  const brushG = g.append("g").attr("class", "brush");
+
+  // --- Draw functions ---
+  const drawPoints = (xDomain, yDomain) => {
+    const xS = d3.scaleLinear().domain(xDomain).range([0, innerW]);
+    const yS = d3.scaleLinear().domain(yDomain).range([innerH, 0]);
+
+    ctx.clearRect(0, 0, width, height);
+    ctx.save();
+    ctx.translate(margin.left, margin.top);
+
+    // Clip to chart area
+    ctx.beginPath();
+    ctx.rect(0, 0, innerW, innerH);
+    ctx.clip();
+
+    // Batch by cluster for fewer state changes
+    for (let ci = 0; ci < clusters.length; ci++) {
+      ctx.fillStyle = tolColors[ci];
+      ctx.globalAlpha = 0.35;
+      ctx.beginPath();
+      for (const d of data) {
+        if (d.cluster !== ci) continue;
+        const px = xS(d.x);
+        const py = yS(d.y);
+        // Cull off-screen points
+        if (px < -3 || px > innerW + 3 || py < -3 || py > innerH + 3) continue;
+        ctx.moveTo(px + 1.8, py);
+        ctx.arc(px, py, 1.8, 0, Math.PI * 2);
+      }
+      ctx.fill();
+    }
+    ctx.restore();
+  };
+
+  const computeAndDrawContours = (xDomain, yDomain) => {
+    const xS = d3.scaleLinear().domain(xDomain).range([0, innerW]);
+    const yS = d3.scaleLinear().domain(yDomain).range([innerH, 0]);
+
+    // Filter points visible in domain
+    const visible = data.filter(d =>
+      d.x >= xDomain[0] && d.x <= xDomain[1] &&
+      d.y >= yDomain[0] && d.y <= yDomain[1]
+    );
+
+    // Compute density contours
+    const contourGenerator = d3.contourDensity()
+      .x(d => xS(d.x))
+      .y(d => yS(d.y))
+      .size([innerW, innerH])
+      .bandwidth(25)
+      .thresholds(12);
+
+    const contours = contourGenerator(visible);
+
+    // Color scale for contour fills
+    const maxDensity = d3.max(contours, c => c.value) || 1;
+    const colorScale = d3.scaleSequential()
+      .domain([0, maxDensity])
+      .interpolator(d3.interpolateViridis);
+
+    contourGroup.selectAll("path").remove();
+
+    contourGroup.selectAll("path")
+      .data(contours)
+      .join("path")
+        .attr("d", d3.geoPath())
+        .attr("fill", d => colorScale(d.value))
+        .attr("fill-opacity", 0.45)
+        .attr("stroke", d => colorScale(d.value))
+        .attr("stroke-opacity", 0.6)
+        .attr("stroke-width", 0.5);
+  };
+
+  const updateAxes = (xDomain, yDomain) => {
+    const xS = d3.scaleLinear().domain(xDomain).range([0, innerW]);
+    const yS = d3.scaleLinear().domain(yDomain).range([innerH, 0]);
+
+    xAxisG.transition().duration(300)
+      .call(d3.axisBottom(xS).ticks(10).tickFormat(d3.format(".1f")));
+    yAxisG.transition().duration(300)
+      .call(d3.axisLeft(yS).ticks(10).tickFormat(d3.format(".1f")));
+  };
+
+  // --- Initial render ---
+  let currentXDomain = fullXDomain;
+  let currentYDomain = fullYDomain;
+
+  const renderAll = (xDomain, yDomain, animate = false) => {
+    currentXDomain = xDomain;
+    currentYDomain = yDomain;
+    drawPoints(xDomain, yDomain);
+    computeAndDrawContours(xDomain, yDomain);
+    updateAxes(xDomain, yDomain);
+  };
+
+  renderAll(fullXDomain, fullYDomain);
+
+  // --- Brush-to-zoom ---
+  const brush = d3.brush()
+    .extent([[0, 0], [innerW, innerH]])
+    .on("end", (event) => {
+      if (!event.selection) return;
+      const [[x0, y0], [x1, y1]] = event.selection;
+
+      // Convert pixel selection to data domain
+      const xS = d3.scaleLinear().domain(currentXDomain).range([0, innerW]);
+      const yS = d3.scaleLinear().domain(currentYDomain).range([innerH, 0]);
+
+      const newXDomain = [xS.invert(x0), xS.invert(x1)];
+      const newYDomain = [yS.invert(y1), yS.invert(y0)]; // inverted because y goes down
+
+      // Clear the brush selection visually
+      brushG.call(brush.move, null);
+
+      renderAll(newXDomain, newYDomain, true);
+    });
+
+  brushG.call(brush);
+
+  // --- Double-click to reset ---
+  svg.on("dblclick", (event) => {
+    event.preventDefault();
+    renderAll(fullXDomain, fullYDomain, true);
+  });
+
+  // --- Legend ---
+  const legend = d3.select("#legend");
+  clusters.forEach((c, i) => {
+    const item = legend.append("div").attr("class", "legend-item");
+    item.append("div")
+      .attr("class", "legend-swatch")
+      .style("background", tolColors[i]);
+    item.append("span").text(`${c.label} (n=${c.n.toLocaleString()})`);
+  });
+})();
+</script>
+</body>
+</html>

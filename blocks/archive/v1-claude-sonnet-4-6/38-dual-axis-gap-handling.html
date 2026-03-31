@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Dual-Axis Gap Handling — Temperature & Rainfall</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #fafafa;
+    font-family: system-ui, -apple-system, sans-serif;
+    display: flex; justify-content: center; align-items: center;
+    min-height: 100vh; padding: 1.5rem;
+  }
+  .mono { font-family: "SF Mono", Monaco, "Cascadia Code", monospace; }
+  .tooltip {
+    position: absolute; pointer-events: none; opacity: 0;
+    background: white; border: 1px solid #ddd; border-radius: 4px;
+    padding: 8px 10px; font-size: 12px; line-height: 1.5;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+    font-family: system-ui, sans-serif;
+    max-width: 200px;
+    transition: opacity 0.1s;
+  }
+  .tooltip .label { font-weight: 600; margin-bottom: 2px; }
+  .tooltip .mono { font-family: "SF Mono", Monaco, monospace; font-size: 11px; }
+</style>
+</head>
+<body>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(() => {
+"use strict";
+
+// --- Tol palette ---
+const TOL = {
+  blue: "#4477AA",
+  rose: "#EE6677",
+  green: "#228833",
+  yellow: "#CCBB44",
+  cyan: "#66CCEE",
+  purple: "#AA3377",
+  grey: "#BBBBBB"
+};
+
+// --- Dimensions: polished at 1200x800 ---
+const width = 1200, height = 800;
+const margin = { top: 70, right: 90, bottom: 60, left: 80 };
+const W = width - margin.left - margin.right;
+const H = height - margin.top - margin.bottom;
+
+// --- Synthetic data: 18 months, daily temp, weekly rainfall ---
+const DAY = 86400000;
+const startDate = new Date(Date.UTC(2023, 0, 1));
+const endDate = new Date(Date.UTC(2024, 5, 30));
+
+// Sensor gaps
+const tempGaps = [
+  { start: Date.UTC(2023, 5, 18), end: Date.UTC(2023, 6, 8), label: "Sensor offline" },
+  { start: Date.UTC(2024, 1, 5), end: Date.UTC(2024, 1, 19), label: "Calibration" }
+];
+const rainGaps = [
+  { start: Date.UTC(2023, 8, 20), end: Date.UTC(2023, 9, 10) },
+  { start: Date.UTC(2024, 3, 1), end: Date.UTC(2024, 3, 14) }
+];
+
+const inGap = (t, gaps) => gaps.some(g => t >= g.start && t < g.end);
+
+// Seeded random for reproducibility
+let seed = 42;
+const rand = () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
+
+// Daily temperature (Celsius): seasonal + noise
+const tempData = [];
+for (let t = +startDate; t <= +endDate; t += DAY) {
+  if (inGap(t, tempGaps)) continue;
+  const d = new Date(t);
+  const doy = (t - Date.UTC(d.getUTCFullYear(), 0, 1)) / DAY;
+  const seasonal = 15 + 14 * Math.sin((doy - 80) * 2 * Math.PI / 365);
+  const noise = (rand() - 0.5) * 8;
+  tempData.push({ date: d, value: Math.round((seasonal + noise) * 10) / 10 });
+}
+
+// Weekly rainfall (mm): seasonal + noise, with gaps
+const rainData = [];
+for (let t = +startDate; t <= +endDate; t += 7 * DAY) {
+  const d = new Date(t);
+  const doy = (t - Date.UTC(d.getUTCFullYear(), 0, 1)) / DAY;
+  const isGap = inGap(t, rainGaps);
+  // More rain in spring/autumn
+  const seasonal = 20 + 15 * Math.cos((doy - 100) * 2 * Math.PI / 365);
+  const noise = (rand() - 0.5) * 18;
+  rainData.push({
+    date: d,
+    value: isGap ? null : Math.max(0, Math.round((seasonal + noise) * 10) / 10),
+    isGap
+  });
+}
+
+// --- SVG ---
+const svg = d3.select("body").append("svg")
+    .attr("width", width).attr("height", height)
+    .attr("viewBox", `0 0 ${width} ${height}`);
+
+const defs = svg.append("defs");
+
+// Hatching pattern for missing rainfall bars
+const hatch = defs.append("pattern")
+    .attr("id", "hatch-missing")
+    .attr("patternUnits", "userSpaceOnUse")
+    .attr("width", 6).attr("height", 6)
+    .attr("patternTransform", "rotate(45)");
+hatch.append("line")
+    .attr("x1", 0).attr("y1", 0).attr("x2", 0).attr("y2", 6)
+    .attr("stroke", TOL.rose).attr("stroke-width", 1.5).attr("stroke-opacity", 0.5);
+
+// Clip path for chart area
+defs.append("clipPath").attr("id", "chart-clip")
+    .append("rect").attr("width", W).attr("height", H);
+
+const g = svg.append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+// --- Scales ---
+const x = d3.scaleUtc()
+    .domain([startDate, endDate])
+    .range([0, W]);
+
+// Temperature: broken axis (doesn't start at zero)
+// Use a range that shows the data well: ~-5 to 35 C
+const tempExtent = d3.extent(tempData, d => d.value);
+const tempDomainLo = Math.floor(tempExtent[0] / 5) * 5 - 2;
+const tempDomainHi = Math.ceil(tempExtent[1] / 5) * 5 + 2;
+const yTemp = d3.scaleLinear()
+    .domain([tempDomainLo, tempDomainHi])
+    .range([H, 0]);
+
+// Rainfall: starts at zero (honest bars)
+const rainMax = d3.max(rainData, d => d.value) || 50;
+const yRain = d3.scaleLinear()
+    .domain([0, Math.ceil(rainMax / 10) * 10 + 5])
+    .range([H, 0]);
+
+// --- Grid lines (y-axis, subtle) ---
+g.append("g")
+    .attr("class", "grid")
+    .call(d3.axisLeft(yTemp)
+        .tickSize(-W).tickFormat(""))
+    .call(gg => gg.select(".domain").remove())
+    .call(gg => gg.selectAll("line")
+        .attr("stroke", "#e8e8e8").attr("stroke-dasharray", "2,3"));
+
+// --- Reference bands ---
+// Normal temperature range: 10-25 C
+const normalLo = 10, normalHi = 25;
+g.append("rect")
+    .attr("x", 0).attr("y", yTemp(normalHi))
+    .attr("width", W).attr("height", yTemp(normalLo) - yTemp(normalHi))
+    .attr("fill", TOL.blue).attr("opacity", 0.06)
+    .attr("rx", 2);
+
+g.append("text")
+    .attr("x", 6).attr("y", yTemp(normalHi) + 13)
+    .attr("fill", TOL.blue).attr("font-size", "10px").attr("opacity", 0.6)
+    .text("Normal temp range (10\u201325\u00b0C)");
+
+// Normal weekly rainfall range: 10-30 mm
+const rainNormLo = 10, rainNormHi = 30;
+g.append("rect")
+    .attr("x", 0).attr("y", yRain(rainNormHi))
+    .attr("width", W).attr("height", yRain(rainNormLo) - yRain(rainNormHi))
+    .attr("fill", TOL.cyan).attr("opacity", 0.06)
+    .attr("rx", 2);
+
+g.append("text")
+    .attr("x", W - 6).attr("y", yRain(rainNormHi) + 13)
+    .attr("text-anchor", "end")
+    .attr("fill", TOL.cyan).attr("font-size", "10px").attr("opacity", 0.6)
+    .text("Normal rainfall (10\u201330 mm/wk)");
+
+// --- Chart content group (clipped) ---
+const chartG = g.append("g").attr("clip-path", "url(#chart-clip)");
+
+// --- Rainfall bars ---
+const barW = Math.min(W / rainData.length * 0.7, 14);
+
+chartG.selectAll(".rain-bar")
+    .data(rainData.filter(d => d.value !== null))
+    .join("rect")
+      .attr("class", "rain-bar")
+      .attr("x", d => x(d.date) - barW / 2)
+      .attr("y", d => yRain(d.value))
+      .attr("width", barW)
+      .attr("height", d => H - yRain(d.value))
+      .attr("fill", TOL.cyan)
+      .attr("opacity", 0.4)
+      .attr("rx", 1);
+
+// Hatched bars for missing rainfall data
+const gapBars = chartG.selectAll(".rain-gap")
+    .data(rainData.filter(d => d.isGap))
+    .join("g")
+      .attr("class", "rain-gap");
+
+gapBars.append("rect")
+    .attr("x", d => x(d.date) - barW / 2)
+    .attr("y", yRain(rainNormHi))
+    .attr("width", barW)
+    .attr("height", H - yRain(rainNormHi))
+    .attr("fill", "url(#hatch-missing)")
+    .attr("stroke", TOL.rose)
+    .attr("stroke-width", 0.5)
+    .attr("stroke-opacity", 0.4)
+    .attr("rx", 1);
+
+gapBars.append("text")
+    .attr("x", d => x(d.date))
+    .attr("y", yRain(rainNormHi) - 5)
+    .attr("text-anchor", "middle")
+    .attr("font-size", "8px")
+    .attr("fill", TOL.rose)
+    .attr("opacity", 0.7)
+    .text("?");
+
+// --- Temperature line with gap handling ---
+// Split data into segments at gaps
+const segments = [];
+let currentSeg = [];
+const gapBridges = [];
+
+for (let i = 0; i < tempData.length; i++) {
+  currentSeg.push(tempData[i]);
+  if (i < tempData.length - 1) {
+    const dt = tempData[i + 1].date - tempData[i].date;
+    if (dt > 2 * DAY) {
+      // Gap detected
+      gapBridges.push({
+        from: tempData[i],
+        to: tempData[i + 1],
+        gap: tempGaps.find(gg =>
+          tempData[i].date.getTime() < gg.end && tempData[i + 1].date.getTime() >= gg.end
+        )
+      });
+      segments.push(currentSeg);
+      currentSeg = [];
+    }
+  }
+}
+if (currentSeg.length) segments.push(currentSeg);
+
+const line = d3.line()
+    .x(d => x(d.date))
+    .y(d => yTemp(d.value))
+    .curve(d3.curveMonotoneX);
+
+// Draw solid line segments
+segments.forEach(seg => {
+  chartG.append("path")
+      .datum(seg)
+      .attr("d", line)
+      .attr("fill", "none")
+      .attr("stroke", TOL.blue)
+      .attr("stroke-width", 2);
+});
+
+// Draw dashed bridges across gaps
+gapBridges.forEach(bridge => {
+  // Dashed line
+  chartG.append("line")
+      .attr("x1", x(bridge.from.date)).attr("y1", yTemp(bridge.from.value))
+      .attr("x2", x(bridge.to.date)).attr("y2", yTemp(bridge.to.value))
+      .attr("stroke", TOL.blue)
+      .attr("stroke-width", 1.5)
+      .attr("stroke-dasharray", "6,4")
+      .attr("opacity", 0.45);
+
+  // Gap boundary markers (small circles)
+  [bridge.from, bridge.to].forEach(pt => {
+    chartG.append("circle")
+        .attr("cx", x(pt.date)).attr("cy", yTemp(pt.value))
+        .attr("r", 3.5)
+        .attr("fill", "white")
+        .attr("stroke", TOL.rose)
+        .attr("stroke-width", 1.5);
+  });
+
+  // Shaded gap region
+  const gx0 = x(bridge.from.date), gx1 = x(bridge.to.date);
+  chartG.append("rect")
+      .attr("x", gx0).attr("y", 0)
+      .attr("width", gx1 - gx0).attr("height", H)
+      .attr("fill", TOL.rose).attr("opacity", 0.04);
+
+  // Label
+  const midX = (gx0 + gx1) / 2;
+  const midY = (yTemp(bridge.from.value) + yTemp(bridge.to.value)) / 2;
+  const labelText = bridge.gap ? bridge.gap.label : "Data gap";
+
+  const labelG = chartG.append("g");
+  labelG.append("rect")
+      .attr("x", midX - 40).attr("y", midY - 22)
+      .attr("width", 80).attr("height", 16)
+      .attr("fill", "white").attr("opacity", 0.85).attr("rx", 3);
+  labelG.append("text")
+      .attr("x", midX).attr("y", midY - 10)
+      .attr("text-anchor", "middle")
+      .attr("font-size", "10px")
+      .attr("fill", TOL.rose)
+      .attr("font-weight", 500)
+      .text(labelText);
+});
+
+// --- Broken axis indicator (left axis, temp doesn't start at 0) ---
+{
+  const axX = -1; // just left of axis line
+  const zigY = H; // bottom
+  const n = 3, step = 6, amp = 5;
+  const pts = [];
+  for (let i = 0; i <= n * 2; i++) {
+    pts.push([axX + (i % 2 === 0 ? -amp : amp), zigY - 4 - i * step]);
+  }
+
+  // White backing to hide axis line behind zigzag
+  g.append("rect")
+      .attr("x", axX - amp - 3).attr("y", zigY - 4 - (n * 2 + 1) * step)
+      .attr("width", amp * 2 + 6).attr("height", (n * 2 + 2) * step)
+      .attr("fill", "#fafafa");
+
+  g.append("polyline")
+      .attr("points", pts.map(p => p.join(",")).join(" "))
+      .attr("fill", "none")
+      .attr("stroke", TOL.blue)
+      .attr("stroke-width", 1.5);
+
+  // Small "0" indicator below the break
+  g.append("text")
+      .attr("x", axX - 12).attr("y", zigY + 2)
+      .attr("text-anchor", "end")
+      .attr("font-size", "9px")
+      .attr("fill", TOL.blue)
+      .attr("opacity", 0.5)
+      .text("0\u00b0C \u2193");
+}
+
+// --- Axes ---
+// X axis
+const xAxisG = g.append("g")
+    .attr("transform", `translate(0,${H})`)
+    .call(d3.axisBottom(x)
+        .ticks(d3.utcMonth.every(2))
+        .tickFormat(d3.utcFormat("%b '%y"))
+        .tickSizeOuter(0))
+    .call(gg => gg.selectAll("text")
+        .attr("fill", "#555").attr("font-size", "11px"));
+
+// Left Y axis (temperature) - color coded
+const yTempAxisG = g.append("g")
+    .call(d3.axisLeft(yTemp)
+        .ticks(8)
+        .tickFormat(d => `${d}\u00b0C`)
+        .tickSizeOuter(0))
+    .call(gg => gg.select(".domain").attr("stroke", TOL.blue))
+    .call(gg => gg.selectAll(".tick line").attr("stroke", TOL.blue))
+    .call(gg => gg.selectAll(".tick text").attr("fill", TOL.blue).attr("font-size", "11px"));
+
+// Left axis label
+g.append("text")
+    .attr("transform", "rotate(-90)")
+    .attr("x", -H / 2).attr("y", -55)
+    .attr("text-anchor", "middle")
+    .attr("fill", TOL.blue)
+    .attr("font-size", "13px")
+    .attr("font-weight", 500)
+    .text("Temperature (\u00b0C)");
+
+// Right Y axis (rainfall) - color coded
+g.append("g")
+    .attr("transform", `translate(${W},0)`)
+    .call(d3.axisRight(yRain)
+        .ticks(6)
+        .tickFormat(d => `${d} mm`)
+        .tickSizeOuter(0))
+    .call(gg => gg.select(".domain").attr("stroke", TOL.cyan))
+    .call(gg => gg.selectAll(".tick line").attr("stroke", TOL.cyan))
+    .call(gg => gg.selectAll(".tick text").attr("fill", TOL.cyan).attr("font-size", "11px"));
+
+// Right axis label
+g.append("text")
+    .attr("transform", "rotate(90)")
+    .attr("x", H / 2).attr("y", -W - 65)
+    .attr("text-anchor", "middle")
+    .attr("fill", TOL.cyan)
+    .attr("font-size", "13px")
+    .attr("font-weight", 500)
+    .text("Weekly Rainfall (mm)");
+
+// --- Title + subtitle ---
+svg.append("text")
+    .attr("x", width / 2).attr("y", 28)
+    .attr("text-anchor", "middle")
+    .attr("font-size", "18px").attr("font-weight", 600)
+    .attr("fill", "#222")
+    .text("Weather Station \u2014 Temperature & Rainfall (2023\u20132024)");
+
+svg.append("text")
+    .attr("x", width / 2).attr("y", 48)
+    .attr("text-anchor", "middle")
+    .attr("font-size", "12px")
+    .attr("fill", "#888")
+    .text("Dashed bridges span sensor gaps \u00b7 Hatched bars mark missing data \u00b7 Shaded bands show normal ranges");
+
+// --- Legend ---
+const legend = svg.append("g")
+    .attr("transform", `translate(${margin.left + 8},${margin.top - 14})`);
+
+// Temp line
+legend.append("line")
+    .attr("x1", 0).attr("x2", 22).attr("y1", 0).attr("y2", 0)
+    .attr("stroke", TOL.blue).attr("stroke-width", 2);
+legend.append("text")
+    .attr("x", 28).attr("y", 4).attr("font-size", "11px").attr("fill", TOL.blue)
+    .text("Temperature");
+
+// Dashed bridge
+legend.append("line")
+    .attr("x1", 120).attr("x2", 142).attr("y1", 0).attr("y2", 0)
+    .attr("stroke", TOL.blue).attr("stroke-width", 1.5)
+    .attr("stroke-dasharray", "5,3");
+legend.append("text")
+    .attr("x", 148).attr("y", 4).attr("font-size", "11px").attr("fill", "#666")
+    .text("Gap bridge");
+
+// Rain bar
+legend.append("rect")
+    .attr("x", 235).attr("y", -6).attr("width", 12).attr("height", 12)
+    .attr("fill", TOL.cyan).attr("opacity", 0.4).attr("rx", 1);
+legend.append("text")
+    .attr("x", 253).attr("y", 4).attr("font-size", "11px").attr("fill", TOL.cyan)
+    .text("Rainfall");
+
+// Hatched bar
+legend.append("rect")
+    .attr("x", 330).attr("y", -6).attr("width", 12).attr("height", 12)
+    .attr("fill", "url(#hatch-missing)")
+    .attr("stroke", TOL.rose).attr("stroke-width", 0.5).attr("rx", 1);
+legend.append("text")
+    .attr("x", 348).attr("y", 4).attr("font-size", "11px").attr("fill", TOL.rose)
+    .text("Missing data");
+
+// --- Crosshair tooltip ---
+const tooltip = d3.select("body").append("div").attr("class", "tooltip");
+const crosshairG = g.append("g").style("display", "none");
+
+crosshairG.append("line")
+    .attr("class", "cross-v")
+    .attr("y1", 0).attr("y2", H)
+    .attr("stroke", "#999").attr("stroke-width", 0.5)
+    .attr("stroke-dasharray", "3,3");
+
+crosshairG.append("circle")
+    .attr("class", "cross-dot-temp")
+    .attr("r", 4)
+    .attr("fill", "white").attr("stroke", TOL.blue).attr("stroke-width", 2);
+
+crosshairG.append("circle")
+    .attr("class", "cross-dot-rain")
+    .attr("r", 4)
+    .attr("fill", "white").attr("stroke", TOL.cyan).attr("stroke-width", 2);
+
+// Bisector for nearest data point
+const bisect = d3.bisector(d => d.date).center;
+
+// Interaction overlay
+g.append("rect")
+    .attr("width", W).attr("height", H)
+    .attr("fill", "none").attr("pointer-events", "all")
+    .style("cursor", "crosshair")
+    .on("pointerenter", () => crosshairG.style("display", null))
+    .on("pointerleave", () => {
+      crosshairG.style("display", "none");
+      tooltip.style("opacity", 0);
+    })
+    .on("pointermove", (event) => {
+      const [mx] = d3.pointer(event);
+      const dateAtMouse = x.invert(mx);
+
+      // Nearest temp point
+      const ti = bisect(tempData, dateAtMouse);
+      const td = tempData[ti];
+
+      // Nearest rain bar
+      const ri = bisect(rainData, dateAtMouse);
+      const rd = rainData[ri];
+
+      crosshairG.select(".cross-v")
+          .attr("x1", mx).attr("x2", mx);
+
+      crosshairG.select(".cross-dot-temp")
+          .attr("cx", x(td.date))
+          .attr("cy", yTemp(td.value));
+
+      if (rd && rd.value !== null) {
+        crosshairG.select(".cross-dot-rain")
+            .attr("cx", x(rd.date))
+            .attr("cy", yRain(rd.value))
+            .style("display", null);
+      } else {
+        crosshairG.select(".cross-dot-rain").style("display", "none");
+      }
+
+      // Tooltip content
+      const fmt = d3.utcFormat("%b %-d, %Y");
+      let html = `<div class="label">${fmt(td.date)}</div>`;
+      html += `<div><span style="color:${TOL.blue}">\u25cf</span> Temp: <span class="mono">${td.value.toFixed(1)}\u00b0C</span></div>`;
+      if (rd && rd.value !== null) {
+        html += `<div><span style="color:${TOL.cyan}">\u25cf</span> Rain: <span class="mono">${rd.value.toFixed(1)} mm</span></div>`;
+      } else if (rd && rd.isGap) {
+        html += `<div><span style="color:${TOL.rose}">\u25cf</span> Rain: <em>no data</em></div>`;
+      }
+
+      const tw = tooltip.node().offsetWidth || 160;
+      const th = tooltip.node().offsetHeight || 60;
+      const px = event.pageX + 16;
+      const py = event.pageY - th - 10;
+      tooltip
+          .html(html)
+          .style("left", `${Math.min(px, window.innerWidth - tw - 12)}px`)
+          .style("top", `${Math.max(py, 8)}px`)
+          .style("opacity", 1);
+    });
+
+// --- Dual-axis caution note ---
+svg.append("text")
+    .attr("x", width / 2).attr("y", height - 10)
+    .attr("text-anchor", "middle")
+    .attr("font-size", "10px")
+    .attr("fill", "#aaa")
+    .text("\u26a0 Dual-axis charts can mislead \u2014 scales are independent. Both axes include zero context via broken-axis indicator.");
+
+})();
+</script>
+</body>
+</html>

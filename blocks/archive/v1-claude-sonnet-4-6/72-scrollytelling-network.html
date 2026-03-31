@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Scrollytelling Network Growth</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #fafafa;
+    font-family: system-ui, -apple-system, sans-serif;
+    color: #333;
+  }
+
+  .wrapper {
+    display: grid;
+    grid-template-columns: 38% 62%;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+
+  /* Scroll column */
+  .scroll-col { position: relative; z-index: 2; }
+
+  .step {
+    min-height: 90vh;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 40px 36px 40px 24px;
+    opacity: 0.25;
+    transition: opacity 0.4s ease;
+  }
+  .step.active { opacity: 1; }
+
+  .step .stage-num {
+    font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.12em; color: #999; margin-bottom: 6px;
+  }
+  .step h2 {
+    font-size: 22px; font-weight: 700; line-height: 1.25;
+    color: #111; margin-bottom: 10px;
+  }
+  .step p {
+    font-size: 14px; line-height: 1.7; color: #555;
+    max-width: 340px;
+  }
+  .step .stat {
+    display: inline-block; margin-top: 14px; padding: 6px 14px;
+    background: #fff; border: 1px solid #e0e0e0; border-radius: 6px;
+    font-size: 12px; font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    color: #444;
+  }
+
+  /* Sticky viz column */
+  .sticky-col {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+
+  #viz { display: block; }
+
+  /* Progress dots */
+  .progress-dots {
+    position: fixed; left: 16px; top: 50%;
+    transform: translateY(-50%);
+    display: flex; flex-direction: column; gap: 12px;
+    z-index: 20;
+  }
+  .pdot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #ccc; transition: all 0.3s ease;
+    cursor: pointer;
+  }
+  .pdot.active { background: #4477AA; transform: scale(1.5); }
+
+  /* Tooltip */
+  .tooltip {
+    position: absolute; pointer-events: none; opacity: 0;
+    background: #fff; border: 1px solid #ddd; border-radius: 6px;
+    padding: 8px 12px; font-size: 12px; line-height: 1.5;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    max-width: 200px; z-index: 30;
+    transition: opacity 0.15s ease;
+  }
+  .tooltip strong { color: #111; }
+  .tooltip .role { color: #888; font-size: 11px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .step { transition: none; }
+    .pdot { transition: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="progress-dots" id="dots"></div>
+<div class="tooltip" id="tooltip"></div>
+
+<div class="wrapper">
+  <div class="scroll-col" id="scrollCol"></div>
+  <div class="sticky-col">
+    <svg id="viz"></svg>
+  </div>
+</div>
+
+<script>
+// --- Palette: Tol colorblind-safe ---
+const TOL = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377","#BBBBBB"];
+
+// --- Config ---
+const svgW = 660, svgH = 620;
+const rng = d3.randomLcg(42);
+
+// --- Synthetic network data ---
+// Stage 1: 5 founders, fully connected clique
+const founders = d3.range(5).map(i => ({
+  id: i, name: `Founder ${i + 1}`, group: "founder", stage: 1
+}));
+const founderEdges = [];
+for (let i = 0; i < 5; i++)
+  for (let j = i + 1; j < 5; j++)
+    founderEdges.push({ source: i, target: j, stage: 1 });
+
+// Stage 2: 18 early adopters, each connected to 1-2 founders + some inter-edges
+const earlyAdopters = d3.range(18).map(i => ({
+  id: 5 + i, name: `Adopter ${i + 1}`, group: "early", stage: 2
+}));
+const earlyEdges = [];
+earlyAdopters.forEach(n => {
+  earlyEdges.push({ source: n.id, target: Math.floor(rng() * 5), stage: 2 });
+  if (rng() < 0.4) earlyEdges.push({ source: n.id, target: Math.floor(rng() * 5), stage: 2 });
+});
+for (let i = 0; i < 10; i++) {
+  const a = 5 + Math.floor(rng() * 18), b = 5 + Math.floor(rng() * 18);
+  if (a !== b) earlyEdges.push({ source: a, target: b, stage: 2 });
+}
+
+// Stage 3: 30 community members in 3 clusters
+const communityNames = ["Design", "Engineering", "Research"];
+const communityNodes = d3.range(30).map(i => ({
+  id: 23 + i, name: `Member ${i + 1}`,
+  group: communityNames[i % 3], stage: 3
+}));
+const communityEdges = [];
+for (let i = 0; i < 30; i++) {
+  for (let j = i + 1; j < 30; j++) {
+    if (communityNodes[i].group === communityNodes[j].group && rng() < 0.3) {
+      communityEdges.push({ source: 23 + i, target: 23 + j, stage: 3 });
+    }
+  }
+}
+// Each cluster connects to 2 early adopters
+communityNames.forEach((c, ci) => {
+  const members = communityNodes.filter(n => n.group === c);
+  communityEdges.push({ source: members[0].id, target: 5 + ci * 4, stage: 3 });
+  communityEdges.push({ source: members[1].id, target: 5 + ci * 4 + 1, stage: 3 });
+});
+
+// Stage 4: 8 bridge nodes that span clusters
+const bridges = d3.range(8).map(i => ({
+  id: 53 + i, name: `Bridge ${i + 1}`, group: "bridge", stage: 4
+}));
+const bridgeEdges = [];
+bridges.forEach((b, i) => {
+  // Connect to nodes in two different clusters
+  const c1Idx = i % 3, c2Idx = (i + 1) % 3;
+  const c1Members = communityNodes.filter(n => n.group === communityNames[c1Idx]);
+  const c2Members = communityNodes.filter(n => n.group === communityNames[c2Idx]);
+  bridgeEdges.push({ source: b.id, target: c1Members[Math.floor(rng() * c1Members.length)].id, stage: 4 });
+  bridgeEdges.push({ source: b.id, target: c2Members[Math.floor(rng() * c2Members.length)].id, stage: 4 });
+  // Some bridges also link to a founder or early adopter
+  if (rng() < 0.4) bridgeEdges.push({ source: b.id, target: Math.floor(rng() * 23), stage: 4 });
+});
+
+// Stage 5: fill edges to complete the network + 4 peripheral nodes
+const peripherals = d3.range(4).map(i => ({
+  id: 61 + i, name: `Peripheral ${i + 1}`, group: "peripheral", stage: 5
+}));
+const fillEdges = [];
+// Random cross-links
+for (let i = 0; i < 20; i++) {
+  const a = Math.floor(rng() * 61), b = Math.floor(rng() * 61);
+  if (a !== b) fillEdges.push({ source: a, target: b, stage: 5 });
+}
+// Peripherals connected by a single thread
+peripherals.forEach(p => {
+  fillEdges.push({ source: p.id, target: Math.floor(rng() * 61), stage: 5 });
+});
+
+const allNodes = [...founders, ...earlyAdopters, ...communityNodes, ...bridges, ...peripherals];
+
+// --- Stage definitions ---
+const stages = [
+  {
+    nodes: founders,
+    edges: founderEdges,
+    label: "Stage 1 of 5",
+    title: "The Founders",
+    text: "Five people who knew each other before anything else existed. A fully connected clique -- every founder linked to every other. This dense core of mutual trust becomes the seed crystal for everything that follows.",
+    stat: "5 nodes, 10 edges",
+    annotation: "clique"
+  },
+  {
+    nodes: [...founders, ...earlyAdopters],
+    edges: [...founderEdges, ...earlyEdges],
+    label: "Stage 2 of 5",
+    title: "Early Adopters Arrive",
+    text: "Eighteen newcomers, each drawn in by one or two founders. The topology is a star: every new connection routes through the original five. The founders' degree centrality skyrockets -- they are the only path between any two adopters.",
+    stat: "23 nodes, " + (founderEdges.length + earlyEdges.length) + " edges",
+    annotation: "star"
+  },
+  {
+    nodes: [...founders, ...earlyAdopters, ...communityNodes],
+    edges: [...founderEdges, ...earlyEdges, ...communityEdges],
+    label: "Stage 3 of 5",
+    title: "Communities Crystallize",
+    text: "Three distinct communities form -- Design, Engineering, and Research. People connect to others like themselves, creating dense local neighborhoods. Homophily drives clustering: within-group density is 10x the between-group rate.",
+    stat: "53 nodes, 3 communities",
+    annotation: "communities"
+  },
+  {
+    nodes: [...founders, ...earlyAdopters, ...communityNodes, ...bridges],
+    edges: [...founderEdges, ...earlyEdges, ...communityEdges, ...bridgeEdges],
+    label: "Stage 4 of 5",
+    title: "Bridges Span the Gaps",
+    text: "Eight bridge nodes appear, each connected to two different communities. Structurally rare but disproportionately powerful: they control information flow between clusters. Remove them, and the communities become isolated silos.",
+    stat: "61 nodes, 8 bridges",
+    annotation: "bridges"
+  },
+  {
+    nodes: allNodes,
+    edges: [...founderEdges, ...earlyEdges, ...communityEdges, ...bridgeEdges, ...fillEdges],
+    label: "Stage 5 of 5",
+    title: "The Full Network",
+    text: "The mature network: 65 nodes with emergent structure visible at every scale. Dense community cores, structural bridges, founding clique still central. Notice the peripheral nodes at the edges -- connected by a single thread, vulnerable to disconnection.",
+    stat: "65 nodes, " + [...founderEdges, ...earlyEdges, ...communityEdges, ...bridgeEdges, ...fillEdges].length + " edges",
+    annotation: "full"
+  }
+];
+
+// --- Build scroll sections ---
+const scrollCol = d3.select("#scrollCol");
+stages.forEach((s, i) => {
+  const step = scrollCol.append("div")
+    .attr("class", "step" + (i === 0 ? " active" : ""))
+    .attr("id", `step-${i}`)
+    .attr("data-step", i);
+  step.append("div").attr("class", "stage-num").text(s.label);
+  step.append("h2").text(s.title);
+  step.append("p").text(s.text);
+  step.append("div").attr("class", "stat").text(s.stat);
+});
+
+// Progress dots
+const dotsWrap = d3.select("#dots");
+stages.forEach((_, i) => {
+  dotsWrap.append("div")
+    .attr("class", "pdot" + (i === 0 ? " active" : ""))
+    .attr("data-step", i)
+    .on("click", () => {
+      document.getElementById(`step-${i}`).scrollIntoView({ behavior: "smooth" });
+    });
+});
+
+// --- SVG setup ---
+const svg = d3.select("#viz").attr("width", svgW).attr("height", svgH);
+const defs = svg.append("defs");
+
+// Glow filter for founders
+const glow = defs.append("filter").attr("id", "glow")
+  .attr("x", "-50%").attr("y", "-50%").attr("width", "200%").attr("height", "200%");
+glow.append("feGaussianBlur").attr("stdDeviation", "2.5").attr("result", "blur");
+const merge = glow.append("feMerge");
+merge.append("feMergeNode").attr("in", "blur");
+merge.append("feMergeNode").attr("in", "SourceGraphic");
+
+const gLinks = svg.append("g").attr("class", "links");
+const gNodes = svg.append("g").attr("class", "nodes");
+const gAnnotations = svg.append("g").attr("class", "annotations").style("pointer-events", "none");
+const gLabels = svg.append("g").attr("class", "labels").style("pointer-events", "none");
+
+// --- Color scale ---
+const groupColor = d3.scaleOrdinal()
+  .domain(["founder", "early", "Design", "Engineering", "Research", "bridge", "peripheral"])
+  .range([TOL[0], TOL[4], TOL[2], TOL[3], TOL[5], TOL[1], TOL[6]]);
+
+// --- Node radius by role ---
+const nodeRadius = d => {
+  if (d.group === "founder") return 8;
+  if (d.group === "bridge") return 6;
+  if (d.group === "peripheral") return 4;
+  return 5;
+};
+
+// --- Force simulation ---
+const simulation = d3.forceSimulation()
+  .force("link", d3.forceLink().id(d => d.id).distance(35).strength(0.4))
+  .force("charge", d3.forceManyBody().strength(-60).distanceMax(200))
+  .force("center", d3.forceCenter(svgW / 2, svgH / 2))
+  .force("collide", d3.forceCollide(d => nodeRadius(d) + 2))
+  .force("x", d3.forceX(svgW / 2).strength(0.04))
+  .force("y", d3.forceY(svgH / 2).strength(0.04))
+  .on("tick", ticked);
+
+simulation.stop();
+
+// --- State ---
+let currentStage = -1;
+const nodeMap = new Map();
+const tooltip = d3.select("#tooltip");
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+const dur = ms => reducedMotion.matches ? 0 : ms;
+
+// --- Tick function ---
+function ticked() {
+  gLinks.selectAll("line")
+    .attr("x1", d => d.source.x).attr("y1", d => d.source.y)
+    .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
+  gNodes.selectAll("circle")
+    .attr("cx", d => d.x).attr("cy", d => d.y);
+  updateAnnotations();
+}
+
+// --- Transition to a stage ---
+function goToStage(idx) {
+  if (idx === currentStage || idx < 0 || idx >= stages.length) return;
+  currentStage = idx;
+  const stage = stages[idx];
+
+  // Build node objects, preserving positions for existing nodes
+  const stageNodes = stage.nodes.map(d => {
+    if (nodeMap.has(d.id)) return nodeMap.get(d.id);
+    const n = {
+      ...d,
+      x: svgW / 2 + (rng() - 0.5) * 40,
+      y: svgH / 2 + (rng() - 0.5) * 40
+    };
+    nodeMap.set(d.id, n);
+    return n;
+  });
+
+  // Deep copy edges so force can mutate source/target to objects
+  const stageEdges = stage.edges.map(e => ({ source: e.source, target: e.target }));
+
+  // --- Nodes ---
+  gNodes.selectAll("circle")
+    .data(stageNodes, d => d.id)
+    .join(
+      enter => enter.append("circle")
+        .attr("cx", d => d.x).attr("cy", d => d.y)
+        .attr("r", 0)
+        .attr("fill", d => groupColor(d.group))
+        .attr("stroke", "#fff").attr("stroke-width", 1.5)
+        .attr("cursor", "pointer")
+        .attr("filter", d => d.group === "founder" ? "url(#glow)" : null)
+        .on("pointerenter", showTooltip)
+        .on("pointermove", moveTooltip)
+        .on("pointerleave", hideTooltip)
+        .call(drag(simulation))
+        .call(e => e.transition().duration(dur(600)).ease(d3.easeCubicOut)
+          .attr("r", d => nodeRadius(d))),
+      update => update
+        .call(u => u.transition().duration(dur(400))
+          .attr("r", d => nodeRadius(d))
+          .attr("fill", d => groupColor(d.group))
+          .attr("stroke-width", 1.5)),
+      exit => exit
+        .call(e => e.transition().duration(dur(400)).attr("r", 0).attr("opacity", 0).remove())
+    );
+
+  // --- Links ---
+  gLinks.selectAll("line")
+    .data(stageEdges, d => `${typeof d.source === "object" ? d.source.id : d.source}-${typeof d.target === "object" ? d.target.id : d.target}`)
+    .join(
+      enter => enter.append("line")
+        .attr("stroke", "#999").attr("stroke-width", 0.8)
+        .attr("stroke-opacity", 0)
+        .call(e => e.transition().delay(dur(200)).duration(dur(500))
+          .attr("stroke-opacity", 0.25)),
+      update => update
+        .call(u => u.transition().duration(dur(300)).attr("stroke-opacity", 0.25)),
+      exit => exit
+        .call(e => e.transition().duration(dur(300)).attr("stroke-opacity", 0).remove())
+    );
+
+  // --- Update simulation ---
+  simulation.nodes(stageNodes);
+  simulation.force("link").links(stageEdges);
+  simulation.alpha(0.6).restart();
+
+  // --- Update UI ---
+  d3.selectAll(".step").classed("active", function() {
+    return +this.dataset.step === idx;
+  });
+  d3.selectAll(".pdot").classed("active", function() {
+    return +this.dataset.step === idx;
+  });
+}
+
+// --- Annotations per stage ---
+function updateAnnotations() {
+  gAnnotations.selectAll("*").remove();
+
+  if (currentStage === 0) {
+    // Label the clique
+    const cx = d3.mean(founders, f => nodeMap.get(f.id)?.x ?? svgW / 2);
+    const cy = d3.mean(founders, f => nodeMap.get(f.id)?.y ?? svgH / 2);
+    const maxR = d3.max(founders, f => {
+      const n = nodeMap.get(f.id);
+      return n ? Math.hypot(n.x - cx, n.y - cy) : 0;
+    }) + 20;
+    gAnnotations.append("circle")
+      .attr("cx", cx).attr("cy", cy).attr("r", maxR)
+      .attr("fill", "none").attr("stroke", TOL[0]).attr("stroke-opacity", 0.35)
+      .attr("stroke-width", 1.5).attr("stroke-dasharray", "6,4");
+    gAnnotations.append("text")
+      .attr("x", cx).attr("y", cy - maxR - 8)
+      .attr("text-anchor", "middle")
+      .attr("font-size", "11px").attr("fill", TOL[0]).attr("font-weight", 600)
+      .text("Fully connected clique");
+
+  } else if (currentStage === 1) {
+    // Highlight founders' hub position
+    founders.forEach(f => {
+      const n = nodeMap.get(f.id);
+      if (!n) return;
+      gAnnotations.append("circle")
+        .attr("cx", n.x).attr("cy", n.y).attr("r", 14)
+        .attr("fill", "none").attr("stroke", TOL[0]).attr("stroke-opacity", 0.3)
+        .attr("stroke-width", 1);
+    });
+    const f0 = nodeMap.get(0);
+    if (f0) {
+      gAnnotations.append("text")
+        .attr("x", f0.x + 18).attr("y", f0.y - 12)
+        .attr("font-size", "11px").attr("fill", "#555").attr("font-weight", 600)
+        .text("Hub nodes");
+    }
+
+  } else if (currentStage === 2) {
+    // Circle each community
+    communityNames.forEach((name, ci) => {
+      const members = communityNodes.filter(n => n.group === name);
+      const xs = members.map(m => nodeMap.get(m.id)?.x).filter(Boolean);
+      const ys = members.map(m => nodeMap.get(m.id)?.y).filter(Boolean);
+      if (xs.length === 0) return;
+      const cx = d3.mean(xs), cy = d3.mean(ys);
+      const maxR = d3.max(members, m => {
+        const n = nodeMap.get(m.id);
+        return n ? Math.hypot(n.x - cx, n.y - cy) : 0;
+      }) + 16;
+      gAnnotations.append("circle")
+        .attr("cx", cx).attr("cy", cy).attr("r", maxR)
+        .attr("fill", "none").attr("stroke", groupColor(name))
+        .attr("stroke-opacity", 0.3).attr("stroke-width", 1.5)
+        .attr("stroke-dasharray", "5,3");
+      gAnnotations.append("text")
+        .attr("x", cx).attr("y", cy - maxR - 6)
+        .attr("text-anchor", "middle")
+        .attr("font-size", "11px").attr("fill", groupColor(name)).attr("font-weight", 600)
+        .text(name);
+    });
+
+  } else if (currentStage === 3) {
+    // Label bridges
+    bridges.slice(0, 4).forEach(b => {
+      const n = nodeMap.get(b.id);
+      if (!n) return;
+      // Draw a small diamond marker
+      const s = 10;
+      gAnnotations.append("path")
+        .attr("d", `M${n.x},${n.y - s} L${n.x + s},${n.y} L${n.x},${n.y + s} L${n.x - s},${n.y} Z`)
+        .attr("fill", "none").attr("stroke", TOL[1]).attr("stroke-opacity", 0.5)
+        .attr("stroke-width", 1.5);
+    });
+    const b0 = nodeMap.get(bridges[0].id);
+    if (b0) {
+      gAnnotations.append("text")
+        .attr("x", b0.x + 16).attr("y", b0.y - 14)
+        .attr("font-size", "11px").attr("fill", TOL[1]).attr("font-weight", 600)
+        .text("Structural bridges");
+    }
+
+  } else if (currentStage === 4) {
+    // Highlight peripherals
+    peripherals.forEach(p => {
+      const n = nodeMap.get(p.id);
+      if (!n) return;
+      gAnnotations.append("circle")
+        .attr("cx", n.x).attr("cy", n.y).attr("r", 12)
+        .attr("fill", "none").attr("stroke", TOL[6]).attr("stroke-opacity", 0.5)
+        .attr("stroke-width", 1).attr("stroke-dasharray", "3,2");
+    });
+    const p0 = nodeMap.get(peripherals[0].id);
+    if (p0) {
+      // Leader line
+      const tx = p0.x + 30, ty = p0.y - 25;
+      gAnnotations.append("path")
+        .attr("d", `M${p0.x + 8},${p0.y - 8} Q${tx - 5},${p0.y - 8} ${tx},${ty + 12}`)
+        .attr("fill", "none").attr("stroke", "#999").attr("stroke-width", 0.8);
+      gAnnotations.append("text")
+        .attr("x", tx).attr("y", ty)
+        .attr("font-size", "11px").attr("fill", "#777").attr("font-weight", 600)
+        .text("Peripheral");
+      gAnnotations.append("text")
+        .attr("x", tx).attr("y", ty + 13)
+        .attr("font-size", "10px").attr("fill", "#999").attr("font-style", "italic")
+        .text("Single connection");
+    }
+  }
+}
+
+// --- Tooltip ---
+function showTooltip(event, d) {
+  const degree = countDegree(d.id);
+  tooltip
+    .html(`<strong>${d.name}</strong><br><span class="role">${d.group}</span><br>Connections: ${degree}`)
+    .style("opacity", 1);
+}
+function moveTooltip(event) {
+  const tw = tooltip.node().offsetWidth, th = tooltip.node().offsetHeight;
+  const x = Math.min(event.pageX + 14, window.innerWidth + window.scrollX - tw - 8);
+  const y = Math.max(event.pageY - th - 10, window.scrollY + 8);
+  tooltip.style("left", `${x}px`).style("top", `${y}px`);
+}
+function hideTooltip() {
+  tooltip.style("opacity", 0);
+}
+
+function countDegree(id) {
+  if (currentStage < 0) return 0;
+  return stages[currentStage].edges.filter(e => e.source === id || e.target === id).length;
+}
+
+// --- Drag ---
+function drag(sim) {
+  return d3.drag()
+    .on("start", (event, d) => {
+      if (!event.active) sim.alphaTarget(0.3).restart();
+      d.fx = d.x; d.fy = d.y;
+    })
+    .on("drag", (event, d) => { d.fx = event.x; d.fy = event.y; })
+    .on("end", (event, d) => {
+      if (!event.active) sim.alphaTarget(0);
+      d.fx = null; d.fy = null;
+    });
+}
+
+// --- IntersectionObserver ---
+const observer = new IntersectionObserver(
+  entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        const idx = +e.target.dataset.step;
+        goToStage(idx);
+      }
+    });
+  },
+  { threshold: 0.5 }
+);
+document.querySelectorAll(".step").forEach(el => observer.observe(el));
+
+// --- Background tab: pause simulation ---
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) simulation.stop();
+  else if (currentStage >= 0) simulation.alpha(0.1).restart();
+});
+
+// --- Legend ---
+const legendG = svg.append("g").attr("transform", `translate(${svgW - 120}, 14)`);
+const legendItems = [
+  { label: "Founder", color: TOL[0] },
+  { label: "Early adopter", color: TOL[4] },
+  { label: "Community", color: TOL[2] },
+  { label: "Bridge", color: TOL[1] },
+  { label: "Peripheral", color: TOL[6] }
+];
+legendG.append("rect")
+  .attr("x", -6).attr("y", -4)
+  .attr("width", 110).attr("height", legendItems.length * 20 + 8)
+  .attr("fill", "#fff").attr("fill-opacity", 0.85).attr("rx", 4)
+  .attr("stroke", "#e0e0e0");
+legendItems.forEach((item, i) => {
+  const g = legendG.append("g").attr("transform", `translate(0, ${i * 20 + 10})`);
+  g.append("circle").attr("cx", 8).attr("cy", 0).attr("r", 4).attr("fill", item.color);
+  g.append("text").attr("x", 18).attr("y", 4)
+    .attr("font-size", "11px").attr("fill", "#555")
+    .text(item.label);
+});
+
+// --- Initialize ---
+goToStage(0);
+</script>
+</body>
+</html>

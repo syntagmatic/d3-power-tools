@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Falcon Prefetch Histogram</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #fafafa; font-family: system-ui, -apple-system, sans-serif; }
+  .container { width: 1200px; margin: 0 auto; padding: 16px 0; }
+  .header { display: flex; align-items: baseline; gap: 16px; padding: 0 0 12px; }
+  .header h2 { font-size: 18px; font-weight: 600; color: #222; }
+  .header .subtitle { font-size: 13px; color: #888; }
+  .stats { display: flex; gap: 24px; align-items: center; padding: 8px 0 4px; flex-wrap: wrap; }
+  .stat-box {
+    display: inline-flex; align-items: baseline; gap: 6px;
+    font-size: 13px; color: #555;
+  }
+  .stat-box .label { color: #888; }
+  .stat-box .value {
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    font-size: 13px; font-weight: 600;
+  }
+  .stat-box .value.fast { color: #228833; }
+  .stat-box .value.slow { color: #EE6677; }
+  .stat-box .value.neutral { color: #4477AA; }
+  .stat-box .value.speedup { color: #AA3377; font-size: 14px; }
+  .divider { width: 1px; height: 16px; background: #ddd; }
+  .reset-btn {
+    padding: 4px 14px; border: 1px solid #ccc; border-radius: 4px; cursor: pointer;
+    background: #fff; font-size: 12px; font-family: system-ui; margin-left: auto;
+    transition: background 0.15s;
+  }
+  .reset-btn:hover { background: #f0f0f0; border-color: #aaa; }
+  .chart-section { margin-top: 8px; }
+  .chart-title { font-size: 13px; font-weight: 600; color: #444; padding: 4px 0 2px 60px; }
+  .hint { font-size: 11px; color: #aaa; padding: 6px 0 0 60px; }
+  .selection .overlay { cursor: crosshair; }
+  .tick text { font-size: 11px; }
+  .latency-history { margin-top: 12px; padding: 8px 0 0 60px; }
+  .latency-history .title { font-size: 12px; font-weight: 600; color: #666; margin-bottom: 4px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h2>Falcon Prefetch Histogram</h2>
+    <span class="subtitle">Brush the timeline to filter 500K events with O(1) cumulative histogram lookups</span>
+  </div>
+  <div class="stats" id="stats">
+    <div class="stat-box">
+      <span class="label">Events:</span>
+      <span class="value neutral" id="countValue">500,000 / 500,000</span>
+    </div>
+    <div class="divider"></div>
+    <div class="stat-box">
+      <span class="label">Prefetch:</span>
+      <span class="value fast" id="prefetchTime">--</span>
+    </div>
+    <div class="stat-box">
+      <span class="label">Naive:</span>
+      <span class="value slow" id="naiveTime">--</span>
+    </div>
+    <div class="divider"></div>
+    <div class="stat-box">
+      <span class="label">Speedup:</span>
+      <span class="value speedup" id="speedupValue">--</span>
+    </div>
+    <button class="reset-btn" id="resetBtn">Reset brush</button>
+  </div>
+
+  <div class="chart-section">
+    <div class="chart-title">Event Timeline — Daily Count</div>
+    <svg id="overview"></svg>
+  </div>
+  <div class="chart-section">
+    <div class="chart-title">Value Distribution (log-scaled bins)</div>
+    <svg id="detail"></svg>
+  </div>
+  <div class="chart-section">
+    <div class="chart-title">Latency Comparison — Last 50 Brush Updates</div>
+    <svg id="latencyChart"></svg>
+    <div class="hint">Each brush movement runs both methods and logs the time. The gap shows why prefetch matters.</div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const N = 500_000;
+  const NBINS = 48;
+  const NSLOTS = 256;
+  const TOL = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377","#BBBBBB"];
+  const WIDTH = 1200;
+
+  // ── Seeded RNG ──
+  const rng = d3.randomLcg(42);
+  const normal = () => {
+    let u = 0, v = 0;
+    while (!u) u = rng();
+    v = rng();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
+
+  // ── Synthetic data: 500K events over one year ──
+  // Timestamps have weekly seasonality (more events on weekdays) and a mid-year surge
+  const timestamps = new Float64Array(N);
+  const values = new Float64Array(N);
+
+  for (let i = 0; i < N; i++) {
+    // Non-uniform time distribution: weekday-heavy + summer surge
+    let t = rng() * 365;
+    // Reject-sample to create weekly pattern and mid-year bump
+    const dayOfWeek = t % 7;
+    const weekdayBias = dayOfWeek < 5 ? 1.0 : 0.4;
+    // Gaussian bump centered around day 180 (summer)
+    const seasonalBias = 1.0 + 0.6 * Math.exp(-((t - 180) ** 2) / (2 * 50 ** 2));
+    if (rng() > weekdayBias * seasonalBias / 1.6) { i--; continue; }
+    timestamps[i] = t;
+
+    // Tri-modal log-normal: cheap ($10-30), mid ($60-120), premium ($200-500)
+    const r = rng();
+    const logVal = r < 0.45
+      ? Math.log(20) + normal() * 0.45
+      : r < 0.82
+        ? Math.log(90) + normal() * 0.38
+        : Math.log(300) + normal() * 0.32;
+    values[i] = Math.max(0.5, Math.exp(logVal));
+  }
+
+  // ── Histogram bin edges (log scale) ──
+  const valMin = d3.min(values), valMax = d3.max(values);
+  const logMin = Math.log(valMin), logMax = Math.log(valMax);
+  const logStep = (logMax - logMin) / NBINS;
+  const binEdges = d3.range(NBINS + 1).map(i => Math.exp(logMin + i * logStep));
+
+  const getBin = v => {
+    const idx = Math.floor((Math.log(v) - logMin) / logStep);
+    return Math.max(0, Math.min(NBINS - 1, idx));
+  };
+
+  // ── Sort by timestamp for cumulative indexing ──
+  const order = d3.range(N).sort((a, b) => timestamps[a] - timestamps[b]);
+  const sortedT = new Float64Array(N);
+  const sortedBin = new Uint8Array(N);
+  for (let i = 0; i < N; i++) {
+    sortedT[i] = timestamps[order[i]];
+    sortedBin[i] = getBin(values[order[i]]);
+  }
+
+  // ── Falcon prefetch: 256+1 cumulative histograms ──
+  // cumHist[s][b] = # events with timestamp <= slot boundary s
+  const tMin = 0, tMax = 365;
+  const cumHist = new Array(NSLOTS + 1);
+  for (let s = 0; s <= NSLOTS; s++) cumHist[s] = new Uint32Array(NBINS);
+
+  {
+    let ei = 0;
+    const running = new Uint32Array(NBINS);
+    for (let s = 0; s <= NSLOTS; s++) {
+      const boundary = tMin + (s / NSLOTS) * (tMax - tMin);
+      while (ei < N && sortedT[ei] <= boundary) {
+        running[sortedBin[ei]]++;
+        ei++;
+      }
+      cumHist[s].set(running);
+    }
+  }
+
+  // Full histogram for background
+  const fullHist = cumHist[NSLOTS];
+
+  // O(1) Falcon query: subtract two cumulative snapshots
+  const falconQuery = (t0, t1) => {
+    const s0 = Math.max(0, Math.min(NSLOTS, Math.round((t0 - tMin) / (tMax - tMin) * NSLOTS)));
+    const s1 = Math.max(0, Math.min(NSLOTS, Math.round((t1 - tMin) / (tMax - tMin) * NSLOTS)));
+    const result = new Uint32Array(NBINS);
+    for (let b = 0; b < NBINS; b++) result[b] = cumHist[s1][b] - cumHist[s0][b];
+    return result;
+  };
+
+  // Naive query: full scan
+  const naiveQuery = (t0, t1) => {
+    const result = new Uint32Array(NBINS);
+    for (let i = 0; i < N; i++) {
+      if (timestamps[i] >= t0 && timestamps[i] <= t1) result[getBin(values[i])]++;
+    }
+    return result;
+  };
+
+  // ── Latency history for the sparkline chart ──
+  const latencyLog = []; // {prefetch, naive}
+  const MAX_LOG = 50;
+
+  // ── Overview: daily event count area chart ──
+  const oMargin = { top: 8, right: 24, bottom: 28, left: 60 };
+  const oW = WIDTH - oMargin.left - oMargin.right;
+  const oH = 160 - oMargin.top - oMargin.bottom;
+
+  const oSvg = d3.select("#overview").attr("width", WIDTH).attr("height", 160);
+  const oG = oSvg.append("g").attr("transform", `translate(${oMargin.left},${oMargin.top})`);
+
+  // Bin by day
+  const dayCounts = new Uint32Array(366);
+  for (let i = 0; i < N; i++) dayCounts[Math.min(365, Math.floor(timestamps[i]))]++;
+
+  const startDate = new Date(2025, 0, 1);
+  const dayData = Array.from(dayCounts, (c, i) => ({
+    date: d3.timeDay.offset(startDate, i),
+    count: c,
+  }));
+
+  const oX = d3.scaleUtc()
+    .domain([startDate, d3.timeDay.offset(startDate, 365)])
+    .range([0, oW]);
+  const oY = d3.scaleLinear()
+    .domain([0, d3.max(dayCounts)]).nice()
+    .range([oH, 0]);
+
+  // Grid lines
+  oG.append("g").attr("class", "grid")
+    .call(d3.axisLeft(oY).ticks(4).tickSize(-oW).tickFormat(""))
+    .call(g => g.selectAll(".tick line").attr("stroke", "#e8e8e8"))
+    .call(g => g.select(".domain").remove());
+
+  oG.append("g").attr("transform", `translate(0,${oH})`)
+    .call(d3.axisBottom(oX).ticks(d3.utcMonth.every(1)).tickFormat(d3.utcFormat("%b")))
+    .call(g => g.select(".domain").attr("stroke", "#ccc"));
+  oG.append("g")
+    .call(d3.axisLeft(oY).ticks(4))
+    .call(g => g.select(".domain").remove())
+    .call(g => g.selectAll(".tick line").attr("stroke", "#ddd"));
+
+  // Area + line
+  const areaGen = d3.area()
+    .x(d => oX(d.date))
+    .y0(oH)
+    .y1(d => oY(d.count))
+    .curve(d3.curveMonotoneX);
+  const lineGen = d3.line()
+    .x(d => oX(d.date))
+    .y(d => oY(d.count))
+    .curve(d3.curveMonotoneX);
+
+  oG.append("path").datum(dayData)
+    .attr("fill", TOL[0]).attr("fill-opacity", 0.12)
+    .attr("d", areaGen);
+  oG.append("path").datum(dayData)
+    .attr("fill", "none").attr("stroke", TOL[0]).attr("stroke-width", 1.5)
+    .attr("d", lineGen);
+
+  // Brush
+  const brush = d3.brushX()
+    .extent([[0, 0], [oW, oH]])
+    .on("brush end", onBrush);
+  oG.append("g").attr("class", "brush").call(brush);
+
+  // ── Detail: value histogram ──
+  const dMargin = { top: 8, right: 24, bottom: 36, left: 60 };
+  const dW = WIDTH - dMargin.left - dMargin.right;
+  const dH = 220 - dMargin.top - dMargin.bottom;
+
+  const dSvg = d3.select("#detail").attr("width", WIDTH).attr("height", 220);
+  const dG = dSvg.append("g").attr("transform", `translate(${dMargin.left},${dMargin.top})`);
+
+  const dX = d3.scaleBand().domain(d3.range(NBINS)).range([0, dW]).padding(0.08);
+  const dY = d3.scaleLinear().range([dH, 0]);
+
+  // Grid
+  const dGridG = dG.append("g").attr("class", "grid");
+  const dYAxisG = dG.append("g");
+
+  // X axis with log-scale labels
+  const dXAxisG = dG.append("g").attr("transform", `translate(0,${dH})`);
+  const formatVal = v => v >= 1000 ? `$${(v/1000).toFixed(0)}k` : `$${v.toFixed(0)}`;
+  // Show ~8 evenly spaced tick labels
+  const tickStep = Math.max(1, Math.floor(NBINS / 8));
+  const tickIdxs = d3.range(0, NBINS, tickStep);
+
+  dSvg.append("text")
+    .attr("x", dMargin.left + dW / 2).attr("y", 216)
+    .attr("text-anchor", "middle").attr("font-size", 11).attr("fill", "#888")
+    .text("Transaction Value");
+
+  // Background bars (full dataset, muted)
+  const bgBars = dG.selectAll(".bg").data(d3.range(NBINS)).join("rect")
+    .attr("x", i => dX(i)).attr("width", dX.bandwidth())
+    .attr("fill", "#e4e4e4");
+
+  // Foreground bars (filtered)
+  const fgBars = dG.selectAll(".fg").data(d3.range(NBINS)).join("rect")
+    .attr("x", i => dX(i)).attr("width", dX.bandwidth())
+    .attr("fill", TOL[0]);
+
+  const renderHistogram = hist => {
+    dY.domain([0, d3.max(fullHist)]).nice();
+
+    dGridG.call(d3.axisLeft(dY).ticks(5).tickSize(-dW).tickFormat(""))
+      .call(g => g.selectAll(".tick line").attr("stroke", "#eee"))
+      .call(g => g.select(".domain").remove());
+    dYAxisG.call(d3.axisLeft(dY).ticks(5).tickFormat(d3.format(",.0f")))
+      .call(g => g.select(".domain").remove())
+      .call(g => g.selectAll(".tick line").attr("stroke", "#ddd"));
+    dXAxisG.call(d3.axisBottom(dX).tickValues(tickIdxs).tickFormat(i => formatVal(binEdges[i])))
+      .call(g => g.select(".domain").attr("stroke", "#ccc"))
+      .call(g => g.selectAll(".tick text").attr("font-size", 10));
+
+    bgBars.attr("y", i => dY(fullHist[i])).attr("height", i => dH - dY(fullHist[i]));
+    fgBars
+      .transition().duration(60)
+      .attr("y", i => dY(hist[i]))
+      .attr("height", i => dH - dY(hist[i]));
+  };
+
+  // ── Latency sparkline chart ──
+  const lMargin = { top: 8, right: 24, bottom: 24, left: 60 };
+  const lW = WIDTH - lMargin.left - lMargin.right;
+  const lH = 120 - lMargin.top - lMargin.bottom;
+
+  const lSvg = d3.select("#latencyChart").attr("width", WIDTH).attr("height", 120);
+  const lG = lSvg.append("g").attr("transform", `translate(${lMargin.left},${lMargin.top})`);
+
+  const lX = d3.scaleLinear().domain([0, MAX_LOG - 1]).range([0, lW]);
+  const lY = d3.scaleLog().range([lH, 0]);
+
+  const lYAxisG = lG.append("g");
+  const lGridG = lG.append("g");
+
+  lG.append("g").attr("transform", `translate(0,${lH})`)
+    .call(d3.axisBottom(lX).ticks(5).tickFormat(i => `${i + 1}`))
+    .call(g => g.select(".domain").attr("stroke", "#ccc"));
+  lSvg.append("text")
+    .attr("x", lMargin.left + lW / 2).attr("y", 116)
+    .attr("text-anchor", "middle").attr("font-size", 10).attr("fill", "#aaa")
+    .text("Brush update #");
+
+  // Lines for prefetch and naive
+  const prefetchLine = lG.append("path")
+    .attr("fill", "none").attr("stroke", TOL[2]).attr("stroke-width", 2);
+  const naiveLine = lG.append("path")
+    .attr("fill", "none").attr("stroke", TOL[1]).attr("stroke-width", 2);
+
+  // Threshold line at 16ms (60fps budget)
+  const thresholdLine = lG.append("line")
+    .attr("x1", 0).attr("x2", lW)
+    .attr("stroke", "#CCBB44").attr("stroke-dasharray", "4,3").attr("stroke-width", 1);
+  const thresholdLabel = lG.append("text")
+    .attr("x", lW + 4).attr("font-size", 9).attr("fill", "#CCBB44")
+    .attr("dy", "0.35em").text("16ms");
+
+  // Legend
+  const legendG = lG.append("g").attr("transform", `translate(${lW - 200}, 4)`);
+  [[TOL[2], "Prefetch (O(bins))"], [TOL[1], "Naive (O(N))"]].forEach(([c, t], i) => {
+    const g = legendG.append("g").attr("transform", `translate(${i * 110}, 0)`);
+    g.append("line").attr("x2", 16).attr("stroke", c).attr("stroke-width", 2);
+    g.append("text").attr("x", 20).attr("dy", "0.35em").attr("font-size", 10).attr("fill", "#666").text(t);
+  });
+
+  const renderLatencyChart = () => {
+    if (!latencyLog.length) return;
+    const allVals = latencyLog.flatMap(d => [d.prefetch, d.naive]).filter(v => v > 0);
+    if (!allVals.length) return;
+    const yMin = Math.max(0.001, d3.min(allVals) * 0.5);
+    const yMax = d3.max(allVals) * 1.5;
+    lY.domain([yMin, yMax]);
+    lX.domain([0, Math.max(MAX_LOG - 1, latencyLog.length - 1)]);
+
+    lGridG.call(d3.axisLeft(lY).ticks(4).tickSize(-lW).tickFormat(""))
+      .call(g => g.selectAll(".tick line").attr("stroke", "#eee"))
+      .call(g => g.select(".domain").remove());
+    lYAxisG.call(d3.axisLeft(lY).ticks(4).tickFormat(d => d >= 1 ? `${d.toFixed(0)}ms` : `${(d*1000).toFixed(0)}µs`))
+      .call(g => g.select(".domain").remove())
+      .call(g => g.selectAll(".tick line").attr("stroke", "#ddd"));
+
+    thresholdLine
+      .attr("y1", lY(16)).attr("y2", lY(16))
+      .attr("visibility", yMax >= 16 ? "visible" : "hidden");
+    thresholdLabel
+      .attr("y", lY(16))
+      .attr("visibility", yMax >= 16 ? "visible" : "hidden");
+
+    const line = d3.line().x((d, i) => lX(i)).curve(d3.curveMonotoneX);
+    prefetchLine.datum(latencyLog)
+      .attr("d", line.y(d => lY(Math.max(lY.domain()[0], d.prefetch))));
+    naiveLine.datum(latencyLog)
+      .attr("d", line.y(d => lY(Math.max(lY.domain()[0], d.naive))));
+  };
+
+  // ── Interaction ──
+  function onBrush(event) {
+    if (!event.sourceEvent) return;
+    const sel = event.selection;
+    if (!sel) { resetAll(); return; }
+
+    const [px0, px1] = sel;
+    const t0 = (oX.invert(px0) - startDate) / 86400000;
+    const t1 = (oX.invert(px1) - startDate) / 86400000;
+
+    // Falcon
+    const pStart = performance.now();
+    const fHist = falconQuery(t0, t1);
+    const pTime = performance.now() - pStart;
+
+    // Naive (run every time for comparison)
+    const nStart = performance.now();
+    naiveQuery(t0, t1);
+    const nTime = performance.now() - nStart;
+
+    const total = d3.sum(fHist);
+
+    // Update stats
+    d3.select("#countValue").text(`${total.toLocaleString()} / ${N.toLocaleString()}`);
+    d3.select("#prefetchTime").text(`${pTime < 1 ? (pTime * 1000).toFixed(0) + 'µs' : pTime.toFixed(2) + 'ms'}`);
+    d3.select("#naiveTime").text(`${nTime.toFixed(2)}ms`);
+    const speedup = nTime / Math.max(0.001, pTime);
+    d3.select("#speedupValue").text(`${speedup.toFixed(0)}×`);
+
+    // Log latency
+    latencyLog.push({ prefetch: pTime, naive: nTime });
+    if (latencyLog.length > MAX_LOG) latencyLog.shift();
+
+    renderHistogram(fHist);
+    renderLatencyChart();
+  }
+
+  function resetAll() {
+    d3.select("#countValue").text(`${N.toLocaleString()} / ${N.toLocaleString()}`);
+    d3.select("#prefetchTime").text("--");
+    d3.select("#naiveTime").text("--");
+    d3.select("#speedupValue").text("--");
+    renderHistogram(fullHist);
+  }
+
+  d3.select("#resetBtn").on("click", () => {
+    oG.select(".brush").call(brush.move, null);
+    resetAll();
+  });
+
+  // Initial render
+  renderHistogram(fullHist);
+})();
+</script>
+</body>
+</html>

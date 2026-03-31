@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebGL Force Galaxy — 50K Nodes</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #0a0a1a; color: #ccc; font-family: system-ui, sans-serif; overflow: hidden; }
+  #container { position: relative; width: 100vw; height: 100vh; }
+  canvas, svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+  svg { pointer-events: all; }
+  #controls { position: absolute; top: 16px; left: 16px; z-index: 10; display: flex; gap: 10px; align-items: center; }
+  button { background: rgba(255,255,255,0.1); color: #eee; border: 1px solid rgba(255,255,255,0.2);
+           padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 14px; }
+  button:hover { background: rgba(255,255,255,0.2); }
+  #stats { position: absolute; top: 16px; right: 16px; z-index: 10; font-size: 13px;
+           background: rgba(0,0,0,0.6); padding: 8px 12px; border-radius: 4px; }
+  .tooltip { position: absolute; pointer-events: none; background: rgba(10,10,30,0.9);
+             border: 1px solid rgba(255,255,255,0.2); padding: 6px 10px; border-radius: 4px;
+             font-size: 12px; color: #eee; display: none; z-index: 20; }
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="glCanvas"></canvas>
+  <svg id="overlay"></svg>
+  <div id="controls">
+    <button id="reheat">⟳ Reheat</button>
+    <span id="alpha" style="font-size:13px;opacity:0.7">α: 1.00</span>
+  </div>
+  <div id="stats"></div>
+  <div class="tooltip" id="tooltip"></div>
+</div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(function() {
+  "use strict";
+
+  // ─── Configuration ───
+  const N = 50000;
+  const NUM_COMMUNITIES = 8;
+  const EDGES_PER_NODE = 1.6; // ~80K edges
+  const NODE_RADIUS = 1.8;
+
+  // Community colors (Tol muted palette)
+  const PALETTE = ["#332288","#88CCEE","#44AA99","#117733","#999933","#DDCC77","#CC6677","#882255"];
+
+  // ─── Generate synthetic data ───
+  const nodes = new Array(N);
+  const communitySize = Math.floor(N / NUM_COMMUNITIES);
+
+  for (let i = 0; i < N; i++) {
+    const community = Math.min(Math.floor(i / communitySize), NUM_COMMUNITIES - 1);
+    // Start positions clustered by community
+    const angle = (community / NUM_COMMUNITIES) * Math.PI * 2 + (Math.random() - 0.5) * 0.8;
+    const r = 200 + Math.random() * 150;
+    nodes[i] = {
+      index: i,
+      community,
+      x: Math.cos(angle) * r + (Math.random() - 0.5) * 100,
+      y: Math.sin(angle) * r + (Math.random() - 0.5) * 100
+    };
+  }
+
+  // Generate edges: mostly intra-community, some inter-community
+  const totalEdges = Math.round(N * EDGES_PER_NODE);
+  const links = new Array(totalEdges);
+  for (let i = 0; i < totalEdges; i++) {
+    const source = Math.floor(Math.random() * N);
+    let target;
+    if (Math.random() < 0.85) {
+      // Intra-community
+      const comm = nodes[source].community;
+      const base = comm * communitySize;
+      target = base + Math.floor(Math.random() * communitySize);
+    } else {
+      // Inter-community
+      target = Math.floor(Math.random() * N);
+    }
+    if (target >= N) target = N - 1;
+    links[i] = { source, target };
+  }
+
+  // ─── Sizing ───
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+  const dpr = window.devicePixelRatio || 1;
+
+  // ─── WebGL Setup ───
+  const canvas = document.getElementById("glCanvas");
+  canvas.width = width * dpr;
+  canvas.height = height * dpr;
+  canvas.style.width = width + "px";
+  canvas.style.height = height + "px";
+
+  const gl = canvas.getContext("webgl2", { antialias: true, alpha: true });
+  if (!gl) { document.body.innerHTML = "<h1 style='color:#fff;padding:2em'>WebGL2 required</h1>"; return; }
+
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  gl.clearColor(0.04, 0.04, 0.1, 1.0);
+
+  // ─── Shaders ───
+  const vsSource = `#version 300 es
+    precision highp float;
+    uniform vec2 u_resolution;
+    uniform vec2 u_pan;
+    uniform float u_zoom;
+    uniform float u_radius;
+    // Per-vertex (unit circle quad)
+    in vec2 a_unitPos;
+    // Per-instance
+    in vec2 a_position;
+    in vec3 a_color;
+    out vec2 v_uv;
+    out vec3 v_color;
+    void main() {
+      v_uv = a_unitPos;
+      v_color = a_color;
+      vec2 worldPos = (a_position + u_pan) * u_zoom;
+      vec2 screen = worldPos + a_unitPos * u_radius * u_zoom;
+      vec2 clip = (screen / u_resolution) * 2.0 - 1.0;
+      clip.y = -clip.y;
+      gl_Position = vec4(clip, 0.0, 1.0);
+    }
+  `;
+
+  const fsSource = `#version 300 es
+    precision highp float;
+    in vec2 v_uv;
+    in vec3 v_color;
+    out vec4 fragColor;
+    void main() {
+      float dist = length(v_uv);
+      if (dist > 1.0) discard;
+      float alpha = smoothstep(1.0, 0.6, dist) * 0.85;
+      fragColor = vec4(v_color, alpha);
+    }
+  `;
+
+  function compileShader(src, type) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      console.error(gl.getShaderInfoLog(s));
+    }
+    return s;
+  }
+
+  const vs = compileShader(vsSource, gl.VERTEX_SHADER);
+  const fs = compileShader(fsSource, gl.FRAGMENT_SHADER);
+  const program = gl.createProgram();
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.linkProgram(program);
+  gl.useProgram(program);
+
+  // Uniforms
+  const u_resolution = gl.getUniformLocation(program, "u_resolution");
+  const u_pan = gl.getUniformLocation(program, "u_pan");
+  const u_zoom = gl.getUniformLocation(program, "u_zoom");
+  const u_radius = gl.getUniformLocation(program, "u_radius");
+
+  // ─── Geometry: unit quad as two triangles ───
+  const quadVerts = new Float32Array([
+    -1,-1, 1,-1, 1,1,
+    -1,-1, 1,1, -1,1
+  ]);
+
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+
+  // Quad buffer
+  const quadBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, quadVerts, gl.STATIC_DRAW);
+  const a_unitPos = gl.getAttribLocation(program, "a_unitPos");
+  gl.enableVertexAttribArray(a_unitPos);
+  gl.vertexAttribPointer(a_unitPos, 2, gl.FLOAT, false, 0, 0);
+
+  // ─── Instance data ───
+  // Position buffer (updated each tick)
+  const positionData = new Float32Array(N * 2);
+  const positionBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, positionBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, positionData.byteLength, gl.DYNAMIC_DRAW);
+  const a_position = gl.getAttribLocation(program, "a_position");
+  gl.enableVertexAttribArray(a_position);
+  gl.vertexAttribPointer(a_position, 2, gl.FLOAT, false, 0, 0);
+  gl.vertexAttribDivisor(a_position, 1);
+
+  // Color buffer (static)
+  const colorData = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    const c = d3.rgb(PALETTE[nodes[i].community]);
+    colorData[i * 3] = c.r / 255;
+    colorData[i * 3 + 1] = c.g / 255;
+    colorData[i * 3 + 2] = c.b / 255;
+  }
+  const colorBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, colorBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, colorData, gl.STATIC_DRAW);
+  const a_color = gl.getAttribLocation(program, "a_color");
+  gl.enableVertexAttribArray(a_color);
+  gl.vertexAttribPointer(a_color, 3, gl.FLOAT, false, 0, 0);
+  gl.vertexAttribDivisor(a_color, 1);
+
+  gl.bindVertexArray(null);
+
+  // ─── Edge rendering (separate program, lines) ───
+  const edgeVsSource = `#version 300 es
+    precision highp float;
+    uniform vec2 u_resolution;
+    uniform vec2 u_pan;
+    uniform float u_zoom;
+    in vec2 a_pos;
+    void main() {
+      vec2 screen = (a_pos + u_pan) * u_zoom;
+      vec2 clip = (screen / u_resolution) * 2.0 - 1.0;
+      clip.y = -clip.y;
+      gl_Position = vec4(clip, 0.0, 1.0);
+    }
+  `;
+  const edgeFsSource = `#version 300 es
+    precision highp float;
+    out vec4 fragColor;
+    void main() {
+      fragColor = vec4(1.0, 1.0, 1.0, 0.03);
+    }
+  `;
+
+  const evs = compileShader(edgeVsSource, gl.VERTEX_SHADER);
+  const efs = compileShader(edgeFsSource, gl.FRAGMENT_SHADER);
+  const edgeProgram = gl.createProgram();
+  gl.attachShader(edgeProgram, evs);
+  gl.attachShader(edgeProgram, efs);
+  gl.linkProgram(edgeProgram);
+
+  const eu_resolution = gl.getUniformLocation(edgeProgram, "u_resolution");
+  const eu_pan = gl.getUniformLocation(edgeProgram, "u_pan");
+  const eu_zoom = gl.getUniformLocation(edgeProgram, "u_zoom");
+
+  // Edge vertex buffer (2 vertices per edge, updated each tick)
+  const edgePositions = new Float32Array(totalEdges * 4);
+  const edgeVao = gl.createVertexArray();
+  gl.bindVertexArray(edgeVao);
+  const edgeBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, edgeBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, edgePositions.byteLength, gl.DYNAMIC_DRAW);
+  const ea_pos = gl.getAttribLocation(edgeProgram, "a_pos");
+  gl.enableVertexAttribArray(ea_pos);
+  gl.vertexAttribPointer(ea_pos, 2, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+
+  // ─── D3 Force Simulation ───
+  const simulation = d3.forceSimulation(nodes)
+    .force("charge", d3.forceManyBody().strength(-0.3).distanceMax(200))
+    .force("link", d3.forceLink(links).distance(30).strength(0.02).iterations(1))
+    .force("center", d3.forceCenter(0, 0))
+    .force("collide", d3.forceCollide(2).iterations(1))
+    .alphaDecay(0.01)
+    .velocityDecay(0.3)
+    .on("tick", onTick);
+
+  // ─── Zoom ───
+  let currentTransform = d3.zoomIdentity;
+  const svg = d3.select("#overlay")
+    .attr("width", width)
+    .attr("height", height);
+
+  const zoomBehavior = d3.zoom()
+    .scaleExtent([0.1, 20])
+    .on("zoom", (event) => {
+      currentTransform = event.transform;
+    });
+
+  svg.call(zoomBehavior);
+
+  // ─── Quadtree for hover ───
+  let quadtree = d3.quadtree()
+    .x(d => d.x)
+    .y(d => d.y);
+
+  const tooltip = document.getElementById("tooltip");
+  const hoverCircle = svg.append("circle")
+    .attr("r", 6)
+    .attr("fill", "none")
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 2)
+    .style("display", "none");
+
+  svg.on("mousemove", function(event) {
+    const [mx, my] = d3.pointer(event);
+    // Convert screen coords to simulation coords
+    const simX = (mx - currentTransform.x) / currentTransform.k;
+    const simY = (my - currentTransform.y) / currentTransform.k;
+
+    const found = quadtree.find(simX, simY, 20 / currentTransform.k);
+    if (found) {
+      const sx = found.x * currentTransform.k + currentTransform.x;
+      const sy = found.y * currentTransform.k + currentTransform.y;
+      hoverCircle
+        .attr("cx", sx)
+        .attr("cy", sy)
+        .style("display", null);
+      tooltip.style.display = "block";
+      tooltip.style.left = (sx + 12) + "px";
+      tooltip.style.top = (sy - 8) + "px";
+      tooltip.innerHTML = `Node ${found.index}<br>Community ${found.community}`;
+    } else {
+      hoverCircle.style("display", "none");
+      tooltip.style.display = "none";
+    }
+  });
+
+  svg.on("mouseleave", () => {
+    hoverCircle.style("display", "none");
+    tooltip.style.display = "none";
+  });
+
+  // ─── Reheat ───
+  document.getElementById("reheat").addEventListener("click", () => {
+    simulation.alpha(1).restart();
+  });
+
+  // ─── Stats ───
+  const statsEl = document.getElementById("stats");
+  const alphaEl = document.getElementById("alpha");
+  let frameCount = 0, lastTime = performance.now(), fps = 0;
+
+  function updateStats() {
+    frameCount++;
+    const now = performance.now();
+    if (now - lastTime > 500) {
+      fps = Math.round(frameCount / ((now - lastTime) / 1000));
+      frameCount = 0;
+      lastTime = now;
+      statsEl.textContent = `${N.toLocaleString()} nodes · ${totalEdges.toLocaleString()} edges · ${fps} fps`;
+    }
+    alphaEl.textContent = `α: ${simulation.alpha().toFixed(3)}`;
+  }
+
+  // ─── Tick: upload positions, rebuild quadtree, render ───
+  function onTick() {
+    // Upload node positions
+    for (let i = 0; i < N; i++) {
+      positionData[i * 2] = nodes[i].x;
+      positionData[i * 2 + 1] = nodes[i].y;
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, positionData);
+
+    // Upload edge positions (sample edges for performance — draw max 40K)
+    const edgesToDraw = Math.min(totalEdges, 40000);
+    for (let i = 0; i < edgesToDraw; i++) {
+      const s = links[i].source;
+      const t = links[i].target;
+      const si = typeof s === "object" ? s.index : s;
+      const ti = typeof t === "object" ? t.index : t;
+      edgePositions[i * 4] = nodes[si].x;
+      edgePositions[i * 4 + 1] = nodes[si].y;
+      edgePositions[i * 4 + 2] = nodes[ti].x;
+      edgePositions[i * 4 + 3] = nodes[ti].y;
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, edgeBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, edgePositions, 0, edgesToDraw * 4);
+
+    // Rebuild quadtree
+    quadtree = d3.quadtree(nodes, d => d.x, d => d.y);
+
+    render(edgesToDraw);
+    updateStats();
+  }
+
+  // ─── Render loop (also runs when zooming without simulation) ───
+  function render(edgesToDraw) {
+    const panX = width / 2 + currentTransform.x / dpr;
+    const panY = height / 2 + currentTransform.y / dpr;
+    const zoom = currentTransform.k;
+
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    // Draw edges
+    if (edgesToDraw > 0) {
+      gl.useProgram(edgeProgram);
+      gl.uniform2f(eu_resolution, width, height);
+      gl.uniform2f(eu_pan, panX, panY);
+      gl.uniform1f(eu_zoom, zoom);
+      gl.bindVertexArray(edgeVao);
+      gl.drawArrays(gl.LINES, 0, edgesToDraw * 2);
+    }
+
+    // Draw nodes
+    gl.useProgram(program);
+    gl.uniform2f(u_resolution, width, height);
+    gl.uniform2f(u_pan, panX, panY);
+    gl.uniform1f(u_zoom, zoom);
+    gl.uniform1f(u_radius, NODE_RADIUS * dpr);
+    gl.bindVertexArray(vao);
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, N);
+  }
+
+  // Keep rendering on zoom even when simulation is cold
+  let lastEdgesToDraw = 0;
+  function animationLoop() {
+    if (simulation.alpha() < simulation.alphaMin()) {
+      // Simulation stopped, but still render for zoom/pan
+      render(Math.min(totalEdges, 40000));
+      updateStats();
+    }
+    requestAnimationFrame(animationLoop);
+  }
+  requestAnimationFrame(animationLoop);
+
+})();
+</script>
+</body>
+</html>

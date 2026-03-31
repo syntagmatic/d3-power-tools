@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Strum Brush Parallel Coordinates</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { margin: 0; box-sizing: border-box; }
+  body { background: #fafafa; font-family: system-ui, -apple-system, sans-serif; color: #222; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 12px 16px; }
+  .header { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  .header h2 { font-size: 17px; font-weight: 600; letter-spacing: -0.02em; }
+  .counter { font-size: 13px; color: #666; font-family: "SF Mono", Monaco, "Cascadia Code", monospace; }
+  .legend { display: flex; gap: 14px; margin-left: auto; font-size: 12px; color: #444; }
+  .legend-item { display: flex; align-items: center; gap: 5px; }
+  .legend-swatch { width: 12px; height: 12px; border-radius: 2px; }
+  .pc-wrap { position: relative; width: 1200px; height: 380px; margin-top: 6px; }
+  .pc-wrap canvas, .pc-wrap svg {
+    position: absolute; top: 0; left: 0;
+  }
+  .pc-wrap canvas { pointer-events: none; }
+  .pc-wrap svg { width: 100%; height: 100%; }
+  .axis text { font-size: 10.5px; fill: #555; }
+  .axis path, .axis line { stroke: #ccc; }
+  .axis-label {
+    font-size: 11px; font-weight: 600; text-anchor: middle;
+    fill: #333; cursor: default; user-select: none;
+  }
+  .strum-line { stroke: #EE6677; stroke-width: 2.5; stroke-linecap: round; }
+  .strum-handle { fill: #EE6677; stroke: #fff; stroke-width: 1.5; cursor: grab; }
+  .strum-hit { stroke: transparent; stroke-width: 14; cursor: pointer; }
+  .panels { display: flex; gap: 0; margin-top: 8px; align-items: flex-start; }
+  .scatter-panel { flex: 1; min-width: 0; }
+  .scatter-panel svg { display: block; }
+  .scatter-msg { text-anchor: middle; fill: #aaa; font-size: 13px; }
+  .scatter-title { font-size: 12px; font-weight: 600; text-anchor: middle; fill: #333; }
+  .scatter-axis text { font-size: 10px; fill: #666; }
+  .scatter-axis path, .scatter-axis line { stroke: #ddd; }
+  .scatter-label { font-size: 11px; fill: #555; text-anchor: middle; }
+  .hint {
+    font-size: 12px; color: #999; margin-top: 8px; padding: 6px 10px;
+    background: #f3f3f3; border-radius: 4px; display: inline-block;
+  }
+  .hint kbd {
+    background: #e8e8e8; border: 1px solid #ccc; border-radius: 3px;
+    padding: 1px 5px; font-size: 11px; font-family: "SF Mono", Monaco, monospace;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h2>Strum Brush Parallel Coordinates</h2>
+    <span class="counter" id="counter"></span>
+    <div class="legend" id="legend"></div>
+  </div>
+  <div class="pc-wrap" id="parcoords"></div>
+  <div class="panels" id="panels"></div>
+  <div class="hint">
+    <kbd>Alt</kbd> + drag between adjacent axes to create a strum brush.
+    Click a strum line to remove it. Multiple strums intersect (AND).
+  </div>
+</div>
+<script>
+(() => {
+  // --- Tol colorblind-safe palette ---
+  const TOL = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE"];
+  const categories = ["Alloy-A","Alloy-B","Alloy-C","Alloy-D","Alloy-E"];
+  const dims = ["tensile","hardness","density","ductility","conductivity","corrosion","fatigue","cost"];
+  const N = 2000;
+
+  // --- Layout ---
+  const W = 1200, H = 380;
+  const margin = { top: 34, right: 28, bottom: 8, left: 28 };
+  const innerW = W - margin.left - margin.right;
+  const innerH = H - margin.top - margin.bottom;
+
+  // --- Synthetic data with clusters and correlations ---
+  const rng = d3.randomLcg(12345);
+  const randn = () => {
+    let u = 0, v = 0;
+    while (!u) u = rng();
+    v = rng();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+  // Cluster centers per category -- designed so strums reveal structure
+  const centers = [
+    [75, 60, 30, 70, 80, 65, 72, 35],  // Alloy-A: high tensile, high conductivity, low cost
+    [45, 80, 55, 35, 40, 75, 50, 70],  // Alloy-B: hard, dense, expensive
+    [60, 45, 40, 60, 55, 50, 65, 50],  // Alloy-C: middling
+    [35, 30, 70, 80, 30, 40, 40, 25],  // Alloy-D: dense, ductile, cheap
+    [80, 70, 25, 50, 70, 85, 80, 60],  // Alloy-E: high-performance, corrosion-resistant
+  ];
+  const spreads = [12, 10, 8, 11, 9, 10, 11, 13];
+
+  const data = d3.range(N).map(i => {
+    const ci = i % categories.length;
+    const row = { id: i, category: categories[ci] };
+    dims.forEach((d, j) => {
+      row[d] = clamp(centers[ci][j] + randn() * spreads[j], 0, 100);
+    });
+    // Inject correlations: tensile-fatigue positive, density-ductility negative
+    row.fatigue = clamp(row.tensile * 0.5 + randn() * 10 + 30, 0, 100);
+    row.ductility = clamp(100 - row.density * 0.7 + randn() * 12, 0, 100);
+    return row;
+  });
+
+  // --- Scales ---
+  const xScale = d3.scalePoint().domain(dims).range([0, innerW]).padding(0.04);
+  const yScales = {};
+  dims.forEach(d => {
+    yScales[d] = d3.scaleLinear().domain(d3.extent(data, r => r[d])).nice().range([innerH, 0]);
+  });
+  const colorMap = new Map(categories.map((c, i) => [c, TOL[i]]));
+
+  // --- Canvas (DPR-aware) ---
+  const wrap = d3.select("#parcoords");
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  const canvas = wrap.append("canvas")
+    .attr("width", W * dpr).attr("height", H * dpr)
+    .style("width", W + "px").style("height", H + "px").node();
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  // --- SVG overlay ---
+  const svg = wrap.append("svg").attr("viewBox", `0 0 ${W} ${H}`);
+  const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+  // --- Axes ---
+  dims.forEach(d => {
+    const x = xScale(d);
+    const axG = g.append("g").attr("class", "axis")
+      .attr("transform", `translate(${x},0)`);
+    axG.call(d3.axisLeft(yScales[d]).ticks(6).tickSize(-4));
+    axG.selectAll(".tick line").attr("x2", 4).attr("x1", -4);
+    axG.append("text").attr("class", "axis-label").attr("y", -16)
+      .text(d.charAt(0).toUpperCase() + d.slice(1));
+  });
+
+  // --- Legend ---
+  const legendDiv = d3.select("#legend");
+  categories.forEach((c, i) => {
+    const item = legendDiv.append("span").attr("class", "legend-item");
+    item.append("span").attr("class", "legend-swatch").style("background", TOL[i]);
+    item.append("span").text(c);
+  });
+
+  // --- Pre-compute pixel positions for all rows ---
+  // Float32Array for cache-friendly iteration
+  const pxPositions = new Float32Array(N * dims.length * 2);
+  const axisXPositions = dims.map(d => xScale(d));
+
+  function computePositions() {
+    for (let i = 0; i < N; i++) {
+      const row = data[i];
+      const base = i * dims.length * 2;
+      for (let j = 0; j < dims.length; j++) {
+        pxPositions[base + j * 2] = axisXPositions[j];
+        pxPositions[base + j * 2 + 1] = yScales[dims[j]](row[dims[j]]);
+      }
+    }
+  }
+  computePositions();
+
+  // --- Strum state ---
+  const strums = []; // { x1, y1, x2, y2, dimLeft, dimRight, leftIdx, rightIdx }
+  let selectedBits = new Uint8Array(N).fill(1); // 1 = selected
+  let selectedCount = N;
+
+  // --- Segment intersection (cross-product) ---
+  const segIntersect = (ax, ay, bx, by, cx, cy, dx, dy) => {
+    const d1 = (dx - cx) * (ay - cy) - (dy - cy) * (ax - cx);
+    const d2 = (dx - cx) * (by - cy) - (dy - cy) * (bx - cx);
+    const d3 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    const d4 = (bx - ax) * (dy - ay) - (by - ay) * (dx - ax);
+    return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+           ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+  };
+
+  // --- Apply strums to filter data ---
+  const applyStrums = () => {
+    if (strums.length === 0) {
+      selectedBits.fill(1);
+      selectedCount = N;
+    } else {
+      selectedBits.fill(0);
+      selectedCount = 0;
+      for (let i = 0; i < N; i++) {
+        const base = i * dims.length * 2;
+        let pass = true;
+        for (let si = 0; si < strums.length; si++) {
+          const s = strums[si];
+          const leftOff = base + s.leftIdx * 2;
+          const rightOff = base + s.rightIdx * 2;
+          if (!segIntersect(
+            pxPositions[leftOff], pxPositions[leftOff + 1],
+            pxPositions[rightOff], pxPositions[rightOff + 1],
+            s.x1, s.y1, s.x2, s.y2
+          )) { pass = false; break; }
+        }
+        if (pass) { selectedBits[i] = 1; selectedCount++; }
+      }
+    }
+    render();
+  };
+
+  // --- Alpha based on dataset size ---
+  const bgAlpha = Math.max(0.015, Math.min(0.08, 80 / N));
+  const fgAlpha = Math.max(0.04, Math.min(0.5, 200 / N));
+
+  // --- Rendering ---
+  let dirty = false;
+  const render = () => {
+    if (dirty) return;
+    dirty = true;
+    requestAnimationFrame(() => {
+      dirty = false;
+      drawLines();
+      drawStrumMarkers();
+      updateCounter();
+      updateScatters();
+    });
+  };
+
+  const drawLines = () => {
+    ctx.clearRect(0, 0, W, H);
+    ctx.save();
+    ctx.translate(margin.left, margin.top);
+    ctx.lineWidth = 1;
+
+    // Background: unselected lines, very dim
+    ctx.globalAlpha = bgAlpha;
+    for (let i = 0; i < N; i++) {
+      if (selectedBits[i]) continue;
+      const base = i * dims.length * 2;
+      ctx.strokeStyle = "#aaa";
+      ctx.beginPath();
+      ctx.moveTo(pxPositions[base], pxPositions[base + 1]);
+      for (let j = 1; j < dims.length; j++) {
+        ctx.lineTo(pxPositions[base + j * 2], pxPositions[base + j * 2 + 1]);
+      }
+      ctx.stroke();
+    }
+
+    // Foreground: selected lines, colored
+    ctx.globalAlpha = fgAlpha;
+    ctx.lineWidth = 1.2;
+    for (let i = 0; i < N; i++) {
+      if (!selectedBits[i]) continue;
+      const base = i * dims.length * 2;
+      ctx.strokeStyle = colorMap.get(data[i].category);
+      ctx.beginPath();
+      ctx.moveTo(pxPositions[base], pxPositions[base + 1]);
+      for (let j = 1; j < dims.length; j++) {
+        ctx.lineTo(pxPositions[base + j * 2], pxPositions[base + j * 2 + 1]);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  };
+
+  // --- Counter ---
+  const updateCounter = () => {
+    const pct = ((selectedCount / N) * 100).toFixed(1);
+    d3.select("#counter").text(
+      `${selectedCount.toLocaleString()} / ${N.toLocaleString()} selected (${pct}%)`
+    );
+  };
+
+  // --- Strum SVG overlays ---
+  const strumGroup = g.append("g");
+
+  const drawStrumMarkers = () => {
+    const sel = strumGroup.selectAll(".strum-g").data(strums, (_, i) => i);
+    sel.exit().remove();
+
+    const enter = sel.enter().append("g").attr("class", "strum-g");
+    enter.append("line").attr("class", "strum-hit")
+      .on("click", function(event, d) {
+        event.stopPropagation();
+        const idx = strums.indexOf(d);
+        if (idx >= 0) strums.splice(idx, 1);
+        applyStrums();
+      });
+    enter.append("line").attr("class", "strum-line");
+    enter.append("circle").attr("class", "strum-handle strum-start").attr("r", 5);
+    enter.append("circle").attr("class", "strum-handle strum-end").attr("r", 5);
+
+    const merged = enter.merge(sel);
+    merged.each(function(d) {
+      const gEl = d3.select(this);
+      gEl.select(".strum-line")
+        .attr("x1", d.x1).attr("y1", d.y1).attr("x2", d.x2).attr("y2", d.y2);
+      gEl.select(".strum-hit")
+        .attr("x1", d.x1).attr("y1", d.y1).attr("x2", d.x2).attr("y2", d.y2);
+      gEl.select(".strum-start").attr("cx", d.x1).attr("cy", d.y1);
+      gEl.select(".strum-end").attr("cx", d.x2).attr("cy", d.y2);
+    });
+  };
+
+  // --- Alt+drag interaction ---
+  let dragging = false, dragStrum = null;
+
+  // Invisible rect for pointer capture
+  const interactionRect = g.append("rect")
+    .attr("width", innerW).attr("height", innerH)
+    .attr("fill", "none").attr("pointer-events", "all")
+    .style("cursor", "crosshair");
+
+  // Find adjacent axis pair from x coordinate
+  const findPair = (mx) => {
+    for (let i = 0; i < dims.length - 1; i++) {
+      const lx = axisXPositions[i], rx = axisXPositions[i + 1];
+      if (mx >= lx - 10 && mx <= rx + 10) {
+        return { dimLeft: dims[i], dimRight: dims[i + 1], leftIdx: i, rightIdx: i + 1 };
+      }
+    }
+    return null;
+  };
+
+  interactionRect.on("pointerdown", (event) => {
+    if (!event.altKey) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const [mx, my] = d3.pointer(event, g.node());
+    const pair = findPair(mx);
+    if (!pair) return;
+    dragging = true;
+    dragStrum = { x1: mx, y1: my, x2: mx, y2: my, ...pair };
+    strums.push(dragStrum);
+    interactionRect.node().setPointerCapture(event.pointerId);
+  });
+
+  interactionRect.on("pointermove", (event) => {
+    if (!dragging) return;
+    const [mx, my] = d3.pointer(event, g.node());
+    // Clamp to the region between the two axes
+    const lx = axisXPositions[dragStrum.leftIdx];
+    const rx = axisXPositions[dragStrum.rightIdx];
+    dragStrum.x2 = Math.max(lx, Math.min(rx, mx));
+    dragStrum.y2 = Math.max(0, Math.min(innerH, my));
+    applyStrums();
+  });
+
+  interactionRect.on("pointerup", (event) => {
+    if (!dragging) return;
+    dragging = false;
+    // Remove if too short (accidental click)
+    const dx = dragStrum.x2 - dragStrum.x1, dy = dragStrum.y2 - dragStrum.y1;
+    if (Math.hypot(dx, dy) < 8) {
+      strums.pop();
+    }
+    dragStrum = null;
+    applyStrums();
+  });
+
+  // --- Handle drag on strum endpoints ---
+  const handleDrag = d3.drag()
+    .on("drag", function(event) {
+      const d = d3.select(this.parentNode).datum();
+      const isStart = d3.select(this).classed("strum-start");
+      const lx = axisXPositions[d.leftIdx];
+      const rx = axisXPositions[d.rightIdx];
+      const [mx, my] = [
+        Math.max(lx, Math.min(rx, event.x)),
+        Math.max(0, Math.min(innerH, event.y))
+      ];
+      if (isStart) { d.x1 = mx; d.y1 = my; }
+      else { d.x2 = mx; d.y2 = my; }
+      applyStrums();
+    });
+
+  // Attach drag to handles after they're created
+  strumGroup.on("click", () => {}); // prevent bubble
+  const observeStrums = new MutationObserver(() => {
+    strumGroup.selectAll(".strum-handle").call(handleDrag);
+  });
+  observeStrums.observe(strumGroup.node(), { childList: true, subtree: true });
+
+  // --- Linked Scatterplots ---
+  // One scatter per active strum, max 3 shown
+  const panelsDiv = d3.select("#panels");
+  const scW = 370, scH = 280;
+  const scM = { top: 28, right: 16, bottom: 36, left: 48 };
+  const scInnerW = scW - scM.left - scM.right;
+  const scInnerH = scH - scM.top - scM.bottom;
+
+  const updateScatters = () => {
+    const active = strums.slice(0, 3); // show up to 3
+    const panels = panelsDiv.selectAll(".scatter-panel").data(active, (d, i) => `${d.dimLeft}-${d.dimRight}-${i}`);
+    panels.exit().remove();
+
+    const enter = panels.enter().append("div").attr("class", "scatter-panel");
+    enter.append("svg")
+      .attr("width", scW).attr("height", scH)
+      .each(function() {
+        const sv = d3.select(this);
+        sv.append("text").attr("class", "scatter-title").attr("x", scW / 2).attr("y", 16);
+        const sg = sv.append("g").attr("class", "scatter-g")
+          .attr("transform", `translate(${scM.left},${scM.top})`);
+        sg.append("g").attr("class", "scatter-axis scatter-xaxis")
+          .attr("transform", `translate(0,${scInnerH})`);
+        sg.append("g").attr("class", "scatter-axis scatter-yaxis");
+        sv.append("text").attr("class", "scatter-label scatter-xlabel")
+          .attr("x", scM.left + scInnerW / 2).attr("y", scH - 4);
+        sv.append("text").attr("class", "scatter-label scatter-ylabel")
+          .attr("transform", `translate(13,${scM.top + scInnerH / 2}) rotate(-90)`);
+      });
+
+    const merged = enter.merge(panels);
+    merged.each(function(strum) {
+      const sv = d3.select(this).select("svg");
+      const dx = strum.dimLeft, dy = strum.dimRight;
+      const dxLabel = dx.charAt(0).toUpperCase() + dx.slice(1);
+      const dyLabel = dy.charAt(0).toUpperCase() + dy.slice(1);
+
+      sv.select(".scatter-title").text(`${dxLabel} vs ${dyLabel}`);
+      sv.select(".scatter-xlabel").text(dxLabel);
+      sv.select(".scatter-ylabel").text(dyLabel);
+
+      const sx = d3.scaleLinear().domain(d3.extent(data, r => r[dx])).nice().range([0, scInnerW]);
+      const sy = d3.scaleLinear().domain(d3.extent(data, r => r[dy])).nice().range([scInnerH, 0]);
+
+      sv.select(".scatter-xaxis").call(d3.axisBottom(sx).ticks(5));
+      sv.select(".scatter-yaxis").call(d3.axisLeft(sy).ticks(5));
+
+      const sg = sv.select(".scatter-g");
+
+      // Background: all points, very dim
+      const bgCircles = sg.selectAll(".bg-dot").data(data, d => d.id);
+      bgCircles.exit().remove();
+      bgCircles.enter().append("circle").attr("class", "bg-dot")
+        .attr("r", 2).attr("opacity", 0.06).attr("fill", "#999")
+        .merge(bgCircles)
+        .attr("cx", d => sx(d[dx])).attr("cy", d => sy(d[dy]));
+
+      // Foreground: selected points
+      const selData = data.filter((_, i) => selectedBits[i]);
+      const fgCircles = sg.selectAll(".fg-dot").data(selData, d => d.id);
+      fgCircles.exit().remove();
+      fgCircles.enter().append("circle").attr("class", "fg-dot")
+        .attr("r", 3).attr("opacity", 0.65)
+        .merge(fgCircles)
+        .attr("cx", d => sx(d[dx])).attr("cy", d => sy(d[dy]))
+        .attr("fill", d => colorMap.get(d.category));
+    });
+
+    // Show message if no strums
+    if (strums.length === 0) {
+      panelsDiv.selectAll(".scatter-panel").remove();
+      if (panelsDiv.select(".no-strum-msg").empty()) {
+        const msgSvg = panelsDiv.append("div").attr("class", "scatter-panel no-strum-msg")
+          .append("svg").attr("width", scW).attr("height", 80);
+        msgSvg.append("text").attr("class", "scatter-msg")
+          .attr("x", scW / 2).attr("y", 45)
+          .text("Alt + drag between axes to create a strum");
+      }
+    } else {
+      panelsDiv.selectAll(".no-strum-msg").remove();
+    }
+  };
+
+  // --- Initial render ---
+  drawLines();
+  drawStrumMarkers();
+  updateCounter();
+  updateScatters();
+})();
+</script>
+</body>
+</html>

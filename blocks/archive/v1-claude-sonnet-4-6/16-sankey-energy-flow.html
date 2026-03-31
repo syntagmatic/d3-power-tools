@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Energy Flow — Sankey Diagram</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #fafafa; font-family: system-ui, sans-serif; }
+  svg { display: block; width: 100%; height: auto; }
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: rgba(255,255,255,0.96);
+    border: 1px solid #bbb;
+    border-radius: 4px;
+    padding: 8px 12px;
+    font-size: 13px;
+    line-height: 1.45;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    opacity: 0;
+    transition: opacity 0.15s;
+    max-width: 260px;
+  }
+  .tooltip .val { font-family: "SF Mono", "Cascadia Mono", "Consolas", monospace; }
+  .node-rect { cursor: grab; }
+  .node-rect:active { cursor: grabbing; }
+  h1 {
+    text-align: center;
+    font-size: 20px;
+    font-weight: 600;
+    color: #222;
+    padding: 18px 0 4px;
+  }
+  .subtitle {
+    text-align: center;
+    font-size: 13px;
+    color: #777;
+    padding-bottom: 6px;
+  }
+</style>
+</head>
+<body>
+<h1>U.S. Energy Flow</h1>
+<p class="subtitle">From primary sources through generation and grid to end uses &mdash; drag nodes vertically, hover for details</p>
+<div id="chart"></div>
+<div class="tooltip" id="tooltip"></div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3-sankey@0.12/dist/d3-sankey.min.js"></script>
+<script>
+(() => {
+  // --- Dimensions & margins ---
+  const width = 1200, height = 800;
+  const margin = { top: 24, right: 160, bottom: 24, left: 140 };
+
+  // --- Tol muted palette (colorblind safe) ---
+  const stagePalette = [
+    "#332288", // Sources — indigo
+    "#88CCEE", // Generation — cyan
+    "#44AA99", // Grid — teal
+    "#DDCC77", // Sectors — sand
+    "#AA4499", // End Uses — rose
+  ];
+  const lossColor = "#CC3311"; // Tol bright red
+
+  // --- Stage definitions ---
+  // Stage 0: Primary sources
+  // Stage 1: Generation type
+  // Stage 2: Grid infrastructure
+  // Stage 3: Demand sectors
+  // Stage 4: End uses
+  const stageOf = {};
+  const assignStage = (names, stage) => names.forEach(n => { stageOf[n] = stage; });
+
+  assignStage(["Coal", "Natural Gas", "Nuclear", "Solar", "Wind", "Hydroelectric"], 0);
+  assignStage(["Thermal Generation", "Renewable Generation"], 1);
+  assignStage(["High-Voltage Transmission", "Local Distribution"], 2);
+  assignStage(["Residential", "Commercial", "Industrial", "Transportation"], 3);
+  assignStage(["Heating & Cooling", "Lighting", "Motors & Drives", "Electronics", "Vehicle Propulsion", "Other Uses"], 4);
+
+  // Loss nodes (belong to grid stage visually)
+  const lossNames = new Set(["Transmission Losses", "Distribution Losses", "Generation Losses"]);
+  ["Transmission Losses", "Distribution Losses"].forEach(n => { stageOf[n] = 2; });
+  stageOf["Generation Losses"] = 1;
+
+  // --- Build nodes ---
+  const nodeNames = Object.keys(stageOf);
+  const nodes = nodeNames.map(name => ({ name }));
+  const idx = name => nodeNames.indexOf(name);
+
+  // --- Build links (~35 across 5 stages) ---
+  const links = [
+    // Stage 0→1: Sources → Generation
+    { source: idx("Coal"),           target: idx("Thermal Generation"),    value: 180 },
+    { source: idx("Natural Gas"),    target: idx("Thermal Generation"),    value: 260 },
+    { source: idx("Nuclear"),        target: idx("Thermal Generation"),    value: 160 },
+    { source: idx("Solar"),          target: idx("Renewable Generation"),  value: 90 },
+    { source: idx("Wind"),           target: idx("Renewable Generation"),  value: 110 },
+    { source: idx("Hydroelectric"),  target: idx("Renewable Generation"),  value: 70 },
+
+    // Stage 1→2: Generation → Grid (with losses)
+    { source: idx("Thermal Generation"),    target: idx("Generation Losses"),         value: 72 },
+    { source: idx("Thermal Generation"),    target: idx("High-Voltage Transmission"), value: 390 },
+    { source: idx("Thermal Generation"),    target: idx("Local Distribution"),        value: 138 },
+    { source: idx("Renewable Generation"),  target: idx("High-Voltage Transmission"), value: 180 },
+    { source: idx("Renewable Generation"),  target: idx("Local Distribution"),        value: 90 },
+
+    // Stage 2→2 (losses)
+    { source: idx("High-Voltage Transmission"), target: idx("Transmission Losses"), value: 28 },
+    { source: idx("Local Distribution"),        target: idx("Distribution Losses"),  value: 18 },
+
+    // Stage 2→3: Grid → Sectors
+    { source: idx("High-Voltage Transmission"), target: idx("Industrial"),      value: 260 },
+    { source: idx("High-Voltage Transmission"), target: idx("Commercial"),      value: 140 },
+    { source: idx("High-Voltage Transmission"), target: idx("Transportation"),  value: 80 },
+    { source: idx("High-Voltage Transmission"), target: idx("Residential"),     value: 62 },
+    { source: idx("Local Distribution"),        target: idx("Residential"),     value: 120 },
+    { source: idx("Local Distribution"),        target: idx("Commercial"),      value: 60 },
+    { source: idx("Local Distribution"),        target: idx("Industrial"),      value: 30 },
+
+    // Stage 3→4: Sectors → End Uses
+    { source: idx("Residential"),    target: idx("Heating & Cooling"),    value: 78 },
+    { source: idx("Residential"),    target: idx("Lighting"),             value: 38 },
+    { source: idx("Residential"),    target: idx("Electronics"),          value: 42 },
+    { source: idx("Residential"),    target: idx("Other Uses"),           value: 24 },
+    { source: idx("Commercial"),     target: idx("Heating & Cooling"),    value: 72 },
+    { source: idx("Commercial"),     target: idx("Lighting"),             value: 56 },
+    { source: idx("Commercial"),     target: idx("Electronics"),          value: 44 },
+    { source: idx("Commercial"),     target: idx("Other Uses"),           value: 28 },
+    { source: idx("Industrial"),     target: idx("Motors & Drives"),      value: 160 },
+    { source: idx("Industrial"),     target: idx("Heating & Cooling"),    value: 80 },
+    { source: idx("Industrial"),     target: idx("Other Uses"),           value: 50 },
+    { source: idx("Transportation"), target: idx("Vehicle Propulsion"),   value: 64 },
+    { source: idx("Transportation"), target: idx("Other Uses"),           value: 16 },
+  ];
+
+  // --- Total energy for percentage calc ---
+  const totalEnergy = d3.sum(links.filter(l => stageOf[nodeNames[l.source]] === 0), d => d.value);
+
+  // --- Sankey layout ---
+  const sankey = d3.sankey()
+    .nodeId(d => d.index)
+    .nodeWidth(18)
+    .nodePadding(14)
+    .nodeAlign(d3.sankeyLeft)
+    .nodeSort(null)
+    .extent([[margin.left, margin.top], [width - margin.right, height - margin.bottom]]);
+
+  const graph = sankey({
+    nodes: nodes.map(d => ({ ...d })),
+    links: links.map(d => ({ ...d }))
+  });
+
+  // --- Color helpers ---
+  const nodeColor = d => lossNames.has(d.name) ? lossColor : stagePalette[stageOf[d.name]] || "#999";
+  const linkColor = d => {
+    const tgtName = typeof d.target === "object" ? d.target.name : nodeNames[d.target];
+    if (lossNames.has(tgtName)) return lossColor;
+    const srcName = typeof d.source === "object" ? d.source.name : nodeNames[d.source];
+    return stagePalette[stageOf[srcName]] || "#999";
+  };
+
+  // --- SVG ---
+  const svg = d3.select("#chart").append("svg")
+    .attr("viewBox", `0 0 ${width} ${height}`)
+    .attr("role", "img")
+    .attr("aria-label", "Sankey diagram showing energy flow from 6 primary sources through generation, grid infrastructure, demand sectors, to 6 end uses. Loss flows highlighted in red.");
+
+  // --- Gradient definitions for links ---
+  const defs = svg.append("defs");
+  graph.links.forEach((d, i) => {
+    const grad = defs.append("linearGradient")
+      .attr("id", `grad-${i}`)
+      .attr("gradientUnits", "userSpaceOnUse")
+      .attr("x1", d.source.x1)
+      .attr("x2", d.target.x0);
+    grad.append("stop").attr("offset", "0%").attr("stop-color", nodeColor(d.source));
+    grad.append("stop").attr("offset", "100%").attr("stop-color", nodeColor(d.target));
+  });
+
+  // --- Links ---
+  const linkG = svg.append("g").attr("fill", "none");
+  const linkPath = linkG.selectAll("path")
+    .data(graph.links)
+    .join("path")
+      .attr("d", d3.sankeyLinkHorizontal())
+      .attr("stroke", (d, i) => {
+        const tgtName = d.target.name;
+        return lossNames.has(tgtName) ? lossColor : `url(#grad-${i})`;
+      })
+      .attr("stroke-width", d => Math.max(1.5, d.width))
+      .attr("stroke-opacity", d => lossNames.has(d.target.name) ? 0.55 : 0.4)
+      .attr("class", "link")
+      .sort((a, b) => b.width - a.width);
+
+  // --- Loss link dashing ---
+  linkPath.filter(d => lossNames.has(d.target.name))
+    .attr("stroke-dasharray", "6,3");
+
+  // --- Nodes ---
+  const nodeG = svg.append("g");
+  const nodeRects = nodeG.selectAll("g")
+    .data(graph.nodes)
+    .join("g")
+      .attr("transform", d => `translate(${d.x0},${d.y0})`);
+
+  nodeRects.append("rect")
+    .attr("width", d => d.x1 - d.x0)
+    .attr("height", d => Math.max(1, d.y1 - d.y0))
+    .attr("fill", nodeColor)
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 0.5)
+    .attr("rx", 2)
+    .attr("class", "node-rect");
+
+  // --- Node labels ---
+  const fmt = d3.format(",.0f");
+  const pctFmt = d3.format(".1f");
+
+  nodeRects.append("text")
+    .attr("x", d => {
+      const stage = stageOf[d.name];
+      return stage === 4 || lossNames.has(d.name) ? (d.x1 - d.x0) + 8 : -8;
+    })
+    .attr("y", d => (d.y1 - d.y0) / 2)
+    .attr("dy", "0.35em")
+    .attr("text-anchor", d => {
+      const stage = stageOf[d.name];
+      return stage === 4 || lossNames.has(d.name) ? "start" : "end";
+    })
+    .attr("font-size", 12)
+    .attr("fill", d => lossNames.has(d.name) ? lossColor : "#333")
+    .attr("font-weight", d => lossNames.has(d.name) ? 600 : 400)
+    .text(d => d.name);
+
+  // --- Value labels (monospace) ---
+  nodeRects.append("text")
+    .attr("x", d => {
+      const stage = stageOf[d.name];
+      return stage === 4 || lossNames.has(d.name) ? (d.x1 - d.x0) + 8 : -8;
+    })
+    .attr("y", d => (d.y1 - d.y0) / 2 + 15)
+    .attr("dy", "0.35em")
+    .attr("text-anchor", d => {
+      const stage = stageOf[d.name];
+      return stage === 4 || lossNames.has(d.name) ? "start" : "end";
+    })
+    .attr("font-size", 10)
+    .attr("font-family", "'SF Mono','Cascadia Mono','Consolas',monospace")
+    .attr("fill", d => lossNames.has(d.name) ? lossColor : "#888")
+    .text(d => `${fmt(d.value)} TWh`);
+
+  // --- Stage column headers ---
+  const stageLabels = ["Sources", "Generation", "Grid", "Sectors", "End Uses"];
+  const stageXPositions = d3.groups(graph.nodes, d => stageOf[d.name])
+    .filter(([stage]) => !isNaN(stage))
+    .map(([stage, ns]) => ({
+      stage,
+      x: d3.mean(ns.filter(n => !lossNames.has(n.name)), n => (n.x0 + n.x1) / 2)
+    }));
+
+  svg.append("g").selectAll("text")
+    .data(stageXPositions)
+    .join("text")
+      .attr("x", d => d.x)
+      .attr("y", 14)
+      .attr("text-anchor", "middle")
+      .attr("font-size", 13)
+      .attr("font-weight", 600)
+      .attr("fill", d => stagePalette[d.stage])
+      .attr("letter-spacing", "0.5px")
+      .text(d => stageLabels[d.stage]);
+
+  // --- Tooltip ---
+  const tooltip = d3.select("#tooltip");
+
+  // Collect connected links for each node
+  const connectedLinks = (node) => {
+    const upstream = new Set(), downstream = new Set();
+    const findUp = (n) => {
+      graph.links.forEach(l => {
+        if (l.target === n && !upstream.has(l)) {
+          upstream.add(l);
+          findUp(l.source);
+        }
+      });
+    };
+    const findDown = (n) => {
+      graph.links.forEach(l => {
+        if (l.source === n && !downstream.has(l)) {
+          downstream.add(l);
+          findDown(l.target);
+        }
+      });
+    };
+    findUp(node);
+    findDown(node);
+    return new Set([...upstream, ...downstream]);
+  };
+
+  // --- Hover: highlight connected paths ---
+  const highlightLinks = (activeLinks) => {
+    linkPath
+      .attr("stroke-opacity", d => activeLinks.has(d)
+        ? (lossNames.has(d.target.name) ? 0.7 : 0.65)
+        : 0.06);
+  };
+
+  const resetLinks = () => {
+    linkPath.attr("stroke-opacity", d => lossNames.has(d.target.name) ? 0.55 : 0.4);
+  };
+
+  // Node hover
+  nodeRects
+    .on("pointerenter", (event, d) => {
+      const connected = connectedLinks(d);
+      highlightLinks(connected);
+
+      const inFlow = d3.sum(d.targetLinks, l => l.value);
+      const outFlow = d3.sum(d.sourceLinks, l => l.value);
+      const pct = pctFmt(d.value / totalEnergy * 100);
+      let html = `<strong>${d.name}</strong><br>`;
+      html += `<span class="val">${fmt(d.value)} TWh</span> (${pct}% of total)<br>`;
+      if (inFlow > 0) html += `In: <span class="val">${fmt(inFlow)}</span> TWh<br>`;
+      if (outFlow > 0) html += `Out: <span class="val">${fmt(outFlow)}</span> TWh`;
+      tooltip.html(html).style("opacity", 1);
+    })
+    .on("pointermove", (event) => {
+      const tw = tooltip.node().offsetWidth;
+      const th = tooltip.node().offsetHeight;
+      const x = Math.min(event.pageX + 14, window.innerWidth + window.scrollX - tw - 10);
+      const y = Math.max(event.pageY - th - 10, window.scrollY + 8);
+      tooltip.style("left", `${x}px`).style("top", `${y}px`);
+    })
+    .on("pointerleave", () => {
+      resetLinks();
+      tooltip.style("opacity", 0);
+    });
+
+  // Link hover
+  linkPath
+    .on("pointerenter", (event, d) => {
+      highlightLinks(new Set([d]));
+      const pct = pctFmt(d.value / totalEnergy * 100);
+      const srcName = d.source.name;
+      const tgtName = d.target.name;
+      let html = `<strong>${srcName} → ${tgtName}</strong><br>`;
+      html += `<span class="val">${fmt(d.value)} TWh</span> (${pct}% of total)`;
+      tooltip.html(html).style("opacity", 1);
+    })
+    .on("pointermove", (event) => {
+      const tw = tooltip.node().offsetWidth;
+      const th = tooltip.node().offsetHeight;
+      const x = Math.min(event.pageX + 14, window.innerWidth + window.scrollX - tw - 10);
+      const y = Math.max(event.pageY - th - 10, window.scrollY + 8);
+      tooltip.style("left", `${x}px`).style("top", `${y}px`);
+    })
+    .on("pointerleave", () => {
+      resetLinks();
+      tooltip.style("opacity", 0);
+    });
+
+  // --- Vertical drag on nodes ---
+  const drag = d3.drag()
+    .on("start", function () { d3.select(this).raise(); })
+    .on("drag", (event, d) => {
+      const dy = event.dy;
+      const nodeHeight = d.y1 - d.y0;
+      const newY0 = Math.max(margin.top, Math.min(height - margin.bottom - nodeHeight, d.y0 + dy));
+      const newY1 = newY0 + nodeHeight;
+      d.y0 = newY0;
+      d.y1 = newY1;
+
+      // Update this node's position
+      d3.select(event.sourceEvent.target.parentNode)
+        .attr("transform", `translate(${d.x0},${d.y0})`);
+
+      // Recompute link paths
+      sankey.update(graph);
+      linkPath.attr("d", d3.sankeyLinkHorizontal());
+
+      // Update gradients
+      graph.links.forEach((l, i) => {
+        const grad = defs.select(`#grad-${i}`);
+        grad.attr("x1", l.source.x1).attr("x2", l.target.x0);
+      });
+    });
+
+  nodeRects.call(drag);
+
+  // --- Legend for loss flows ---
+  const legend = svg.append("g")
+    .attr("transform", `translate(${width - 148}, ${height - 60})`);
+
+  legend.append("line")
+    .attr("x1", 0).attr("x2", 30).attr("y1", 0).attr("y2", 0)
+    .attr("stroke", lossColor).attr("stroke-width", 3)
+    .attr("stroke-dasharray", "6,3").attr("stroke-opacity", 0.6);
+  legend.append("text")
+    .attr("x", 36).attr("y", 4)
+    .attr("font-size", 12).attr("fill", lossColor)
+    .text("Energy losses");
+
+  legend.append("line")
+    .attr("x1", 0).attr("x2", 30).attr("y1", 20).attr("y2", 20)
+    .attr("stroke", "#888").attr("stroke-width", 3).attr("stroke-opacity", 0.4);
+  legend.append("text")
+    .attr("x", 36).attr("y", 24)
+    .attr("font-size", 12).attr("fill", "#666")
+    .text("Energy flow");
+})();
+</script>
+</body>
+</html>

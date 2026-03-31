@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Log-Scale Bee Swarm — Revenue by Sector</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+  }
+  #container { position: relative; }
+  .toggle-group {
+    display: flex;
+    gap: 0;
+    position: absolute;
+    top: 12px;
+    right: 24px;
+    z-index: 10;
+    border: 1px solid #bbb;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .toggle-btn {
+    padding: 5px 14px;
+    font-size: 12px;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    cursor: pointer;
+    background: #fff;
+    border: none;
+    border-right: 1px solid #bbb;
+    color: #555;
+    transition: background 0.15s, color 0.15s;
+  }
+  .toggle-btn:last-child { border-right: none; }
+  .toggle-btn.active { background: #4477AA; color: #fff; }
+  .toggle-btn:hover:not(.active) { background: #eef; }
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: rgba(255,255,255,0.96);
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 12px;
+    line-height: 1.5;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+    opacity: 0;
+    transition: opacity 0.12s;
+    white-space: nowrap;
+  }
+  .tooltip .swatch {
+    display: inline-block;
+    width: 10px; height: 10px;
+    border-radius: 2px;
+    margin-right: 4px;
+    vertical-align: middle;
+  }
+  .tooltip .revenue {
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    font-weight: 600;
+  }
+  .legend-item { cursor: default; }
+  .legend-item text { font-size: 11px; fill: #444; }
+</style>
+</head>
+<body>
+<div id="container">
+  <div class="toggle-group">
+    <button class="toggle-btn active" data-scale="log">Log</button>
+    <button class="toggle-btn" data-scale="linear">Linear</button>
+    <button class="toggle-btn" data-scale="symlog">Symlog</button>
+  </div>
+  <div class="tooltip" id="tooltip"></div>
+</div>
+<script>
+(() => {
+  // --- Dimensions ---
+  const W = 1200, H = 800;
+  const margin = { top: 60, right: 30, bottom: 80, left: 90 };
+  const boxH = 40;
+  const boxMarginTop = 14;
+  // Swarm fills most of the vertical space; box plot at bottom
+  const swarmTop = margin.top;
+  const swarmBottom = H - margin.bottom - boxH - boxMarginTop;
+  const innerW = W - margin.left - margin.right;
+
+  // --- Tol palette (colorblind-safe) ---
+  const sectors = ["Technology", "Healthcare", "Finance", "Energy", "Retail", "Manufacturing"];
+  const tolColors = ["#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE", "#AA3377"];
+  const colorScale = d3.scaleOrdinal().domain(sectors).range(tolColors);
+
+  // --- Generate log-normal revenue data ---
+  const rng = d3.randomLcg(42);
+  const logNorm = d3.randomLogNormal.source(rng)(
+    Math.log(2e6), // mu: median ~$2M
+    1.8            // sigma: wide spread from ~$100K to ~$1B
+  );
+  const data = d3.range(500).map((_, i) => {
+    let rev = logNorm();
+    // Clamp to $100K-$1B range
+    rev = Math.max(1e5, Math.min(1e9, rev));
+    return {
+      id: i,
+      sector: sectors[Math.floor(rng() * 6)],
+      revenue: rev,
+      name: `Company ${i + 1}`
+    };
+  });
+
+  // --- SVG ---
+  const svg = d3.select("#container").append("svg")
+    .attr("width", W).attr("height", H)
+    .attr("viewBox", `0 0 ${W} ${H}`);
+
+  // Title
+  svg.append("text")
+    .attr("x", margin.left).attr("y", 30)
+    .attr("font-size", 18).attr("font-weight", 600).attr("fill", "#222")
+    .text("Company Revenue by Sector");
+
+  svg.append("text")
+    .attr("class", "subtitle")
+    .attr("x", margin.left).attr("y", 48)
+    .attr("font-size", 12).attr("fill", "#888")
+    .text("500 companies, $100K\u2013$1B \u2014 toggle scale to see how perception shifts");
+
+  // Axis label
+  svg.append("text")
+    .attr("x", margin.left + innerW / 2).attr("y", H - 10)
+    .attr("text-anchor", "middle")
+    .attr("font-size", 13).attr("fill", "#555")
+    .text("Annual Revenue (USD)");
+
+  // Groups
+  const axisG = svg.append("g").attr("class", "x-axis")
+    .attr("transform", `translate(0,${swarmBottom})`);
+  const boxAxisG = svg.append("g").attr("class", "box-axis")
+    .attr("transform", `translate(0,${swarmBottom + boxMarginTop + boxH})`);
+  const boxG = svg.append("g").attr("class", "box-plots")
+    .attr("transform", `translate(0,${swarmBottom + boxMarginTop})`);
+  const swarmG = svg.append("g").attr("class", "swarm");
+  const gridG = svg.append("g").attr("class", "grid");
+
+  // --- Legend ---
+  const legendG = svg.append("g")
+    .attr("transform", `translate(${margin.left}, ${H - 40})`);
+  sectors.forEach((s, i) => {
+    const g = legendG.append("g").attr("class", "legend-item")
+      .attr("transform", `translate(${i * 140}, 0)`);
+    g.append("rect").attr("width", 12).attr("height", 12).attr("rx", 2)
+      .attr("fill", colorScale(s));
+    g.append("text").attr("x", 16).attr("y", 10).text(s);
+  });
+
+  // --- Scales ---
+  const extent = d3.extent(data, d => d.revenue);
+  const makeScale = (type) => {
+    if (type === "log") {
+      return d3.scaleLog().domain(extent).range([margin.left, W - margin.right]).nice();
+    } else if (type === "symlog") {
+      return d3.scaleSymlog().domain(extent).range([margin.left, W - margin.right]).constant(1e5).nice();
+    } else {
+      return d3.scaleLinear().domain(extent).range([margin.left, W - margin.right]).nice();
+    }
+  };
+
+  let currentScaleType = "log";
+  let x = makeScale("log");
+  const r = 4;
+
+  // --- Stats for box plot ---
+  function computeStats(values) {
+    const sorted = Float64Array.from(values).sort();
+    const q1 = d3.quantile(sorted, 0.25), q3 = d3.quantile(sorted, 0.75), iqr = q3 - q1;
+    return {
+      min: sorted[0], max: sorted[sorted.length - 1],
+      q1, median: d3.quantile(sorted, 0.5), q3, iqr,
+      whiskerLow: d3.min(sorted.filter(v => v >= q1 - 1.5 * iqr)),
+      whiskerHigh: d3.max(sorted.filter(v => v <= q3 + 1.5 * iqr)),
+      n: sorted.length
+    };
+  }
+  const stats = computeStats(data.map(d => d.revenue));
+
+  // --- Format ---
+  const fmt = d => {
+    if (d >= 1e9) return `$${(d / 1e9).toFixed(d % 1e9 === 0 ? 0 : 1)}B`;
+    if (d >= 1e6) return `$${(d / 1e6).toFixed(d % 1e6 === 0 ? 0 : 1)}M`;
+    if (d >= 1e3) return `$${(d / 1e3).toFixed(d % 1e3 === 0 ? 0 : 0)}K`;
+    return `$${d.toFixed(0)}`;
+  };
+  // Axis formatter: only label powers of 10 on log, skip sub-ticks
+  const axisFmt = (type) => (d) => {
+    if (type === "log") {
+      const log = Math.log10(d);
+      if (Math.abs(log - Math.round(log)) > 0.01) return "";
+      return fmt(d);
+    }
+    return fmt(d);
+  };
+
+  // --- Force simulation ---
+  // Clone data for simulation (force mutates nodes)
+  let nodes = data.map(d => ({ ...d }));
+
+  const swarmCenterY = (swarmTop + swarmBottom) / 2;
+
+  // Bounding box force to keep nodes in the swarm area
+  function forceBounds() {
+    let nodes;
+    function force() {
+      for (const d of nodes) {
+        if (d.y < swarmTop + r) { d.y = swarmTop + r; d.vy = 0; }
+        if (d.y > swarmBottom - r) { d.y = swarmBottom - r; d.vy = 0; }
+        if (d.x < margin.left + r) { d.x = margin.left + r; d.vx = 0; }
+        if (d.x > W - margin.right - r) { d.x = W - margin.right - r; d.vx = 0; }
+      }
+    }
+    force.initialize = n => { nodes = n; };
+    return force;
+  }
+
+  const simulation = d3.forceSimulation(nodes)
+    .force("x", d3.forceX(d => x(d.revenue)).strength(1))
+    .force("y", d3.forceY(swarmCenterY).strength(0.02))
+    .force("collide", d3.forceCollide(r + 1).strength(0.8).iterations(3))
+    .force("bounds", forceBounds())
+    .alphaDecay(0.012)
+    .velocityDecay(0.35)
+    .stop();
+
+  // Pre-compute
+  for (let i = 0; i < 350; i++) simulation.tick();
+
+  // --- Draw ---
+  function drawAxis() {
+    const tickCount = Math.max(4, Math.floor(innerW / 120));
+    const axis = d3.axisBottom(x)
+      .ticks(currentScaleType === "log" ? 10 : tickCount)
+      .tickFormat(axisFmt(currentScaleType));
+    axisG.transition().duration(600).call(axis)
+      .call(g => g.select(".domain").attr("stroke", "#bbb"))
+      .call(g => g.selectAll(".tick line").attr("stroke", "#ccc"))
+      .call(g => g.selectAll(".tick text")
+        .attr("font-size", 11)
+        .attr("font-family", "'SF Mono', Monaco, 'Cascadia Code', monospace"));
+
+    // Grid — only at labeled ticks for log, all ticks for linear/symlog
+    gridG.selectAll("line").remove();
+    let gridTicks;
+    if (currentScaleType === "log") {
+      gridTicks = [1e5, 1e6, 1e7, 1e8, 1e9].filter(d => d >= x.domain()[0] && d <= x.domain()[1]);
+    } else {
+      gridTicks = x.ticks(tickCount);
+    }
+    gridG.selectAll("line").data(gridTicks).join("line")
+      .attr("x1", d => x(d)).attr("x2", d => x(d))
+      .attr("y1", swarmTop).attr("y2", swarmBottom)
+      .attr("stroke", "#eee").attr("stroke-width", 1);
+
+    // Box axis (same scale)
+    const boxAxis = d3.axisBottom(x).ticks(0).tickSize(0).tickFormat("");
+    boxAxisG.call(boxAxis).call(g => g.select(".domain").attr("stroke", "#ccc"));
+  }
+
+  function drawBoxPlot() {
+    boxG.selectAll("*").remove();
+    const bh = boxH * 0.5;
+    const cy = boxH / 2;
+
+    // Whisker line
+    boxG.append("line")
+      .attr("x1", x(stats.whiskerLow)).attr("x2", x(stats.whiskerHigh))
+      .attr("y1", cy).attr("y2", cy)
+      .attr("stroke", "#666").attr("stroke-width", 1.2);
+
+    // Whisker caps
+    [stats.whiskerLow, stats.whiskerHigh].forEach(v => {
+      boxG.append("line")
+        .attr("x1", x(v)).attr("x2", x(v))
+        .attr("y1", cy - bh * 0.3).attr("y2", cy + bh * 0.3)
+        .attr("stroke", "#666").attr("stroke-width", 1.2);
+    });
+
+    // IQR box
+    const bx1 = x(stats.q1), bx3 = x(stats.q3);
+    boxG.append("rect")
+      .attr("x", Math.min(bx1, bx3)).attr("y", cy - bh / 2)
+      .attr("width", Math.abs(bx3 - bx1)).attr("height", bh)
+      .attr("fill", "#e8e8e8").attr("stroke", "#888").attr("stroke-width", 1)
+      .attr("rx", 2);
+
+    // Median line
+    boxG.append("line")
+      .attr("x1", x(stats.median)).attr("x2", x(stats.median))
+      .attr("y1", cy - bh / 2).attr("y2", cy + bh / 2)
+      .attr("stroke", "#333").attr("stroke-width", 2);
+
+    // Labels
+    const labelY = cy + bh / 2 + 13;
+    [
+      { v: stats.q1, label: "Q1" },
+      { v: stats.median, label: "Median" },
+      { v: stats.q3, label: "Q3" }
+    ].forEach(({ v, label }) => {
+      boxG.append("text")
+        .attr("x", x(v)).attr("y", labelY)
+        .attr("text-anchor", "middle")
+        .attr("font-size", 9).attr("fill", "#888")
+        .attr("font-family", "'SF Mono', Monaco, 'Cascadia Code', monospace")
+        .text(`${label}: ${fmt(v)}`);
+    });
+  }
+
+  // Circles
+  const circles = swarmG.selectAll("circle")
+    .data(nodes, d => d.id)
+    .join("circle")
+      .attr("cx", d => d.x)
+      .attr("cy", d => d.y)
+      .attr("r", r)
+      .attr("fill", d => colorScale(d.sector))
+      .attr("fill-opacity", 0.8)
+      .attr("stroke", "#fff")
+      .attr("stroke-width", 0.5)
+      .style("cursor", "pointer");
+
+  drawAxis();
+  drawBoxPlot();
+
+  // --- Tooltip ---
+  const tooltip = d3.select("#tooltip");
+
+  svg.on("pointermove", (event) => {
+    const [mx, my] = d3.pointer(event);
+    let closest = null, minD = Infinity;
+    for (const n of nodes) {
+      const d = Math.hypot(n.x - mx, n.y - my);
+      if (d < minD) { minD = d; closest = n; }
+    }
+    if (closest && minD < 15) {
+      circles.attr("fill-opacity", d => d.id === closest.id ? 1 : 0.3)
+        .attr("r", d => d.id === closest.id ? 6 : r);
+      tooltip.style("opacity", 1)
+        .style("left", `${closest.x + 12}px`)
+        .style("top", `${closest.y - 10}px`)
+        .html(`<span class="swatch" style="background:${colorScale(closest.sector)}"></span>
+               <strong>${closest.name}</strong><br>
+               ${closest.sector}<br>
+               <span class="revenue">${fmt(closest.revenue)}</span>`);
+    } else {
+      circles.attr("fill-opacity", 0.8).attr("r", r);
+      tooltip.style("opacity", 0);
+    }
+  });
+
+  svg.on("pointerleave", () => {
+    circles.attr("fill-opacity", 0.8).attr("r", r);
+    tooltip.style("opacity", 0);
+  });
+
+  // --- Scale toggle ---
+  function switchScale(type) {
+    if (type === currentScaleType) return;
+    currentScaleType = type;
+    x = makeScale(type);
+
+    // Update buttons
+    d3.selectAll(".toggle-btn").classed("active", function() {
+      return this.dataset.scale === type;
+    });
+
+    // Re-run force with new x positions
+    simulation.force("x", d3.forceX(d => x(d.revenue)).strength(1));
+    simulation.alpha(1).restart();
+
+    // Animate ticks
+    let tickCount = 0;
+    simulation.on("tick", () => {
+      tickCount++;
+      circles.attr("cx", d => d.x).attr("cy", d => d.y);
+      if (tickCount > 200 || simulation.alpha() < 0.001) {
+        simulation.stop();
+        simulation.on("tick", null);
+      }
+    });
+
+    drawAxis();
+    drawBoxPlot();
+  }
+
+  d3.selectAll(".toggle-btn").on("click", function() {
+    switchScale(this.dataset.scale);
+  });
+
+  // --- Clamp nodes to chart bounds ---
+  simulation.on("tick", null); // clear any leftover
+  // Apply final clamp
+  nodes.forEach(d => {
+    d.x = Math.max(margin.left + r, Math.min(W - margin.right - r, d.x));
+    d.y = Math.max(swarmTop + r, Math.min(swarmBottom - r, d.y));
+  });
+  circles.attr("cx", d => d.x).attr("cy", d => d.y);
+})();
+</script>
+</body>
+</html>

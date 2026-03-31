@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Force · Edge Bundling · Chord Triptych</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0a0f; color: #ccc; font-family: system-ui, sans-serif; }
+h1 { text-align: center; padding: 18px 0 4px; font-size: 1.1rem; font-weight: 400; color: #888; letter-spacing: 0.04em; }
+.panels { display: flex; width: 100vw; height: calc(100vh - 60px); }
+.panel { flex: 1; position: relative; overflow: hidden; }
+.panel-label { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: #555; pointer-events: none; }
+svg { width: 100%; height: 100%; }
+.link { stroke-opacity: 0.15; fill: none; }
+.link.highlighted { stroke-opacity: 0.85; }
+.node { cursor: pointer; }
+.node.dimmed { opacity: 0.12; }
+.link.dimmed { stroke-opacity: 0.03; }
+.chord path { fill-opacity: 0.55; stroke: none; }
+.chord path.dimmed { fill-opacity: 0.04; }
+.chord path.highlighted { fill-opacity: 0.85; }
+.group-arc { cursor: pointer; }
+.group-arc.dimmed { opacity: 0.15; }
+</style>
+</head>
+<body>
+<h1>Force Layout · Radial Edge Bundling · Chord Diagram</h1>
+<div class="panels">
+  <div class="panel" id="force-panel"><span class="panel-label">Force-Directed</span><svg id="force-svg"></svg></div>
+  <div class="panel" id="bundle-panel"><span class="panel-label">Radial Edge Bundling</span><svg id="bundle-svg"></svg></div>
+  <div class="panel" id="chord-panel"><span class="panel-label">Chord Diagram</span><svg id="chord-svg"></svg></div>
+</div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script type="module">
+
+// ─── Synthetic Data ───────────────────────────────────────────
+const groupNames = ["Infra", "Data", "Frontend", "Backend", "ML"];
+const groupColors = ["#4fc3f7", "#aed581", "#ffb74d", "#e57373", "#ba68c8"];
+const color = d3.scaleOrdinal().domain(d3.range(5)).range(groupColors);
+
+const rng = d3.randomLcg(42);
+const rand = d3.randomUniform.source(rng)(0, 1);
+
+const nodes = d3.range(40).map(i => ({
+  id: i,
+  name: `n${i}`,
+  group: i < 8 ? 0 : i < 16 ? 1 : i < 24 ? 2 : i < 32 ? 3 : 4
+}));
+
+const links = [];
+const linkSet = new Set();
+// Intra-group links
+for (const n of nodes) {
+  const peers = nodes.filter(m => m.group === n.group && m.id !== n.id);
+  const k = 1 + Math.floor(rand() * 2);
+  for (let j = 0; j < k; j++) {
+    const t = peers[Math.floor(rand() * peers.length)];
+    const key = `${Math.min(n.id, t.id)}-${Math.max(n.id, t.id)}`;
+    if (!linkSet.has(key)) { linkSet.add(key); links.push({ source: n.id, target: t.id, value: 1 + Math.floor(rand() * 4) }); }
+  }
+}
+// Inter-group links
+for (let i = 0; i < 25; i++) {
+  const a = nodes[Math.floor(rand() * 40)];
+  let b = nodes[Math.floor(rand() * 40)];
+  while (b.group === a.group) b = nodes[Math.floor(rand() * 40)];
+  const key = `${Math.min(a.id, b.id)}-${Math.max(a.id, b.id)}`;
+  if (!linkSet.has(key)) { linkSet.add(key); links.push({ source: a.id, target: b.id, value: 1 + Math.floor(rand() * 3) }); }
+}
+
+// ─── Dispatch ─────────────────────────────────────────────────
+const dispatch = d3.dispatch("highlight", "unhighlight");
+
+// Adjacency for quick lookup
+const adjacent = new Map(nodes.map(n => [n.id, new Set()]));
+for (const l of links) { adjacent.get(l.source).add(l.target); adjacent.get(l.target).add(l.source); }
+
+// ─── Panel 1: Force Layout ───────────────────────────────────
+{
+  const svg = d3.select("#force-svg");
+  const { width, height } = svg.node().getBoundingClientRect();
+  const g = svg.append("g").attr("transform", `translate(${width/2},${height/2})`);
+
+  const simLinks = links.map(d => ({ ...d }));
+  const simNodes = nodes.map(d => ({ ...d }));
+
+  const sim = d3.forceSimulation(simNodes)
+    .force("link", d3.forceLink(simLinks).id(d => d.id).distance(60))
+    .force("charge", d3.forceManyBody().strength(-120))
+    .force("x", d3.forceX(0).strength(0.06))
+    .force("y", d3.forceY(0).strength(0.06))
+    .force("collide", d3.forceCollide(8));
+
+  const linkSel = g.append("g").selectAll("line").data(simLinks).join("line")
+    .attr("class", "link").attr("stroke", d => color(simNodes.find(n => n.id === d.source.id)?.group ?? 0));
+
+  const nodeSel = g.append("g").selectAll("circle").data(simNodes).join("circle")
+    .attr("class", "node").attr("r", 5).attr("fill", d => color(d.group))
+    .attr("stroke", "#0a0a0f").attr("stroke-width", 1.2);
+
+  sim.on("tick", () => {
+    linkSel.attr("x1", d => d.source.x).attr("y1", d => d.source.y)
+           .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
+    nodeSel.attr("cx", d => d.x).attr("cy", d => d.y);
+  });
+
+  nodeSel.on("pointerenter", (e, d) => dispatch.call("highlight", null, d.id))
+         .on("pointerleave", () => dispatch.call("unhighlight"));
+
+  dispatch.on("highlight.force", id => {
+    const adj = adjacent.get(id);
+    nodeSel.classed("dimmed", d => d.id !== id && !adj.has(d.id));
+    linkSel.classed("dimmed", d => d.source.id !== id && d.target.id !== id)
+           .classed("highlighted", d => d.source.id === id || d.target.id === id);
+  });
+  dispatch.on("unhighlight.force", () => {
+    nodeSel.classed("dimmed", false);
+    linkSel.classed("dimmed", false).classed("highlighted", false);
+  });
+}
+
+// ─── Panel 2: Radial Edge Bundling ───────────────────────────
+{
+  const svg = d3.select("#bundle-svg");
+  const { width, height } = svg.node().getBoundingClientRect();
+  const radius = Math.min(width, height) / 2 - 40;
+  const g = svg.append("g").attr("transform", `translate(${width/2},${height/2})`);
+
+  // Sort nodes by group then id for radial layout
+  const sorted = [...nodes].sort((a, b) => a.group - b.group || a.id - b.id);
+  const angleScale = d3.scalePoint().domain(sorted.map(d => d.id)).range([0, 2 * Math.PI - (2 * Math.PI / sorted.length)]);
+  const nodePos = new Map(sorted.map(d => {
+    const a = angleScale(d.id) - Math.PI / 2;
+    return [d.id, { x: Math.cos(a) * radius, y: Math.sin(a) * radius, angle: a }];
+  }));
+
+  // Build hierarchy for bundling paths
+  // Simple LCA-like bundling: route through center with tension
+  const line = d3.lineRadial().curve(d3.curveBundle.beta(0.8))
+    .radius(d => d.r).angle(d => d.a);
+
+  function bundlePath(src, tgt) {
+    const s = nodePos.get(src), t = nodePos.get(tgt);
+    const sa = s.angle + Math.PI / 2, ta = t.angle + Math.PI / 2;
+    return line([
+      { r: radius, a: sa },
+      { r: radius * 0.35, a: sa },
+      { r: radius * 0.35, a: ta },
+      { r: radius, a: ta }
+    ]);
+  }
+
+  const linkSel = g.append("g").selectAll("path").data(links).join("path")
+    .attr("class", "link")
+    .attr("d", d => bundlePath(d.source, d.target))
+    .attr("stroke", d => color(nodes[d.source].group));
+
+  const nodeSel = g.append("g").selectAll("circle").data(sorted).join("circle")
+    .attr("class", "node").attr("r", 4.5)
+    .attr("cx", d => nodePos.get(d.id).x).attr("cy", d => nodePos.get(d.id).y)
+    .attr("fill", d => color(d.group)).attr("stroke", "#0a0a0f").attr("stroke-width", 1);
+
+  // Group arcs
+  const arcGen = d3.arc();
+  const groups = d3.groups(sorted, d => d.group);
+  groups.forEach(([gid, members]) => {
+    const angles = members.map(d => angleScale(d.id) - Math.PI / 2 + Math.PI / 2);
+    const pad = Math.PI / sorted.length;
+    const startAngle = d3.min(angles) - pad;
+    const endAngle = d3.max(angles) + pad;
+    g.append("path").attr("class", "group-arc")
+      .attr("d", arcGen({ innerRadius: radius + 6, outerRadius: radius + 12, startAngle, endAngle }))
+      .attr("fill", color(gid)).attr("opacity", 0.6);
+  });
+
+  nodeSel.on("pointerenter", (e, d) => dispatch.call("highlight", null, d.id))
+         .on("pointerleave", () => dispatch.call("unhighlight"));
+
+  dispatch.on("highlight.bundle", id => {
+    const adj = adjacent.get(id);
+    nodeSel.classed("dimmed", d => d.id !== id && !adj.has(d.id));
+    linkSel.classed("dimmed", d => d.source !== id && d.target !== id)
+           .classed("highlighted", d => d.source === id || d.target === id);
+  });
+  dispatch.on("unhighlight.bundle", () => {
+    nodeSel.classed("dimmed", false);
+    linkSel.classed("dimmed", false).classed("highlighted", false);
+  });
+}
+
+// ─── Panel 3: Chord Diagram ─────────────────────────────────
+{
+  const svg = d3.select("#chord-svg");
+  const { width, height } = svg.node().getBoundingClientRect();
+  const outerRadius = Math.min(width, height) / 2 - 30;
+  const innerRadius = outerRadius - 18;
+  const g = svg.append("g").attr("transform", `translate(${width/2},${height/2})`);
+
+  // Build group-level matrix
+  const n = groupNames.length;
+  const matrix = Array.from({ length: n }, () => Array(n).fill(0));
+  for (const l of links) {
+    const sg = nodes[l.source].group, tg = nodes[l.target].group;
+    matrix[sg][tg] += l.value;
+    if (sg !== tg) matrix[tg][sg] += l.value;
+  }
+
+  const chord = d3.chord().padAngle(0.04).sortSubgroups(d3.descending);
+  const chords = chord(matrix);
+  const arc = d3.arc().innerRadius(innerRadius).outerRadius(outerRadius);
+  const ribbon = d3.ribbon().radius(innerRadius);
+
+  // Map node to chord group angle for highlight
+  // Distribute nodes within their group's arc
+  const groupArcs = chords.groups;
+  const nodeAngleMap = new Map();
+  const groupNodeMap = d3.group(nodes, d => d.group);
+  groupArcs.forEach(ga => {
+    const members = groupNodeMap.get(ga.index);
+    const scale = d3.scalePoint().domain(members.map(d => d.id)).range([ga.startAngle + 0.02, ga.endAngle - 0.02]);
+    members.forEach(m => nodeAngleMap.set(m.id, scale(m.id)));
+  });
+
+  const groupSel = g.append("g").selectAll("path").data(groupArcs).join("path")
+    .attr("class", "group-arc").attr("d", arc).attr("fill", d => color(d.index)).attr("stroke", "#0a0a0f");
+
+  // Group labels
+  g.append("g").selectAll("text").data(groupArcs).join("text")
+    .attr("transform", d => {
+      const a = (d.startAngle + d.endAngle) / 2;
+      return `rotate(${a * 180 / Math.PI - 90}) translate(${outerRadius + 14}) ${a > Math.PI ? "rotate(180)" : ""}`;
+    })
+    .attr("text-anchor", d => (d.startAngle + d.endAngle) / 2 > Math.PI ? "end" : "start")
+    .attr("fill", "#999").attr("font-size", "0.65rem")
+    .text(d => groupNames[d.index]);
+
+  const ribbonSel = g.append("g").attr("class", "chord").selectAll("path").data(chords).join("path")
+    .attr("d", ribbon)
+    .attr("fill", d => color(d.source.index));
+
+  // Node dots along arcs
+  const nodeDots = g.append("g").selectAll("circle").data(nodes).join("circle")
+    .attr("class", "node").attr("r", 3)
+    .attr("cx", d => { const a = nodeAngleMap.get(d.id) - Math.PI/2; return Math.cos(a) * (outerRadius + 3); })
+    .attr("cy", d => { const a = nodeAngleMap.get(d.id) - Math.PI/2; return Math.sin(a) * (outerRadius + 3); })
+    .attr("fill", d => color(d.group));
+
+  nodeDots.on("pointerenter", (e, d) => dispatch.call("highlight", null, d.id))
+          .on("pointerleave", () => dispatch.call("unhighlight"));
+  groupSel.on("pointerenter", (e, d) => {
+    // Highlight first node in group for cross-panel linking
+    const first = groupNodeMap.get(d.index)[0];
+    dispatch.call("highlight", null, first.id);
+  }).on("pointerleave", () => dispatch.call("unhighlight"));
+
+  dispatch.on("highlight.chord", id => {
+    const nodeGroup = nodes[id].group;
+    const adj = adjacent.get(id);
+    const adjGroups = new Set([...adj].map(nid => nodes[nid].group));
+    adjGroups.add(nodeGroup);
+
+    ribbonSel.classed("dimmed", d => d.source.index !== nodeGroup && d.target.index !== nodeGroup)
+             .classed("highlighted", d => d.source.index === nodeGroup || d.target.index === nodeGroup);
+    groupSel.classed("dimmed", d => !adjGroups.has(d.index));
+    nodeDots.classed("dimmed", d => d.id !== id && !adj.has(d.id));
+  });
+  dispatch.on("unhighlight.chord", () => {
+    ribbonSel.classed("dimmed", false).classed("highlighted", false);
+    groupSel.classed("dimmed", false);
+    nodeDots.classed("dimmed", false);
+  });
+}
+</script>
+</body>
+</html>

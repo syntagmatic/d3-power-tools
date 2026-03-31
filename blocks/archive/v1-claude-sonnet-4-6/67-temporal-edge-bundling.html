@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Temporal Edge Bundling</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #fafafa; color: #333; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 16px; }
+  h2 { font-size: 18px; font-weight: 600; margin-bottom: 2px; }
+  .subtitle { font-size: 13px; color: #666; margin-bottom: 10px; line-height: 1.4; }
+  .chart-area { position: relative; width: 660px; height: 660px; margin: 0 auto; }
+  canvas, svg { position: absolute; top: 0; left: 0; }
+  svg { z-index: 1; pointer-events: none; }
+  svg .node-hit { pointer-events: all; cursor: pointer; }
+  .controls {
+    display: flex; align-items: center; gap: 14px; margin-top: 8px;
+    justify-content: center; flex-wrap: wrap;
+  }
+  .controls label { font-size: 13px; color: #555; }
+  .controls input[type="range"] { width: 200px; accent-color: #4477AA; }
+  .controls button {
+    width: 64px; padding: 5px 0; font-size: 13px; border: 1px solid #bbb;
+    border-radius: 4px; background: #fff; cursor: pointer; font-family: system-ui;
+    transition: background 0.15s;
+  }
+  .controls button:hover { background: #eef; }
+  .badge {
+    font-size: 12px; background: #4477AA; color: #fff; padding: 2px 10px;
+    border-radius: 10px; font-variant-numeric: tabular-nums;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+  }
+  .month-display {
+    font-size: 14px; font-weight: 600; min-width: 40px; text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+  .legend { display: flex; gap: 16px; margin-top: 8px; justify-content: center; flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #555; }
+  .legend-swatch { width: 12px; height: 12px; border-radius: 50%; border: 1px solid rgba(0,0,0,0.1); }
+  .tooltip {
+    position: absolute; pointer-events: none; background: rgba(255,255,255,0.95);
+    border: 1px solid #ddd; border-radius: 6px; padding: 8px 12px; font-size: 12px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1); z-index: 10; line-height: 1.5;
+    display: none; max-width: 220px;
+  }
+  .tooltip .tt-name { font-weight: 600; margin-bottom: 2px; }
+  .tooltip .tt-dept { color: #666; font-size: 11px; }
+  .tooltip .tt-count { margin-top: 4px; font-family: "SF Mono", Monaco, monospace; }
+  .slider-row { display: flex; align-items: center; gap: 8px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h2>Temporal Edge Bundling</h2>
+  <p class="subtitle">Cross-department collaboration network over 12 months. Edges route through hierarchy via LCA bundling. Hover a node to trace its connections.</p>
+  <div class="chart-area" id="chart">
+    <div class="tooltip" id="tooltip"></div>
+  </div>
+  <div class="controls">
+    <button id="playBtn">&#9654; Play</button>
+    <div class="slider-row">
+      <label>Month</label>
+      <input type="range" id="monthSlider" min="0" max="11" value="0" step="1">
+      <span class="month-display" id="monthLabel">Jan</span>
+    </div>
+    <span class="badge" id="edgeBadge">0 edges</span>
+    <div class="slider-row">
+      <label>Bundling</label>
+      <input type="range" id="betaSlider" min="0" max="100" value="85" step="1">
+    </div>
+  </div>
+  <div class="legend" id="legend"></div>
+</div>
+<script>
+(() => {
+  const TOL = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377"];
+  const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const DEPTS = ["Engineering","Design","Marketing","Sales","Operations","Research"];
+  const dpr = window.devicePixelRatio || 1;
+  const W = 660, H = 660;
+  const outerRadius = W / 2 - 80;
+  const labelRadius = outerRadius + 14;
+
+  // --- Seeded RNG ---
+  const rng = d3.randomLcg(42);
+
+  // --- Build hierarchy: root -> dept -> team -> person ---
+  const flat = [{ id: "root", parent: null, dept: null, team: null }];
+  const teamsPerDept = [5, 4, 4, 3, 4, 3];
+  const membersPerTeam = () => 3 + Math.floor(rng() * 3); // 3-5
+
+  DEPTS.forEach((dept, di) => {
+    flat.push({ id: dept, parent: "root", dept, team: null });
+    for (let t = 0; t < teamsPerDept[di]; t++) {
+      const teamId = `${dept}.T${t}`;
+      flat.push({ id: teamId, parent: dept, dept, team: teamId });
+      const n = membersPerTeam();
+      for (let m = 0; m < n; m++) {
+        const names = ["Alice","Bob","Carol","Dave","Eve","Frank","Grace","Hank","Ivy","Jake",
+                       "Kim","Leo","Mia","Ned","Ora","Pat","Quinn","Ray","Sue","Tom","Uma","Val","Wes","Xia","Yuri","Zoe"];
+        const name = names[Math.floor(rng() * names.length)];
+        flat.push({ id: `${teamId}.${name}${m}`, parent: teamId, dept, team: teamId, label: name });
+      }
+    }
+  });
+
+  const root = d3.stratify().id(d => d.id).parentId(d => d.parent)(flat);
+
+  // Radial cluster: all leaves on circumference
+  d3.cluster()
+    .size([2 * Math.PI, outerRadius])
+    .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth)(root);
+
+  // Cartesian coordinates for each node
+  root.each(d => {
+    d.cx = d.y * Math.cos(d.x - Math.PI / 2);
+    d.cy = d.y * Math.sin(d.x - Math.PI / 2);
+  });
+
+  const leaves = root.leaves();
+  const nodesById = new Map(root.descendants().map(d => [d.id, d]));
+  const deptColor = d3.scaleOrdinal().domain(DEPTS).range(TOL);
+
+  // --- Generate ~350 edges with temporal windows and seasonal patterns ---
+  // Seasonal bias: Engineering-Research peaks in winter, Marketing-Sales peaks in summer
+  const seasonalBias = {
+    "Engineering-Research": [0.9, 0.9, 0.7, 0.4, 0.2, 0.1, 0.1, 0.2, 0.4, 0.7, 0.9, 0.9],
+    "Marketing-Sales": [0.1, 0.2, 0.4, 0.7, 0.9, 1.0, 1.0, 0.9, 0.7, 0.4, 0.2, 0.1],
+    "Design-Marketing": [0.3, 0.4, 0.6, 0.8, 0.9, 0.9, 0.8, 0.6, 0.4, 0.3, 0.3, 0.3],
+  };
+
+  function getSeasonalWeight(deptA, deptB, month) {
+    const key1 = `${deptA}-${deptB}`, key2 = `${deptB}-${deptA}`;
+    const bias = seasonalBias[key1] || seasonalBias[key2];
+    return bias ? bias[month] : 0.5;
+  }
+
+  const edges = [];
+  for (let i = 0; i < 380; i++) {
+    let srcIdx, tgtIdx, srcDept, tgtDept;
+    // 70% cross-dept, 30% within-dept cross-team
+    const crossDept = rng() < 0.7;
+    do {
+      srcIdx = Math.floor(rng() * leaves.length);
+      tgtIdx = Math.floor(rng() * leaves.length);
+      srcDept = leaves[srcIdx].data.dept;
+      tgtDept = leaves[tgtIdx].data.dept;
+    } while (
+      srcIdx === tgtIdx ||
+      (crossDept && srcDept === tgtDept) ||
+      (!crossDept && (srcDept !== tgtDept || leaves[srcIdx].data.team === leaves[tgtIdx].data.team))
+    );
+
+    // Temporal window influenced by seasonal patterns
+    const weight = getSeasonalWeight(srcDept, tgtDept, Math.floor(rng() * 12));
+    const startMonth = Math.floor(rng() * 11);
+    const dur = 1 + Math.floor(rng() * (weight > 0.5 ? 6 : 3));
+    const endMonth = Math.min(11, startMonth + dur);
+
+    edges.push({
+      source: leaves[srcIdx].id,
+      target: leaves[tgtIdx].id,
+      srcDept,
+      tgtDept,
+      startMonth,
+      endMonth,
+    });
+  }
+
+  // Precompute LCA paths in cartesian coordinates
+  const edgePaths = edges.map(e => {
+    const src = nodesById.get(e.source);
+    const tgt = nodesById.get(e.target);
+    if (!src || !tgt) return null;
+    const path = src.path(tgt);
+    return {
+      ...e,
+      srcNode: src,
+      tgtNode: tgt,
+      path: path.map(n => ({ cx: n.cx, cy: n.cy })),
+    };
+  }).filter(Boolean);
+
+  // Precompute per-month connection counts for node sizing
+  const monthCounts = new Array(12).fill(null).map(() => new Map());
+  edgePaths.forEach(e => {
+    for (let m = e.startMonth; m <= e.endMonth; m++) {
+      const mc = monthCounts[m];
+      mc.set(e.source, (mc.get(e.source) || 0) + 1);
+      mc.set(e.target, (mc.get(e.target) || 0) + 1);
+    }
+  });
+  const maxCount = d3.max(monthCounts, mc => d3.max(mc.values()));
+  const rScale = d3.scaleSqrt().domain([0, maxCount]).range([2.5, 10]);
+
+  // --- Canvas layer for bundled edges ---
+  const chartDiv = d3.select("#chart");
+  const canvas = chartDiv.append("canvas")
+    .attr("width", W * dpr)
+    .attr("height", H * dpr)
+    .style("width", `${W}px`)
+    .style("height", `${H}px`);
+  const ctx = canvas.node().getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  // --- SVG layer for nodes, labels, group arcs ---
+  const svg = chartDiv.append("svg")
+    .attr("width", W)
+    .attr("height", H)
+    .attr("viewBox", `0 0 ${W} ${H}`);
+
+  const gMain = svg.append("g")
+    .attr("transform", `translate(${W / 2}, ${H / 2})`);
+
+  // Group arcs along circumference
+  const deptGroups = d3.groups(leaves, d => d.data.dept);
+  const arcGen = d3.arc();
+  gMain.selectAll("path.dept-arc")
+    .data(deptGroups)
+    .join("path")
+      .attr("class", "dept-arc")
+      .attr("fill", "none")
+      .attr("stroke", ([dept]) => deptColor(dept))
+      .attr("stroke-width", 3)
+      .attr("stroke-opacity", 0.3)
+      .attr("d", ([dept, nodes]) => {
+        const angles = nodes.map(n => n.x);
+        const pad = 0.02;
+        return arcGen({
+          innerRadius: outerRadius + 4,
+          outerRadius: outerRadius + 4,
+          startAngle: d3.min(angles) - pad,
+          endAngle: d3.max(angles) + pad,
+        });
+      });
+
+  // Department labels
+  gMain.selectAll("text.dept-label")
+    .data(deptGroups)
+    .join("text")
+      .attr("class", "dept-label")
+      .attr("text-anchor", "middle")
+      .attr("font-size", 11)
+      .attr("font-weight", 600)
+      .attr("fill", ([dept]) => deptColor(dept))
+      .attr("dy", "0.35em")
+      .each(function([dept, nodes]) {
+        const midAngle = d3.mean(nodes, n => n.x) - Math.PI / 2;
+        const r = outerRadius + 28;
+        d3.select(this)
+          .attr("x", r * Math.cos(midAngle))
+          .attr("y", r * Math.sin(midAngle))
+          .attr("transform", () => {
+            const deg = midAngle * 180 / Math.PI;
+            const x = r * Math.cos(midAngle);
+            const y = r * Math.sin(midAngle);
+            // Flip labels on left side so they read left-to-right
+            if (deg > 90 || deg < -90) {
+              return `rotate(${deg + 180}, ${x}, ${y})`;
+            }
+            return `rotate(${deg}, ${x}, ${y})`;
+          })
+          .text(dept);
+      });
+
+  // Node circles + invisible hit targets
+  const nodeG = gMain.selectAll("g.node")
+    .data(leaves, d => d.id)
+    .join("g")
+      .attr("class", "node")
+      .attr("transform", d => `translate(${d.cx},${d.cy})`);
+
+  const nodeDots = nodeG.append("circle")
+    .attr("class", "node-dot")
+    .attr("r", 3)
+    .attr("fill", d => deptColor(d.data.dept))
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 0.5);
+
+  nodeG.append("circle")
+    .attr("class", "node-hit")
+    .attr("r", 10)
+    .attr("fill", "transparent");
+
+  // --- State ---
+  let currentMonth = 0;
+  let beta = 0.15;
+  let hoveredNode = null;
+  let playing = false;
+  let playTimer = null;
+
+  // --- Rendering ---
+  function getActiveEdges(month) {
+    return edgePaths.filter(e => e.startMonth <= month && e.endMonth >= month);
+  }
+
+  function drawEdges(month) {
+    const active = getActiveEdges(month);
+    const mc = monthCounts[month];
+
+    ctx.clearRect(0, 0, W, H);
+    ctx.save();
+    ctx.translate(W / 2, H / 2);
+
+    const lineCtx = d3.line()
+      .curve(d3.curveBundle.beta(beta))
+      .x(d => d.cx).y(d => d.cy)
+      .context(ctx);
+
+    if (hoveredNode) {
+      // Dim all edges first
+      ctx.globalAlpha = 0.04;
+      ctx.strokeStyle = "#999";
+      ctx.lineWidth = 0.5;
+      for (const edge of active) {
+        ctx.beginPath();
+        lineCtx(edge.path);
+        ctx.stroke();
+      }
+
+      // Highlight connected edges
+      const hovId = hoveredNode.id;
+      const connected = active.filter(e => e.source === hovId || e.target === hovId);
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = 1.5;
+      for (const edge of connected) {
+        const col = deptColor(edge.source === hovId ? edge.tgtDept : edge.srcDept);
+        ctx.strokeStyle = col;
+        ctx.globalAlpha = 0.7;
+        ctx.beginPath();
+        lineCtx(edge.path);
+        ctx.stroke();
+      }
+    } else {
+      // Normal rendering: color by source department
+      ctx.lineWidth = 1;
+      for (const edge of active) {
+        ctx.strokeStyle = deptColor(edge.srcDept);
+        ctx.globalAlpha = 0.18;
+        ctx.beginPath();
+        lineCtx(edge.path);
+        ctx.stroke();
+      }
+    }
+
+    ctx.restore();
+
+    // Update nodes
+    nodeDots
+      .attr("r", d => {
+        const count = mc.get(d.id) || 0;
+        return count > 0 ? rScale(count) : 2.5;
+      })
+      .attr("fill-opacity", d => {
+        if (hoveredNode) {
+          if (d.id === hoveredNode.id) return 1;
+          const connected = active.some(e =>
+            (e.source === hoveredNode.id && e.target === d.id) ||
+            (e.target === hoveredNode.id && e.source === d.id)
+          );
+          return connected ? 1 : 0.15;
+        }
+        const count = mc.get(d.id) || 0;
+        return count > 0 ? 0.9 : 0.2;
+      })
+      .attr("fill", d => {
+        if (hoveredNode && d.id !== hoveredNode.id) {
+          const connected = active.some(e =>
+            (e.source === hoveredNode.id && e.target === d.id) ||
+            (e.target === hoveredNode.id && e.source === d.id)
+          );
+          if (!connected) return "#ccc";
+        }
+        return deptColor(d.data.dept);
+      })
+      .attr("stroke-width", d => {
+        if (hoveredNode && d.id === hoveredNode.id) return 2;
+        const count = mc.get(d.id) || 0;
+        return count > 0 ? 0.5 : 0;
+      });
+
+    // Update UI
+    d3.select("#edgeBadge").text(`${active.length} edges`);
+    d3.select("#monthLabel").text(MONTHS[month]);
+    d3.select("#monthSlider").property("value", month);
+  }
+
+  function render() {
+    drawEdges(currentMonth);
+  }
+
+  // --- Interaction: hover ---
+  const tooltip = d3.select("#tooltip");
+
+  nodeG.on("pointerenter", (event, d) => {
+    hoveredNode = d;
+    const active = getActiveEdges(currentMonth);
+    const mc = monthCounts[currentMonth];
+    const count = mc.get(d.id) || 0;
+    const connectedNodes = new Set();
+    active.forEach(e => {
+      if (e.source === d.id) connectedNodes.add(e.target);
+      if (e.target === d.id) connectedNodes.add(e.source);
+    });
+
+    tooltip.style("display", "block").html(
+      `<div class="tt-name">${d.data.label || d.id.split(".").pop()}</div>` +
+      `<div class="tt-dept">${d.data.dept} / ${(d.data.team || "").split(".").pop()}</div>` +
+      `<div class="tt-count">${count} connections in ${MONTHS[currentMonth]}</div>` +
+      `<div class="tt-count">${connectedNodes.size} unique peers</div>`
+    );
+
+    // Position tooltip
+    const x = d.cx + W / 2;
+    const y = d.cy + H / 2;
+    tooltip
+      .style("left", `${x + (d.cx > 0 ? 14 : -170)}px`)
+      .style("top", `${y - 20}px`);
+
+    render();
+  }).on("pointerleave", () => {
+    hoveredNode = null;
+    tooltip.style("display", "none");
+    render();
+  });
+
+  // --- Controls ---
+  d3.select("#monthSlider").on("input", function() {
+    currentMonth = +this.value;
+    render();
+  });
+
+  d3.select("#betaSlider").on("input", function() {
+    beta = 1 - (+this.value / 100); // slider 0-100 maps to beta 1.0-0.0
+    render();
+  });
+
+  const playBtn = d3.select("#playBtn");
+  playBtn.on("click", () => {
+    if (playing) {
+      clearInterval(playTimer);
+      playTimer = null;
+      playing = false;
+      playBtn.html("&#9654; Play");
+      return;
+    }
+    playing = true;
+    playBtn.html("&#10074;&#10074; Pause");
+    playTimer = setInterval(() => {
+      currentMonth = (currentMonth + 1) % 12;
+      render();
+    }, 700);
+  });
+
+  // Teardown on visibility change
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden && playing) {
+      clearInterval(playTimer);
+      playTimer = null;
+      playing = false;
+      playBtn.html("&#9654; Play");
+    }
+  });
+
+  // --- Legend ---
+  const legend = d3.select("#legend");
+  DEPTS.forEach(dept => {
+    const item = legend.append("div").attr("class", "legend-item");
+    item.append("div").attr("class", "legend-swatch").style("background", deptColor(dept));
+    item.append("span").text(dept);
+  });
+
+  // Initial render
+  render();
+})();
+</script>
+</body>
+</html>

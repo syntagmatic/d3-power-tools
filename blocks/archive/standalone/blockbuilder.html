@@ -1,0 +1,905 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Blockbuilder Explorer</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #111;
+    color: #ccc;
+    margin: 0;
+    overflow: hidden;
+    height: 100vh;
+  }
+
+  /* --- Grid layout --- */
+  .app {
+    display: grid;
+    grid-template-rows: auto 90px 0.75fr 1fr;
+    height: 100vh;
+    padding: 8px 12px;
+    gap: 6px;
+    opacity: 0;
+    transition: opacity 0.3s;
+  }
+  .app.ready { opacity: 1; }
+
+  /* --- Header --- */
+  .header {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    padding: 4px 0;
+  }
+  .header h1 {
+    font-size: 16px;
+    font-weight: 600;
+    margin: 0;
+    color: #eee;
+  }
+  #status {
+    font-size: 13px;
+    color: #888;
+  }
+  .header-controls {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .filter-toggle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: #888;
+    cursor: pointer;
+    user-select: none;
+  }
+  .filter-toggle input { cursor: pointer; }
+  .filter-toggle:hover { color: #bbb; }
+  #reset-btn {
+    font-family: system-ui;
+    font-size: 12px;
+    padding: 3px 10px;
+    border: 1px solid #555;
+    border-radius: 3px;
+    background: #222;
+    color: #ccc;
+    cursor: pointer;
+  }
+  #reset-btn:hover { background: #333; }
+
+  /* --- Panels --- */
+  .panel {
+    position: relative;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .panel-label {
+    position: absolute;
+    top: 6px;
+    left: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #777;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    z-index: 2;
+    pointer-events: none;
+  }
+
+  /* --- Middle row --- */
+  .middle {
+    display: grid;
+    grid-template-columns: 1.15fr 0.85fr;
+    gap: 6px;
+  }
+
+  /* --- Timeline --- */
+  .bar-bg { fill: #333; }
+  .bar-fg { fill: #4477AA; }
+  .axis text { fill: #888; }
+  .axis path, .axis line { stroke: #444; }
+  #timeline .axis text { font-size: 10px; }
+  #timeline .brush .selection { fill: #4477AA; fill-opacity: 0.2; stroke: #4477AA; stroke-width: 1; }
+  #colors .axis text { font-size: 9px; }
+  #colors .brush .selection { fill: #fff; fill-opacity: 0.1; stroke: #aaa; stroke-width: 1; }
+
+  /* --- Network & Colors --- */
+  #network canvas, #colors canvas, #network svg, #colors svg {
+    position: absolute;
+    top: 0;
+    left: 0;
+  }
+  #network .node-label {
+    font-size: 9px;
+    fill: #aaa;
+    pointer-events: none;
+  }
+  /* --- Block list --- */
+  #blocklist {
+    overflow-y: auto;
+    overflow-x: hidden;
+    height: 100%;
+    padding-top: 24px;
+  }
+  .block-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 10px;
+    border-bottom: 1px solid #222;
+    cursor: pointer;
+    height: 48px;
+  }
+  .block-row:hover { background: #252525; }
+  .block-thumb {
+    width: 56px;
+    height: 36px;
+    background: #333;
+    border-radius: 2px;
+    object-fit: cover;
+    flex-shrink: 0;
+  }
+  .block-desc, .block-author, .block-date { overflow: hidden; text-overflow: ellipsis; }
+  .block-desc {
+    flex: 1;
+    font-size: 12px;
+    color: #bbb;
+    white-space: nowrap;
+  }
+  .block-author, .block-date {
+    font-size: 11px;
+    flex-shrink: 0;
+  }
+  .block-author { color: #666; width: 80px; }
+  .block-date { color: #555; width: 70px; text-align: right; }
+  .api-badge {
+    display: inline-block;
+    font-size: 9px;
+    padding: 1px 4px;
+    background: #2a2a3a;
+    color: #8888cc;
+    border-radius: 2px;
+    margin-right: 3px;
+  }
+
+  /* --- Loading overlay --- */
+  .loading-overlay {
+    position: fixed;
+    inset: 0;
+    background: #111;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    gap: 12px;
+    transition: opacity 0.3s;
+  }
+  .loading-overlay.hidden {
+    opacity: 0;
+    pointer-events: none;
+  }
+  .progress-bar {
+    width: 300px;
+    height: 4px;
+    background: #333;
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    background: #4477AA;
+    width: 0%;
+    transition: width 0.2s;
+  }
+  .loading-text {
+    font-size: 13px;
+    color: #888;
+  }
+
+  /* --- Panel tabs --- */
+  .panel-tabs {
+    position: absolute;
+    top: 4px;
+    right: 20px;
+    display: flex;
+    gap: 2px;
+    z-index: 3;
+  }
+  .panel-tab {
+    font-size: 10px;
+    padding: 2px 8px;
+    border: 1px solid #444;
+    border-radius: 3px;
+    background: #222;
+    color: #888;
+    cursor: pointer;
+  }
+  .panel-tab:hover { color: #bbb; }
+  .panel-tab.active { background: #333; color: #ccc; border-color: #666; }
+  .panel-view { display: none; position: absolute; inset: 0; overflow: hidden; }
+  .panel-view.active { display: block; }
+
+  /* --- Thumbnail wall --- */
+  .thumb-wall {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+    gap: 2px;
+    padding: 26px 4px 4px;
+    overflow-y: auto;
+    height: 100%;
+  }
+  .thumb-wall img {
+    width: 100%;
+    aspect-ratio: 230/120;
+    object-fit: cover;
+    border-radius: 2px;
+    cursor: pointer;
+    opacity: 0.85;
+    transition: opacity 0.1s;
+  }
+  .thumb-wall img:hover { opacity: 1; }
+
+  /* --- Search bar --- */
+  .panel-search {
+    position: absolute;
+    top: 3px;
+    left: 8px;
+    z-index: 3;
+    width: 200px;
+  }
+  .panel-search input {
+    width: 100%;
+    font-size: 11px;
+    padding: 3px 8px;
+    border: 1px solid #444;
+    border-radius: 3px;
+    background: #222;
+    color: #ccc;
+    outline: none;
+  }
+  .panel-search input:focus { border-color: #4477AA; }
+  .panel-search input::placeholder { color: #666; }
+
+  /* --- Tooltip --- */
+  .tooltip {
+    position: fixed;
+    pointer-events: none;
+    background: #222;
+    border: 1px solid #555;
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 11px;
+    color: #ddd;
+    z-index: 50;
+    max-width: 280px;
+    display: none;
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <div class="header">
+    <h1>Blockbuilder Explorer</h1>
+    <span id="status">Loading...</span>
+    <div class="header-controls">
+      <label class="filter-toggle">
+        <input type="checkbox" id="thumb-filter"> Has thumbnail
+      </label>
+      <button id="reset-btn">Reset</button>
+    </div>
+  </div>
+  <div id="timeline" class="panel">
+    <span class="panel-label">Blocks over time</span>
+  </div>
+  <div class="middle">
+    <div id="network" class="panel">
+      <span class="panel-label">D3 API co-occurrence</span>
+    </div>
+    <div id="colors" class="panel">
+      <span class="panel-label" id="colors-label">Color usage</span>
+    </div>
+  </div>
+  <div id="bottom-panel" class="panel">
+    <div class="panel-search">
+      <input type="text" id="search-input" placeholder="Search blocks...">
+    </div>
+    <div class="panel-tabs">
+      <button class="panel-tab" data-view="blocklist">List</button>
+      <button class="panel-tab active" data-view="thumbs">Thumbnails</button>
+    </div>
+    <div id="blocklist" class="panel-view"></div>
+    <div id="thumbs" class="panel-view active">
+      <div class="thumb-wall" id="thumb-wall"></div>
+    </div>
+  </div>
+</div>
+
+<div class="loading-overlay" id="loading">
+  <div class="loading-text" id="loading-text">Loading blocks-api.json...</div>
+  <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script type="module">
+const state = { timeRange: null, selectedApi: null, filteredIndices: null, searchQuery: "" };
+class BitFilter {
+  #n; #masks;
+  constructor(n) { this.#n = n; this.#masks = new Map(); }
+
+  set(dim, predicate, data) {
+    const words = Math.ceil(this.#n / 32);
+    const mask = new Uint32Array(words);
+    for (let i = 0; i < this.#n; i++) {
+      if (predicate(data[i])) mask[i >> 5] |= 1 << (i & 31);
+    }
+    this.#masks.set(dim, mask);
+  }
+
+  clear(dim) { this.#masks.delete(dim); }
+
+  filtered() {
+    if (this.#masks.size === 0) return null; // null = everything
+    const words = Math.ceil(this.#n / 32);
+    const result = new Uint32Array(words).fill(0xFFFFFFFF);
+    for (const mask of this.#masks.values()) {
+      for (let w = 0; w < words; w++) result[w] &= mask[w];
+    }
+    const indices = new Set();
+    for (let w = 0; w < words; w++) {
+      let bits = result[w];
+      while (bits) {
+        const bit = bits & -bits;
+        indices.add((w << 5) + (31 - Math.clz32(bit)));
+        bits ^= bit;
+      }
+    }
+    return indices;
+  }
+}
+const LAYER = { TIMELINE: 1, NETWORK: 2, COLORS: 4, LIST: 8, THUMBS: 16, ALL: 31 };
+let dirtyLayers = 0;
+const updaters = {};
+
+function markDirty(layers) {
+  const wasDirty = dirtyLayers;
+  dirtyLayers |= layers;
+  if (!wasDirty) requestAnimationFrame(() => {
+    const d = dirtyLayers; dirtyLayers = 0;
+    ["timeline", "network", "colors", "list", "thumbs"].forEach((name, i) => { if (d & (1 << i) && updaters[name]) updaters[name](); });
+  });
+}
+const tooltipEl = document.getElementById("tooltip");
+
+function setupLayers(el, width, height) {
+  const dpr = devicePixelRatio;
+  const ctx = d3.select(el).append("canvas")
+    .attr("width", width * dpr).attr("height", height * dpr)
+    .style("width", width + "px").style("height", height + "px")
+    .node().getContext("2d");
+  ctx.scale(dpr, dpr);
+  return { ctx, svg: d3.select(el).append("svg").attr("width", width).attr("height", height) };
+}
+
+function showTooltip(x, y, html) {
+  Object.assign(tooltipEl.style, { display: "block", left: (x + 12) + "px", top: (y - 10) + "px" });
+  tooltipEl.innerHTML = html;
+}
+function hideTooltip() { tooltipEl.style.display = "none"; }
+async function fetchWithProgress(url, label) {
+  const loadingText = document.getElementById("loading-text");
+  const progressFill = document.getElementById("progress-fill");
+  loadingText.textContent = label;
+
+  const response = await fetch(url);
+  const contentLength = +response.headers.get("Content-Length") || 0;
+
+  if (!contentLength || !response.body) { progressFill.style.width = "100%"; return response.json(); }
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let received = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    progressFill.style.width = Math.round((received / contentLength) * 100) + "%";
+  }
+
+  return JSON.parse(await new Blob(chunks).text());
+}
+function processApiData(raw) {
+  const blocks = raw.flatMap((d, i) => {
+    if (!d.created_at) return [];
+    return [{ id: d.id || d.userId + "/" + i, userId: d.userId || "unknown",
+      description: d.description || "", created: new Date(d.created_at),
+      api: d.api || {}, thumbnail: d.thumbnail || null }];
+  });
+  blocks.sort((a, b) => a.created - b.created).forEach((d, i) => d.idx = i);
+  return blocks;
+}
+
+function buildCooccurrence(blocks, topN = 60) {
+  const apiCounts = new Map();
+  for (const b of blocks) for (const fn of Object.keys(b.api))
+    apiCounts.set(fn, (apiCounts.get(fn) || 0) + 1);
+
+  const topFuncs = [...apiCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, topN).map(d => d[0]);
+  const topSet = new Set(topFuncs);
+
+  const cooc = new Map();
+  for (const b of blocks) {
+    const funcs = Object.keys(b.api).filter(f => topSet.has(f));
+    for (let i = 0; i < funcs.length; i++) for (let j = i + 1; j < funcs.length; j++) {
+      const key = funcs[i] < funcs[j] ? funcs[i] + "|" + funcs[j] : funcs[j] + "|" + funcs[i];
+      cooc.set(key, (cooc.get(key) || 0) + 1);
+    }
+  }
+
+  const nodes = topFuncs.map(fn => ({ id: fn, label: fn.replace(/^d3\./, ""), count: apiCounts.get(fn) }));
+  const minWeight = Math.max(5, d3.quantile([...cooc.values()].sort(d3.ascending), 0.5));
+  const links = [...cooc].filter(([, w]) => w >= minWeight)
+    .map(([k, weight]) => { const [source, target] = k.split("|"); return { source, target, weight }; });
+  return { nodes, links };
+}
+function createTimeline(container, blocks, bitFilter) {
+  const el = document.getElementById(container);
+  const { width, height } = el.getBoundingClientRect();
+  const margin = { top: 24, right: 16, bottom: 24, left: 50 };
+  const innerW = width - margin.left - margin.right;
+  const innerH = height - margin.top - margin.bottom;
+
+  const svg = d3.select(el).append("svg")
+    .attr("width", width).attr("height", height);
+
+  const g = svg.append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+  const x = d3.scaleUtc().domain(d3.extent(blocks, d => d.created)).range([0, innerW]);
+
+  const binner = d3.bin()
+    .value(d => d.created)
+    .domain(x.domain())
+    .thresholds(d3.utcMonth.range(...x.domain()));
+  const bins = binner(blocks);
+
+  const maxCount = d3.max(bins, b => b.length);
+  const y = d3.scaleLinear().domain([0, maxCount]).nice().range([innerH, 0]);
+
+  const barAttrs = s => s.attr("x", d => x(d.x0) + 0.5)
+    .attr("width", d => Math.max(0, x(d.x1) - x(d.x0) - 1))
+    .attr("y", d => y(d.length)).attr("height", d => innerH - y(d.length));
+  g.selectAll(".bar-bg").data(bins).join("rect").attr("class", "bar-bg").call(barAttrs);
+  const fgBars = g.selectAll(".bar-fg").data(bins).join("rect").attr("class", "bar-fg").call(barAttrs);
+  g.append("g").attr("class", "axis").attr("transform", `translate(0,${innerH})`).call(d3.axisBottom(x).ticks(d3.utcYear.every(1)));
+  g.append("g").attr("class", "axis").call(d3.axisLeft(y).ticks(4));
+  const brush = d3.brushX()
+    .extent([[0, 0], [innerW, innerH]])
+    .on("brush end", event => {
+      if (event.selection) {
+        const [px0, px1] = event.selection;
+        const range = [x.invert(px0), x.invert(px1)];
+        state.timeRange = range;
+        bitFilter.set("time", d => d.created >= range[0] && d.created <= range[1], blocks);
+      } else {
+        state.timeRange = null;
+        bitFilter.clear("time");
+      }
+      state.filteredIndices = bitFilter.filtered();
+      markDirty(LAYER.NETWORK | LAYER.COLORS | LAYER.LIST | LAYER.THUMBS);
+    });
+
+  const brushG = g.append("g").attr("class", "brush").call(brush);
+  updaters.timeline = () => {
+    const indices = state.filteredIndices;
+    const filtered = indices ? blocks.filter(d => indices.has(d.idx)) : blocks;
+    fgBars.data(binner(filtered))
+      .attr("y", d => y(d.length))
+      .attr("height", d => innerH - y(d.length));
+  };
+
+  return { brush, brushG };
+}
+function createNetwork(container, blocks, graph, bitFilter) {
+  const el = document.getElementById(container);
+  const { width, height } = el.getBoundingClientRect();
+  const margin = { top: 24, right: 8, bottom: 8, left: 8 };
+  const innerW = width - margin.left - margin.right;
+  const innerH = height - margin.top - margin.bottom;
+
+  const nodes = graph.nodes.map(d => ({ ...d }));
+  const links = graph.links.map(d => ({ ...d }));
+  const rScale = d3.scaleSqrt().domain(d3.extent(nodes, d => d.count)).range([3, 20]);
+  const wScale = d3.scaleLinear().domain(d3.extent(links, d => d.weight)).range([0.5, 8]);
+  // Scale forces to panel size so nodes spread to fill
+  const forcePad = Math.min(innerW, innerH) * 0.1;
+  const simulation = d3.forceSimulation(nodes)
+    .force("link", d3.forceLink(links).id(d => d.id)
+      .distance(d => Math.min(innerW, innerH) * 0.15 / Math.sqrt(Math.max(1, d.weight / 50))))
+    .force("charge", d3.forceManyBody().strength(-350).distanceMax(Math.max(innerW, innerH)))
+    .force("center", d3.forceCenter(innerW / 2, innerH / 2))
+    .force("collide", d3.forceCollide(d => rScale(d.count) + 6))
+    .force("x", d3.forceX(innerW / 2).strength(0.02))
+    .force("y", d3.forceY(innerH / 2).strength(0.02))
+    .stop();
+
+  for (let i = 0; i < 400; i++) simulation.tick();
+  for (const n of nodes) {
+    const r = rScale(n.count);
+    n.x = Math.max(r + forcePad, Math.min(innerW - r - forcePad, n.x));
+    n.y = Math.max(r + forcePad, Math.min(innerH - r - forcePad, n.y));
+  }
+
+  const { ctx, svg } = setupLayers(el, width, height);
+
+  const topNodes = nodes.slice().sort((a, b) => b.count - a.count).slice(0, 20);
+  svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`)
+    .selectAll(".node-label").data(topNodes).join("text")
+    .attr("class", "node-label").attr("text-anchor", "middle")
+    .attr("x", d => d.x).attr("y", d => d.y - rScale(d.count) - 3).text(d => d.label);
+
+  const quadtree = d3.quadtree()
+    .x(d => d.x).y(d => d.y)
+    .addAll(nodes);
+
+  const findNearest = e => { const [mx, my] = d3.pointer(e); return quadtree.find(mx - margin.left, my - margin.top, 20); };
+
+  let hoveredNode = null;
+
+  svg.append("rect")
+    .attr("x", margin.left).attr("y", margin.top)
+    .attr("width", innerW).attr("height", innerH)
+    .attr("fill", "none").attr("pointer-events", "all")
+    .on("pointermove", event => {
+      const nearest = findNearest(event);
+      if (nearest !== hoveredNode) {
+        hoveredNode = nearest;
+        nearest ? showTooltip(event.clientX, event.clientY,
+          `<strong>${nearest.id}</strong><br>${d3.format(",")(nearest.count)} blocks`) : hideTooltip();
+        markDirty(LAYER.NETWORK);
+      }
+    }).on("pointerleave", () => {
+      hoveredNode = null; hideTooltip(); markDirty(LAYER.NETWORK);
+    }).on("click", event => {
+      const nearest = findNearest(event);
+      if (nearest && nearest.id !== state.selectedApi) {
+        state.selectedApi = nearest.id;
+        bitFilter.set("api", d => d.api && d.api[nearest.id], blocks);
+      } else { state.selectedApi = null; bitFilter.clear("api"); }
+      state.filteredIndices = bitFilter.filtered();
+      markDirty(LAYER.ALL);
+    });
+
+  // Build lookup: api function → set of block indices that use it
+  const apiToBlocks = new Map();
+  for (const n of nodes) apiToBlocks.set(n.id, new Set());
+  for (const b of blocks) {
+    for (const fn of Object.keys(b.api)) {
+      if (apiToBlocks.has(fn)) apiToBlocks.get(fn).add(b.idx);
+    }
+  }
+
+  // Precompute link lookup for fast co-occurrence counting
+  const linkKey = (a, b) => a < b ? a + "|" + b : b + "|" + a;
+  const linkMap = new Map();
+  for (const l of links) linkMap.set(linkKey(l.source.id, l.target.id), l);
+
+  function draw() {
+    ctx.clearRect(0, 0, width, height);
+    ctx.save();
+    ctx.translate(margin.left, margin.top);
+
+    const selectedApi = state.selectedApi;
+    const indices = state.filteredIndices;
+    const hasFilter = indices !== null;
+
+    // Recount node usage and co-occurrence within filtered set
+    const filteredCounts = new Map();
+    const filteredCooc = new Map();
+    if (hasFilter) {
+      for (const n of nodes) {
+        const bset = apiToBlocks.get(n.id);
+        let c = 0;
+        if (bset) for (const bi of bset) if (indices.has(bi)) c++;
+        filteredCounts.set(n.id, c);
+      }
+      // Recount co-occurrence for links
+      for (const b of blocks) {
+        if (!indices.has(b.idx)) continue;
+        const funcs = Object.keys(b.api).filter(f => apiToBlocks.has(f));
+        for (let i = 0; i < funcs.length; i++) for (let j = i + 1; j < funcs.length; j++) {
+          const key = linkKey(funcs[i], funcs[j]);
+          if (linkMap.has(key)) filteredCooc.set(key, (filteredCooc.get(key) || 0) + 1);
+        }
+      }
+    }
+
+    // Dynamic scales for filtered counts
+    const maxFilteredCount = hasFilter ? Math.max(1, ...filteredCounts.values()) : 1;
+    const maxFilteredCooc = hasFilter && filteredCooc.size ? Math.max(1, ...filteredCooc.values()) : 1;
+    const rFiltered = d3.scaleSqrt().domain([0, maxFilteredCount]).range([2, 20]);
+    const wFiltered = d3.scaleLinear().domain([0, maxFilteredCooc]).range([0.3, 8]);
+
+    // Selected-node neighbors
+    const connectedNodes = new Set(selectedApi ? [selectedApi] : []);
+    if (selectedApi) for (const l of links) {
+      if (l.source.id === selectedApi) connectedNodes.add(l.target.id);
+      if (l.target.id === selectedApi) connectedNodes.add(l.source.id);
+    }
+
+    for (const l of links) {
+      const key = linkKey(l.source.id, l.target.id);
+      const selActive = !selectedApi ||
+        (connectedNodes.has(l.source.id) && connectedNodes.has(l.target.id));
+      const fc = hasFilter ? (filteredCooc.get(key) || 0) : l.weight;
+      const active = selActive && (!hasFilter || fc > 0);
+      ctx.beginPath();
+      ctx.moveTo(l.source.x, l.source.y);
+      ctx.lineTo(l.target.x, l.target.y);
+      ctx.strokeStyle = active ? "rgba(68,119,170,0.5)" : "rgba(68,119,170,0.04)";
+      ctx.lineWidth = active ? (hasFilter ? wFiltered(fc) : wScale(l.weight)) : 0.3;
+      ctx.stroke();
+    }
+
+    for (const n of nodes) {
+      const fc = hasFilter ? (filteredCounts.get(n.id) || 0) : n.count;
+      const r = hasFilter ? rFiltered(fc) : rScale(n.count);
+      const selActive = !selectedApi || connectedNodes.has(n.id);
+      const active = selActive && (!hasFilter || fc > 0);
+      const hovered = n === hoveredNode;
+      const selected = n.id === selectedApi;
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, hovered ? r + 2 : r, 0, Math.PI * 2);
+      ctx.fillStyle = selected ? "#4477AA" : hovered ? "#6699CC"
+        : active ? "rgba(68,119,170,0.8)" : "rgba(68,119,170,0.1)";
+      ctx.fill();
+      if (selected) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke(); }
+    }
+
+    ctx.restore();
+  }
+
+  updaters.network = draw;
+  draw();
+}
+function createColorView(container, blocks, colorMap, bitFilter) {
+  const el = document.getElementById(container);
+  const { width, height } = el.getBoundingClientRect();
+  const margin = { top: 28, right: 12, bottom: 24, left: 40 };
+  const innerW = width - margin.left - margin.right;
+  const innerH = height - margin.top - margin.bottom;
+
+  const colorAgg = new Map();
+  for (const [blockId, colors] of colorMap) {
+    const block = blocks.find(b => b.id === blockId);
+    if (!block) continue;
+    for (const [hex, count] of Object.entries(colors)) {
+      if (!hex.match(/^#[0-9a-fA-F]{6}$/)) continue;
+      const c = d3.hcl(hex);
+      if (isNaN(c.h + c.c + c.l)) continue;
+      const h = Math.round(c.h / 3) * 3, l = Math.round(c.l / 3) * 3, key = h + "," + l;
+      if (!colorAgg.has(key)) colorAgg.set(key, { h, l, hex, count: 0, blockIndices: new Set() });
+      colorAgg.get(key).count += count;
+      colorAgg.get(key).blockIndices.add(block.idx);
+    }
+  }
+
+  const colorPoints = [...colorAgg.values()];
+
+  const x = d3.scaleLinear().domain([0, 360]).range([0, innerW]);
+  const y = d3.scaleLinear().domain([0, 100]).range([innerH, 0]);
+  const rScale = d3.scaleSqrt()
+    .domain(d3.extent(colorPoints, d => d.count))
+    .range([1, 8]);
+
+  const { ctx, svg } = setupLayers(el, width, height);
+
+  const gAxes = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+  gAxes.append("g").attr("class", "axis").attr("transform", `translate(0,${innerH})`)
+    .call(d3.axisBottom(x).tickValues([0, 60, 120, 180, 240, 300, 360]).tickFormat(d => d + "\u00B0"));
+  gAxes.append("g").attr("class", "axis").call(d3.axisLeft(y).ticks(5));
+  [["Hue", innerW / 2, innerH + 20, null], ["Lightness", -innerH / 2, -28, "rotate(-90)"]].forEach(([t, lx, ly, tr]) =>
+    gAxes.append("text").attr("x", lx).attr("y", ly).attr("text-anchor", "middle").attr("transform", tr).style("fill", "#666").style("font-size", "9px").text(t));
+
+  const brush = d3.brush()
+    .extent([[0, 0], [innerW, innerH]])
+    .on("brush end", event => {
+      if (event.selection) {
+        const [[bx0, by0], [bx1, by1]] = event.selection;
+        const [h0, h1, l0, l1] = [x.invert(bx0), x.invert(bx1), y.invert(by1), y.invert(by0)];
+        const brushedBlocks = new Set();
+        for (const p of colorPoints) {
+          if (p.h >= h0 && p.h <= h1 && p.l >= l0 && p.l <= l1) {
+            for (const bi of p.blockIndices) brushedBlocks.add(bi);
+          }
+        }
+        bitFilter.set("color", d => brushedBlocks.has(d.idx), blocks);
+      } else {
+        bitFilter.clear("color");
+      }
+      state.filteredIndices = bitFilter.filtered();
+      markDirty(LAYER.TIMELINE | LAYER.NETWORK | LAYER.LIST | LAYER.THUMBS);
+    });
+
+  const colorBrushG = gAxes.append("g").attr("class", "brush").call(brush);
+
+  function draw() {
+    ctx.clearRect(0, 0, width, height);
+    ctx.save();
+    ctx.translate(margin.left, margin.top);
+    const indices = state.filteredIndices;
+    const hasFilter = indices !== null;
+    for (const p of colorPoints) {
+      let passes = !hasFilter;
+      if (!passes) for (const bi of p.blockIndices) if (indices.has(bi)) { passes = true; break; }
+      ctx.globalAlpha = passes ? (hasFilter ? 0.8 : 0.5) : 0.08;
+      ctx.fillStyle = p.hex;
+      ctx.beginPath();
+      ctx.arc(x(p.h), y(p.l), rScale(p.count), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  updaters.colors = draw;
+  draw();
+
+  return { brush, brushG: colorBrushG };
+}
+function createBlockList(container, blocks) {
+  const el = document.getElementById(container);
+  const formatDate = d3.utcFormat("%Y-%m");
+  el.addEventListener("click", e => {
+    const row = e.target.closest(".block-row");
+    if (row?.dataset.url) window.open(row.dataset.url, "_blank");
+  });
+
+  function renderList() {
+    const indices = state.filteredIndices;
+    let filtered = indices ? blocks.filter(d => indices.has(d.idx)) : blocks;
+    const q = state.searchQuery;
+    if (q) filtered = filtered.filter(d =>
+      (d.description && d.description.toLowerCase().includes(q)) ||
+      d.userId.toLowerCase().includes(q) ||
+      Object.keys(d.api).some(fn => fn.toLowerCase().includes(q)));
+    const shown = filtered.slice().sort((a, b) => b.created - a.created).slice(0, 200);
+    document.getElementById("status").textContent =
+      `Showing ${d3.format(",")(filtered.length)} of ${d3.format(",")(blocks.length)} blocks`;
+    el.innerHTML = shown.map(b => {
+      const apis = Object.entries(b.api).sort((a, b) => b[1] - a[1]).slice(0, 3)
+        .map(([fn]) => `<span class="api-badge">${fn.replace("d3.", "")}</span>`).join("");
+      return `<div class="block-row" data-url="https://blocks.roadtolarissa.com/${b.userId}/${b.id}">` +
+        (b.thumbnail ? `<img class="block-thumb" loading="lazy" src="${b.thumbnail}" onerror="this.style.display='none'">` : "") +
+        `<span class="block-desc">${b.description || "(untitled)"} ${apis}</span>` +
+        `<span class="block-author">${b.userId}</span>` +
+        `<span class="block-date">${formatDate(b.created)}</span></div>`;
+    }).join("");
+  }
+
+  updaters.list = renderList;
+  renderList();
+}
+let colorParts = null;
+async function main() {
+  const loadingEl = document.getElementById("loading");
+  const raw = await fetchWithProgress(
+    "https://storage.googleapis.com/bb-search-data/parsed/blocks-api.json",
+    "Loading blocks-api.json (10 MB)..."
+  );
+
+  const yield_ = () => new Promise(r => setTimeout(r, 0));
+
+  document.getElementById("loading-text").textContent = "Processing...";
+  await yield_();
+
+  const blocks = processApiData(raw);
+  const bitFilter = new BitFilter(blocks.length);
+  await yield_();
+
+  document.getElementById("loading-text").textContent = "Building network...";
+  const graph = buildCooccurrence(blocks, 60);
+  await yield_();
+
+  document.getElementById("loading-text").textContent = "Rendering...";
+  const timelineParts = createTimeline("timeline", blocks, bitFilter);
+  createNetwork("network", blocks, graph, bitFilter);
+  createBlockList("blocklist", blocks);
+
+  // Tab switching (bottom panel)
+  const tabs = document.querySelectorAll("#bottom-panel .panel-tab");
+  const bottomViews = document.querySelectorAll("#bottom-panel .panel-view");
+  tabs.forEach(tab => tab.addEventListener("click", () => {
+    const target = tab.dataset.view;
+    tabs.forEach(t => t.classList.toggle("active", t === tab));
+    bottomViews.forEach(v => v.classList.toggle("active", v.id === target));
+    if (target === "thumbs") updateThumbWall();
+  }));
+
+  // Search
+  const searchInput = document.getElementById("search-input");
+  let searchTimeout;
+  searchInput.addEventListener("input", () => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => {
+      state.searchQuery = searchInput.value.trim().toLowerCase();
+      markDirty(LAYER.LIST | LAYER.THUMBS);
+    }, 150);
+  });
+
+  // Thumbnail wall
+  const thumbWall = document.getElementById("thumb-wall");
+  function updateThumbWall() {
+    const indices = state.filteredIndices;
+    let filtered = indices ? blocks.filter(d => indices.has(d.idx)) : blocks;
+    const q = state.searchQuery;
+    if (q) filtered = filtered.filter(d =>
+      (d.description && d.description.toLowerCase().includes(q)) ||
+      d.userId.toLowerCase().includes(q) ||
+      Object.keys(d.api).some(fn => fn.toLowerCase().includes(q)));
+    const withThumbs = filtered.filter(d => d.thumbnail).slice(0, 500);
+    thumbWall.innerHTML = withThumbs.map(b =>
+      `<img src="${b.thumbnail}" loading="lazy" title="${b.description || b.userId + '/' + b.id}" onerror="this.remove()">`
+    ).join("");
+  }
+  updaters.thumbs = () => {
+    if (document.querySelector('#bottom-panel .panel-tab[data-view="thumbs"]').classList.contains("active")) {
+      updateThumbWall();
+    }
+  };
+  updateThumbWall();
+
+  d3.select("#reset-btn").on("click", () => {
+    for (const d of ["time","api","thumb","color"]) bitFilter.clear(d);
+    Object.assign(state, { timeRange: null, selectedApi: null, filteredIndices: null, searchQuery: "" });
+    document.getElementById("thumb-filter").checked = false;
+    searchInput.value = "";
+    for (const p of [timelineParts, colorParts]) if (p) p.brushG.call(p.brush.move, null);
+    markDirty(LAYER.ALL);
+  });
+
+  document.getElementById("thumb-filter").addEventListener("change", (e) => {
+    if (e.target.checked) bitFilter.set("thumb", d => !!d.thumbnail, blocks);
+    else bitFilter.clear("thumb");
+    state.filteredIndices = bitFilter.filtered();
+    markDirty(LAYER.ALL);
+  });
+
+  // Reveal app, hide loading overlay
+  document.querySelector(".app").classList.add("ready");
+  loadingEl.classList.add("hidden");
+  setTimeout(() => loadingEl.remove(), 300);
+
+  try {
+    const rawColors = await fetchWithProgress(
+      "https://storage.googleapis.com/bb-search-data/parsed/blocks-colors.json",
+      "Loading colors..."
+    );
+    const colorMap = new Map(rawColors.filter(d => d.colors && d.id).map(d => [d.id, d.colors]));
+    colorParts = createColorView("colors", blocks, colorMap, bitFilter);
+    d3.select("#colors-label").text(`Color usage (${d3.format(",")(colorMap.size)} blocks)`);
+  } catch (e) {
+    d3.select("#colors-label").text("Color data unavailable");
+    console.warn("Failed to load colors:", e);
+  }
+}
+
+main().catch(e => {
+  console.error(e);
+  document.getElementById("loading-text").textContent = "Error: " + e.message;
+});
+
+</script>
+</body>
+</html>

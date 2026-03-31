@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebGL Streaming Particles</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body {
+    background: #0b0b1a;
+    font-family: system-ui, -apple-system, sans-serif;
+    color: #c8cad0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  h2 {
+    font-size: 15px;
+    font-weight: 600;
+    color: #e0e0e0;
+    margin: 14px 0 8px;
+    letter-spacing: 0.3px;
+  }
+  #container {
+    position: relative;
+    width: 1200px;
+    height: 800px;
+  }
+  canvas {
+    position: absolute;
+    top: 0; left: 0;
+  }
+  #controls {
+    position: absolute;
+    bottom: 14px;
+    left: 14px;
+    z-index: 10;
+    display: flex;
+    gap: 18px;
+    align-items: center;
+    font-size: 13px;
+    background: rgba(10,10,26,0.85);
+    padding: 8px 14px;
+    border-radius: 6px;
+    border: 1px solid rgba(255,255,255,0.08);
+  }
+  #controls label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  #controls input[type=range] {
+    width: 110px;
+    accent-color: #66CCEE;
+  }
+  #controls button {
+    padding: 5px 16px;
+    border: 1px solid #444;
+    border-radius: 4px;
+    background: #1a1a2e;
+    color: #c8cad0;
+    cursor: pointer;
+    font-size: 13px;
+    font-family: inherit;
+    transition: background 0.15s;
+  }
+  #controls button:hover { background: #2a2a44; }
+  .val {
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    font-size: 12px;
+    min-width: 36px;
+    text-align: right;
+  }
+  #stats {
+    position: absolute;
+    top: 10px;
+    right: 14px;
+    z-index: 10;
+    font-size: 12px;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    color: rgba(200,200,210,0.7);
+    text-align: right;
+    line-height: 1.6;
+  }
+  #legend {
+    position: absolute;
+    top: 10px;
+    left: 14px;
+    z-index: 10;
+    font-size: 11px;
+    color: rgba(200,200,210,0.6);
+  }
+  #legend canvas {
+    position: static;
+    display: block;
+    margin-top: 4px;
+    border-radius: 2px;
+  }
+</style>
+</head>
+<body>
+<h2>WebGL Streaming Particles &mdash; Vector Field Flow</h2>
+<div id="container">
+  <canvas id="glCanvas"></canvas>
+  <div id="stats">
+    <div id="fps">FPS: --</div>
+    <div id="pcount">Particles: 200,000</div>
+  </div>
+  <div id="legend"></div>
+  <div id="controls">
+    <button id="btnPlay">Pause</button>
+    <label>Particles: <input type="range" id="sliderCount" min="20000" max="200000" step="10000" value="200000"><span class="val" id="countVal">200K</span></label>
+    <label>Speed: <input type="range" id="sliderSpeed" min="0.1" max="3.0" step="0.1" value="1.0"><span class="val" id="speedVal">1.0x</span></label>
+  </div>
+</div>
+<script>
+(() => {
+  const W = 1200, H = 800;
+  const DPR = devicePixelRatio || 1;
+  const MAX_PARTICLES = 200000;
+
+  let particleCount = MAX_PARTICLES;
+  let speed = 1.0;
+  let playing = true;
+
+  // --- Tol-derived velocity color ramp: deep indigo -> teal -> warm yellow ---
+  // #332288 (Tol indigo) -> #44AA99 (Tol teal) -> #DDCC77 (Tol sand)
+  const colorStops = [
+    [0.20, 0.13, 0.53],   // #332288 - slow
+    [0.27, 0.67, 0.60],   // #44AA99 - medium
+    [0.87, 0.80, 0.47],   // #DDCC77 - fast
+  ];
+
+  const lerpColor = (t) => {
+    t = Math.max(0, Math.min(1, t));
+    let a, b, s;
+    if (t < 0.5) {
+      a = colorStops[0]; b = colorStops[1]; s = t * 2;
+    } else {
+      a = colorStops[1]; b = colorStops[2]; s = (t - 0.5) * 2;
+    }
+    return [a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s, a[2] + (b[2] - a[2]) * s];
+  };
+
+  // --- Draw legend ---
+  const legendDiv = document.getElementById("legend");
+  legendDiv.innerHTML = '<div>Velocity</div>';
+  const legendCanvas = document.createElement("canvas");
+  legendCanvas.width = 120; legendCanvas.height = 10;
+  legendDiv.appendChild(legendCanvas);
+  const lctx = legendCanvas.getContext("2d");
+  for (let i = 0; i < 120; i++) {
+    const c = lerpColor(i / 119);
+    lctx.fillStyle = `rgb(${c[0]*255|0},${c[1]*255|0},${c[2]*255|0})`;
+    lctx.fillRect(i, 0, 1, 10);
+  }
+  const labDiv = document.createElement("div");
+  labDiv.style.cssText = "display:flex;justify-content:space-between;font-size:10px;width:120px;margin-top:2px;";
+  labDiv.innerHTML = '<span>Slow</span><span>Fast</span>';
+  legendDiv.appendChild(labDiv);
+
+  // --- WebGL setup ---
+  const canvas = document.getElementById("glCanvas");
+  canvas.width = W * DPR;
+  canvas.height = H * DPR;
+  canvas.style.width = W + "px";
+  canvas.style.height = H + "px";
+
+  const gl = canvas.getContext("webgl2", {
+    antialias: false,
+    premultipliedAlpha: false,
+    alpha: false
+  });
+  if (!gl) { document.body.innerHTML = '<p style="color:#f66;padding:2em">WebGL 2 not supported.</p>'; return; }
+
+  gl.viewport(0, 0, W * DPR, H * DPR);
+
+  // --- Shaders ---
+  const vsSource = `#version 300 es
+    in vec2 a_position;
+    in vec3 a_color;
+    uniform vec2 u_resolution;
+    uniform float u_pointSize;
+    out vec3 v_color;
+    void main() {
+      vec2 clip = (a_position / u_resolution) * 2.0 - 1.0;
+      clip.y = -clip.y;
+      gl_Position = vec4(clip, 0.0, 1.0);
+      gl_PointSize = u_pointSize;
+      v_color = a_color;
+    }
+  `;
+
+  const fsSource = `#version 300 es
+    precision mediump float;
+    in vec3 v_color;
+    out vec4 fragColor;
+    void main() {
+      float dist = length(gl_PointCoord - 0.5);
+      if (dist > 0.5) discard;
+      float alpha = 1.0 - smoothstep(0.3, 0.5, dist);
+      fragColor = vec4(v_color * alpha, alpha);
+    }
+  `;
+
+  // Fullscreen quad shader for trail fade
+  const vsQuad = `#version 300 es
+    in vec2 a_pos;
+    void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }
+  `;
+
+  const fsQuad = `#version 300 es
+    precision mediump float;
+    uniform float u_fade;
+    out vec4 fragColor;
+    void main() { fragColor = vec4(0.043, 0.043, 0.102, u_fade); }
+  `;
+
+  function compileShader(src, type) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      console.error(gl.getShaderInfoLog(s));
+      return null;
+    }
+    return s;
+  }
+
+  function linkProgram(vs, fs) {
+    const p = gl.createProgram();
+    gl.attachShader(p, compileShader(vs, gl.VERTEX_SHADER));
+    gl.attachShader(p, compileShader(fs, gl.FRAGMENT_SHADER));
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+      console.error(gl.getProgramInfoLog(p));
+      return null;
+    }
+    return p;
+  }
+
+  // Particle program
+  const particleProg = linkProgram(vsSource, fsSource);
+  const u_resolution = gl.getUniformLocation(particleProg, "u_resolution");
+  const u_pointSize = gl.getUniformLocation(particleProg, "u_pointSize");
+
+  // Quad fade program
+  const quadProg = linkProgram(vsQuad, fsQuad);
+  const u_fade = gl.getUniformLocation(quadProg, "u_fade");
+
+  // --- Buffers ---
+  // Particle positions and colors
+  const posBuf = gl.createBuffer();
+  const colBuf = gl.createBuffer();
+
+  // Fullscreen quad
+  const quadBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, 1,1, -1,-1, 1,1, -1,1]), gl.STATIC_DRAW);
+
+  // VAO for particles
+  const particleVAO = gl.createVertexArray();
+  gl.bindVertexArray(particleVAO);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, MAX_PARTICLES * 2 * 4, gl.DYNAMIC_DRAW);
+  const posLoc = gl.getAttribLocation(particleProg, "a_position");
+  gl.enableVertexAttribArray(posLoc);
+  gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, colBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, MAX_PARTICLES * 3 * 4, gl.DYNAMIC_DRAW);
+  const colLoc = gl.getAttribLocation(particleProg, "a_color");
+  gl.enableVertexAttribArray(colLoc);
+  gl.vertexAttribPointer(colLoc, 3, gl.FLOAT, false, 0, 0);
+
+  // VAO for quad
+  const quadVAO = gl.createVertexArray();
+  gl.bindVertexArray(quadVAO);
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  const qposLoc = gl.getAttribLocation(quadProg, "a_pos");
+  gl.enableVertexAttribArray(qposLoc);
+  gl.vertexAttribPointer(qposLoc, 2, gl.FLOAT, false, 0, 0);
+
+  gl.bindVertexArray(null);
+
+  // --- Particle state (CPU) ---
+  const px = new Float32Array(MAX_PARTICLES);
+  const py = new Float32Array(MAX_PARTICLES);
+  const life = new Float32Array(MAX_PARTICLES); // 0..1 remaining
+  const posUpload = new Float32Array(MAX_PARTICLES * 2);
+  const colUpload = new Float32Array(MAX_PARTICLES * 3);
+
+  // Deterministic seeded RNG for reproducible initialization
+  let _seed = 42;
+  const rng = () => { _seed = (_seed * 1664525 + 1013904223) & 0x7fffffff; return _seed / 0x7fffffff; };
+
+  // Initialize all particles
+  for (let i = 0; i < MAX_PARTICLES; i++) {
+    px[i] = rng() * W;
+    py[i] = rng() * H;
+    life[i] = rng(); // stagger lifetimes so they don't all reset at once
+  }
+
+  // --- Vector field ---
+  // Curl-like field with multiple frequency components to create interesting flow
+  // Normalized coordinates [0,1] for field evaluation
+  const TWO_PI = Math.PI * 2;
+
+  const fieldVx = (nx, ny) => {
+    // Primary curl + secondary swirl + slow drift
+    return Math.sin(ny * TWO_PI * 2.5) * Math.cos(nx * TWO_PI * 1.5) * 0.7
+         + Math.cos(ny * TWO_PI * 4.0 + nx * TWO_PI * 1.0) * 0.3
+         + 0.15; // slight rightward bias
+  };
+
+  const fieldVy = (nx, ny) => {
+    return Math.cos(nx * TWO_PI * 2.0) * Math.sin(ny * TWO_PI * 1.5) * 0.6
+         - Math.sin(nx * TWO_PI * 3.5 + ny * TWO_PI * 0.8) * 0.35
+         - 0.1; // slight upward bias
+  };
+
+  // --- Simulation step ---
+  const LIFE_DECAY = 0.003; // per frame
+  const BASE_SPEED = 1.8;   // pixels per frame at speed=1
+
+  function simulate() {
+    const n = particleCount;
+    const spd = BASE_SPEED * speed;
+    const decay = LIFE_DECAY * speed;
+
+    for (let i = 0; i < n; i++) {
+      const nx = px[i] / W;
+      const ny = py[i] / H;
+      const vx = fieldVx(nx, ny) * spd;
+      const vy = fieldVy(nx, ny) * spd;
+
+      px[i] += vx;
+      py[i] += vy;
+      life[i] -= decay;
+
+      // Respawn dead or out-of-bounds particles
+      if (life[i] <= 0 || px[i] < 0 || px[i] > W || py[i] < 0 || py[i] > H) {
+        px[i] = Math.random() * W;
+        py[i] = Math.random() * H;
+        life[i] = 0.5 + Math.random() * 0.5;
+      }
+    }
+  }
+
+  // --- Upload particle data to GPU ---
+  function uploadParticles() {
+    const n = particleCount;
+
+    for (let i = 0; i < n; i++) {
+      posUpload[i * 2] = px[i];
+      posUpload[i * 2 + 1] = py[i];
+
+      // Color by velocity magnitude
+      const nx = px[i] / W;
+      const ny = py[i] / H;
+      const vx = fieldVx(nx, ny);
+      const vy = fieldVy(nx, ny);
+      const mag = Math.sqrt(vx * vx + vy * vy);
+      // Normalize: field magnitude ranges roughly 0..1.2
+      const t = Math.min(mag / 1.1, 1.0);
+      const c = lerpColor(t);
+
+      // Modulate alpha by life for fade-in/fade-out
+      const a = life[i] < 0.15 ? life[i] / 0.15 : 1.0;
+      colUpload[i * 3] = c[0] * a;
+      colUpload[i * 3 + 1] = c[1] * a;
+      colUpload[i * 3 + 2] = c[2] * a;
+    }
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, posUpload.subarray(0, n * 2));
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, colBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, colUpload.subarray(0, n * 3));
+  }
+
+  // --- Render ---
+  // Trail fade factor: lower = longer trails. This is the alpha of the dark
+  // overlay drawn each frame. 0.04 gives roughly 25-frame trails.
+  const TRAIL_FADE = 0.045;
+
+  function render() {
+    // 1. Draw semi-transparent dark quad over the whole screen (trail effect)
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+    gl.useProgram(quadProg);
+    gl.bindVertexArray(quadVAO);
+    gl.uniform1f(u_fade, TRAIL_FADE);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // 2. Draw particles with additive blending for glow
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+
+    gl.useProgram(particleProg);
+    gl.bindVertexArray(particleVAO);
+    gl.uniform2f(u_resolution, W, H);
+    gl.uniform1f(u_pointSize, 2.0 * DPR);
+    gl.drawArrays(gl.POINTS, 0, particleCount);
+
+    gl.bindVertexArray(null);
+  }
+
+  // --- Animation loop ---
+  let lastTime = 0;
+  let frameCount = 0;
+  let fpsAccum = 0;
+
+  function frame(now) {
+    if (playing) {
+      simulate();
+      uploadParticles();
+    }
+    render();
+
+    // FPS counter
+    frameCount++;
+    fpsAccum += now - (lastTime || now);
+    if (fpsAccum >= 500) {
+      document.getElementById("fps").textContent = `FPS: ${Math.round(frameCount / (fpsAccum / 1000))}`;
+      frameCount = 0;
+      fpsAccum = 0;
+    }
+    lastTime = now;
+
+    requestAnimationFrame(frame);
+  }
+
+  // Clear to dark background initially
+  gl.clearColor(0.043, 0.043, 0.102, 1.0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  requestAnimationFrame(frame);
+
+  // --- Controls ---
+  const btnPlay = document.getElementById("btnPlay");
+  btnPlay.addEventListener("click", () => {
+    playing = !playing;
+    btnPlay.textContent = playing ? "Pause" : "Play";
+  });
+
+  const sliderCount = document.getElementById("sliderCount");
+  const countVal = document.getElementById("countVal");
+  sliderCount.addEventListener("input", () => {
+    particleCount = +sliderCount.value;
+    const label = particleCount >= 1000 ? (particleCount / 1000) + "K" : particleCount;
+    countVal.textContent = label;
+    document.getElementById("pcount").textContent = `Particles: ${particleCount.toLocaleString()}`;
+  });
+
+  const sliderSpeed = document.getElementById("sliderSpeed");
+  const speedVal = document.getElementById("speedVal");
+  sliderSpeed.addEventListener("input", () => {
+    speed = +sliderSpeed.value;
+    speedVal.textContent = speed.toFixed(1) + "x";
+  });
+
+  // Context loss handling
+  canvas.addEventListener("webglcontextlost", e => e.preventDefault());
+  canvas.addEventListener("webglcontextrestored", () => location.reload());
+})();
+</script>
+</body>
+</html>

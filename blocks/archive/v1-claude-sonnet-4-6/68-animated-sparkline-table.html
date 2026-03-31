@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Animated Sparkline Table — Server Metrics</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa; color: #1a1a1a;
+    line-height: 1.4;
+  }
+  .container { max-width: 1200px; margin: 0 auto; padding: 20px 24px; }
+  h1 { font-size: 20px; font-weight: 700; margin-bottom: 2px; }
+  .subtitle { font-size: 13px; color: #666; margin-bottom: 18px; }
+
+  /* KPI cards */
+  .kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+  .kpi-card {
+    background: #fff; border: 1px solid #e2e2e2; border-radius: 8px;
+    padding: 14px 16px; position: relative; overflow: hidden;
+  }
+  .kpi-card::after {
+    content: ''; position: absolute; top: 0; left: 0; right: 0;
+    height: 3px; border-radius: 8px 8px 0 0;
+  }
+  .kpi-card:nth-child(1)::after { background: #4477AA; }
+  .kpi-card:nth-child(2)::after { background: #228833; }
+  .kpi-card:nth-child(3)::after { background: #EE6677; }
+  .kpi-card:nth-child(4)::after { background: #66CCEE; }
+  .kpi-label { font-size: 11px; color: #777; text-transform: uppercase; letter-spacing: 0.6px; font-weight: 500; }
+  .kpi-value { font-size: 26px; font-weight: 700; margin: 4px 0 2px; font-variant-numeric: tabular-nums; }
+  .kpi-delta { font-size: 12px; font-weight: 500; margin-bottom: 6px; }
+  .kpi-delta.up { color: #228833; }
+  .kpi-delta.down { color: #EE6677; }
+  .kpi-spark svg { display: block; }
+  .kpi-type-label { font-size: 9px; color: #aaa; text-transform: uppercase; letter-spacing: 0.3px; margin-top: 4px; }
+
+  /* Controls */
+  .controls { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+  .controls button {
+    padding: 5px 16px; font-size: 13px; border: 1px solid #bbb; border-radius: 5px;
+    background: #fff; cursor: pointer; font-family: inherit; transition: background 0.15s;
+  }
+  .controls button:hover { background: #f0f0f0; }
+  .controls button:active { background: #e4e4e4; }
+  .controls .replay-icon { margin-right: 4px; }
+  .row-count { font-size: 12px; color: #888; margin-left: auto; }
+
+  /* Table */
+  .table-wrap { overflow-x: auto; border: 1px solid #e2e2e2; border-radius: 8px; background: #fff; }
+  table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+  thead th {
+    text-align: left; padding: 8px 10px; background: #f7f7f7;
+    border-bottom: 2px solid #ddd; cursor: pointer; user-select: none;
+    font-weight: 600; font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.3px; color: #555; white-space: nowrap;
+    position: sticky; top: 0; z-index: 2;
+  }
+  thead th:hover { background: #ededf0; }
+  thead th.active { color: #1a1a1a; }
+  td {
+    padding: 5px 10px; border-bottom: 1px solid #f0f0f0;
+    vertical-align: middle; white-space: nowrap;
+  }
+  tbody tr:hover td { background: #f5f8ff; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: "SF Mono", Monaco, "Cascadia Code", monospace; font-size: 12px; }
+  th.num { text-align: right; }
+  .server-name { font-weight: 600; color: #1a1a1a; }
+  .status-badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 11px; font-weight: 500; padding: 2px 8px;
+    border-radius: 10px;
+  }
+  .status-badge.healthy { background: #e8f5e9; color: #1b5e20; }
+  .status-badge.warning { background: #fff8e1; color: #8d6e00; }
+  .status-badge.critical { background: #fce4ec; color: #b71c1c; }
+  .status-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+  .status-badge.healthy .status-dot { background: #228833; }
+  .status-badge.warning .status-dot { background: #CCBB44; }
+  .status-badge.critical .status-dot { background: #EE6677; }
+  td svg { display: block; }
+  .error-high { color: #EE6677; font-weight: 600; }
+  .sort-arrow { font-size: 9px; margin-left: 3px; opacity: 0.7; }
+  .latency-bar { height: 4px; border-radius: 2px; margin-top: 2px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Server Metrics Dashboard</h1>
+  <p class="subtitle">Real-time monitoring with animated sparklines across 18 production servers. Click column headers to sort. Replay to re-animate.</p>
+
+  <div class="kpi-row" id="kpiRow"></div>
+
+  <div class="controls">
+    <button id="replayBtn"><span class="replay-icon">&#9654;</span> Replay Animation</button>
+    <span class="row-count" id="rowCount"></span>
+  </div>
+  <div class="table-wrap">
+    <table id="serverTable" role="grid">
+      <thead><tr id="headerRow"></tr></thead>
+      <tbody id="tableBody"></tbody>
+    </table>
+  </div>
+</div>
+<script>
+(() => {
+  const TOL = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377","#BBBBBB"];
+  const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+  const safeDur = ms => reducedMotion.matches ? 0 : ms;
+
+  // --- Seeded random for reproducibility ---
+  const rng = d3.randomLcg(42);
+  const norm = (mu, sigma) => {
+    const gen = d3.randomNormal.source(d3.randomLcg(mu * 1000 + sigma))();
+    return () => mu + sigma * gen();
+  };
+
+  // --- Generate 18 servers with realistic metric patterns ---
+  const servers = [
+    { name: "api-prod-01", region: "us-east", tier: "primary" },
+    { name: "api-prod-02", region: "us-east", tier: "primary" },
+    { name: "api-prod-03", region: "us-west", tier: "primary" },
+    { name: "web-front-01", region: "us-east", tier: "edge" },
+    { name: "web-front-02", region: "us-west", tier: "edge" },
+    { name: "web-front-03", region: "eu-west", tier: "edge" },
+    { name: "db-primary", region: "us-east", tier: "data" },
+    { name: "db-replica-01", region: "us-west", tier: "data" },
+    { name: "db-replica-02", region: "eu-west", tier: "data" },
+    { name: "cache-redis-01", region: "us-east", tier: "cache" },
+    { name: "cache-redis-02", region: "us-west", tier: "cache" },
+    { name: "worker-queue-01", region: "us-east", tier: "worker" },
+    { name: "worker-queue-02", region: "us-east", tier: "worker" },
+    { name: "worker-batch-01", region: "us-west", tier: "worker" },
+    { name: "gateway-lb-01", region: "us-east", tier: "edge" },
+    { name: "gateway-lb-02", region: "us-west", tier: "edge" },
+    { name: "ml-inference-01", region: "us-east", tier: "compute" },
+    { name: "ml-inference-02", region: "us-west", tier: "compute" },
+  ];
+
+  // 48 points = 24h at 30-min intervals
+  const N = 48;
+
+  const genSeries = (base, volatility, trendSlope = 0, spikeProbability = 0) => {
+    const gen = norm(0, volatility);
+    let val = base;
+    return Array.from({ length: N }, (_, i) => {
+      val += gen() + trendSlope;
+      if (rng() < spikeProbability) val += volatility * (3 + rng() * 4) * (rng() > 0.5 ? 1 : -1);
+      val = Math.max(0, Math.min(100, val));
+      return +val.toFixed(1);
+    });
+  };
+
+  const genRequests = (base, burstiness) => {
+    return Array.from({ length: N }, (_, i) => {
+      // Diurnal pattern: more traffic during business hours (indices 8-20 out of 48)
+      const hour = (i / 2) % 24;
+      const diurnal = hour >= 8 && hour <= 20 ? 1.5 : 0.6;
+      const noise = 1 + (rng() - 0.5) * burstiness;
+      return Math.max(0, Math.round(base * diurnal * noise));
+    });
+  };
+
+  const data = servers.map((srv, i) => {
+    const cpuBase = srv.tier === "compute" ? 60 + rng() * 25 :
+                    srv.tier === "data" ? 35 + rng() * 20 :
+                    20 + rng() * 30;
+    const memBase = srv.tier === "data" ? 55 + rng() * 25 :
+                    srv.tier === "cache" ? 45 + rng() * 30 :
+                    25 + rng() * 30;
+    const reqBase = srv.tier === "edge" ? 400 + rng() * 600 :
+                    srv.tier === "primary" ? 200 + rng() * 400 :
+                    50 + rng() * 200;
+    const errorRate = srv.name.includes("replica-02") ? 3.8 + rng() * 1.5 :
+                      srv.name.includes("batch") ? 2.1 + rng() * 0.8 :
+                      rng() * 1.2;
+    const isProblematic = errorRate > 2.5;
+
+    return {
+      id: i,
+      name: srv.name,
+      region: srv.region,
+      tier: srv.tier,
+      status: isProblematic ? (errorRate > 3.5 ? "critical" : "warning") : "healthy",
+      cpu: genSeries(cpuBase, 4, isProblematic ? 0.3 : 0, isProblematic ? 0.08 : 0.02),
+      memory: genSeries(memBase, 3, 0.05, 0),
+      requests: genRequests(reqBase, 0.4),
+      errorRate: +errorRate.toFixed(2),
+      p99Latency: Math.round(srv.tier === "data" ? 8 + rng() * 15 : 2 + rng() * 12),
+      uptime: +(0.5 + rng() * 350).toFixed(1),
+    };
+  });
+
+  // --- KPI cards ---
+  const avgCpu = d3.mean(data, d => d.cpu.at(-1));
+  const prevAvgCpu = d3.mean(data, d => d.cpu.at(-3));
+  const totalReq = d3.sum(data, d => d3.sum(d.requests));
+  const prevTotalReq = d3.sum(data, d => d3.sum(d.requests.slice(0, -6)));
+  const avgErr = d3.mean(data, d => d.errorRate);
+  const healthyCount = data.filter(d => d.status === "healthy").length;
+
+  const kpiConfigs = [
+    {
+      label: "Avg CPU", value: `${avgCpu.toFixed(1)}%`,
+      delta: (avgCpu - prevAvgCpu) / prevAvgCpu,
+      deltaDir: avgCpu > prevAvgCpu ? "up" : "down",
+      type: "spark-bar", color: TOL[0],
+      series: d3.range(12).map(i => d3.mean(data, d => d3.mean(d.cpu.slice(i * 4, (i + 1) * 4)))),
+      typeLabel: "Spark Bar"
+    },
+    {
+      label: "Total Requests", value: d3.format(",.0f")(totalReq),
+      delta: 0.042, deltaDir: "up",
+      type: "spark-area", color: TOL[2],
+      series: d3.range(N).map(i => d3.sum(data, d => d.requests[i])),
+      typeLabel: "Spark Area"
+    },
+    {
+      label: "Error Rate", value: `${avgErr.toFixed(2)}%`,
+      delta: -0.015, deltaDir: "down",
+      type: "win-loss", color: null,
+      series: data.map(d => d.errorRate > 2 ? -1 : d.errorRate > 1 ? 0 : 1),
+      typeLabel: "Win / Loss"
+    },
+    {
+      label: "Healthy Servers", value: `${healthyCount} / ${data.length}`,
+      delta: null,
+      type: "bullet", color: TOL[4],
+      actual: healthyCount, target: data.length,
+      ranges: [data.length, data.length * 0.85, data.length * 0.7],
+      typeLabel: "Bullet Chart"
+    },
+  ];
+
+  const kpiRow = d3.select("#kpiRow");
+  kpiConfigs.forEach(kpi => {
+    const card = kpiRow.append("div").attr("class", "kpi-card");
+    card.append("div").attr("class", "kpi-label").text(kpi.label);
+    card.append("div").attr("class", "kpi-value").text(kpi.value);
+    if (kpi.delta !== null) {
+      const cls = kpi.deltaDir === "up" && kpi.label.includes("Error") ? "down" :
+                  kpi.deltaDir === "down" && kpi.label.includes("Error") ? "up" :
+                  kpi.deltaDir;
+      card.append("div").attr("class", `kpi-delta ${cls}`)
+        .text(`${kpi.delta >= 0 ? "\u25B2" : "\u25BC"} ${d3.format("+.1%")(kpi.delta)} vs prev`);
+    }
+
+    const sw = 140, sh = 28;
+    const svg = card.append("svg").attr("class", "kpi-spark")
+      .attr("width", sw).attr("height", sh)
+      .attr("role", "img").attr("aria-label", `${kpi.typeLabel} for ${kpi.label}`);
+
+    if (kpi.type === "spark-bar") {
+      const n = kpi.series.length, gap = 2;
+      const bw = (sw - gap * (n - 1)) / n;
+      const y = d3.scaleLinear([0, d3.max(kpi.series)], [sh, 0]);
+      svg.selectAll("rect").data(kpi.series).join("rect")
+        .attr("x", (_, i) => i * (bw + gap))
+        .attr("y", d => y(d)).attr("width", bw).attr("height", d => sh - y(d))
+        .attr("rx", 1).attr("fill", kpi.color).attr("opacity", 0.8);
+    } else if (kpi.type === "spark-area") {
+      const x = d3.scaleLinear([0, kpi.series.length - 1], [1, sw - 1]);
+      const y = d3.scaleLinear(d3.extent(kpi.series), [sh - 1, 1]);
+      const area = d3.area().x((_, i) => x(i)).y0(sh).y1(d => y(d)).curve(d3.curveMonotoneX);
+      const line = d3.line().x((_, i) => x(i)).y(d => y(d)).curve(d3.curveMonotoneX);
+      svg.append("path").datum(kpi.series).attr("d", area).attr("fill", kpi.color).attr("opacity", 0.12);
+      svg.append("path").datum(kpi.series).attr("d", line).attr("fill", "none").attr("stroke", kpi.color).attr("stroke-width", 1.5);
+      // Endpoint dot
+      svg.append("circle").attr("cx", x(kpi.series.length - 1)).attr("cy", y(kpi.series.at(-1)))
+        .attr("r", 2).attr("fill", kpi.color);
+    } else if (kpi.type === "win-loss") {
+      const n = kpi.series.length, gap = 2;
+      const bw = Math.max(2, (sw - gap * (n - 1)) / n);
+      const mid = sh / 2;
+      svg.selectAll("rect").data(kpi.series).join("rect")
+        .attr("x", (_, i) => i * (bw + gap))
+        .attr("y", d => d > 0 ? 2 : d < 0 ? mid + 1 : mid - 1)
+        .attr("width", bw)
+        .attr("height", d => d === 0 ? 2 : mid - 3)
+        .attr("rx", 1)
+        .attr("fill", d => d > 0 ? TOL[2] : d < 0 ? TOL[1] : TOL[6]);
+    } else if (kpi.type === "bullet") {
+      const x = d3.scaleLinear([0, kpi.target], [0, sw]);
+      const sortedRanges = [...kpi.ranges].sort((a, b) => b - a);
+      const grays = ["#e8e8e8", "#d8d8d8", "#c8c8c8"];
+      svg.selectAll(".bg").data(sortedRanges).join("rect").attr("class", "bg")
+        .attr("width", d => x(d)).attr("height", sh).attr("rx", 3)
+        .attr("fill", (_, i) => grays[i]);
+      svg.append("rect").attr("y", sh * 0.3).attr("height", sh * 0.4).attr("rx", 2)
+        .attr("width", x(kpi.actual)).attr("fill", kpi.color);
+      svg.append("line").attr("x1", x(kpi.target)).attr("x2", x(kpi.target))
+        .attr("y1", sh * 0.12).attr("y2", sh * 0.88)
+        .attr("stroke", "#333").attr("stroke-width", 2.5);
+    }
+
+    card.append("div").attr("class", "kpi-type-label").text(kpi.typeLabel);
+  });
+
+  // --- Table ---
+  const columns = [
+    { key: "name", label: "Server", type: "string" },
+    { key: "status", label: "Status", type: "status" },
+    { key: "cpu", label: "CPU %  (24h)", type: "sparkline", sparkColor: TOL[0] },
+    { key: "memory", label: "Memory %  (24h)", type: "sparkline", sparkColor: TOL[5] },
+    { key: "requests", label: "Requests (24h)", type: "spark-bar", sparkColor: TOL[4] },
+    { key: "errorRate", label: "Error %", type: "number", format: d3.format(".2f") },
+    { key: "p99Latency", label: "P99 (ms)", type: "number", format: d3.format(",") },
+    { key: "uptime", label: "Uptime (d)", type: "number", format: d3.format(",.1f") },
+  ];
+
+  // Shared domains for comparable sparklines across rows
+  const cpuDomain = [0, 100];
+  const memDomain = [0, 100];
+  const reqDomain = [0, d3.max(data, d => d3.max(d.requests))];
+
+  let sortKey = null, sortAsc = true;
+  let allClipRects = [];
+
+  // Build header
+  const headerRow = d3.select("#headerRow");
+  columns.forEach(col => {
+    headerRow.append("th")
+      .attr("class", col.type === "number" ? "num" : null)
+      .attr("role", "columnheader")
+      .attr("aria-sort", "none")
+      .attr("tabindex", "0")
+      .text(col.label)
+      .on("click", () => handleSort(col.key))
+      .on("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleSort(col.key); } });
+  });
+
+  const handleSort = (key) => {
+    if (sortKey === key) sortAsc = !sortAsc;
+    else { sortKey = key; sortAsc = true; }
+    renderTable(false);
+  };
+
+  const sparkW = 80, sparkH = 18;
+
+  const drawSparkline = (td, series, domain, color) => {
+    const svg = d3.select(td).append("svg").attr("width", sparkW).attr("height", sparkH)
+      .attr("role", "img").attr("aria-label", `Sparkline: min ${d3.min(series).toFixed(0)}, max ${d3.max(series).toFixed(0)}, latest ${series.at(-1).toFixed(0)}`);
+    const clipId = `c${Math.random().toString(36).slice(2, 9)}`;
+    svg.append("defs").append("clipPath").attr("id", clipId)
+      .append("rect").attr("width", 0).attr("height", sparkH);
+
+    const x = d3.scaleLinear([0, series.length - 1], [1, sparkW - 1]);
+    const y = d3.scaleLinear(domain, [sparkH - 1, 1]);
+    const area = d3.area().x((_, i) => x(i)).y0(sparkH).y1(d => y(d)).curve(d3.curveMonotoneX);
+    const line = d3.line().x((_, i) => x(i)).y(d => y(d)).curve(d3.curveMonotoneX);
+
+    const g = svg.append("g").attr("clip-path", `url(#${clipId})`);
+    g.append("path").datum(series).attr("d", area).attr("fill", color).attr("opacity", 0.1);
+    g.append("path").datum(series).attr("d", line).attr("fill", "none").attr("stroke", color).attr("stroke-width", 1.5);
+    g.append("circle").attr("cx", x(series.length - 1)).attr("cy", y(series.at(-1)))
+      .attr("r", 2).attr("fill", color);
+
+    return svg.select(`#${clipId} rect`);
+  };
+
+  const drawSparkBar = (td, series, domain, color) => {
+    const svg = d3.select(td).append("svg").attr("width", sparkW).attr("height", sparkH)
+      .attr("role", "img").attr("aria-label", `Spark bar: total ${d3.sum(series).toLocaleString()}`);
+    const clipId = `c${Math.random().toString(36).slice(2, 9)}`;
+    svg.append("defs").append("clipPath").attr("id", clipId)
+      .append("rect").attr("width", 0).attr("height", sparkH);
+
+    const y = d3.scaleLinear(domain, [sparkH, 0]);
+    const n = series.length, gap = 0.5;
+    const bw = Math.max(1, (sparkW - gap * (n - 1)) / n);
+
+    const g = svg.append("g").attr("clip-path", `url(#${clipId})`);
+    g.selectAll("rect").data(series).join("rect")
+      .attr("x", (_, i) => i * (bw + gap))
+      .attr("y", d => y(d)).attr("width", bw).attr("height", d => sparkH - y(d))
+      .attr("fill", color).attr("opacity", 0.75);
+
+    return svg.select(`#${clipId} rect`);
+  };
+
+  const renderTable = (animate = true) => {
+    allClipRects = [];
+    let sorted = [...data];
+    if (sortKey) {
+      sorted.sort((a, b) => {
+        let va = a[sortKey], vb = b[sortKey];
+        if (Array.isArray(va)) { va = d3.mean(va); vb = d3.mean(vb); }
+        return sortAsc ? d3.ascending(va, vb) : d3.descending(va, vb);
+      });
+    }
+
+    // Update header arrows and aria-sort
+    headerRow.selectAll("th").each(function(_, i) {
+      const col = columns[i];
+      const isActive = col.key === sortKey;
+      d3.select(this)
+        .classed("active", isActive)
+        .attr("aria-sort", isActive ? (sortAsc ? "ascending" : "descending") : "none")
+        .html(col.label + (isActive ? `<span class="sort-arrow">${sortAsc ? "\u25B2" : "\u25BC"}</span>` : ""));
+    });
+
+    const tbody = d3.select("#tableBody");
+    tbody.selectAll("tr").remove();
+
+    sorted.forEach((d, rowIdx) => {
+      const tr = tbody.append("tr").attr("role", "row");
+      columns.forEach(col => {
+        const td = tr.append("td").attr("role", "gridcell");
+        if (col.key === "name") {
+          td.attr("class", "server-name").text(d.name);
+        } else if (col.type === "status") {
+          td.append("span").attr("class", `status-badge ${d.status}`)
+            .html(`<span class="status-dot"></span>${d.status}`);
+        } else if (col.type === "sparkline") {
+          const domain = col.key === "cpu" ? cpuDomain : memDomain;
+          const cr = drawSparkline(td.node(), d[col.key], domain, col.sparkColor);
+          allClipRects.push({ rect: cr, rowIdx });
+        } else if (col.type === "spark-bar") {
+          const cr = drawSparkBar(td.node(), d[col.key], reqDomain, col.sparkColor);
+          allClipRects.push({ rect: cr, rowIdx });
+        } else if (col.type === "number") {
+          td.attr("class", "num");
+          if (col.key === "errorRate" && d.errorRate > 2) td.classed("error-high", true);
+          td.text(col.format(d[col.key]));
+        }
+      });
+    });
+
+    d3.select("#rowCount").text(`${sorted.length} servers`);
+
+    if (animate) animateReveal();
+  };
+
+  const animateReveal = () => {
+    const dur = safeDur(500);
+    const stagger = safeDur(40);
+    allClipRects.forEach(({ rect, rowIdx }) => {
+      rect.attr("width", 0)
+        .transition().duration(dur).delay(rowIdx * stagger)
+        .ease(d3.easeCubicOut)
+        .attr("width", sparkW);
+    });
+  };
+
+  renderTable(true);
+
+  // Replay button
+  d3.select("#replayBtn").on("click", () => {
+    // Reset all clips then re-animate with longer duration
+    allClipRects.forEach(({ rect }) => rect.interrupt().attr("width", 0));
+    const dur = safeDur(600);
+    const stagger = safeDur(50);
+    allClipRects.forEach(({ rect, rowIdx }) => {
+      rect.transition().duration(dur).delay(rowIdx * stagger)
+        .ease(d3.easeCubicOut)
+        .attr("width", sparkW);
+    });
+  });
+
+  // Hover tooltip on sparklines
+  d3.select("#tableBody").on("pointermove", function(event) {
+    const svg = event.target.closest("svg");
+    if (!svg) { d3.select("#sparkTip").remove(); return; }
+    const rect = svg.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const idx = Math.round(px / rect.width * (N - 1));
+    if (idx < 0 || idx >= N) return;
+    // Time label
+    const hour = Math.floor(idx / 2);
+    const min = (idx % 2) * 30;
+    const timeStr = `${hour.toString().padStart(2, "0")}:${min.toString().padStart(2, "0")}`;
+    // Show native title
+    svg.querySelector("title")?.remove();
+    const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+    title.textContent = `${timeStr} ago`;
+    svg.prepend(title);
+  });
+})();
+</script>
+</body>
+</html>

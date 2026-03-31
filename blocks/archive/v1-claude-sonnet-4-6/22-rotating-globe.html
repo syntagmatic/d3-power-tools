@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Rotating Globe with Pulsing Cities &amp; Day/Night Terminator</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0d1117;
+    font-family: system-ui, -apple-system, sans-serif;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    color: #e6edf3;
+    overflow: hidden;
+  }
+  #container {
+    position: relative;
+    width: 1200px;
+    height: 800px;
+  }
+  canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+  }
+  #tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: rgba(13, 17, 23, 0.92);
+    color: #e6edf3;
+    padding: 5px 10px;
+    border-radius: 4px;
+    font-size: 13px;
+    white-space: nowrap;
+    display: none;
+    border: 1px solid #30363d;
+    z-index: 10;
+  }
+  .title-bar {
+    position: absolute;
+    top: 16px;
+    left: 0;
+    right: 0;
+    text-align: center;
+    pointer-events: none;
+    z-index: 5;
+  }
+  .title-bar h1 {
+    font-size: 18px;
+    font-weight: 600;
+    color: #c9d1d9;
+    letter-spacing: 0.5px;
+  }
+  .title-bar p {
+    font-size: 12px;
+    color: #8b949e;
+    margin-top: 4px;
+  }
+  .legend {
+    position: absolute;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 16px;
+    font-size: 12px;
+    color: #8b949e;
+    pointer-events: none;
+    z-index: 5;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .time-label {
+    position: absolute;
+    top: 60px;
+    right: 40px;
+    font-size: 12px;
+    color: #8b949e;
+    pointer-events: none;
+    z-index: 5;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+  }
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="ocean"></canvas>
+  <canvas id="land"></canvas>
+  <canvas id="graticule"></canvas>
+  <canvas id="cities"></canvas>
+  <div id="tooltip"></div>
+  <div class="title-bar">
+    <h1>World Cities</h1>
+    <p>Drag to rotate &middot; 30 cities colored by continent &middot; Day/night terminator</p>
+  </div>
+  <div class="legend" id="legend"></div>
+  <div class="time-label" id="time-label"></div>
+</div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(() => {
+  const width = 1200, height = 800;
+  const cx = width / 2, cy = height / 2;
+  const globeRadius = 340;
+  const dpr = devicePixelRatio;
+
+  // --- Canvas setup ---
+  function setupCanvas(id) {
+    const canvas = d3.select(`#${id}`)
+      .attr("width", width * dpr).attr("height", height * dpr)
+      .style("width", `${width}px`).style("height", `${height}px`)
+      .node();
+    const ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+    return { canvas, ctx };
+  }
+
+  const ocean = setupCanvas("ocean");
+  const land = setupCanvas("land");
+  const grat = setupCanvas("graticule");
+  const cityLayer = setupCanvas("cities");
+
+  // --- Projection ---
+  const projection = d3.geoOrthographic()
+    .scale(globeRadius)
+    .translate([cx, cy])
+    .clipAngle(90);
+
+  const pathOcean = d3.geoPath(projection, ocean.ctx);
+  const pathLand = d3.geoPath(projection, land.ctx);
+  const pathGrat = d3.geoPath(projection, grat.ctx);
+  const pathCity = d3.geoPath(projection, cityLayer.ctx);
+
+  const sphere = { type: "Sphere" };
+  const graticule = d3.geoGraticule().step([15, 15])();
+
+  // --- Tol palette by continent ---
+  const continentColors = {
+    "N. America": "#4477AA",
+    "S. America": "#EE6677",
+    "Europe":     "#228833",
+    "Africa":     "#CCBB44",
+    "Asia":       "#66CCEE",
+    "Oceania":    "#AA3377"
+  };
+
+  // --- 30 cities with [lon, lat], name, continent ---
+  const cities = [
+    { name: "New York",      coords: [-74.0, 40.7],    continent: "N. America" },
+    { name: "Los Angeles",   coords: [-118.2, 34.1],   continent: "N. America" },
+    { name: "Mexico City",   coords: [-99.1, 19.4],    continent: "N. America" },
+    { name: "Toronto",       coords: [-79.4, 43.7],    continent: "N. America" },
+    { name: "Chicago",       coords: [-87.6, 41.9],    continent: "N. America" },
+    { name: "São Paulo",     coords: [-46.6, -23.5],   continent: "S. America" },
+    { name: "Buenos Aires",  coords: [-58.4, -34.6],   continent: "S. America" },
+    { name: "Lima",          coords: [-77.0, -12.0],   continent: "S. America" },
+    { name: "London",        coords: [-0.1, 51.5],     continent: "Europe" },
+    { name: "Paris",         coords: [2.3, 48.9],      continent: "Europe" },
+    { name: "Berlin",        coords: [13.4, 52.5],     continent: "Europe" },
+    { name: "Moscow",        coords: [37.6, 55.8],     continent: "Europe" },
+    { name: "Istanbul",      coords: [29.0, 41.0],     continent: "Europe" },
+    { name: "Cairo",         coords: [31.2, 30.0],     continent: "Africa" },
+    { name: "Lagos",         coords: [3.4, 6.5],       continent: "Africa" },
+    { name: "Nairobi",       coords: [36.8, -1.3],     continent: "Africa" },
+    { name: "Cape Town",     coords: [18.4, -33.9],    continent: "Africa" },
+    { name: "Casablanca",    coords: [-7.6, 33.6],     continent: "Africa" },
+    { name: "Tokyo",         coords: [139.7, 35.7],    continent: "Asia" },
+    { name: "Beijing",       coords: [116.4, 39.9],    continent: "Asia" },
+    { name: "Mumbai",        coords: [72.9, 19.1],     continent: "Asia" },
+    { name: "Shanghai",      coords: [121.5, 31.2],    continent: "Asia" },
+    { name: "Dubai",         coords: [55.3, 25.3],     continent: "Asia" },
+    { name: "Seoul",         coords: [127.0, 37.6],    continent: "Asia" },
+    { name: "Bangkok",       coords: [100.5, 13.8],    continent: "Asia" },
+    { name: "Singapore",     coords: [103.8, 1.3],     continent: "Asia" },
+    { name: "Jakarta",       coords: [106.8, -6.2],    continent: "Asia" },
+    { name: "Sydney",        coords: [151.2, -33.9],   continent: "Oceania" },
+    { name: "Melbourne",     coords: [144.9, -37.8],   continent: "Oceania" },
+    { name: "Auckland",      coords: [174.8, -36.9],   continent: "Oceania" }
+  ];
+
+  // --- Simplified world land polygons (approximate outlines) ---
+  const landGeo = {
+    type: "FeatureCollection",
+    features: [
+      { type: "Feature", properties: { name: "North America" }, geometry: { type: "Polygon", coordinates: [[
+        [-130,50],[-125,60],[-120,65],[-110,68],[-95,72],[-85,70],[-80,65],[-60,55],[-55,47],
+        [-65,43],[-70,41],[-75,35],[-81,25],[-83,30],[-90,29],[-97,26],[-100,28],[-105,32],
+        [-110,32],[-115,32],[-120,34],[-125,42],[-130,50]
+      ]] }},
+      { type: "Feature", properties: { name: "Central America" }, geometry: { type: "Polygon", coordinates: [[
+        [-105,22],[-100,20],[-97,18],[-92,16],[-88,15],[-84,11],[-80,8],[-78,8],
+        [-82,10],[-86,13],[-90,16],[-95,17],[-100,20],[-105,22]
+      ]] }},
+      { type: "Feature", properties: { name: "South America" }, geometry: { type: "Polygon", coordinates: [[
+        [-80,10],[-75,12],[-65,12],[-58,5],[-50,2],[-45,-2],[-38,-8],[-35,-12],
+        [-38,-18],[-42,-22],[-48,-28],[-52,-33],[-56,-38],[-62,-42],[-66,-48],[-70,-52],
+        [-75,-46],[-73,-37],[-70,-28],[-70,-18],[-76,-14],[-78,-5],[-80,2],[-80,10]
+      ]] }},
+      { type: "Feature", properties: { name: "Europe" }, geometry: { type: "Polygon", coordinates: [[
+        [-10,36],[-9,42],[-5,44],[0,43],[3,43],[5,46],[-1,48],[-5,48],[0,52],[5,54],[8,55],
+        [12,55],[15,58],[20,60],[25,60],[30,62],[32,65],[28,70],[18,71],[10,66],[5,62],
+        [0,58],[-5,53],[-10,50],[-10,36]
+      ]] }},
+      { type: "Feature", properties: { name: "Africa" }, geometry: { type: "Polygon", coordinates: [[
+        [-17,15],[-17,21],[-13,28],[-5,36],[10,37],[15,33],[25,32],[30,31],[33,30],
+        [38,20],[42,12],[44,2],[40,-4],[38,-10],[35,-18],[30,-26],[27,-34],[22,-35],
+        [18,-35],[15,-30],[12,-22],[10,-10],[8,-2],[5,5],[0,6],[-5,5],[-10,8],[-15,12],[-17,15]
+      ]] }},
+      { type: "Feature", properties: { name: "Asia" }, geometry: { type: "Polygon", coordinates: [[
+        [26,40],[30,42],[35,42],[40,40],[45,40],[50,37],[55,25],[60,25],[65,25],[70,22],
+        [75,15],[78,8],[80,15],[85,22],[88,22],[90,25],[95,18],[100,15],[105,10],[108,15],
+        [110,20],[115,22],[120,25],[122,30],[125,35],[130,42],[135,40],[140,43],
+        [142,52],[138,55],[130,56],[120,55],[110,50],[100,50],[90,48],[80,52],[70,56],
+        [60,56],[50,48],[42,44],[35,42],[26,40]
+      ]] }},
+      { type: "Feature", properties: { name: "India" }, geometry: { type: "Polygon", coordinates: [[
+        [68,24],[70,28],[72,32],[76,34],[80,32],[84,28],[88,24],[90,22],[88,18],
+        [85,15],[80,10],[78,8],[76,10],[74,14],[72,18],[68,24]
+      ]] }},
+      { type: "Feature", properties: { name: "Japan" }, geometry: { type: "Polygon", coordinates: [[
+        [130,31],[131,33],[133,34],[135,35],[137,36],[140,38],[141,40],[142,43],
+        [141,44],[140,42],[138,38],[136,36],[134,34],[131,32],[130,31]
+      ]] }},
+      { type: "Feature", properties: { name: "Indonesia" }, geometry: { type: "Polygon", coordinates: [[
+        [95,6],[98,4],[102,2],[105,0],[106,-2],[108,-6],[110,-7],[114,-8],[118,-8],
+        [122,-7],[126,-4],[130,-3],[134,-4],[136,-6],[134,-8],[128,-8],[122,-9],
+        [116,-9],[110,-8],[106,-6],[104,-3],[100,-1],[96,2],[95,6]
+      ]] }},
+      { type: "Feature", properties: { name: "Australia" }, geometry: { type: "Polygon", coordinates: [[
+        [115,-15],[120,-14],[128,-14],[133,-12],[137,-12],[142,-11],[146,-15],[150,-22],
+        [152,-26],[154,-28],[153,-32],[150,-35],[147,-38],[142,-39],[138,-36],[136,-34],
+        [132,-32],[128,-30],[124,-33],[118,-35],[115,-34],[114,-28],[114,-22],[115,-15]
+      ]] }},
+      { type: "Feature", properties: { name: "New Zealand" }, geometry: { type: "Polygon", coordinates: [[
+        [173,-37],[174,-38],[176,-40],[177,-42],[176,-44],[174,-46],[172,-45],
+        [170,-44],[168,-45],[167,-46],[167,-44],[169,-43],[171,-42],[172,-40],[173,-37]
+      ]] }},
+      { type: "Feature", properties: { name: "Greenland" }, geometry: { type: "Polygon", coordinates: [[
+        [-52,60],[-48,62],[-42,64],[-35,66],[-28,68],[-22,72],[-18,76],[-20,80],
+        [-30,82],[-42,83],[-50,82],[-55,80],[-58,76],[-60,72],[-56,66],[-52,60]
+      ]] }},
+      { type: "Feature", properties: { name: "UK" }, geometry: { type: "Polygon", coordinates: [[
+        [-5,50],[-3,51],[0,51],[2,53],[0,54],[-2,56],[-4,57],[-5,58],[-6,57],
+        [-7,55],[-6,53],[-5,50]
+      ]] }},
+      { type: "Feature", properties: { name: "Madagascar" }, geometry: { type: "Polygon", coordinates: [[
+        [44,-13],[46,-14],[48,-16],[50,-18],[50,-22],[48,-24],[46,-25],[44,-24],
+        [43,-22],[44,-18],[44,-13]
+      ]] }},
+      { type: "Feature", properties: { name: "Papua New Guinea" }, geometry: { type: "Polygon", coordinates: [[
+        [141,-2],[143,-3],[146,-4],[148,-5],[150,-6],[152,-5],[154,-4],[155,-6],
+        [152,-8],[148,-8],[145,-7],[142,-6],[141,-5],[141,-2]
+      ]] }},
+      { type: "Feature", properties: { name: "Philippines" }, geometry: { type: "Polygon", coordinates: [[
+        [118,7],[119,10],[120,13],[121,15],[122,18],[123,17],[124,14],[122,11],
+        [120,8],[118,7]
+      ]] }},
+      { type: "Feature", properties: { name: "Korea" }, geometry: { type: "Polygon", coordinates: [[
+        [126,34],[127,35],[128,36],[129,37],[129,38],[128,39],[127,38],[126,37],[126,34]
+      ]] }},
+      { type: "Feature", properties: { name: "Scandinavia" }, geometry: { type: "Polygon", coordinates: [[
+        [5,58],[8,58],[10,60],[12,62],[14,64],[16,66],[18,68],[20,70],[22,70],
+        [25,68],[28,70],[30,70],[30,65],[28,62],[24,60],[20,58],[15,57],[10,57],[5,58]
+      ]] }},
+      { type: "Feature", properties: { name: "Arabian Peninsula" }, geometry: { type: "Polygon", coordinates: [[
+        [35,30],[38,28],[42,22],[44,18],[46,15],[48,14],[51,16],[55,22],[56,25],
+        [52,24],[48,26],[44,28],[40,30],[35,30]
+      ]] }}
+    ]
+  };
+
+  // Combine all features into a single MultiPolygon for quick land fill
+  const allLand = {
+    type: "MultiPolygon",
+    coordinates: landGeo.features.map(f => f.geometry.coordinates.map(ring => ring))
+  };
+
+  // --- Day/Night terminator ---
+  // Compute the subsolar point for current time
+  function solarPosition(date) {
+    const dayOfYear = Math.floor((date - new Date(date.getFullYear(), 0, 0)) / 864e5);
+    const hour = date.getUTCHours() + date.getUTCMinutes() / 60;
+    // Declination: approximate formula
+    const declination = -23.44 * Math.cos(2 * Math.PI / 365 * (dayOfYear + 10));
+    // Hour angle -> longitude
+    const lon = -(hour / 24) * 360 + 180;
+    return [lon, declination];
+  }
+
+  function terminatorGeoJSON(date) {
+    const [sunLon, sunLat] = solarPosition(date);
+    // The terminator is a great circle 90 degrees from the subsolar point
+    const circle = d3.geoCircle()
+      .center([sunLon, sunLat])
+      .radius(90)
+      .precision(2)();
+    return { circle, sunLon, sunLat };
+  }
+
+  // --- Legend ---
+  const legendEl = document.getElementById("legend");
+  for (const [name, color] of Object.entries(continentColors)) {
+    const item = document.createElement("div");
+    item.className = "legend-item";
+    item.innerHTML = `<span class="legend-dot" style="background:${color}"></span>${name}`;
+    legendEl.appendChild(item);
+  }
+
+  // --- Versor quaternion rotation ---
+  // Inline versor implementation for self-contained file
+  const versor = (() => {
+    const acos = Math.acos, asin = Math.asin, atan2 = Math.atan2,
+          cos = Math.cos, sin = Math.sin, sqrt = Math.sqrt,
+          pi = Math.PI, radians = pi / 180, degrees = 180 / pi;
+
+    function fromAngles([l, p, g]) {
+      l *= radians / 2; p *= radians / 2; g = (g || 0) * radians / 2;
+      const sl = sin(l), cl = cos(l), sp = sin(p), cp = cos(p), sg = sin(g), cg = cos(g);
+      return [
+        cl * cp * cg + sl * sp * sg,
+        sl * cp * cg - cl * sp * sg,
+        cl * sp * cg + sl * cp * sg,
+        cl * cp * sg - sl * sp * cg
+      ];
+    }
+
+    function toAngles([a, b, c, d]) {
+      return [
+        atan2(2 * (a * b + c * d), 1 - 2 * (b * b + c * c)) * degrees,
+        asin(Math.max(-1, Math.min(1, 2 * (a * c - d * b)))) * degrees,
+        atan2(2 * (a * d + b * c), 1 - 2 * (c * c + d * d)) * degrees
+      ];
+    }
+
+    function multiply([a1, b1, c1, d1], [a2, b2, c2, d2]) {
+      return [
+        a1 * a2 - b1 * b2 - c1 * c2 - d1 * d2,
+        a1 * b2 + b1 * a2 + c1 * d2 - d1 * c2,
+        a1 * c2 - b1 * d2 + c1 * a2 + d1 * b2,
+        a1 * d2 + b1 * c2 - c1 * b2 + d1 * a2
+      ];
+    }
+
+    function delta(v0, v1) {
+      if (!v0 || !v1) return [1, 0, 0, 0];
+      const c0 = cartesian(v0), c1 = cartesian(v1);
+      const w = cross(c0, c1), l = sqrt(dot(w, w));
+      if (!l) return [1, 0, 0, 0];
+      const t = acos(Math.max(-1, Math.min(1, dot(c0, c1)))) / 2;
+      const s = sin(t) / l;
+      return [cos(t), w[2] * s, -w[1] * s, w[0] * s];
+    }
+
+    function cartesian([l, p]) {
+      l *= radians; p *= radians;
+      const cp = cos(p);
+      return [cp * cos(l), cp * sin(l), sin(p)];
+    }
+    function dot(a, b) { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; }
+    function cross(a, b) { return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]; }
+
+    const v = fromAngles;
+    v.rotation = toAngles;
+    v.delta = delta;
+    v.multiply = multiply;
+    return v;
+  })();
+
+  // --- Rotation state ---
+  let autoRotate = true;
+  let rotationSpeed = 0.3; // degrees per frame
+  let currentRotation = projection.rotate();
+  let dragStartTime = 0;
+
+  // --- Drag with versor ---
+  let r0, q0, p0;
+
+  d3.select(cityLayer.canvas).call(
+    d3.drag()
+      .on("start", (event) => {
+        autoRotate = false;
+        dragStartTime = Date.now();
+        r0 = projection.rotate();
+        q0 = versor(r0);
+        p0 = projection.invert(d3.pointer(event, cityLayer.canvas));
+      })
+      .on("drag", (event) => {
+        if (!p0) return;
+        const p1 = projection.rotate(r0).invert(d3.pointer(event, cityLayer.canvas));
+        if (!p1) return;
+        const q1 = versor.multiply(q0, versor.delta(p0, p1));
+        const rot = versor.rotation(q1);
+        projection.rotate(rot);
+        currentRotation = rot;
+        render();
+      })
+      .on("end", () => {
+        // Resume auto-rotate after a short drag, or if user barely moved
+        currentRotation = projection.rotate();
+        setTimeout(() => { autoRotate = true; }, 2000);
+      })
+  );
+
+  // --- Hover detection ---
+  const tooltip = document.getElementById("tooltip");
+
+  d3.select(cityLayer.canvas).on("pointermove", (event) => {
+    const [mx, my] = d3.pointer(event, cityLayer.canvas);
+    let found = null;
+    let minDist = 15; // px threshold
+    for (const c of cities) {
+      const projected = projection(c.coords);
+      if (!projected) continue;
+      const d = Math.hypot(projected[0] - mx, projected[1] - my);
+      if (d < minDist) { minDist = d; found = c; }
+    }
+    if (found) {
+      tooltip.style.display = "block";
+      tooltip.textContent = `${found.name} (${found.continent})`;
+      const pp = projection(found.coords);
+      tooltip.style.left = `${pp[0] + 12}px`;
+      tooltip.style.top = `${pp[1] - 20}px`;
+      cityLayer.canvas.style.cursor = "pointer";
+    } else {
+      tooltip.style.display = "none";
+      cityLayer.canvas.style.cursor = "grab";
+    }
+  });
+
+  // --- Render ---
+  let frameCount = 0;
+  const pulseSpeed = 0.004;
+
+  function render() {
+    const now = Date.now();
+    const pulse = 0.5 + 0.5 * Math.sin(now * pulseSpeed);
+    const terminator = terminatorGeoJSON(new Date());
+
+    // Layer 1: Ocean
+    const octx = ocean.ctx;
+    octx.clearRect(0, 0, width, height);
+    // Globe shadow
+    octx.save();
+    octx.shadowColor = "rgba(100,180,255,0.15)";
+    octx.shadowBlur = 40;
+    octx.beginPath();
+    pathOcean(sphere);
+    octx.fillStyle = "#0f2940";
+    octx.fill();
+    octx.restore();
+
+    // Layer 2: Land
+    const lctx = land.ctx;
+    lctx.clearRect(0, 0, width, height);
+
+    // Night side: fill sphere with dark, then clip terminator
+    // Draw the night hemisphere as a dark overlay on the ocean
+    lctx.save();
+    lctx.beginPath();
+    pathLand(sphere);
+    lctx.clip();
+
+    // Night shade - the area opposite the sun
+    lctx.globalAlpha = 0.35;
+    lctx.beginPath();
+    pathLand(terminator.circle);
+    lctx.fillStyle = "#000";
+    lctx.fill();
+    lctx.globalAlpha = 1.0;
+    lctx.restore();
+
+    // Land masses
+    lctx.save();
+    lctx.beginPath();
+    pathLand(sphere);
+    lctx.clip();
+
+    lctx.beginPath();
+    for (const f of landGeo.features) pathLand(f.geometry);
+    lctx.fillStyle = "#1a5c3a";
+    lctx.fill();
+
+    // Land borders
+    lctx.beginPath();
+    for (const f of landGeo.features) pathLand(f.geometry);
+    lctx.strokeStyle = "rgba(255,255,255,0.12)";
+    lctx.lineWidth = 0.5;
+    lctx.stroke();
+    lctx.restore();
+
+    // Layer 3: Graticule
+    const gctx = grat.ctx;
+    gctx.clearRect(0, 0, width, height);
+    gctx.beginPath();
+    pathGrat(graticule);
+    gctx.strokeStyle = "rgba(100,160,220,0.12)";
+    gctx.lineWidth = 0.5;
+    gctx.stroke();
+
+    // Sphere border
+    gctx.beginPath();
+    pathGrat(sphere);
+    gctx.strokeStyle = "rgba(100,160,220,0.3)";
+    gctx.lineWidth = 1.5;
+    gctx.stroke();
+
+    // Terminator line on graticule layer
+    gctx.beginPath();
+    gctx.save();
+    gctx.beginPath();
+    pathGrat(sphere);
+    gctx.clip();
+    gctx.beginPath();
+    pathGrat(terminator.circle);
+    gctx.strokeStyle = "rgba(255,200,50,0.5)";
+    gctx.lineWidth = 1.5;
+    gctx.setLineDash([4, 4]);
+    gctx.stroke();
+    gctx.setLineDash([]);
+    gctx.restore();
+
+    // Layer 4: Cities
+    const cctx = cityLayer.ctx;
+    cctx.clearRect(0, 0, width, height);
+
+    // Group cities by continent for batch rendering
+    const byCont = d3.group(cities, d => d.continent);
+    for (const [cont, group] of byCont) {
+      const color = continentColors[cont];
+      const rgb = d3.color(color);
+
+      for (const c of group) {
+        const projected = projection(c.coords);
+        if (!projected) continue;
+        const [px, py] = projected;
+
+        // Check if on visible hemisphere
+        const dist = d3.geoDistance(c.coords, projection.invert([cx, cy]) || [0, 0]);
+        if (dist > Math.PI / 2) continue;
+
+        // Pulsing glow
+        const glowR = 6 + pulse * 5;
+        cctx.beginPath();
+        cctx.arc(px, py, glowR, 0, 2 * Math.PI);
+        cctx.fillStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},${0.15 + pulse * 0.1})`;
+        cctx.fill();
+
+        // Outer ring
+        cctx.beginPath();
+        cctx.arc(px, py, 4 + pulse * 1.5, 0, 2 * Math.PI);
+        cctx.strokeStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},0.6)`;
+        cctx.lineWidth = 1;
+        cctx.stroke();
+
+        // Core dot - boosted chroma for small marks
+        cctx.beginPath();
+        cctx.moveTo(px + 3, py);
+        cctx.arc(px, py, 3, 0, 2 * Math.PI);
+        cctx.fillStyle = color;
+        cctx.fill();
+      }
+    }
+
+    // Update time label
+    const timeLabel = document.getElementById("time-label");
+    const now2 = new Date();
+    timeLabel.textContent = `UTC ${now2.getUTCHours().toString().padStart(2,"0")}:${now2.getUTCMinutes().toString().padStart(2,"0")}`;
+  }
+
+  // --- Animation loop ---
+  function animate() {
+    if (autoRotate) {
+      currentRotation[0] += rotationSpeed;
+      projection.rotate(currentRotation);
+    }
+    frameCount++;
+    render();
+    requestAnimationFrame(animate);
+  }
+
+  render();
+  requestAnimationFrame(animate);
+})();
+</script>
+</body>
+</html>

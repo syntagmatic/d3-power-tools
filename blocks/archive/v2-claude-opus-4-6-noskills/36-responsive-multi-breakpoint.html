@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Responsive Multi-Breakpoint Chart</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #fafafa; display: flex; justify-content: center; padding: 16px; }
+  #container { width: 100%; max-width: 1200px; background: #fff; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,0.1); overflow: hidden; }
+  .legend-below { display: flex; flex-wrap: wrap; gap: 12px; padding: 8px 16px 12px; justify-content: center; }
+  .legend-below .legend-item { display: flex; align-items: center; gap: 5px; font-size: 13px; color: #444; }
+  .legend-below .legend-swatch { width: 12px; height: 12px; border-radius: 50%; }
+</style>
+</head>
+<body>
+<div id="container"></div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data: 3 species, 150 points ---
+const rng = d3.randomLcg(42);
+const randNorm = (mu, sigma) => d3.randomNormal.source(rng)(mu, sigma);
+
+const species = ["Setosa", "Versicolor", "Virginica"];
+const colorScale = d3.scaleOrdinal().domain(species).range(["#e15759", "#4e79a7", "#59a14f"]);
+
+const data = [];
+const params = [
+  { x: [5.0, 0.35], y: [3.4, 0.38] },
+  { x: [5.9, 0.52], y: [2.8, 0.31] },
+  { x: [6.6, 0.64], y: [3.0, 0.32] },
+];
+species.forEach((sp, i) => {
+  const genX = randNorm(...params[i].x);
+  const genY = randNorm(...params[i].y);
+  for (let j = 0; j < 50; j++) {
+    data.push({ species: sp, x: genX(), y: genY(), id: i * 50 + j });
+  }
+});
+
+const container = d3.select("#container");
+const svg = container.append("svg").style("display", "block");
+const legendDiv = container.append("div").attr("class", "legend-below").style("display", "none");
+
+// Build legend HTML once
+species.forEach(sp => {
+  const item = legendDiv.append("div").attr("class", "legend-item");
+  item.append("div").attr("class", "legend-swatch").style("background", colorScale(sp));
+  item.append("span").text(sp);
+});
+
+const margin = { top: 20, right: 20, bottom: 40, left: 50 };
+const histH = 50; // marginal histogram height
+
+const xExtent = d3.extent(data, d => d.x);
+const yExtent = d3.extent(data, d => d.y);
+const xPad = (xExtent[1] - xExtent[0]) * 0.08;
+const yPad = (yExtent[1] - yExtent[0]) * 0.08;
+const xDomain = [xExtent[0] - xPad, xExtent[1] + xPad];
+const yDomain = [yExtent[0] - yPad, yExtent[1] + yPad];
+
+let prevMode = null;
+
+function render() {
+  const W = container.node().clientWidth;
+  const mode = W >= 1000 ? "wide" : W >= 600 ? "medium" : "narrow";
+
+  const H = mode === "wide" ? 520 : mode === "medium" ? 440 : 360;
+  svg.attr("width", W).attr("height", H);
+
+  const showMarginals = mode === "wide";
+  const mTop = margin.top + (showMarginals ? histH + 8 : 0);
+  const mRight = margin.right + (showMarginals ? histH + 8 : 0);
+  const plotW = W - margin.left - mRight;
+  const plotH = H - mTop - margin.bottom;
+
+  // Scales
+  const xScale = d3.scaleLinear().domain(xDomain).range([0, plotW]);
+  const yScale = d3.scaleLinear().domain(yDomain).range([plotH, 0]);
+
+  // Ensure groups exist
+  let gMain = svg.selectAll("g.main").data([0]);
+  gMain = gMain.enter().append("g").attr("class", "main").merge(gMain);
+
+  const t = d3.transition().duration(prevMode === null ? 0 : 600).ease(d3.easeCubicInOut);
+
+  gMain.transition(t).attr("transform", `translate(${margin.left},${mTop})`);
+
+  // --- Axes ---
+  let gXAxis = gMain.selectAll("g.x-axis").data([0]);
+  gXAxis = gXAxis.enter().append("g").attr("class", "x-axis").merge(gXAxis);
+  gXAxis.transition(t).attr("transform", `translate(0,${plotH})`).call(d3.axisBottom(xScale).ticks(mode === "narrow" ? 5 : 8));
+
+  let gYAxis = gMain.selectAll("g.y-axis").data([0]);
+  gYAxis = gYAxis.enter().append("g").attr("class", "y-axis").merge(gYAxis);
+
+  if (mode === "narrow") {
+    // Strip plot: y is categorical
+    const stripScale = d3.scaleBand().domain(species).range([0, plotH]).padding(0.3);
+    gYAxis.transition(t).call(d3.axisLeft(stripScale));
+
+    // Box overlays
+    const boxData = species.map(sp => {
+      const vals = data.filter(d => d.species === sp).map(d => d.x).sort(d3.ascending);
+      const q1 = d3.quantile(vals, 0.25);
+      const med = d3.quantile(vals, 0.5);
+      const q3 = d3.quantile(vals, 0.75);
+      const iqr = q3 - q1;
+      const lo = Math.max(d3.min(vals), q1 - 1.5 * iqr);
+      const hi = Math.min(d3.max(vals), q3 + 1.5 * iqr);
+      return { species: sp, q1, med, q3, lo, hi, bw: stripScale.bandwidth() };
+    });
+
+    // Box group
+    let gBox = gMain.selectAll("g.boxes").data([0]);
+    gBox = gBox.enter().append("g").attr("class", "boxes").merge(gBox);
+
+    // Whisker lines
+    const whiskers = gBox.selectAll("line.whisker").data(boxData, d => d.species);
+    whiskers.enter().append("line").attr("class", "whisker")
+      .attr("stroke", "#888").attr("stroke-width", 1.5)
+      .merge(whiskers).transition(t)
+      .attr("x1", d => xScale(d.lo)).attr("x2", d => xScale(d.hi))
+      .attr("y1", d => stripScale(d.species) + d.bw / 2)
+      .attr("y2", d => stripScale(d.species) + d.bw / 2);
+
+    // Box rects
+    const boxes = gBox.selectAll("rect.box").data(boxData, d => d.species);
+    boxes.enter().append("rect").attr("class", "box")
+      .attr("stroke", "#555").attr("stroke-width", 1).attr("rx", 3)
+      .merge(boxes).transition(t)
+      .attr("x", d => xScale(d.q1)).attr("width", d => xScale(d.q3) - xScale(d.q1))
+      .attr("y", d => stripScale(d.species) + d.bw * 0.15)
+      .attr("height", d => d.bw * 0.7)
+      .attr("fill", d => colorScale(d.species)).attr("fill-opacity", 0.2);
+
+    // Median lines
+    const medians = gBox.selectAll("line.median").data(boxData, d => d.species);
+    medians.enter().append("line").attr("class", "median")
+      .attr("stroke", "#333").attr("stroke-width", 2)
+      .merge(medians).transition(t)
+      .attr("x1", d => xScale(d.med)).attr("x2", d => xScale(d.med))
+      .attr("y1", d => stripScale(d.species) + d.bw * 0.1)
+      .attr("y2", d => stripScale(d.species) + d.bw * 0.9);
+
+    // Points as strip with jitter
+    const jitter = d3.randomUniform.source(rng)(-0.35, 0.35);
+    const circles = gMain.selectAll("circle.point").data(data, d => d.id);
+    circles.enter().append("circle").attr("class", "point")
+      .attr("r", 0).attr("fill-opacity", 0.6)
+      .merge(circles).transition(t)
+      .attr("cx", d => xScale(d.x))
+      .attr("cy", d => stripScale(d.species) + stripScale.bandwidth() * (0.5 + jitter()))
+      .attr("r", 3.5)
+      .attr("fill", d => colorScale(d.species));
+
+    // Show/hide
+    gBox.style("display", null);
+    svg.selectAll("g.hist-top, g.hist-right, g.legend-svg").transition(t).style("opacity", 0).on("end", function() { d3.select(this).style("display", "none"); });
+    legendDiv.style("display", "none");
+
+  } else {
+    // Scatter modes
+    gYAxis.transition(t).call(d3.axisLeft(yScale).ticks(6));
+
+    // Hide box overlays
+    let gBox = gMain.selectAll("g.boxes").data([0]);
+    gBox = gBox.enter().append("g").attr("class", "boxes").merge(gBox);
+    gBox.selectAll("*").transition(t).style("opacity", 0).remove();
+
+    // Points
+    const circles = gMain.selectAll("circle.point").data(data, d => d.id);
+    circles.enter().append("circle").attr("class", "point")
+      .attr("r", 0).attr("fill-opacity", 0.7)
+      .merge(circles).transition(t)
+      .attr("cx", d => xScale(d.x))
+      .attr("cy", d => yScale(d.y))
+      .attr("r", mode === "wide" ? 5 : 4.5)
+      .attr("fill", d => colorScale(d.species));
+
+    // --- Marginal histograms (wide only) ---
+    if (showMarginals) {
+      legendDiv.style("display", "none");
+
+      const nBins = 20;
+
+      // Top histogram (x distribution)
+      const xBins = d3.bin().domain(xDomain).thresholds(nBins)(data.map(d => d.x));
+      const hYScale = d3.scaleLinear().domain([0, d3.max(xBins, b => b.length)]).range([histH, 0]);
+
+      let gHistTop = svg.selectAll("g.hist-top").data([0]);
+      gHistTop = gHistTop.enter().append("g").attr("class", "hist-top").style("opacity", 0).merge(gHistTop);
+      gHistTop.transition(t).attr("transform", `translate(${margin.left},${margin.top})`).style("opacity", 1).style("display", null);
+
+      const topBars = gHistTop.selectAll("rect").data(xBins, (d, i) => i);
+      topBars.enter().append("rect").attr("fill", "#aaa").attr("fill-opacity", 0.5)
+        .merge(topBars).transition(t)
+        .attr("x", d => xScale(d.x0) + 1)
+        .attr("width", d => Math.max(0, xScale(d.x1) - xScale(d.x0) - 2))
+        .attr("y", d => hYScale(d.length))
+        .attr("height", d => histH - hYScale(d.length));
+      topBars.exit().remove();
+
+      // Right histogram (y distribution)
+      const yBins = d3.bin().domain(yDomain).thresholds(nBins)(data.map(d => d.y));
+      const hXScale = d3.scaleLinear().domain([0, d3.max(yBins, b => b.length)]).range([0, histH]);
+
+      let gHistRight = svg.selectAll("g.hist-right").data([0]);
+      gHistRight = gHistRight.enter().append("g").attr("class", "hist-right").style("opacity", 0).merge(gHistRight);
+      gHistRight.transition(t).attr("transform", `translate(${margin.left + plotW + 8},${mTop})`).style("opacity", 1).style("display", null);
+
+      const rightBars = gHistRight.selectAll("rect").data(yBins, (d, i) => i);
+      rightBars.enter().append("rect").attr("fill", "#aaa").attr("fill-opacity", 0.5)
+        .merge(rightBars).transition(t)
+        .attr("x", 0)
+        .attr("width", d => hXScale(d.length))
+        .attr("y", d => yScale(d.x1) + 1)
+        .attr("height", d => Math.max(0, yScale(d.x0) - yScale(d.x1) - 2));
+      rightBars.exit().remove();
+
+      // SVG legend for wide mode
+      let gLegend = svg.selectAll("g.legend-svg").data([0]);
+      gLegend = gLegend.enter().append("g").attr("class", "legend-svg").merge(gLegend);
+      gLegend.transition(t).attr("transform", `translate(${margin.left + plotW - 120},${mTop + 10})`).style("opacity", 1).style("display", null);
+
+      const legItems = gLegend.selectAll("g.leg-item").data(species, d => d);
+      const legEnter = legItems.enter().append("g").attr("class", "leg-item");
+      legEnter.append("circle").attr("r", 5).attr("cx", 0);
+      legEnter.append("text").attr("x", 10).attr("dy", "0.35em").style("font-size", "12px").style("fill", "#444");
+      const legMerge = legEnter.merge(legItems);
+      legMerge.attr("transform", (d, i) => `translate(0,${i * 22})`);
+      legMerge.select("circle").attr("fill", d => colorScale(d));
+      legMerge.select("text").text(d => d);
+
+    } else {
+      // Medium: hide marginals, show legend below
+      svg.selectAll("g.hist-top, g.hist-right, g.legend-svg").transition(t).style("opacity", 0).on("end", function() { d3.select(this).style("display", "none"); });
+      legendDiv.style("display", "flex");
+    }
+  }
+
+  // Axis labels
+  let xLabel = svg.selectAll("text.x-label").data([0]);
+  xLabel = xLabel.enter().append("text").attr("class", "x-label")
+    .attr("text-anchor", "middle").style("font-size", "13px").style("fill", "#555").text("Sepal Length")
+    .merge(xLabel);
+  xLabel.transition(t).attr("x", margin.left + plotW / 2).attr("y", H - 4);
+
+  let yLabel = svg.selectAll("text.y-label").data([0]);
+  yLabel = yLabel.enter().append("text").attr("class", "y-label")
+    .attr("text-anchor", "middle").style("font-size", "13px").style("fill", "#555")
+    .merge(yLabel);
+  yLabel.transition(t)
+    .attr("transform", `translate(14,${mTop + plotH / 2}) rotate(-90)`)
+    .text(mode === "narrow" ? "Species" : "Sepal Width");
+
+  // Title
+  let title = svg.selectAll("text.title").data([0]);
+  title = title.enter().append("text").attr("class", "title")
+    .attr("text-anchor", "middle").style("font-size", "15px").style("font-weight", 600).style("fill", "#222")
+    .merge(title);
+  title.transition(t).attr("x", W / 2).attr("y", 15)
+    .text(mode === "wide" ? "Iris Scatter with Marginal Histograms" : mode === "medium" ? "Iris Scatter Plot" : "Iris Strip Plot with Box Overlays");
+
+  prevMode = mode;
+}
+
+render();
+
+new ResizeObserver(() => render()).observe(container.node());
+</script>
+</body>
+</html>

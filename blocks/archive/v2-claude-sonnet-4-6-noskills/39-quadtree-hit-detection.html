@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quadtree Nearest-Neighbor Demo</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0d1117; color: #e6edf3; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+#container { position: relative; width: 100vw; height: 100vh; }
+canvas { position: absolute; top: 0; left: 0; cursor: crosshair; display: block; }
+#overlay-svg { position: absolute; top: 0; left: 0; pointer-events: none; }
+#ui { position: absolute; top: 16px; left: 16px; z-index: 10; display: flex; flex-direction: column; gap: 8px; }
+#ui h1 { font-size: 13px; font-weight: 600; color: #8b949e; letter-spacing: 0.04em; text-transform: uppercase; }
+button {
+  background: #161b22;
+  color: #c9d1d9;
+  border: 1px solid #30363d;
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  width: fit-content;
+  transition: background 0.15s, border-color 0.15s;
+}
+button:hover { background: #21262d; border-color: #8b949e; }
+button.active { background: #1f6feb; border-color: #388bfd; color: #fff; }
+#stats {
+  font-size: 11px;
+  color: #484f58;
+  background: #161b2299;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid #21262d;
+  min-width: 160px;
+  line-height: 1.7;
+}
+#stats span { color: #8b949e; }
+#legend { position: absolute; top: 16px; right: 16px; display: flex; flex-direction: column; gap: 5px; }
+.legend-item { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #8b949e; }
+.legend-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+#hint { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); font-size: 11px; color: #30363d; }
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="main-canvas"></canvas>
+  <svg id="overlay-svg"></svg>
+  <div id="ui">
+    <h1>Quadtree NN Demo</h1>
+    <button id="voronoi-btn">Voronoi Overlay</button>
+    <div id="stats">
+      <div>Particles: <span>5,000</span></div>
+      <div>Categories: <span>8</span></div>
+      <div id="stat-zoom">Zoom: <span>1.00×</span></div>
+      <div id="stat-nearest">Nearest: <span>—</span></div>
+    </div>
+  </div>
+  <div id="legend"></div>
+  <div id="hint">Move mouse to find nearest 10 · Scroll to zoom · Click button for Voronoi</div>
+</div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// ── Dimensions ────────────────────────────────────────────────────────────────
+let W = window.innerWidth;
+let H = window.innerHeight;
+
+const canvas = document.getElementById('main-canvas');
+canvas.width = W;
+canvas.height = H;
+const ctx = canvas.getContext('2d');
+
+const svg = d3.select('#overlay-svg').attr('width', W).attr('height', H);
+const voronoiGroup = svg.append('g').attr('id', 'voronoi-group');
+
+// ── Categories ────────────────────────────────────────────────────────────────
+const CATEGORIES = [
+  { name: 'Alpha',   color: '#4e9af1' },
+  { name: 'Beta',    color: '#f7a35c' },
+  { name: 'Gamma',   color: '#7bc86c' },
+  { name: 'Delta',   color: '#f15c80' },
+  { name: 'Epsilon', color: '#e4d354' },
+  { name: 'Zeta',    color: '#9b7dd4' },
+  { name: 'Eta',     color: '#f45b5b' },
+  { name: 'Theta',   color: '#5bc4bf' },
+];
+
+// Legend
+const legend = document.getElementById('legend');
+CATEGORIES.forEach(cat => {
+  const el = document.createElement('div');
+  el.className = 'legend-item';
+  el.innerHTML = `<div class="legend-dot" style="background:${cat.color}"></div><span>${cat.name}</span>`;
+  legend.appendChild(el);
+});
+
+// ── Data Generation ───────────────────────────────────────────────────────────
+// Seeded generators for reproducible layout
+const seedRand = d3.randomLcg(0xdeadbeef);
+const seedNorm = d3.randomNormal.source(d3.randomLcg(0xcafebabe));
+
+// Cluster centers per category (normalized 0–1 space)
+const CLUSTER_CENTERS = CATEGORIES.map((_, i) => {
+  // Spread clusters across the canvas using a grid + jitter
+  const col = i % 4;
+  const row = Math.floor(i / 4);
+  return {
+    cx: 0.12 + col * 0.25 + (seedRand() - 0.5) * 0.08,
+    cy: 0.15 + row * 0.55 + (seedRand() - 0.5) * 0.12,
+    sx: 0.05 + seedRand() * 0.07,
+    sy: 0.04 + seedRand() * 0.07,
+  };
+});
+
+const N = 5000;
+const rawPoints = new Array(N);
+{
+  const rng = d3.randomLcg(42);
+  for (let i = 0; i < N; i++) {
+    const cat = Math.floor(rng() * 8);
+    const c = CLUSTER_CENTERS[cat];
+    const nx = seedNorm(c.cx, c.sx)();
+    const ny = seedNorm(c.cy, c.sy)();
+    rawPoints[i] = {
+      // clamp to canvas bounds with padding
+      nx: Math.max(0.01, Math.min(0.99, nx)),
+      ny: Math.max(0.01, Math.min(0.99, ny)),
+      cat,
+    };
+  }
+}
+
+// ── Transform & Quadtree ──────────────────────────────────────────────────────
+let transform = d3.zoomIdentity;
+let screenPoints = [];   // {x, y, cat} in screen space
+let qt = null;           // d3.quadtree over screenPoints
+
+function rebuildScreenPoints() {
+  for (let i = 0; i < N; i++) {
+    const p = rawPoints[i];
+    if (!screenPoints[i]) screenPoints[i] = { cat: p.cat };
+    screenPoints[i].x = transform.applyX(p.nx * W);
+    screenPoints[i].y = transform.applyY(p.ny * H);
+  }
+  qt = d3.quadtree()
+    .x(d => d.x)
+    .y(d => d.y)
+    .addAll(screenPoints);
+}
+
+rebuildScreenPoints();
+
+// ── K-Nearest Search ──────────────────────────────────────────────────────────
+// Returns array of {point, dist²} sorted by distance, length <= k
+function kNearest(mx, my, k) {
+  const heap = [];       // max-heap by dist² so we can prune efficiently
+  let worstDist2 = Infinity;
+
+  qt.visit((node, x1, y1, x2, y2) => {
+    if (!node.length) {
+      // Leaf: iterate linked list
+      let cursor = node;
+      do {
+        const d = cursor.data;
+        const dx = d.x - mx;
+        const dy = d.y - my;
+        const dist2 = dx * dx + dy * dy;
+        if (dist2 < worstDist2 || heap.length < k) {
+          heap.push({ point: d, dist2 });
+          // Sort and trim — simple for k=10
+          heap.sort((a, b) => a.dist2 - b.dist2);
+          if (heap.length > k) heap.pop();
+          if (heap.length === k) worstDist2 = heap[k - 1].dist2;
+        }
+        cursor = cursor.next;
+      } while (cursor);
+      return false;
+    }
+    // Internal node: prune if closest corner farther than worst
+    if (heap.length === k) {
+      const nearX = Math.max(x1, Math.min(x2, mx));
+      const nearY = Math.max(y1, Math.min(y2, my));
+      const dx = nearX - mx, dy = nearY - my;
+      return (dx * dx + dy * dy) > worstDist2;
+    }
+    return false;
+  });
+
+  return heap;
+}
+
+// ── Voronoi ───────────────────────────────────────────────────────────────────
+let showVoronoi = false;
+let voronoiDirty = true;
+
+function drawVoronoiOverlay() {
+  if (!showVoronoi) {
+    voronoiGroup.selectAll('path').remove();
+    return;
+  }
+  if (!voronoiDirty) return;
+  voronoiDirty = false;
+
+  // Filter to visible points for performance
+  const visible = screenPoints.filter(p =>
+    p.x > -50 && p.x < W + 50 && p.y > -50 && p.y < H + 50
+  );
+
+  const delaunay = d3.Delaunay.from(visible, d => d.x, d => d.y);
+  const voronoi = delaunay.voronoi([0, 0, W, H]);
+
+  voronoiGroup.selectAll('path')
+    .data(visible)
+    .join('path')
+    .attr('d', (_, i) => voronoi.renderCell(i))
+    .attr('fill', d => CATEGORIES[d.cat].color + '18')
+    .attr('stroke', d => CATEGORIES[d.cat].color + '60')
+    .attr('stroke-width', 0.6);
+}
+
+// ── Rendering ─────────────────────────────────────────────────────────────────
+let mousePos = null;
+let nearest = [];
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+
+  // Particle radius scales with zoom (min 1.5, max 5)
+  const r = Math.max(1.5, Math.min(5, 2.5 / Math.sqrt(transform.k) * transform.k));
+
+  // Build a set of highlighted indices for fast lookup
+  const highlightedSet = new Set(nearest.map(n => n.point));
+
+  // Draw base particles
+  for (let i = 0; i < N; i++) {
+    const p = screenPoints[i];
+    if (p.x < -r || p.x > W + r || p.y < -r || p.y > H + r) continue;
+    if (highlightedSet.has(p)) continue; // draw highlighted on top
+
+    const col = CATEGORIES[p.cat].color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = col + 'aa';
+    ctx.fill();
+  }
+
+  // Draw connector lines and highlights
+  if (nearest.length > 0 && mousePos) {
+    const [mx, my] = mousePos;
+    const maxDist = Math.sqrt(nearest[nearest.length - 1].dist2);
+
+    // Search radius indicator
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(mx, my, maxDist, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+    ctx.setLineDash([3, 5]);
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+
+    // Connector lines (back to front = farthest first)
+    for (let i = nearest.length - 1; i >= 0; i--) {
+      const { point, dist2 } = nearest[i];
+      const t = 1 - i / (nearest.length - 1 || 1);
+      const alpha = 0.1 + t * 0.45;
+      ctx.beginPath();
+      ctx.moveTo(mx, my);
+      ctx.lineTo(point.x, point.y);
+      ctx.strokeStyle = `rgba(255,255,255,${alpha})`;
+      ctx.lineWidth = 0.8 + t * 0.6;
+      ctx.stroke();
+    }
+
+    // Highlighted points with glow
+    for (let i = nearest.length - 1; i >= 0; i--) {
+      const { point } = nearest[i];
+      const col = CATEGORIES[point.cat].color;
+      const rank = nearest.length - 1 - i; // 0 = closest
+      const glowSize = r * (2.5 - rank * 0.1);
+
+      // Glow layer
+      ctx.save();
+      ctx.shadowColor = col;
+      ctx.shadowBlur = 14 - rank;
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, glowSize, 0, Math.PI * 2);
+      ctx.fillStyle = col;
+      ctx.fill();
+      ctx.restore();
+
+      // White core for closest 3
+      if (rank < 3) {
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, r * 0.8, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255,255,255,${0.9 - rank * 0.25})`;
+        ctx.fill();
+      }
+    }
+
+    // Mouse crosshair
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(mx, my, 5, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(mx, my, 1.5, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Voronoi (SVG layer)
+  drawVoronoiOverlay();
+}
+
+// ── Stats ─────────────────────────────────────────────────────────────────────
+const statZoom = document.querySelector('#stat-zoom span');
+const statNearest = document.querySelector('#stat-nearest span');
+
+function updateStats() {
+  statZoom.textContent = transform.k.toFixed(2) + '×';
+  if (nearest.length > 0) {
+    const d = Math.sqrt(nearest[0].dist2).toFixed(1);
+    statNearest.textContent = `${d}px`;
+  } else {
+    statNearest.textContent = '—';
+  }
+}
+
+// ── Event Handlers ────────────────────────────────────────────────────────────
+canvas.addEventListener('mousemove', e => {
+  const rect = canvas.getBoundingClientRect();
+  mousePos = [e.clientX - rect.left, e.clientY - rect.top];
+  if (qt) nearest = kNearest(mousePos[0], mousePos[1], 10);
+  updateStats();
+  draw();
+});
+
+canvas.addEventListener('mouseleave', () => {
+  mousePos = null;
+  nearest = [];
+  updateStats();
+  draw();
+});
+
+// Zoom
+const zoom = d3.zoom()
+  .scaleExtent([0.3, 30])
+  .on('zoom', event => {
+    transform = event.transform;
+    rebuildScreenPoints();
+    voronoiDirty = true;
+    // Re-query nearest with same mouse position
+    if (mousePos && qt) nearest = kNearest(mousePos[0], mousePos[1], 10);
+    updateStats();
+    draw();
+  });
+
+d3.select(canvas).call(zoom);
+
+// Voronoi toggle
+document.getElementById('voronoi-btn').addEventListener('click', function() {
+  showVoronoi = !showVoronoi;
+  this.classList.toggle('active', showVoronoi);
+  voronoiDirty = true;
+  if (!showVoronoi) voronoiGroup.selectAll('path').remove();
+  draw();
+});
+
+// Resize
+window.addEventListener('resize', () => {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = W;
+  canvas.height = H;
+  svg.attr('width', W).attr('height', H);
+  rebuildScreenPoints();
+  voronoiDirty = true;
+  draw();
+});
+
+// ── Initial Render ────────────────────────────────────────────────────────────
+draw();
+</script>
+</body>
+</html>

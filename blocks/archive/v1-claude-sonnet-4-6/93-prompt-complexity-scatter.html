@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prompt Complexity Scatter — Word Count vs Composite Score</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #fafafa;
+    font-family: system-ui, -apple-system, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px;
+  }
+  #chart { max-width: 960px; width: 100%; }
+  svg { display: block; width: 100%; height: auto; }
+  .title { font-size: 18px; font-weight: 700; fill: #1a1a1a; }
+  .subtitle { font-size: 12px; fill: #666; }
+  .axis text { font-size: 11px; fill: #555; }
+  .axis line, .axis path { stroke: #ccc; }
+  .dot { stroke: #fff; stroke-width: 0.8; cursor: pointer; }
+  .dot.muted { opacity: 0.12; }
+  .brush .selection { fill: rgba(68, 119, 170, 0.15); stroke: #4477AA; stroke-width: 1; }
+  .annotation-line { stroke: #888; stroke-width: 1; stroke-dasharray: 4,3; }
+  .annotation-text { font-size: 10px; fill: #666; }
+  .callout-line { stroke: #999; stroke-width: 0.8; fill: none; }
+  .callout-text { font-size: 10px; fill: #333; font-weight: 500; }
+  .tooltip {
+    position: absolute; pointer-events: none;
+    background: rgba(255,255,255,0.96);
+    border: 1px solid #ddd; border-radius: 5px;
+    padding: 8px 11px; font-size: 11px; line-height: 1.5;
+    color: #333; box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    opacity: 0; transition: opacity 0.15s;
+    max-width: 260px;
+  }
+  .tooltip strong { font-weight: 600; }
+  .legend { display: flex; gap: 16px; margin-top: 6px; flex-wrap: wrap; justify-content: center; }
+  .legend-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: #555; }
+  .legend-swatch { width: 10px; height: 10px; border-radius: 50%; border: 1px solid rgba(0,0,0,0.15); }
+  .stats-bar {
+    font-size: 12px; color: #555; margin-top: 4px; text-align: center;
+    min-height: 1.4em;
+  }
+  .stats-bar strong { color: #333; }
+</style>
+</head>
+<body>
+<div id="chart"></div>
+<div class="legend" id="legend"></div>
+<div class="stats-bar" id="stats"></div>
+<div class="tooltip" id="tooltip"></div>
+<script type="module">
+
+// ── Seeded PRNG ──
+const lcg = d3.randomLcg(42);
+const normal = d3.randomNormal.source(lcg);
+const uniform = d3.randomUniform.source(lcg);
+
+// ── Skill categories (mirrors manifest groupings) ──
+const categories = [
+  { name: "Seeing patterns",  color: "#4477AA" },
+  { name: "Seeing structure", color: "#EE6677" },
+  { name: "Seeing place",     color: "#228833" },
+  { name: "Seeing change",    color: "#CCBB44" },
+  { name: "Making it legible", color: "#AA3377" },
+  { name: "Making it work",   color: "#66CCEE" },
+];
+
+// ── Synthetic block data: 105 prompts ──
+const rNorm = normal(0, 1);
+const rU = uniform(0, 1);
+
+const data = Array.from({ length: 105 }, (_, i) => {
+  const cat = categories[i % categories.length];
+  // Word count: roughly 30–120, some outliers reaching 160+
+  const baseWc = 40 + Math.abs(rNorm()) * 35;
+  const wordCount = Math.round(Math.min(180, Math.max(20, baseWc + (rU() < 0.1 ? 50 : 0))));
+
+  // Composite score: slight inverted-U relationship with word count
+  // Sweet spot around 60–80 words, too short or too long hurts
+  const optimalWc = 70;
+  const wcPenalty = -0.003 * (wordCount - optimalWc) ** 2;
+  const baseScore = 65 + wcPenalty + rNorm() * 12;
+  const compositeScore = Math.round(Math.max(15, Math.min(98, baseScore)) * 10) / 10;
+
+  // Skill count correlates loosely with word count
+  const skillCount = Math.max(1, Math.min(6, Math.round(1.5 + wordCount / 40 + rNorm() * 0.6)));
+
+  return {
+    id: i + 1,
+    name: `Block ${String(i + 1).padStart(2, "0")}`,
+    category: cat.name,
+    color: cat.color,
+    wordCount,
+    compositeScore,
+    skillCount,
+  };
+});
+
+// ── Layout ──
+const margin = { top: 52, right: 30, bottom: 52, left: 58 };
+const width = 920;
+const height = 540;
+const innerW = width - margin.left - margin.right;
+const innerH = height - margin.top - margin.bottom;
+
+const svg = d3.select("#chart").append("svg")
+  .attr("viewBox", `0 0 ${width} ${height}`)
+  .attr("preserveAspectRatio", "xMidYMid meet");
+
+const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+// ── Scales ──
+const x = d3.scaleLinear()
+  .domain(d3.nice(...d3.extent(data, d => d.wordCount), 10))
+  .range([0, innerW]);
+
+const y = d3.scaleLinear()
+  .domain([10, 100])
+  .range([innerH, 0]);
+
+const r = d3.scaleSqrt()
+  .domain([1, 6])
+  .range([3.5, 10]);
+
+// ── Axes ──
+const xAxis = g.append("g")
+  .attr("class", "axis")
+  .attr("transform", `translate(0,${innerH})`)
+  .call(d3.axisBottom(x).ticks(8).tickSize(-innerH).tickPadding(8));
+xAxis.select(".domain").remove();
+xAxis.selectAll(".tick line").attr("stroke", "#e8e8e8");
+
+const yAxis = g.append("g")
+  .attr("class", "axis")
+  .call(d3.axisLeft(y).ticks(6).tickSize(-innerW).tickPadding(6));
+yAxis.select(".domain").remove();
+yAxis.selectAll(".tick line").attr("stroke", "#e8e8e8");
+
+// Axis labels
+svg.append("text")
+  .attr("x", margin.left + innerW / 2).attr("y", height - 6)
+  .attr("text-anchor", "middle")
+  .attr("font-size", 12).attr("fill", "#555")
+  .text("Prompt Word Count");
+
+svg.append("text")
+  .attr("transform", `rotate(-90)`)
+  .attr("x", -(margin.top + innerH / 2)).attr("y", 16)
+  .attr("text-anchor", "middle")
+  .attr("font-size", 12).attr("fill", "#555")
+  .text("Composite Score");
+
+// ── Title ──
+svg.append("text").attr("class", "title")
+  .attr("x", margin.left).attr("y", 22)
+  .text("Prompt Complexity vs Output Quality");
+
+svg.append("text").attr("class", "subtitle")
+  .attr("x", margin.left).attr("y", 40)
+  .text("Each dot is a generated block — size encodes skill count, color encodes category. Brush to filter.");
+
+// ── Annotation: optimal zone ──
+const zoneX1 = x(55), zoneX2 = x(90);
+g.append("rect")
+  .attr("x", zoneX1).attr("y", 0)
+  .attr("width", zoneX2 - zoneX1).attr("height", innerH)
+  .attr("fill", "#228833").attr("opacity", 0.04);
+
+g.append("line").attr("class", "annotation-line")
+  .attr("x1", zoneX1).attr("x2", zoneX1).attr("y1", 0).attr("y2", innerH);
+g.append("line").attr("class", "annotation-line")
+  .attr("x1", zoneX2).attr("x2", zoneX2).attr("y1", 0).attr("y2", innerH);
+
+g.append("text").attr("class", "annotation-text")
+  .attr("x", (zoneX1 + zoneX2) / 2).attr("y", -6)
+  .attr("text-anchor", "middle")
+  .text("Sweet spot: 55–90 words");
+
+// ── Median reference lines ──
+const medScore = d3.median(data, d => d.compositeScore);
+g.append("line").attr("class", "annotation-line")
+  .attr("x1", 0).attr("x2", innerW)
+  .attr("y1", y(medScore)).attr("y2", y(medScore))
+  .attr("stroke-dasharray", "2,4").attr("stroke", "#aaa");
+g.append("text").attr("class", "annotation-text")
+  .attr("x", innerW + 4).attr("y", y(medScore) + 3)
+  .attr("text-anchor", "start")
+  .text(`median ${medScore.toFixed(0)}`);
+
+// ── Dots ──
+const dots = g.selectAll(".dot")
+  .data(data, d => d.id)
+  .join("circle")
+    .attr("class", "dot")
+    .attr("cx", d => x(d.wordCount))
+    .attr("cy", d => y(d.compositeScore))
+    .attr("r", d => r(d.skillCount))
+    .attr("fill", d => d.color)
+    .attr("opacity", 0.75);
+
+// ── Callout annotations for outliers ──
+const topScorer = data.reduce((a, b) => a.compositeScore > b.compositeScore ? a : b);
+const longestPrompt = data.reduce((a, b) => a.wordCount > b.wordCount ? a : b);
+
+function drawCallout(d, labelText, dx, dy) {
+  const cx = x(d.wordCount), cy = y(d.compositeScore);
+  const tx = cx + dx, ty = cy + dy;
+
+  // Elbow path
+  const midY = cy + dy * 0.4;
+  g.append("path").attr("class", "callout-line")
+    .attr("d", `M${cx},${cy} L${cx},${midY} L${tx},${midY} L${tx},${ty}`);
+
+  g.append("text").attr("class", "callout-text")
+    .attr("x", tx).attr("y", ty - 4)
+    .attr("text-anchor", dx > 0 ? "start" : "end")
+    .text(labelText);
+}
+
+drawCallout(topScorer, `Top: ${topScorer.compositeScore} (${topScorer.wordCount} words)`, 50, -40);
+drawCallout(longestPrompt, `Longest: ${longestPrompt.wordCount} words`, -45, 35);
+
+// ── Tooltip ──
+const tooltip = d3.select("#tooltip");
+
+dots.on("pointerenter", (event, d) => {
+    tooltip.style("opacity", 1).html(
+      `<strong>${d.name}</strong><br>` +
+      `Category: ${d.category}<br>` +
+      `Words: <strong>${d.wordCount}</strong> · Score: <strong>${d.compositeScore}</strong><br>` +
+      `Skills used: ${d.skillCount}`
+    );
+  })
+  .on("pointermove", event => {
+    tooltip
+      .style("left", (event.pageX + 14) + "px")
+      .style("top", (event.pageY - 10) + "px");
+  })
+  .on("pointerleave", () => tooltip.style("opacity", 0));
+
+// ── Brush ──
+const statsEl = d3.select("#stats");
+
+const brush = d3.brush()
+  .extent([[0, 0], [innerW, innerH]])
+  .on("start brush end", brushed);
+
+g.append("g").attr("class", "brush").call(brush);
+
+function brushed({ selection }) {
+  if (!selection) {
+    dots.classed("muted", false).attr("opacity", 0.75);
+    statsEl.html("");
+    return;
+  }
+  const [[x0, y0], [x1, y1]] = selection;
+  const selected = [];
+  dots.each(function(d) {
+    const cx = x(d.wordCount), cy = y(d.compositeScore);
+    const inside = cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1;
+    d3.select(this)
+      .classed("muted", !inside)
+      .attr("opacity", inside ? 0.85 : undefined);
+    if (inside) selected.push(d);
+  });
+
+  if (selected.length === 0) {
+    statsEl.html("");
+    return;
+  }
+
+  const avgScore = d3.mean(selected, d => d.compositeScore).toFixed(1);
+  const avgWords = d3.mean(selected, d => d.wordCount).toFixed(0);
+  const minS = d3.min(selected, d => d.compositeScore);
+  const maxS = d3.max(selected, d => d.compositeScore);
+  statsEl.html(
+    `<strong>${selected.length}</strong> blocks selected · ` +
+    `Avg score: <strong>${avgScore}</strong> (${minS}–${maxS}) · ` +
+    `Avg words: <strong>${avgWords}</strong>`
+  );
+}
+
+// ── Legend ──
+const legend = d3.select("#legend");
+categories.forEach(c => {
+  const item = legend.append("div").attr("class", "legend-item");
+  item.append("div").attr("class", "legend-swatch").style("background", c.color);
+  item.append("span").text(c.name);
+});
+
+// Size legend
+const sizeLegend = legend.append("div").attr("class", "legend-item").style("margin-left", "12px");
+sizeLegend.append("span").style("color", "#999").text("Size = skill count");
+
+</script>
+</body>
+</html>

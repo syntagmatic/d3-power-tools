@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Semantic Zoom Distributions</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa; color: #333; overflow: hidden;
+  }
+  .header {
+    padding: 8px 20px; display: flex; align-items: center; gap: 14px;
+    height: 44px;
+  }
+  .header h1 { font-size: 17px; font-weight: 600; letter-spacing: -0.02em; }
+  .badge {
+    background: #4477AA; color: #fff; padding: 2px 10px;
+    border-radius: 12px; font-size: 12px; font-weight: 500;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    transition: background 0.3s;
+  }
+  .badge.hex { background: #228833; }
+  .badge.points { background: #EE6677; }
+  .hint {
+    font-size: 11px; color: #888; margin-left: auto;
+  }
+  #chart {
+    width: 100%; height: calc(100vh - 44px);
+    position: relative; overflow: hidden;
+  }
+  canvas, svg { position: absolute; top: 0; left: 0; display: block; }
+  .tooltip {
+    position: absolute; pointer-events: none;
+    background: rgba(255,255,255,0.95); border: 1px solid #ddd;
+    border-radius: 4px; padding: 6px 10px; font-size: 12px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+    opacity: 0; transition: opacity 0.15s;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+  }
+  .tooltip.visible { opacity: 1; }
+  .tick text { font-size: 11px; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Semantic Zoom Distributions</h1>
+  <span class="badge" id="modeBadge">Density contours</span>
+  <span class="hint">Scroll to zoom, drag to pan</span>
+</div>
+<div id="chart">
+  <div class="tooltip" id="tooltip"></div>
+</div>
+
+<script>
+// --- Tol palette ---
+const TOL = ["#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE", "#AA3377"];
+const CLUSTER_COLORS = [TOL[0], TOL[1], TOL[2], TOL[3]];
+
+// --- Synthetic data: 4 clusters with different shapes ---
+const lcg = (() => { let s = 42; return () => (s = (s * 1664525 + 1013904223) & 0x7fffffff) / 0x7fffffff; })();
+const boxMuller = () => {
+  let u, v;
+  do { u = lcg(); } while (u === 0);
+  v = lcg();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+};
+
+const clusters = [
+  { cx: 0.25, cy: 0.35, sx: 0.08, sy: 0.06, n: 600, name: "Alpha", corr: 0.6 },
+  { cx: 0.65, cy: 0.60, sx: 0.10, sy: 0.08, n: 550, name: "Beta", corr: -0.4 },
+  { cx: 0.50, cy: 0.20, sx: 0.05, sy: 0.04, n: 450, name: "Gamma", corr: 0.0 },
+  { cx: 0.80, cy: 0.25, sx: 0.07, sy: 0.12, n: 400, name: "Delta", corr: 0.3 },
+];
+
+const data = [];
+let id = 0;
+for (const c of clusters) {
+  for (let i = 0; i < c.n; i++) {
+    const z1 = boxMuller(), z2 = boxMuller();
+    const x = c.cx + c.sx * z1;
+    const y = c.cy + c.sy * (c.corr * z1 + Math.sqrt(1 - c.corr * c.corr) * z2);
+    data.push({
+      x, y,
+      cluster: clusters.indexOf(c),
+      name: c.name,
+      label: `${c.name}-${String(i + 1).padStart(3, "0")}`,
+      id: id++,
+      value: Math.round((z1 * z1 + z2 * z2) * 100) / 100,
+    });
+  }
+}
+
+// --- Layout ---
+const chartEl = document.getElementById("chart");
+const tooltip = document.getElementById("tooltip");
+const badge = document.getElementById("modeBadge");
+const width = chartEl.clientWidth;
+const height = chartEl.clientHeight;
+const margin = { top: 10, right: 20, bottom: 40, left: 50 };
+const iw = width - margin.left - margin.right;
+const ih = height - margin.top - margin.bottom;
+
+// --- Scales (original, never mutated) ---
+const xExtent = d3.extent(data, d => d.x);
+const yExtent = d3.extent(data, d => d.y);
+const xScale = d3.scaleLinear().domain([xExtent[0] - 0.05, xExtent[1] + 0.05]).nice().range([0, iw]);
+const yScale = d3.scaleLinear().domain([yExtent[0] - 0.05, yExtent[1] + 0.05]).nice().range([ih, 0]);
+
+// --- Canvas layer (contours + hexbins) ---
+const dpr = devicePixelRatio || 1;
+const canvas = document.createElement("canvas");
+canvas.width = Math.round(width * dpr);
+canvas.height = Math.round(height * dpr);
+canvas.style.width = `${width}px`;
+canvas.style.height = `${height}px`;
+chartEl.appendChild(canvas);
+const ctx = canvas.getContext("2d");
+ctx.scale(dpr, dpr);
+
+// --- SVG overlay (axes, points, labels, interaction) ---
+const svg = d3.select("#chart").append("svg")
+  .attr("width", width).attr("height", height)
+  .style("pointer-events", "all");
+
+const defs = svg.append("defs");
+defs.append("clipPath").attr("id", "clip")
+  .append("rect").attr("width", iw).attr("height", ih);
+
+const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+const plotArea = g.append("g").attr("clip-path", "url(#clip)");
+const pointLayer = plotArea.append("g").attr("class", "points");
+const xAxisG = g.append("g").attr("transform", `translate(0,${ih})`);
+const yAxisG = g.append("g");
+
+// --- Quadtree for hit detection ---
+const quadtree = d3.quadtree()
+  .x(d => d.x).y(d => d.y)
+  .addAll(data);
+
+// --- LOD State Machine with Hysteresis ---
+const LOD_STATES = [
+  { name: "contours", enterAbove: 0,   exitBelow: 0 },
+  { name: "hex",      enterAbove: 3.5, exitBelow: 2.5 },
+  { name: "points",   enterAbove: 10,  exitBelow: 7 },
+];
+let lodIndex = 0;
+
+function updateLOD(k) {
+  while (lodIndex < LOD_STATES.length - 1 && k >= LOD_STATES[lodIndex + 1].enterAbove)
+    lodIndex++;
+  while (lodIndex > 0 && k < LOD_STATES[lodIndex].exitBelow)
+    lodIndex--;
+  return LOD_STATES[lodIndex].name;
+}
+
+// --- Contour drawing (Canvas) ---
+function drawContours(zx, zy) {
+  const pts = data.map(d => [zx(d.x) + margin.left, zy(d.y) + margin.top]);
+  const density = d3.contourDensity()
+    .x(d => d[0]).y(d => d[1])
+    .size([width, height])
+    .bandwidth(25)
+    .thresholds(12)(pts);
+
+  const maxVal = d3.max(density, d => d.value) || 1;
+  const colorScale = d3.scaleSequential(d3.interpolateBlues).domain([0, maxVal]);
+  const path = d3.geoPath().context(ctx);
+
+  for (const contour of density) {
+    ctx.beginPath();
+    path(contour);
+    ctx.fillStyle = colorScale(contour.value);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(68,119,170,0.3)";
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+  }
+}
+
+// --- Hexbin drawing (Canvas) ---
+function drawHexbins(zx, zy) {
+  const hexRadius = 14;
+  const dx = hexRadius * 2 * Math.sin(Math.PI / 3);
+  const dy = hexRadius * 1.5;
+
+  const bins = new Map();
+  for (const d of data) {
+    const px = zx(d.x), py = zy(d.y);
+    if (px < -hexRadius || px > iw + hexRadius || py < -hexRadius || py > ih + hexRadius) continue;
+    const col = Math.round(px / dx);
+    const row = Math.round((py - (col & 1) * dy * 0.5) / dy);
+    const cx = col * dx;
+    const cy = row * dy + (col & 1) * dy * 0.5;
+    const key = `${col},${row}`;
+    if (!bins.has(key)) bins.set(key, { cx, cy, count: 0, clusterCounts: new Array(clusters.length).fill(0) });
+    const bin = bins.get(key);
+    bin.count++;
+    bin.clusterCounts[d.cluster]++;
+  }
+
+  const hexData = Array.from(bins.values());
+  const maxCount = d3.max(hexData, d => d.count) || 1;
+  const opacityScale = d3.scaleLinear().domain([0, maxCount]).range([0.15, 0.9]);
+
+  const angles = d3.range(6).map(i => i * Math.PI / 3 - Math.PI / 6);
+  const hexPoints = angles.map(a => [
+    (hexRadius - 0.5) * Math.cos(a),
+    (hexRadius - 0.5) * Math.sin(a),
+  ]);
+
+  ctx.save();
+  ctx.translate(margin.left, margin.top);
+
+  for (const bin of hexData) {
+    // Dominant cluster color
+    const dominant = bin.clusterCounts.indexOf(Math.max(...bin.clusterCounts));
+    const baseColor = d3.color(CLUSTER_COLORS[dominant]);
+    baseColor.opacity = opacityScale(bin.count);
+
+    ctx.beginPath();
+    ctx.moveTo(bin.cx + hexPoints[0][0], bin.cy + hexPoints[0][1]);
+    for (let i = 1; i < 6; i++) {
+      ctx.lineTo(bin.cx + hexPoints[i][0], bin.cy + hexPoints[i][1]);
+    }
+    ctx.closePath();
+    ctx.fillStyle = baseColor.toString();
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.6)";
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+  }
+
+  // Count labels in bins with enough room
+  ctx.font = "9px system-ui";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#333";
+  for (const bin of hexData) {
+    if (bin.count >= 3) {
+      ctx.fillText(bin.count, bin.cx, bin.cy);
+    }
+  }
+
+  ctx.restore();
+}
+
+// --- Point drawing (SVG for interaction) ---
+function drawPoints(zx, zy, k) {
+  const visible = data.filter(d => {
+    const px = zx(d.x), py = zy(d.y);
+    return px >= -20 && px <= iw + 20 && py >= -20 && py <= ih + 20;
+  });
+
+  pointLayer.selectAll("circle")
+    .data(visible, d => d.id)
+    .join(
+      enter => enter.append("circle")
+        .attr("cx", d => zx(d.x))
+        .attr("cy", d => zy(d.y))
+        .attr("r", 0)
+        .attr("fill", d => CLUSTER_COLORS[d.cluster])
+        .attr("stroke", "#fff")
+        .attr("stroke-width", 0.8)
+        .attr("opacity", 0.85)
+        .style("cursor", "pointer")
+        .call(e => e.transition().duration(200).attr("r", 4)),
+      update => update
+        .attr("cx", d => zx(d.x))
+        .attr("cy", d => zy(d.y)),
+      exit => exit.transition().duration(150).attr("r", 0).remove()
+    );
+
+  // Labels at very high zoom (only visible points, capped)
+  const showLabels = k >= 15;
+  const labelData = showLabels ? visible.slice(0, 100) : [];
+
+  pointLayer.selectAll("text.label")
+    .data(labelData, d => d.id)
+    .join(
+      enter => enter.append("text").attr("class", "label")
+        .attr("x", d => zx(d.x) + 6)
+        .attr("y", d => zy(d.y) + 3)
+        .text(d => d.label)
+        .attr("font-size", "9px")
+        .attr("fill", "#555")
+        .attr("opacity", 0)
+        .call(e => e.transition().duration(200).attr("opacity", 1)),
+      update => update
+        .attr("x", d => zx(d.x) + 6)
+        .attr("y", d => zy(d.y) + 3),
+      exit => exit.transition().duration(100).attr("opacity", 0).remove()
+    );
+}
+
+// --- Main render ---
+let currentMode = "contours";
+let currentTransform = d3.zoomIdentity;
+
+function render(transform) {
+  currentTransform = transform;
+  const k = transform.k;
+  const newMode = updateLOD(k);
+
+  const zx = transform.rescaleX(xScale);
+  const zy = transform.rescaleY(yScale);
+
+  // Axes
+  xAxisG.call(d3.axisBottom(zx).ticks(Math.max(3, Math.floor(iw / 100))));
+  yAxisG.call(d3.axisLeft(zy).ticks(Math.max(3, Math.floor(ih / 80))));
+
+  // Clear canvas
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.restore();
+
+  // Transition badge
+  if (newMode !== currentMode) {
+    currentMode = newMode;
+    // Clear SVG points when not in points mode
+    if (currentMode !== "points") {
+      pointLayer.selectAll("*").transition().duration(200).attr("opacity", 0).remove();
+    }
+  }
+
+  // Draw active mode
+  if (currentMode === "contours") {
+    drawContours(zx, zy);
+    badge.textContent = `Density contours (k=${k.toFixed(1)})`;
+    badge.className = "badge";
+  } else if (currentMode === "hex") {
+    drawHexbins(zx, zy);
+    badge.textContent = `Hex bins (k=${k.toFixed(1)})`;
+    badge.className = "badge hex";
+  } else {
+    drawPoints(zx, zy, k);
+    const visCount = pointLayer.selectAll("circle").size();
+    badge.textContent = `${visCount} points (k=${k.toFixed(1)})`;
+    badge.className = "badge points";
+  }
+}
+
+// --- Zoom ---
+let rafId = null;
+const zoom = d3.zoom()
+  .scaleExtent([1, 60])
+  .translateExtent([[0, 0], [width, height]])
+  .extent([[margin.left, margin.top], [width - margin.right, height - margin.bottom]])
+  .on("zoom", ({ transform }) => {
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = requestAnimationFrame(() => {
+      render(transform);
+      rafId = null;
+    });
+  });
+
+svg.call(zoom);
+
+// --- Tooltip (pointer events on SVG overlay) ---
+let hoveredId = null;
+
+svg.on("pointermove", (event) => {
+  if (currentMode !== "points") {
+    tooltip.classList.remove("visible");
+    hoveredId = null;
+    pointLayer.selectAll("circle").attr("r", 4).attr("stroke-width", 0.8);
+    return;
+  }
+
+  const [mx, my] = d3.pointer(event);
+  const px = mx - margin.left, py = my - margin.top;
+  const zx = currentTransform.rescaleX(xScale);
+  const zy = currentTransform.rescaleY(yScale);
+  const dataX = zx.invert(px), dataY = zy.invert(py);
+
+  // Search quadtree
+  const searchRadius = 8 / currentTransform.k;
+  let nearest = null, nearestDist = Infinity;
+  quadtree.visit((node, x0, y0, x1, y1) => {
+    if (!node.length) {
+      do {
+        const d = node.data;
+        const dist = Math.hypot(d.x - dataX, d.y - dataY);
+        if (dist < nearestDist && dist < searchRadius) {
+          nearestDist = dist;
+          nearest = d;
+        }
+      } while ((node = node.next));
+    }
+    return x0 > dataX + searchRadius || x1 < dataX - searchRadius ||
+           y0 > dataY + searchRadius || y1 < dataY - searchRadius;
+  });
+
+  if (nearest && nearest.id !== hoveredId) {
+    hoveredId = nearest.id;
+    pointLayer.selectAll("circle")
+      .attr("r", d => d.id === nearest.id ? 7 : 4)
+      .attr("stroke-width", d => d.id === nearest.id ? 2 : 0.8);
+
+    const sx = zx(nearest.x) + margin.left;
+    const sy = zy(nearest.y) + margin.top;
+    tooltip.innerHTML = `<strong>${nearest.label}</strong><br>x: ${nearest.x.toFixed(3)}, y: ${nearest.y.toFixed(3)}<br>dist: ${nearest.value.toFixed(2)}`;
+    tooltip.style.left = `${sx + 12}px`;
+    tooltip.style.top = `${sy - 10}px`;
+    tooltip.classList.add("visible");
+  } else if (!nearest) {
+    hoveredId = null;
+    pointLayer.selectAll("circle").attr("r", 4).attr("stroke-width", 0.8);
+    tooltip.classList.remove("visible");
+  }
+});
+
+svg.on("pointerleave", () => {
+  hoveredId = null;
+  pointLayer.selectAll("circle").attr("r", 4).attr("stroke-width", 0.8);
+  tooltip.classList.remove("visible");
+});
+
+// --- Initial render ---
+render(d3.zoomIdentity);
+</script>
+</body>
+</html>

@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Letter-Value Plot with Table Toggle</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa; color: #222; padding: 24px;
+  }
+  h1 { font-size: 18px; font-weight: 600; margin-bottom: 2px; }
+  .subtitle { font-size: 12px; color: #777; margin-bottom: 10px; }
+  .controls { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .toggle-btn {
+    padding: 5px 14px; border: 1.5px solid #4477AA; border-radius: 4px;
+    background: #fff; color: #4477AA; cursor: pointer; font-size: 13px;
+    font-weight: 500; transition: background 0.15s, color 0.15s;
+  }
+  .toggle-btn[aria-pressed="true"] { background: #4477AA; color: #fff; }
+  .toggle-btn:focus-visible { outline: 2px solid #4477AA; outline-offset: 2px; }
+
+  #chart-view, #table-view { transition: opacity 0.2s; }
+  #table-view { display: none; }
+
+  /* Table styles */
+  .table-wrap { max-height: 520px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; }
+  table { border-collapse: separate; border-spacing: 0; width: 100%; max-width: 960px; font-size: 13px; }
+  th, td {
+    padding: 6px 10px; border-bottom: 1px solid #e8e8e8;
+    text-align: right; font-variant-numeric: tabular-nums;
+  }
+  th {
+    background: #f5f5f5; font-weight: 600; cursor: pointer; user-select: none;
+    position: sticky; top: 0; z-index: 1;
+  }
+  th:first-child, td:first-child { text-align: left; }
+  th:hover { background: #e0e0e0; }
+  tr:hover td { background: #f0f4fa; }
+  .sort-arrow { font-size: 10px; margin-left: 3px; opacity: 0.6; }
+  caption { text-align: left; font-size: 13px; font-weight: 600; padding: 8px 10px; caption-side: top; }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px;
+    overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+  }
+
+  /* Tooltip */
+  .tooltip {
+    position: absolute; pointer-events: none; background: rgba(0,0,0,0.84); color: #fff;
+    padding: 7px 11px; border-radius: 4px; font-size: 12px; display: none; z-index: 20;
+    white-space: nowrap; line-height: 1.45;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+  }
+
+  /* Legend */
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 11px; color: #555; margin-bottom: 10px; }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .legend-swatch { width: 14px; height: 12px; border-radius: 2px; border: 1px solid rgba(0,0,0,0.15); }
+
+  /* Forced-colors: replace fills with hatching */
+  @media (forced-colors: active) {
+    rect.lv-box { fill: none !important; stroke: CanvasText !important; stroke-width: 1.5px; }
+    rect.lv-box.lv-depth-0 { fill: url(#hatch-dense) !important; }
+    rect.lv-box.lv-depth-1 { fill: url(#hatch-medium) !important; }
+    rect.lv-box.lv-depth-2 { fill: url(#hatch-light) !important; }
+    rect.lv-box.lv-depth-3 { fill: url(#hatch-sparse) !important; }
+    rect.lv-box.lv-depth-4 { fill: none !important; }
+    line.median-line { stroke: CanvasText !important; stroke-width: 2.5px; }
+    circle.outlier-dot { fill: CanvasText !important; }
+    .legend-swatch { forced-color-adjust: none; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Letter-Value Plot: Distribution Comparison</h1>
+<p class="subtitle">Five simulated groups (n=1000 each) — nested boxes show median, fourths, eighths, sixteenths, thirty-seconds</p>
+
+<div class="controls">
+  <button class="toggle-btn" id="btn-chart" aria-pressed="true">Chart</button>
+  <button class="toggle-btn" id="btn-table" aria-pressed="false">Table</button>
+</div>
+
+<div id="legend" class="legend"></div>
+<div id="chart-view"></div>
+<div id="table-view" aria-hidden="true"></div>
+<div class="tooltip" id="tooltip"></div>
+<div id="live-region" class="sr-only" aria-live="polite"></div>
+
+<script>
+(() => {
+  // --- Tol palette ---
+  const tol = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE"];
+  const levelLabels = ["Fourths (F)","Eighths (E)","Sixteenths (D)","Thirty-seconds (C)","Sixty-fourths (B)"];
+
+  // --- Synthetic data: 5 groups with distinct distributional character ---
+  const rng = d3.randomLcg(42);
+  const normal = d3.randomNormal.source(rng);
+  const uniform = d3.randomUniform.source(rng);
+  const expo = d3.randomExponential.source(rng);
+
+  const groups = [
+    { name: "Symmetric", gen: () => normal(50, 12)() },
+    { name: "Right-skewed", gen: () => 20 + expo(0.04)() },
+    { name: "Left-skewed", gen: () => 100 - expo(0.05)() },
+    { name: "Bimodal", gen: () => (rng() < 0.45 ? normal(35, 6) : normal(70, 8))() },
+    { name: "Heavy-tailed", gen: () => normal(50, 8)() / (0.3 + rng() * 0.7) },
+  ];
+
+  const N = 1000;
+  const data = groups.map(g => {
+    const values = Float64Array.from({ length: N }, g.gen).sort();
+    return { name: g.name, values, stats: computeLetterValues(values) };
+  });
+
+  // --- Letter-value computation ---
+  function computeLetterValues(sorted) {
+    const n = sorted.length;
+    const levels = [];
+    let depth = (1 + n) / 2;
+    const median = atDepth(sorted, depth);
+    levels.push({ letter: "M", lower: median, upper: median, depth: 0 });
+
+    const letters = ["F","E","D","C","B","A","Z","Y","X","W"];
+    const maxLevels = Math.max(0, Math.floor(Math.log2(n)) - 2);
+    for (let k = 0; k < Math.min(maxLevels, letters.length); k++) {
+      depth = (1 + Math.floor(depth)) / 2;
+      if (depth < 1) break;
+      levels.push({
+        letter: letters[k],
+        lower: atDepth(sorted, depth),
+        upper: atDepth(sorted, n + 1 - depth),
+        depth: k + 1
+      });
+    }
+    return { levels, median, min: sorted[0], max: sorted[n - 1], n };
+  }
+
+  function atDepth(sorted, depth) {
+    const i = Math.floor(depth) - 1;
+    return depth === Math.floor(depth) ? sorted[i] : (sorted[i] + sorted[i + 1]) / 2;
+  }
+
+  // --- Dimensions ---
+  const margin = { top: 30, right: 30, bottom: 50, left: 70 };
+  const fullW = 1200, fullH = 560;
+  const width = fullW - margin.left - margin.right;
+  const height = fullH - margin.top - margin.bottom;
+
+  // --- Scales ---
+  const allValues = data.flatMap(d => [d.stats.min, d.stats.max]);
+  const yExtent = d3.extent(allValues);
+  const yPad = (yExtent[1] - yExtent[0]) * 0.06;
+
+  const xScale = d3.scaleBand()
+    .domain(data.map(d => d.name))
+    .range([0, width])
+    .padding(0.25);
+
+  const yScale = d3.scaleLinear()
+    .domain([yExtent[0] - yPad, yExtent[1] + yPad])
+    .range([height, 0]);
+
+  // Max depth across all groups for consistent width/color mapping
+  const maxDepth = d3.max(data, d => d.stats.levels.length) - 1; // exclude median
+
+  // Sequential color per depth level (Tol-derived blue ramp)
+  const depthColor = d3.scaleSequential()
+    .domain([maxDepth, 0])
+    .interpolator(d3.interpolateBlues);
+
+  // Width scale: outermost level = full bandwidth, innermost = 15%
+  const bandW = xScale.bandwidth();
+  const widthScale = d3.scaleLinear().domain([1, maxDepth]).range([bandW, bandW * 0.18]);
+
+  // --- SVG ---
+  const svg = d3.select("#chart-view").append("svg")
+    .attr("viewBox", `0 0 ${fullW} ${fullH}`)
+    .attr("width", fullW)
+    .attr("height", fullH)
+    .attr("role", "img")
+    .attr("aria-label", "Letter-value plot comparing five distribution groups");
+
+  // Hatching patterns for forced-colors
+  const defs = svg.append("defs");
+  const hatchConfigs = [
+    { id: "hatch-dense", gap: 3 },
+    { id: "hatch-medium", gap: 5 },
+    { id: "hatch-light", gap: 8 },
+    { id: "hatch-sparse", gap: 13 },
+  ];
+  hatchConfigs.forEach(({ id, gap }) => {
+    const p = defs.append("pattern")
+      .attr("id", id)
+      .attr("patternUnits", "userSpaceOnUse")
+      .attr("width", gap).attr("height", gap)
+      .attr("patternTransform", "rotate(45)");
+    p.append("rect").attr("width", gap).attr("height", gap).attr("fill", "Canvas");
+    p.append("line")
+      .attr("x1", 0).attr("y1", 0).attr("x2", 0).attr("y2", gap)
+      .attr("stroke", "CanvasText").attr("stroke-width", gap < 6 ? 1.5 : 1);
+  });
+
+  const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+  // Axes
+  g.append("g")
+    .attr("transform", `translate(0,${height})`)
+    .call(d3.axisBottom(xScale).tickSize(0).tickPadding(10))
+    .call(g => g.select(".domain").attr("stroke", "#bbb"))
+    .selectAll("text").attr("font-size", "12px");
+
+  g.append("g")
+    .call(d3.axisLeft(yScale).ticks(10).tickFormat(d3.format(".0f")))
+    .call(g => g.select(".domain").remove())
+    .call(g => g.selectAll(".tick line").attr("x2", width).attr("stroke", "#e8e8e8").attr("stroke-dasharray", "2,3"))
+    .selectAll("text").attr("font-size", "11px");
+
+  g.append("text")
+    .attr("transform", "rotate(-90)")
+    .attr("x", -height / 2).attr("y", -50)
+    .attr("text-anchor", "middle")
+    .attr("font-size", "12px").attr("fill", "#555")
+    .text("Value");
+
+  // --- Draw letter-value boxes ---
+  const tooltip = d3.select("#tooltip");
+
+  data.forEach(group => {
+    const cx = xScale(group.name) + bandW / 2;
+    const { levels, median } = group.stats;
+
+    // Draw from outermost level to innermost so inner boxes paint on top
+    const outerLevels = levels.filter(l => l.letter !== "M").sort((a, b) => b.depth - a.depth);
+
+    outerLevels.forEach(level => {
+      const w = widthScale(level.depth);
+      const depthIdx = level.depth - 1; // 0-based for color/class
+      const y1 = yScale(level.upper);
+      const y2 = yScale(level.lower);
+      const rectH = Math.max(y2 - y1, 1);
+
+      g.append("rect")
+        .attr("class", `lv-box lv-depth-${Math.min(depthIdx, 4)}`)
+        .attr("x", cx - w / 2)
+        .attr("y", y1)
+        .attr("width", w)
+        .attr("height", rectH)
+        .attr("fill", depthColor(depthIdx))
+        .attr("stroke", d3.lab(depthColor(depthIdx)).darker(0.6))
+        .attr("stroke-width", 0.8)
+        .attr("rx", 1.5)
+        .style("cursor", "pointer")
+        .on("pointerenter", (event) => {
+          const label = levelLabels[depthIdx] || `Level ${level.depth}`;
+          tooltip.style("display", "block")
+            .html(`<strong>${group.name}</strong> — ${label}<br>` +
+              `Lower: ${d3.format(".1f")(level.lower)}<br>` +
+              `Upper: ${d3.format(".1f")(level.upper)}<br>` +
+              `Range: ${d3.format(".1f")(level.upper - level.lower)}`);
+        })
+        .on("pointermove", (event) => {
+          tooltip.style("left", (event.pageX + 12) + "px")
+            .style("top", (event.pageY - 10) + "px");
+        })
+        .on("pointerleave", () => tooltip.style("display", "none"));
+    });
+
+    // Median line
+    g.append("line")
+      .attr("class", "median-line")
+      .attr("x1", cx - bandW * 0.42)
+      .attr("x2", cx + bandW * 0.42)
+      .attr("y1", yScale(median))
+      .attr("y2", yScale(median))
+      .attr("stroke", "#222")
+      .attr("stroke-width", 2.2);
+
+    // Outliers beyond outermost level
+    const outermost = outerLevels.length > 0
+      ? outerLevels[outerLevels.length - 1]
+      : { lower: median, upper: median };
+    // Actually we want the widest level (largest depth number = outermost quantile)
+    const widest = levels.reduce((a, b) => (b.upper - b.lower) > (a.upper - a.lower) ? b : a);
+    const outliers = Array.from(group.values).filter(v => v < widest.lower || v > widest.upper);
+
+    const jitter = d3.randomLcg(group.name.length);
+    outliers.forEach(v => {
+      g.append("circle")
+        .attr("class", "outlier-dot")
+        .attr("cx", cx + (jitter() - 0.5) * bandW * 0.3)
+        .attr("cy", yScale(v))
+        .attr("r", 2)
+        .attr("fill", "#999")
+        .attr("opacity", 0.55);
+    });
+  });
+
+  // --- Legend ---
+  const legendDiv = d3.select("#legend");
+  const legendItems = [];
+  for (let i = 0; i < Math.min(maxDepth, 5); i++) {
+    legendItems.push({ label: levelLabels[i], color: depthColor(i) });
+  }
+  legendItems.push({ label: "Median", color: "#222" });
+
+  legendDiv.selectAll(".legend-item").data(legendItems).join("div")
+    .attr("class", "legend-item")
+    .html(d => {
+      if (d.label === "Median") {
+        return `<svg width="14" height="12"><line x1="0" y1="6" x2="14" y2="6" stroke="#222" stroke-width="2"/></svg><span>${d.label}</span>`;
+      }
+      return `<span class="legend-swatch" style="background:${d.color}"></span><span>${d.label}</span>`;
+    });
+
+  // --- Table view ---
+  const fmt = d3.format(".1f");
+
+  const columns = [
+    { key: "group", label: "Group", type: "string" },
+    { key: "n", label: "n", type: "number", format: d3.format(",") },
+    { key: "min", label: "Min", type: "number", format: fmt },
+    { key: "lowerF", label: "Lower Fourth", type: "number", format: fmt },
+    { key: "lowerE", label: "Lower Eighth", type: "number", format: fmt },
+    { key: "median", label: "Median", type: "number", format: fmt },
+    { key: "upperE", label: "Upper Eighth", type: "number", format: fmt },
+    { key: "upperF", label: "Upper Fourth", type: "number", format: fmt },
+    { key: "max", label: "Max", type: "number", format: fmt },
+    { key: "iqr", label: "IQR", type: "number", format: fmt },
+  ];
+
+  const tableData = data.map(d => {
+    const levMap = {};
+    d.stats.levels.forEach(l => { levMap[l.letter] = l; });
+    const F = levMap["F"] || { lower: NaN, upper: NaN };
+    const E = levMap["E"] || { lower: NaN, upper: NaN };
+    return {
+      id: d.name,
+      group: d.name,
+      n: d.stats.n,
+      min: d.stats.min,
+      max: d.stats.max,
+      median: d.stats.median,
+      lowerF: F.lower,
+      upperF: F.upper,
+      lowerE: E.lower,
+      upperE: E.upper,
+      iqr: F.upper - F.lower,
+    };
+  });
+
+  let sortKey = "group", sortDir = 1;
+
+  function renderTable() {
+    d3.select("#table-view").selectAll("*").remove();
+
+    const sorted = [...tableData].sort((a, b) => {
+      const col = columns.find(c => c.key === sortKey);
+      const cmp = col.type === "number"
+        ? d3.ascending(a[sortKey], b[sortKey])
+        : d3.ascending(String(a[sortKey]), String(b[sortKey]));
+      return cmp * sortDir;
+    });
+
+    const tableWrap = d3.select("#table-view").append("div").attr("class", "table-wrap");
+    const table = tableWrap.append("table").attr("role", "grid");
+    table.append("caption").text("Letter-value summary statistics by group");
+
+    const thead = table.append("thead").append("tr");
+    thead.selectAll("th").data(columns).join("th")
+      .attr("tabindex", "0")
+      .attr("role", "columnheader")
+      .attr("aria-sort", d => d.key === sortKey ? (sortDir === 1 ? "ascending" : "descending") : "none")
+      .html(d => {
+        const arrow = d.key === sortKey ? (sortDir === 1 ? " \u25B2" : " \u25BC") : "";
+        return d.label + `<span class="sort-arrow">${arrow}</span>`;
+      })
+      .on("click", (_, col) => {
+        if (sortKey === col.key) sortDir *= -1;
+        else { sortKey = col.key; sortDir = 1; }
+        renderTable();
+        liveRegion.textContent = `Sorted by ${col.label}, ${sortDir === 1 ? "ascending" : "descending"}`;
+      })
+      .on("keydown", (event, col) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          if (sortKey === col.key) sortDir *= -1;
+          else { sortKey = col.key; sortDir = 1; }
+          renderTable();
+          liveRegion.textContent = `Sorted by ${col.label}, ${sortDir === 1 ? "ascending" : "descending"}`;
+        }
+      });
+
+    const tbody = table.append("tbody");
+    const rows = tbody.selectAll("tr").data(sorted, d => d.id).join("tr").attr("role", "row");
+    rows.selectAll("td").data(d => columns.map(col => {
+      const v = d[col.key];
+      return col.format && typeof v === "number" ? col.format(v) : v;
+    })).join("td")
+      .attr("role", "gridcell")
+      .text(d => d);
+  }
+
+  const liveRegion = document.getElementById("live-region");
+
+  // --- Toggle ---
+  const btnChart = document.getElementById("btn-chart");
+  const btnTable = document.getElementById("btn-table");
+  const chartView = document.getElementById("chart-view");
+  const tableView = document.getElementById("table-view");
+
+  function showView(view) {
+    const isChart = view === "chart";
+    chartView.style.display = isChart ? "" : "none";
+    chartView.setAttribute("aria-hidden", String(!isChart));
+    tableView.style.display = isChart ? "none" : "";
+    tableView.setAttribute("aria-hidden", String(isChart));
+    btnChart.setAttribute("aria-pressed", String(isChart));
+    btnTable.setAttribute("aria-pressed", String(!isChart));
+    if (!isChart) renderTable();
+    liveRegion.textContent = isChart ? "Showing chart view" : "Showing table view";
+  }
+
+  btnChart.addEventListener("click", () => showView("chart"));
+  btnTable.addEventListener("click", () => showView("table"));
+
+  // Auto-switch to table in forced-colors mode
+  if (matchMedia("(forced-colors: active)").matches) {
+    showView("table");
+  }
+
+  showView("chart");
+})();
+</script>
+</body>
+</html>

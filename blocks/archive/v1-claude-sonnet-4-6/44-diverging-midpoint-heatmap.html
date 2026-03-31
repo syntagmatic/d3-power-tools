@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Diverging Midpoint Heatmap — Daily Temperature Departures</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #fafafa;
+    font-family: system-ui, -apple-system, sans-serif;
+    display: flex;
+    justify-content: center;
+    padding: 20px;
+  }
+  .mono { font-family: "SF Mono", Monaco, "Cascadia Code", monospace; }
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: white;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    padding: 8px 10px;
+    font-size: 12px;
+    line-height: 1.4;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+    opacity: 0;
+    transition: opacity 0.1s;
+  }
+  .tooltip strong { display: block; margin-bottom: 2px; }
+  .annotation-line {
+    stroke: #555;
+    stroke-width: 0.8;
+    fill: none;
+  }
+  .annotation-text {
+    font-size: 10px;
+    fill: #333;
+  }
+  .annotation-bg {
+    fill: #fafafa;
+    opacity: 0.88;
+  }
+</style>
+</head>
+<body>
+<script type="module">
+
+// --- Data generation ---
+// 3 cities with distinct climate signatures
+const cities = [
+  { name: "Chicago", baseTemp: [-5, -3, 3, 10, 16, 22, 25, 24, 19, 12, 5, -2], variance: 6 },
+  { name: "Singapore", baseTemp: [27, 27.5, 28, 28.5, 28.5, 28, 27.5, 27.5, 27.5, 27.5, 27, 27], variance: 1.2 },
+  { name: "London", baseTemp: [5, 5.5, 8, 11, 14, 17, 19, 19, 16, 12, 8, 5.5], variance: 3.5 },
+];
+
+// Deterministic pseudo-random
+const mulberry32 = (a) => () => {
+  a |= 0; a = a + 0x6D2B79F5 | 0;
+  let t = Math.imul(a ^ a >>> 15, 1 | a);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+};
+const rng = mulberry32(42);
+const rnorm = () => {
+  let u = 0, v = 0;
+  while (u === 0) u = rng();
+  while (v === 0) v = rng();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+};
+
+// Generate 365 days of departure data for each city
+const year = 2024;
+const data = [];
+cities.forEach(city => {
+  const daysInYear = 366; // 2024 is leap year
+  for (let d = 0; d < daysInYear; d++) {
+    const date = new Date(year, 0, 1 + d);
+    const month = date.getMonth();
+    const dayOfMonth = date.getDate();
+    const base = city.baseTemp[month];
+
+    // Create autocorrelated departures (weather persists)
+    let departure = rnorm() * city.variance;
+
+    // Inject cold snaps for Chicago in Jan
+    if (city.name === "Chicago" && month === 0 && dayOfMonth >= 14 && dayOfMonth <= 20) {
+      departure = -(8 + Math.abs(rnorm()) * 4);
+    }
+    // Inject heat wave for Chicago in July
+    if (city.name === "Chicago" && month === 6 && dayOfMonth >= 10 && dayOfMonth <= 18) {
+      departure = 6 + Math.abs(rnorm()) * 3;
+    }
+    // Inject heat wave for London in August
+    if (city.name === "London" && month === 7 && dayOfMonth >= 5 && dayOfMonth <= 12) {
+      departure = 5 + Math.abs(rnorm()) * 2.5;
+    }
+
+    data.push({
+      city: city.name,
+      date,
+      month,
+      dayOfMonth,
+      week: d3.utcWeek.count(d3.utcYear(date), date),
+      dayOfWeek: date.getDay(),
+      departure: +departure.toFixed(1),
+    });
+  }
+});
+
+// --- Layout ---
+const totalWidth = 1200;
+const totalHeight = 800;
+const margin = { top: 70, right: 140, bottom: 60, left: 90 };
+const cityGap = 30;
+const legendHeight = 18;
+
+const plotWidth = totalWidth - margin.left - margin.right;
+const panelHeight = (totalHeight - margin.top - margin.bottom - cityGap * 2) / 3;
+
+// --- Scales ---
+// Calendar layout: weeks on x, day-of-week on y
+const weeks = d3.range(0, 54);
+const days = d3.range(0, 7);
+const dayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+const cellSize = Math.min(
+  (plotWidth) / 54,
+  (panelHeight - 20) / 7
+);
+const calWidth = cellSize * 54;
+const calHeight = cellSize * 7;
+
+// Symmetric diverging scale so equal departures look equal
+const absMax = d3.max(data, d => Math.abs(d.departure));
+const symMax = Math.ceil(absMax);
+// Tol diverging: blue-white-red
+const color = d3.scaleDiverging([-symMax, 0, symMax], t => {
+  // Tol-inspired: #4477AA (cold blue) → white → #EE6677 (warm red)
+  if (t < 0.5) {
+    const s = t / 0.5;
+    return d3.interpolateRgb("#4477AA", "#ffffff")(s);
+  } else {
+    const s = (t - 0.5) / 0.5;
+    return d3.interpolateRgb("#ffffff", "#EE6677")(s);
+  }
+});
+
+// --- SVG ---
+const svg = d3.select("body").append("svg")
+  .attr("width", totalWidth)
+  .attr("height", totalHeight)
+  .attr("viewBox", `0 0 ${totalWidth} ${totalHeight}`);
+
+// Title
+svg.append("text")
+  .attr("x", totalWidth / 2)
+  .attr("y", 28)
+  .attr("text-anchor", "middle")
+  .attr("font-size", 20)
+  .attr("font-weight", 700)
+  .attr("fill", "#222")
+  .text("Daily Temperature Departures from Normal (2024)");
+
+svg.append("text")
+  .attr("x", totalWidth / 2)
+  .attr("y", 48)
+  .attr("text-anchor", "middle")
+  .attr("font-size", 13)
+  .attr("fill", "#666")
+  .text("Blue = colder than average, Red = warmer than average. Hover for details.");
+
+// Tooltip
+const tooltip = d3.select("body").append("div").attr("class", "tooltip");
+
+// Group data by city
+const byCityMap = d3.group(data, d => d.city);
+
+// Annotations data
+const annotations = [
+  {
+    city: "Chicago", label: "Polar vortex cold snap",
+    month: 0, dayStart: 14, dayEnd: 20,
+    dx: 80, dy: 30, priority: 1
+  },
+  {
+    city: "Chicago", label: "July heat wave",
+    month: 6, dayStart: 10, dayEnd: 18,
+    dx: 60, dy: 40, priority: 1
+  },
+  {
+    city: "London", label: "August heat wave",
+    month: 7, dayStart: 5, dayEnd: 12,
+    dx: 60, dy: 38, priority: 1
+  },
+  {
+    city: "Singapore", label: "Narrow annual range (< 2\u00b0C)",
+    isRange: true,
+    dx: 0, dy: 0, priority: 2
+  },
+];
+
+// Render each city panel
+const cityNames = ["Chicago", "London", "Singapore"];
+cityNames.forEach((cityName, ci) => {
+  const cityData = byCityMap.get(cityName);
+  const panelY = margin.top + ci * (panelHeight + cityGap);
+
+  const g = svg.append("g")
+    .attr("transform", `translate(${margin.left}, ${panelY})`);
+
+  // City label
+  g.append("text")
+    .attr("x", -12)
+    .attr("y", calHeight / 2)
+    .attr("text-anchor", "end")
+    .attr("dominant-baseline", "middle")
+    .attr("font-size", 14)
+    .attr("font-weight", 600)
+    .attr("fill", "#333")
+    .text(cityName);
+
+  // Day-of-week labels (only for first city or all)
+  if (ci === 1) {
+    days.forEach(d => {
+      if (d % 2 === 1) { // Mon, Wed, Fri
+        g.append("text")
+          .attr("x", -14)
+          .attr("y", d * cellSize + cellSize / 2)
+          .attr("text-anchor", "end")
+          .attr("dominant-baseline", "middle")
+          .attr("font-size", 10)
+          .attr("fill", "#888")
+          .text(dayLabels[d]);
+      }
+    });
+  }
+
+  // Month labels along the top (only first panel)
+  if (ci === 0) {
+    monthNames.forEach((m, mi) => {
+      // Find the first day of this month
+      const firstDay = cityData.find(d => d.month === mi && d.dayOfMonth === 1);
+      if (firstDay) {
+        g.append("text")
+          .attr("x", firstDay.week * cellSize + cellSize / 2)
+          .attr("y", -6)
+          .attr("text-anchor", "start")
+          .attr("font-size", 10)
+          .attr("fill", "#888")
+          .text(m);
+      }
+    });
+  }
+
+  // Cells
+  g.selectAll("rect.cell")
+    .data(cityData)
+    .join("rect")
+    .attr("class", "cell")
+    .attr("x", d => d.week * cellSize)
+    .attr("y", d => d.dayOfWeek * cellSize)
+    .attr("width", cellSize - 1)
+    .attr("height", cellSize - 1)
+    .attr("rx", 1.5)
+    .attr("fill", d => color(d.departure))
+    .attr("stroke", "none")
+    .style("cursor", "pointer")
+    .on("pointerenter", (event, d) => {
+      const sign = d.departure > 0 ? "+" : "";
+      tooltip.html(
+        `<strong>${cityName}</strong>` +
+        `${d3.timeFormat("%b %-d, %Y")(d.date)}<br>` +
+        `Departure: <span class="mono">${sign}${d.departure}\u00b0C</span>`
+      ).style("opacity", 1);
+      d3.select(event.target).attr("stroke", "#333").attr("stroke-width", 1.5);
+    })
+    .on("pointermove", (event) => {
+      const tw = tooltip.node().offsetWidth;
+      const th = tooltip.node().offsetHeight;
+      const x = Math.min(event.pageX + 14, window.innerWidth + window.scrollX - tw - 8);
+      const y = Math.max(event.pageY - th - 10, window.scrollY + 8);
+      tooltip.style("left", `${x}px`).style("top", `${y}px`);
+    })
+    .on("pointerleave", (event) => {
+      tooltip.style("opacity", 0);
+      d3.select(event.target).attr("stroke", "none");
+    });
+
+  // Month dividers — thin lines at month boundaries
+  for (let mi = 1; mi < 12; mi++) {
+    const firstDay = cityData.find(d => d.month === mi && d.dayOfMonth === 1);
+    if (firstDay) {
+      const wx = firstDay.week * cellSize;
+      const dow = firstDay.dayOfWeek;
+      // Draw a step line: top to dayOfWeek at prev week, then across
+      const path = dow === 0
+        ? `M${wx},0 V${calHeight}`
+        : `M${wx},${dow * cellSize} V${calHeight} M${wx + cellSize},0 V${dow * cellSize}`;
+      g.append("path")
+        .attr("d", path)
+        .attr("stroke", "#ddd")
+        .attr("stroke-width", 0.8)
+        .attr("fill", "none");
+    }
+  }
+
+  // Annotations for this city
+  annotations.filter(a => a.city === cityName).forEach(ann => {
+    if (ann.isRange) {
+      // Singapore annotation: bracket the whole calendar with a note
+      const noteG = g.append("g");
+      // Compute city's actual departure range
+      const ext = d3.extent(cityData, d => d.departure);
+      const rangeText = `Range: ${ext[0].toFixed(1)} to +${ext[1].toFixed(1)}\u00b0C`;
+
+      noteG.append("text")
+        .attr("x", calWidth + 6)
+        .attr("y", calHeight / 2 - 6)
+        .attr("font-size", 10)
+        .attr("fill", "#666")
+        .attr("font-style", "italic")
+        .text("Narrow annual range");
+      noteG.append("text")
+        .attr("x", calWidth + 6)
+        .attr("y", calHeight / 2 + 8)
+        .attr("font-size", 10)
+        .attr("fill", "#888")
+        .attr("class", "mono")
+        .text(rangeText);
+    } else {
+      // Event annotation: find midpoint of event, draw leader line
+      const eventDays = cityData.filter(d =>
+        d.month === ann.month && d.dayOfMonth >= ann.dayStart && d.dayOfMonth <= ann.dayEnd
+      );
+      if (eventDays.length === 0) return;
+
+      // Highlight cells
+      eventDays.forEach(ed => {
+        g.append("rect")
+          .attr("x", ed.week * cellSize - 0.5)
+          .attr("y", ed.dayOfWeek * cellSize - 0.5)
+          .attr("width", cellSize)
+          .attr("height", cellSize)
+          .attr("rx", 1.5)
+          .attr("fill", "none")
+          .attr("stroke", "#333")
+          .attr("stroke-width", 1.2)
+          .attr("pointer-events", "none");
+      });
+
+      const mid = eventDays[Math.floor(eventDays.length / 2)];
+      const cx = mid.week * cellSize + cellSize / 2;
+      const cy = mid.dayOfWeek * cellSize + cellSize / 2;
+      const tx = cx + ann.dx;
+      const ty = cy + ann.dy;
+
+      // Background for text
+      const textWidth = ann.label.length * 5.8 + 8;
+      g.append("rect")
+        .attr("class", "annotation-bg")
+        .attr("x", tx - 3)
+        .attr("y", ty - 10)
+        .attr("width", textWidth)
+        .attr("height", 14)
+        .attr("rx", 2);
+
+      // Leader line (curve)
+      g.append("path")
+        .attr("class", "annotation-line")
+        .attr("d", `M${cx},${cy} Q${cx + ann.dx * 0.4},${ty} ${tx},${ty}`);
+
+      // Label text
+      g.append("text")
+        .attr("class", "annotation-text")
+        .attr("x", tx)
+        .attr("y", ty)
+        .attr("font-size", 10)
+        .attr("font-weight", 500)
+        .text(ann.label);
+    }
+  });
+
+  // City summary stat
+  const meanDep = d3.mean(cityData, d => d.departure);
+  const maxDep = d3.max(cityData, d => d.departure);
+  const minDep = d3.min(cityData, d => d.departure);
+  if (cityName !== "Singapore") {
+    g.append("text")
+      .attr("x", calWidth + 6)
+      .attr("y", calHeight / 2 - 6)
+      .attr("font-size", 10)
+      .attr("fill", "#888")
+      .text(`Max: +${maxDep.toFixed(1)}\u00b0C`);
+    g.append("text")
+      .attr("x", calWidth + 6)
+      .attr("y", calHeight / 2 + 8)
+      .attr("font-size", 10)
+      .attr("fill", "#888")
+      .text(`Min: ${minDep.toFixed(1)}\u00b0C`);
+  }
+});
+
+// --- Legend ---
+const legendWidth = 300;
+const legendX = (totalWidth - legendWidth) / 2;
+const legendY = totalHeight - 40;
+
+const legendG = svg.append("g")
+  .attr("transform", `translate(${legendX}, ${legendY})`);
+
+// Gradient
+const defs = svg.append("defs");
+const gradId = "temp-gradient";
+const grad = defs.append("linearGradient").attr("id", gradId);
+const nStops = 11;
+d3.range(nStops).forEach(i => {
+  const t = i / (nStops - 1);
+  const val = -symMax + t * 2 * symMax;
+  grad.append("stop")
+    .attr("offset", `${t * 100}%`)
+    .attr("stop-color", color(val));
+});
+
+legendG.append("rect")
+  .attr("width", legendWidth)
+  .attr("height", legendHeight)
+  .attr("rx", 3)
+  .attr("fill", `url(#${gradId})`);
+
+// Legend axis
+const legendScale = d3.scaleLinear([-symMax, symMax], [0, legendWidth]);
+const legendAxis = d3.axisBottom(legendScale)
+  .ticks(7)
+  .tickSize(4)
+  .tickFormat(d => (d > 0 ? "+" : "") + d + "\u00b0C");
+
+legendG.append("g")
+  .attr("transform", `translate(0, ${legendHeight})`)
+  .call(legendAxis)
+  .call(g => g.select(".domain").remove())
+  .call(g => g.selectAll("text").attr("font-size", 9).attr("fill", "#666"));
+
+legendG.append("text")
+  .attr("x", legendWidth / 2)
+  .attr("y", -6)
+  .attr("text-anchor", "middle")
+  .attr("font-size", 10)
+  .attr("fill", "#666")
+  .text("Temperature departure from monthly normal");
+
+</script>
+</body>
+</html>

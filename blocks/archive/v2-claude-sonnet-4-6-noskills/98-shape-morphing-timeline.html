@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Shape Morphing Timeline</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0f1117;
+    color: #e2e8f0;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 24px;
+  }
+  h1 {
+    font-size: 13px;
+    font-weight: 400;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: #64748b;
+    margin-bottom: 8px;
+  }
+  .subtitle {
+    font-size: 11px;
+    color: #334155;
+    letter-spacing: 0.1em;
+    margin-bottom: 32px;
+  }
+  #chart-container {
+    position: relative;
+    width: 720px;
+    max-width: 100%;
+  }
+  svg {
+    display: block;
+    width: 100%;
+  }
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-top: 20px;
+    padding: 0 60px;
+  }
+  .play-btn {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    border: 1px solid #334155;
+    background: #1e293b;
+    color: #94a3b8;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: all 0.15s;
+    font-size: 12px;
+  }
+  .play-btn:hover {
+    border-color: #60a5fa;
+    color: #60a5fa;
+    background: #1e293b;
+  }
+  .scrubber-track {
+    flex: 1;
+    position: relative;
+    height: 36px;
+    display: flex;
+    align-items: center;
+  }
+  .scrubber-bg {
+    position: absolute;
+    left: 0; right: 0;
+    height: 3px;
+    background: #1e293b;
+    border-radius: 2px;
+  }
+  .scrubber-fill {
+    position: absolute;
+    left: 0;
+    height: 3px;
+    background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+    border-radius: 2px;
+    transition: width 0.05s;
+  }
+  .scrubber-labels {
+    position: absolute;
+    top: 20px;
+    left: 0; right: 0;
+    display: flex;
+    justify-content: space-between;
+  }
+  .scrubber-label {
+    font-size: 9px;
+    letter-spacing: 0.08em;
+    color: #334155;
+    text-transform: uppercase;
+  }
+  .scrubber-label.active {
+    color: #60a5fa;
+  }
+  input[type=range] {
+    position: absolute;
+    width: 100%;
+    opacity: 0;
+    cursor: pointer;
+    height: 36px;
+    margin: 0;
+  }
+  .type-badge {
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #60a5fa;
+    width: 70px;
+    text-align: right;
+    flex-shrink: 0;
+  }
+</style>
+</head>
+<body>
+<h1>Shape Morphing Timeline</h1>
+<div class="subtitle">Monthly revenue data · bar → line → area → scatter</div>
+<div id="chart-container">
+  <svg id="chart"></svg>
+  <div class="controls">
+    <button class="play-btn" id="playBtn">▶</button>
+    <div class="scrubber-track">
+      <div class="scrubber-bg"></div>
+      <div class="scrubber-fill" id="scrubberFill"></div>
+      <div class="scrubber-labels" id="scrubberLabels"></div>
+      <input type="range" id="scrubber" min="0" max="1" step="0.001" value="0">
+    </div>
+    <div class="type-badge" id="typeBadge">Bar</div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<script type="module">
+// --- Synthetic data ---
+const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const rawData = [
+  { label: 'Jan', value: 42 },
+  { label: 'Feb', value: 58 },
+  { label: 'Mar', value: 51 },
+  { label: 'Apr', value: 73 },
+  { label: 'May', value: 89 },
+  { label: 'Jun', value: 95 },
+  { label: 'Jul', value: 82 },
+  { label: 'Aug', value: 76 },
+  { label: 'Sep', value: 91 },
+  { label: 'Oct', value: 68 },
+  { label: 'Nov', value: 55 },
+  { label: 'Dec', value: 77 },
+];
+
+// Chart types in order
+const TYPES = ['bar', 'line', 'area', 'scatter'];
+const TYPE_LABELS = { bar: 'Bar', line: 'Line', area: 'Area', scatter: 'Scatter' };
+
+// Dimensions
+const W = 720, H = 380;
+const margin = { top: 32, right: 40, bottom: 48, left: 60 };
+const iw = W - margin.left - margin.right;
+const ih = H - margin.top - margin.bottom;
+
+// Scales
+const x = d3.scaleBand().domain(rawData.map(d => d.label)).range([0, iw]).padding(0.25);
+const xLinear = d3.scaleLinear().domain([0, rawData.length - 1]).range([0, iw]);
+const y = d3.scaleLinear().domain([0, 110]).range([ih, 0]).nice();
+
+// SVG setup
+const svg = d3.select('#chart')
+  .attr('viewBox', `0 0 ${W} ${H}`)
+  .attr('preserveAspectRatio', 'xMidYMid meet');
+
+const defs = svg.append('defs');
+
+// Gradient for area
+const areaGrad = defs.append('linearGradient')
+  .attr('id', 'areaGrad')
+  .attr('x1', '0').attr('y1', '0')
+  .attr('x2', '0').attr('y2', '1');
+areaGrad.append('stop').attr('offset', '0%').attr('stop-color', '#3b82f6').attr('stop-opacity', 0.5);
+areaGrad.append('stop').attr('offset', '100%').attr('stop-color', '#3b82f6').attr('stop-opacity', 0.02);
+
+// Clip path
+defs.append('clipPath').attr('id', 'clip')
+  .append('rect').attr('width', iw).attr('height', ih + 4).attr('y', -4);
+
+const g = svg.append('g').attr('transform', `translate(${margin.left},${margin.top})`);
+
+// Grid
+const gridGroup = g.append('g').attr('class', 'grid');
+const gridLines = y.ticks(6);
+gridGroup.selectAll('line').data(gridLines).join('line')
+  .attr('x1', 0).attr('x2', iw)
+  .attr('y1', d => y(d)).attr('y2', d => y(d))
+  .attr('stroke', '#1e293b').attr('stroke-width', 1);
+
+// Axes
+const xAxisG = g.append('g').attr('class', 'x-axis').attr('transform', `translate(0,${ih})`);
+const yAxisG = g.append('g').attr('class', 'y-axis');
+
+function styleAxis(sel) {
+  sel.selectAll('text').attr('fill', '#475569').attr('font-size', '11px').attr('font-family', 'SF Mono, Fira Code, monospace');
+  sel.selectAll('line').attr('stroke', '#1e293b');
+  sel.selectAll('path').attr('stroke', '#1e293b');
+}
+
+// X axis — will be updated based on type
+function drawXAxis(type) {
+  if (type === 'bar') {
+    xAxisG.call(d3.axisBottom(x).tickSizeOuter(0));
+  } else {
+    xAxisG.call(d3.axisBottom(xLinear)
+      .ticks(rawData.length - 1)
+      .tickFormat(i => rawData[Math.round(i)]?.label || '')
+      .tickSizeOuter(0));
+  }
+  styleAxis(xAxisG);
+}
+yAxisG.call(d3.axisLeft(y).ticks(6).tickFormat(d => `$${d}k`).tickSizeOuter(0));
+styleAxis(yAxisG);
+
+// Y label
+g.append('text')
+  .attr('transform', 'rotate(-90)')
+  .attr('x', -ih/2).attr('y', -46)
+  .attr('text-anchor', 'middle')
+  .attr('fill', '#334155').attr('font-size', '10px')
+  .attr('font-family', 'SF Mono, Fira Code, monospace')
+  .attr('letter-spacing', '0.1em')
+  .text('REVENUE ($K)');
+
+// Main group for morphing shapes
+const shapeGroup = g.append('g').attr('clip-path', 'url(#clip)');
+
+// === Point resampling for smooth path morphing ===
+// We want every path to have N interpolated points so morphing is smooth
+const N = 200; // number of points to resample to
+
+function resamplePoints(pts, n) {
+  // pts: [{x, y}], n: target count
+  // Compute cumulative arc length
+  const lengths = [0];
+  for (let i = 1; i < pts.length; i++) {
+    const dx = pts[i].x - pts[i-1].x;
+    const dy = pts[i].y - pts[i-1].y;
+    lengths.push(lengths[i-1] + Math.sqrt(dx*dx + dy*dy));
+  }
+  const total = lengths[lengths.length - 1];
+  const result = [];
+  for (let i = 0; i < n; i++) {
+    const target = (i / (n - 1)) * total;
+    // binary search
+    let lo = 0, hi = lengths.length - 1;
+    while (lo < hi - 1) {
+      const mid = (lo + hi) >> 1;
+      if (lengths[mid] <= target) lo = mid; else hi = mid;
+    }
+    const t = lengths[hi] === lengths[lo] ? 0 : (target - lengths[lo]) / (lengths[hi] - lengths[lo]);
+    result.push({
+      x: pts[lo].x + t * (pts[hi].x - pts[lo].x),
+      y: pts[lo].y + t * (pts[hi].y - pts[lo].y)
+    });
+  }
+  return result;
+}
+
+// Build canonical points for each chart type
+function getLinePoints(data) {
+  return data.map((d, i) => ({ x: xLinear(i), y: y(d.value) }));
+}
+
+function getBarPoints(data) {
+  // For bar, we trace the top of the bars as a step function polyline
+  // Each bar has left edge, top, right edge — but we flatten to a sequence
+  const pts = [];
+  data.forEach((d, i) => {
+    const bx = x(d.label);
+    const bw = x.bandwidth();
+    const by = y(d.value);
+    pts.push({ x: bx, y: by });
+    pts.push({ x: bx + bw, y: by });
+  });
+  return pts;
+}
+
+function getAreaPoints(data) {
+  // Same as line
+  return data.map((d, i) => ({ x: xLinear(i), y: y(d.value) }));
+}
+
+function getScatterPoints(data) {
+  // Same x positions as line, scatter uses same positions
+  return data.map((d, i) => ({ x: xLinear(i), y: y(d.value) }));
+}
+
+// Closed path for area (includes bottom baseline)
+function getAreaClosedPoints(data) {
+  const top = data.map((d, i) => ({ x: xLinear(i), y: y(d.value) }));
+  const bottom = data.map((d, i) => ({ x: xLinear(i), y: ih })).reverse();
+  return [...top, ...bottom];
+}
+
+function getBarClosedPoints(data) {
+  // Closed bar outline: go right along tops, down right side, left along bottom, up left side
+  const pts = [];
+  // top of bars left to right (step function)
+  data.forEach((d, i) => {
+    const bx = x(d.label);
+    const bw = x.bandwidth();
+    const by = y(d.value);
+    pts.push({ x: bx, y: ih });
+    pts.push({ x: bx, y: by });
+    pts.push({ x: bx + bw, y: by });
+    pts.push({ x: bx + bw, y: ih });
+  });
+  return pts;
+}
+
+// --- State ---
+let currentType = 'bar';
+let playing = true;
+let playT = 0; // 0..1 global timeline
+let animFrame = null;
+
+// Scrubber segments: 4 types, each takes 1/4 of [0,1]
+// Transitions happen between them
+
+const scrubber = document.getElementById('scrubber');
+const scrubberFill = document.getElementById('scrubberFill');
+const scrubberLabels = document.getElementById('scrubberLabels');
+const playBtn = document.getElementById('playBtn');
+const typeBadge = document.getElementById('typeBadge');
+
+// Build scrubber labels
+TYPES.forEach((t, i) => {
+  const div = document.createElement('div');
+  div.className = 'scrubber-label';
+  div.textContent = TYPE_LABELS[t];
+  div.id = `label-${t}`;
+  div.style.left = `${(i / (TYPES.length - 1)) * 100}%`;
+  div.style.transform = 'translateX(-50%)';
+  div.style.position = 'absolute';
+  scrubberLabels.appendChild(div);
+});
+
+// --- Drawing functions for each type ---
+// These draw the "pure" state at t=1
+
+function pointsToPath(pts) {
+  return pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' ');
+}
+
+function pointsToClosedPath(pts) {
+  return pointsToPath(pts) + ' Z';
+}
+
+// --- Main render: given a type pair and t (0..1), draw interpolated shape ---
+
+// We maintain persistent SVG elements and morph their `d` attributes
+const areaPath = shapeGroup.append('path')
+  .attr('fill', 'url(#areaGrad)')
+  .attr('stroke', 'none')
+  .attr('opacity', 0);
+
+const linePath = shapeGroup.append('path')
+  .attr('fill', 'none')
+  .attr('stroke', '#3b82f6')
+  .attr('stroke-width', 2.5)
+  .attr('stroke-linecap', 'round')
+  .attr('stroke-linejoin', 'round')
+  .attr('opacity', 0);
+
+const barsGroup = shapeGroup.append('g').attr('opacity', 0);
+barsGroup.selectAll('rect').data(rawData).join('rect')
+  .attr('fill', '#3b82f6')
+  .attr('rx', 2);
+
+const dotsGroup = shapeGroup.append('g').attr('opacity', 0);
+dotsGroup.selectAll('circle').data(rawData).join('circle')
+  .attr('fill', '#3b82f6')
+  .attr('stroke', '#1e3a5f')
+  .attr('stroke-width', 1.5);
+
+// Morph path element (used during transitions)
+const morphPath = shapeGroup.append('path')
+  .attr('fill', 'none')
+  .attr('stroke', '#3b82f6')
+  .attr('stroke-width', 2.5)
+  .attr('stroke-linecap', 'round')
+  .attr('stroke-linejoin', 'round')
+  .attr('opacity', 0);
+
+const morphAreaPath = shapeGroup.append('path')
+  .attr('fill', 'url(#areaGrad)')
+  .attr('stroke', 'none')
+  .attr('opacity', 0);
+
+// Interpolate between two sets of resampled points
+function lerpPoints(ptsA, ptsB, t) {
+  return ptsA.map((a, i) => ({
+    x: a.x + (ptsB[i].x - a.x) * t,
+    y: a.y + (ptsB[i].y - a.y) * t
+  }));
+}
+
+// Get resampled polyline for each type (open)
+function getResampledOpen(type) {
+  if (type === 'bar') return resamplePoints(getBarPoints(rawData), N);
+  if (type === 'line') return resamplePoints(getLinePoints(rawData), N);
+  if (type === 'area') return resamplePoints(getAreaPoints(rawData), N);
+  if (type === 'scatter') return resamplePoints(getScatterPoints(rawData), N);
+}
+
+// Get resampled closed path for area/bar fills
+function getResampledClosed(type) {
+  if (type === 'bar') return resamplePoints(getBarClosedPoints(rawData), N);
+  if (type === 'area') return resamplePoints(getAreaClosedPoints(rawData), N);
+  // line and scatter: collapse to baseline
+  if (type === 'line' || type === 'scatter') {
+    const top = resamplePoints(getLinePoints(rawData), N/2);
+    const bottom = top.map(p => ({ x: p.x, y: ih })).reverse();
+    return [...top, ...bottom];
+  }
+}
+
+// Precompute
+const resampledOpen = {};
+const resampledClosed = {};
+TYPES.forEach(t => {
+  resampledOpen[t] = getResampledOpen(t);
+  resampledClosed[t] = getResampledClosed(t);
+});
+
+// Easing
+function easeInOut(t) {
+  return t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
+}
+
+// --- Render at a given global playT (0..1) ---
+// Segments: [0, 1/3] = bar→line, [1/3, 2/3] = line→area, [2/3, 1] = area→scatter
+// Pure states at: 0=bar, 1/6=line, 1/2=area, 5/6=scatter, 1=bar (loop)
+// Actually: let's think of 4 stages with dwell:
+// 0.00–0.12: pure bar
+// 0.12–0.37: bar→line transition
+// 0.37–0.50: pure line
+// 0.50–0.75: line→area transition (wait, overlap)
+// Let me simplify: equal segments, dwell + transition
+// Total: 4 types, each gets 0.25 of the timeline
+// 0.00–0.07: dwell bar
+// 0.07–0.18: transition bar→line
+// 0.18–0.25: dwell line
+// ...repeating
+// Actually simplest: 4 equal segments at 0, 0.25, 0.5, 0.75, 1.0
+// Each segment: 0.0–0.1 dwell start, 0.1–0.9 transition, 0.9–1.0 dwell end
+
+function render(globalT) {
+  // Map globalT to segment + local t
+  const numSegs = TYPES.length; // 4 transitions: bar→line, line→area, area→scatter, scatter→bar
+  const segT = globalT * numSegs;
+  const segIdx = Math.min(Math.floor(segT), numSegs - 1);
+  const localT = segT - segIdx;
+
+  const fromType = TYPES[segIdx];
+  const toType = TYPES[(segIdx + 1) % numSegs];
+
+  // Ease the transition: dwell 15% on each end
+  let morphT;
+  const dwellFrac = 0.15;
+  if (localT < dwellFrac) {
+    morphT = 0;
+  } else if (localT > 1 - dwellFrac) {
+    morphT = 1;
+  } else {
+    morphT = easeInOut((localT - dwellFrac) / (1 - 2 * dwellFrac));
+  }
+
+  const activeType = morphT < 0.5 ? fromType : toType;
+  typeBadge.textContent = TYPE_LABELS[activeType];
+
+  // Update scrubber labels
+  TYPES.forEach((t, i) => {
+    const lbl = document.getElementById(`label-${t}`);
+    lbl.className = 'scrubber-label' + (t === activeType ? ' active' : '');
+  });
+
+  // Update x-axis
+  if (morphT < 0.01) drawXAxis(fromType);
+  else if (morphT > 0.99) drawXAxis(toType);
+  // During transition: keep from axis (or crossfade, but keep it simple)
+
+  // Hide all pure elements
+  areaPath.attr('opacity', 0);
+  linePath.attr('opacity', 0);
+  barsGroup.attr('opacity', 0);
+  dotsGroup.attr('opacity', 0);
+  morphPath.attr('opacity', 0);
+  morphAreaPath.attr('opacity', 0);
+
+  if (morphT <= 0) {
+    // Pure fromType
+    drawPure(fromType, 1);
+  } else if (morphT >= 1) {
+    // Pure toType
+    drawPure(toType, 1);
+  } else {
+    // Morphing between fromType and toType
+    drawMorph(fromType, toType, morphT);
+  }
+}
+
+function drawPure(type, alpha) {
+  if (type === 'bar') {
+    barsGroup.attr('opacity', alpha);
+    barsGroup.selectAll('rect').data(rawData)
+      .attr('x', d => x(d.label))
+      .attr('y', d => y(d.value))
+      .attr('width', x.bandwidth())
+      .attr('height', d => ih - y(d.value));
+  } else if (type === 'line') {
+    const pts = getLinePoints(rawData);
+    linePath.attr('opacity', alpha).attr('d', pointsToPath(pts));
+    // Also show dots
+    dotsGroup.attr('opacity', alpha);
+    dotsGroup.selectAll('circle').data(rawData)
+      .attr('cx', (d, i) => xLinear(i))
+      .attr('cy', d => y(d.value))
+      .attr('r', 4);
+  } else if (type === 'area') {
+    const topPts = getAreaPoints(rawData);
+    const closedPts = getAreaClosedPoints(rawData);
+    areaPath.attr('opacity', alpha).attr('d', pointsToClosedPath(closedPts));
+    linePath.attr('opacity', alpha).attr('d', pointsToPath(topPts));
+  } else if (type === 'scatter') {
+    dotsGroup.attr('opacity', alpha);
+    dotsGroup.selectAll('circle').data(rawData)
+      .attr('cx', (d, i) => xLinear(i))
+      .attr('cy', d => y(d.value))
+      .attr('r', 6);
+  }
+}
+
+function drawMorph(fromType, toType, t) {
+  // Interpolate open paths (for stroke)
+  const fromOpen = resampledOpen[fromType];
+  const toOpen = resampledOpen[toType];
+  const interpOpen = lerpPoints(fromOpen, toOpen, t);
+  morphPath.attr('opacity', 1).attr('d', pointsToPath(interpOpen));
+
+  // Interpolate closed paths (for area fill)
+  const fromClosed = resampledClosed[fromType];
+  const toClosed = resampledClosed[toType];
+  const interpClosed = lerpPoints(fromClosed, toClosed, t);
+
+  // Decide when to show fill
+  const fillAlpha = computeFillAlpha(fromType, toType, t);
+  morphAreaPath.attr('opacity', fillAlpha).attr('d', pointsToClosedPath(interpClosed));
+
+  // Show dots fading in/out for scatter and line
+  const fromDotAlpha = computeDotAlpha(fromType, t, 'from');
+  const toDotAlpha = computeDotAlpha(toType, t, 'to');
+  const dotAlpha = Math.max(fromDotAlpha, toDotAlpha);
+
+  if (dotAlpha > 0) {
+    dotsGroup.attr('opacity', dotAlpha);
+    dotsGroup.selectAll('circle').data(rawData)
+      .attr('cx', (d, i) => {
+        const fromX = fromType === 'bar' ? x(d.label) + x.bandwidth()/2 : xLinear(i);
+        const toX = toType === 'bar' ? x(d.label) + x.bandwidth()/2 : xLinear(i);
+        return fromX + (toX - fromX) * t;
+      })
+      .attr('cy', d => y(d.value))
+      .attr('r', fromType === 'scatter' ? 6*(1-t) + 4*t : (toType === 'scatter' ? 4*(1-t) + 6*t : 4));
+  }
+}
+
+function computeFillAlpha(from, to, t) {
+  const filledTypes = new Set(['area', 'bar']);
+  const fromFilled = filledTypes.has(from);
+  const toFilled = filledTypes.has(to);
+  if (fromFilled && toFilled) return 1;
+  if (fromFilled) return 1 - t;
+  if (toFilled) return t;
+  return 0;
+}
+
+function computeDotAlpha(type, t, role) {
+  const dotTypes = new Set(['scatter', 'line']);
+  if (!dotTypes.has(type)) return 0;
+  if (role === 'from') return Math.max(0, 1 - t * 2); // fade out in first half
+  if (role === 'to') return Math.max(0, (t - 0.5) * 2); // fade in in second half
+  return 0;
+}
+
+// --- Auto-play ---
+let lastTime = null;
+const SPEED = 0.018; // units per second (full cycle = ~55s)
+
+function animate(ts) {
+  if (lastTime === null) lastTime = ts;
+  const dt = (ts - lastTime) / 1000;
+  lastTime = ts;
+  if (playing) {
+    playT = (playT + dt * SPEED) % 1;
+    scrubber.value = playT;
+  }
+  updateScrubberFill(playT);
+  render(playT);
+  animFrame = requestAnimationFrame(animate);
+}
+
+function updateScrubberFill(t) {
+  scrubberFill.style.width = `${t * 100}%`;
+}
+
+// Initial draw
+drawXAxis('bar');
+render(0);
+animFrame = requestAnimationFrame(animate);
+
+// Scrubber interaction
+scrubber.addEventListener('input', () => {
+  playT = parseFloat(scrubber.value);
+  lastTime = null;
+  render(playT);
+  updateScrubberFill(playT);
+});
+
+scrubber.addEventListener('mousedown', () => {
+  playing = false;
+  playBtn.textContent = '▶';
+});
+
+// Play/pause
+playBtn.addEventListener('click', () => {
+  playing = !playing;
+  playBtn.textContent = playing ? '⏸' : '▶';
+  if (playing) lastTime = null;
+});
+
+// Start with pause button shown
+playBtn.textContent = '⏸';
+
+</script>
+</body>
+</html>

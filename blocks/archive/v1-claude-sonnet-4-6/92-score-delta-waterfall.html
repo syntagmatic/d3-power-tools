@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Score Delta Waterfall — Calibration Impact</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    display: flex;
+    justify-content: center;
+    padding: 24px 16px;
+  }
+  #container { width: 100%; max-width: 1080px; }
+  header h1 {
+    font-size: 1.4rem;
+    font-weight: 600;
+    color: #1a1a1a;
+    margin-bottom: 4px;
+  }
+  header p {
+    font-size: 0.85rem;
+    color: #666;
+    margin-bottom: 16px;
+    line-height: 1.4;
+  }
+  .annotation-label {
+    font-size: 11px;
+    fill: #444;
+    font-weight: 500;
+  }
+  .annotation-note {
+    font-size: 10px;
+    fill: #777;
+  }
+  .value-label {
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .axis text { font-size: 12px; fill: #555; }
+  .axis path, .axis line { stroke: #ccc; }
+  .axis-title { font-size: 12px; fill: #444; font-weight: 500; }
+  .legend-text { font-size: 11px; fill: #555; }
+  .total-label { font-size: 13px; font-weight: 700; }
+</style>
+</head>
+<body>
+<div id="container">
+  <header>
+    <h1>Composite Score Changes from Calibration</h1>
+    <p>Waterfall of per-criterion score deltas after inter-rater calibration.
+       Each bar shows how much the composite score shifted when that criterion
+       was recalibrated — the final bar is the net change.</p>
+  </header>
+  <div id="chart"></div>
+</div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  // --- Synthetic data: calibration score deltas by criterion ---
+  // Represents before/after calibration shifts for a skill evaluation
+  const deltas = [
+    { criterion: "Color fidelity",       delta: +8.2,  note: "Tol palettes up-scored" },
+    { criterion: "Axis legibility",      delta: +5.4,  note: "Tick format rules applied" },
+    { criterion: "Annotation placement", delta: -3.1,  note: "Leader line overlap penalty" },
+    { criterion: "Responsive sizing",    delta: +2.7,  note: null },
+    { criterion: "Data-ink ratio",       delta: -6.5,  note: "Gridline clutter detected" },
+    { criterion: "Interaction polish",   delta: +4.0,  note: null },
+    { criterion: "Accessibility",        delta: -1.8,  note: "Missing ARIA labels" },
+    { criterion: "Label collision",      delta: +3.3,  note: null },
+    { criterion: "Perceptual ordering",  delta: +6.1,  note: "Lightness ramp corrected" },
+    { criterion: "Animation fluency",    delta: -2.4,  note: null },
+    { criterion: "Canvas perf",          delta: +1.5,  note: null },
+    { criterion: "Encoding honesty",     delta: -4.8,  note: "Lie factor recalibrated" },
+  ];
+
+  // Compute running totals for waterfall positioning
+  let cumulative = 0;
+  const data = deltas.map(d => {
+    const start = cumulative;
+    cumulative += d.delta;
+    return { ...d, start, end: cumulative };
+  });
+  const netChange = cumulative;
+  // Add the total bar
+  data.push({
+    criterion: "Net change",
+    delta: netChange,
+    start: 0,
+    end: netChange,
+    isTotal: true,
+    note: null
+  });
+
+  // --- Layout ---
+  const margin = { top: 32, right: 80, bottom: 60, left: 160 };
+  const totalWidth = 1080;
+  const barHeight = 28;
+  const barPad = 8;
+  const totalHeight = margin.top + data.length * (barHeight + barPad) + margin.bottom;
+  const innerWidth = totalWidth - margin.left - margin.right;
+  const innerHeight = totalHeight - margin.top - margin.bottom;
+
+  const svg = d3.select("#chart").append("svg")
+    .attr("viewBox", `0 0 ${totalWidth} ${totalHeight}`)
+    .attr("width", "100%")
+    .attr("preserveAspectRatio", "xMidYMid meet");
+
+  const g = svg.append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+  // --- Scales ---
+  const allValues = data.flatMap(d => [d.start, d.end]);
+  const xExtent = d3.extent(allValues);
+  const xPad = (xExtent[1] - xExtent[0]) * 0.15;
+
+  const x = d3.scaleLinear()
+    .domain([Math.min(xExtent[0], 0) - xPad, xExtent[1] + xPad])
+    .range([0, innerWidth])
+    .nice();
+
+  const y = d3.scaleBand()
+    .domain(data.map(d => d.criterion))
+    .range([0, innerHeight])
+    .padding(0.22);
+
+  // --- Color: Tol Bright-derived diverging ---
+  // Blue (#4477AA) for gains, Red (#EE6677) for losses — CVD-safe
+  const colorPos = "#4477AA";
+  const colorNeg = "#EE6677";
+  const colorTotal = "#228833"; // Tol green for net
+  const barColor = d => d.isTotal ? colorTotal : (d.delta >= 0 ? colorPos : colorNeg);
+
+  // --- Zero baseline ---
+  g.append("line")
+    .attr("x1", x(0)).attr("y1", 0)
+    .attr("x2", x(0)).attr("y2", innerHeight)
+    .attr("stroke", "#aaa")
+    .attr("stroke-width", 1)
+    .attr("stroke-dasharray", "3,3");
+
+  // --- Connector lines (cumulative flow) ---
+  g.selectAll(".connector")
+    .data(data.slice(0, -2)) // no connector after last delta or total
+    .join("line")
+      .attr("class", "connector")
+      .attr("x1", d => x(d.end))
+      .attr("y1", (d, i) => y(data[i].criterion) + y.bandwidth())
+      .attr("x2", d => x(d.end))
+      .attr("y2", (d, i) => y(data[i + 1].criterion))
+      .attr("stroke", "#ccc")
+      .attr("stroke-width", 0.8)
+      .attr("stroke-dasharray", "2,2");
+
+  // --- Bars ---
+  g.selectAll(".bar")
+    .data(data)
+    .join("rect")
+      .attr("class", "bar")
+      .attr("x", d => x(Math.min(d.start, d.end)))
+      .attr("y", d => y(d.criterion))
+      .attr("width", d => Math.abs(x(d.end) - x(d.start)))
+      .attr("height", y.bandwidth())
+      .attr("fill", barColor)
+      .attr("rx", 3)
+      .attr("opacity", d => d.isTotal ? 0.9 : 0.85);
+
+  // --- Value labels on bars ---
+  g.selectAll(".value-label")
+    .data(data)
+    .join("text")
+      .attr("class", "value-label")
+      .attr("x", d => {
+        const barEnd = x(d.end);
+        const barStart = x(d.start);
+        return d.delta >= 0 ? Math.max(barEnd, barStart) + 5 : Math.min(barEnd, barStart) - 5;
+      })
+      .attr("y", d => y(d.criterion) + y.bandwidth() / 2)
+      .attr("dy", "0.35em")
+      .attr("text-anchor", d => d.delta >= 0 ? "start" : "end")
+      .attr("fill", d => d.isTotal ? colorTotal : (d.delta >= 0 ? colorPos : colorNeg))
+      .text(d => (d.delta >= 0 ? "+" : "") + d.delta.toFixed(1));
+
+  // --- Axes ---
+  // Y axis (category labels)
+  const yAxis = g.append("g")
+    .attr("class", "axis")
+    .call(d3.axisLeft(y).tickSize(0).tickPadding(8));
+  yAxis.select(".domain").remove();
+
+  // Bold the total label
+  yAxis.selectAll("text")
+    .filter(t => t === "Net change")
+    .attr("font-weight", 700)
+    .attr("fill", colorTotal);
+
+  // X axis (score delta)
+  g.append("g")
+    .attr("class", "axis")
+    .attr("transform", `translate(0,${innerHeight})`)
+    .call(
+      d3.axisBottom(x)
+        .ticks(Math.max(4, Math.floor(innerWidth / 100)))
+        .tickFormat(d => (d >= 0 ? "+" : "") + d)
+    );
+
+  // X axis title
+  g.append("text")
+    .attr("class", "axis-title")
+    .attr("x", innerWidth / 2)
+    .attr("y", innerHeight + 42)
+    .attr("text-anchor", "middle")
+    .text("Score delta (points)");
+
+  // --- Annotations for notable criteria ---
+  const annotations = data.filter(d => d.note);
+  const annotGroup = g.selectAll(".annot")
+    .data(annotations)
+    .join("g")
+      .attr("class", "annot")
+      .attr("transform", d => {
+        const bx = x(d.delta >= 0 ? d.end : d.start);
+        const by = y(d.criterion) + y.bandwidth() / 2;
+        return `translate(${bx},${by})`;
+      });
+
+  // Leader lines — elbow connectors pointing outward
+  annotGroup.append("path")
+    .attr("d", d => {
+      const dir = d.delta >= 0 ? 1 : -1;
+      const dx = dir * 50;
+      const dy = -14;
+      return `M0,0 L${dx * 0.4},0 L${dx * 0.4},${dy}`;
+    })
+    .attr("fill", "none")
+    .attr("stroke", "#999")
+    .attr("stroke-width", 0.8);
+
+  // Annotation text
+  annotGroup.append("text")
+    .attr("class", "annotation-note")
+    .attr("x", d => (d.delta >= 0 ? 1 : -1) * 22)
+    .attr("y", -16)
+    .attr("text-anchor", d => d.delta >= 0 ? "start" : "end")
+    .text(d => d.note);
+
+  // --- Legend ---
+  const legend = svg.append("g")
+    .attr("transform", `translate(${margin.left + innerWidth - 200},${margin.top - 18})`);
+
+  const items = [
+    { label: "Gain", color: colorPos },
+    { label: "Loss", color: colorNeg },
+    { label: "Net", color: colorTotal }
+  ];
+
+  items.forEach((item, i) => {
+    const lg = legend.append("g").attr("transform", `translate(${i * 68},0)`);
+    lg.append("rect")
+      .attr("width", 14).attr("height", 10).attr("rx", 2)
+      .attr("fill", item.color).attr("opacity", 0.85);
+    lg.append("text")
+      .attr("class", "legend-text")
+      .attr("x", 18).attr("y", 9)
+      .text(item.label);
+  });
+
+  // --- Separator line above total ---
+  const totalIdx = data.length - 1;
+  g.append("line")
+    .attr("x1", 0)
+    .attr("y1", y("Net change") - barPad / 2)
+    .attr("x2", innerWidth)
+    .attr("y2", y("Net change") - barPad / 2)
+    .attr("stroke", "#bbb")
+    .attr("stroke-width", 1)
+    .attr("stroke-dasharray", "4,3");
+
+})();
+</script>
+</body>
+</html>

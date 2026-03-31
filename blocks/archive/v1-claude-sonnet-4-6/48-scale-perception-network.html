@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Scale Perception Network</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    color: #222;
+    padding: 20px 24px;
+  }
+  h1 { font-size: 1.3rem; font-weight: 600; margin-bottom: 2px; }
+  .subtitle { font-size: 0.82rem; color: #666; margin-bottom: 14px; line-height: 1.4; }
+  .controls {
+    display: flex; gap: 16px; align-items: center; margin-bottom: 10px; font-size: 0.85rem;
+  }
+  .controls label { font-weight: 500; }
+  .controls select {
+    padding: 4px 8px; border: 1px solid #bbb; border-radius: 4px;
+    font-size: 0.85rem; background: #fff; cursor: pointer;
+  }
+  .annotation {
+    font-size: 0.78rem; color: #555; max-width: 440px; margin-left: 12px;
+    line-height: 1.45; font-style: italic;
+  }
+  .chart-area { position: relative; }
+  svg { display: block; }
+  .tooltip {
+    position: absolute; pointer-events: none; background: rgba(255,255,255,0.96);
+    border: 1px solid #ccc; border-radius: 5px; padding: 8px 11px;
+    font-size: 12px; line-height: 1.5; box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+    display: none; white-space: nowrap; z-index: 10;
+  }
+  .tooltip .name { font-weight: 600; margin-bottom: 2px; }
+  .tooltip .stat { color: #555; }
+  .tooltip .stat span { font-family: "SF Mono", Monaco, "Cascadia Code", monospace; }
+  .legend-row {
+    display: flex; gap: 36px; margin-top: 10px; flex-wrap: wrap; align-items: flex-end;
+  }
+  .legend-group { font-size: 0.78rem; }
+  .legend-group h3 {
+    font-size: 0.72rem; font-weight: 600; margin-bottom: 4px;
+    color: #555; text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .size-legend { display: flex; align-items: flex-end; gap: 14px; }
+  .size-item {
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    font-size: 10px; color: #777;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+  }
+  .color-legend { display: flex; align-items: center; gap: 6px; }
+  .color-legend .bar { width: 140px; height: 12px; border-radius: 2px; }
+  .color-legend .lbl { font-size: 10px; color: #777; }
+</style>
+</head>
+<body>
+<h1>Scale Choice Distorts Network Perception</h1>
+<p class="subtitle">A 60-node social network where node radius encodes influence. Toggle between linear, sqrt, and log scales to see how the mapping exaggerates or compresses high-influence nodes. Color encodes sentiment (diverging).</p>
+
+<div class="controls">
+  <label for="scale-select">Node size scale:</label>
+  <select id="scale-select">
+    <option value="sqrt" selected>Sqrt (area-proportional)</option>
+    <option value="linear">Linear (exaggerates hubs)</option>
+    <option value="log">Log (compresses range)</option>
+  </select>
+  <span class="annotation" id="annotation">Sqrt maps influence to circle area proportionally &mdash; the perceptually honest default.</span>
+</div>
+
+<div class="chart-area">
+  <svg id="chart"></svg>
+  <div class="tooltip" id="tooltip"></div>
+</div>
+
+<div class="legend-row">
+  <div class="legend-group">
+    <h3>Node size (influence)</h3>
+    <div class="size-legend" id="size-legend"></div>
+  </div>
+  <div class="legend-group">
+    <h3>Sentiment</h3>
+    <div class="color-legend" id="color-legend"></div>
+  </div>
+</div>
+
+<script>
+(() => {
+  // --- Dimensions ---
+  const W = 1200, H = 800;
+  const margin = { top: 10, right: 10, bottom: 10, left: 10 };
+  const width = W - margin.left - margin.right;
+  const height = H - margin.top - margin.bottom;
+
+  // --- Tol diverging palette (blue-red via white midpoint) ---
+  // Using Tol's sunset diverging: blue (negative) -> neutral -> red (positive)
+  const tolDiverging = d3.interpolateRgbBasis([
+    "#364B9A", "#4A7BB7", "#6EA6CD", "#98CAE1", "#C2E4EF",
+    "#EAECCC",
+    "#FEDA8B", "#FDB366", "#F67E4B", "#DD3D2D", "#A50026"
+  ]);
+
+  // --- Generate synthetic network ---
+  const rng = d3.randomLcg(42);
+  const randNorm = d3.randomNormal.source(rng)(0, 1);
+  const randUnif = d3.randomUniform.source(rng)(0, 1);
+
+  const N = 60;
+  const communities = ["Tech", "Media", "Policy", "Science"];
+  const communityColors = ["#4477AA", "#EE6677", "#228833", "#CCBB44"];
+
+  // Generate nodes with influence (right-skewed) and sentiment
+  const nodes = d3.range(N).map(i => {
+    const community = communities[i % 4];
+    // Right-skewed influence: a few high-influence hubs
+    const base = Math.abs(randNorm()) * 20 + 5;
+    const isHub = randUnif() < 0.12;
+    const influence = isHub ? base * 4 + 60 : base;
+    // Sentiment: community-biased with noise
+    const bias = i % 4 === 0 ? 0.3 : i % 4 === 1 ? -0.2 : i % 4 === 2 ? 0.1 : -0.15;
+    const sentiment = Math.max(-1, Math.min(1, bias + randNorm() * 0.45));
+    return {
+      id: `n${i}`,
+      label: `User ${i + 1}`,
+      community,
+      communityIdx: i % 4,
+      influence: Math.round(Math.max(2, influence)),
+      sentiment: +sentiment.toFixed(2),
+      degree: 0
+    };
+  });
+
+  // Generate edges: prefer within-community, some cross-community bridges
+  const links = [];
+  const edgeSet = new Set();
+  const addEdge = (s, t, w) => {
+    const key = s < t ? `${s}-${t}` : `${t}-${s}`;
+    if (s === t || edgeSet.has(key)) return;
+    edgeSet.add(key);
+    links.push({ source: nodes[s].id, target: nodes[t].id, weight: w });
+    nodes[s].degree++;
+    nodes[t].degree++;
+  };
+
+  // Intra-community links
+  for (let c = 0; c < 4; c++) {
+    const members = d3.range(N).filter(i => i % 4 === c);
+    for (let i = 0; i < members.length; i++) {
+      for (let j = i + 1; j < members.length; j++) {
+        if (randUnif() < 0.35) addEdge(members[i], members[j], 1 + Math.floor(randUnif() * 3));
+      }
+    }
+  }
+  // Cross-community bridges (sparser)
+  for (let i = 0; i < N; i++) {
+    for (let j = i + 1; j < N; j++) {
+      if (nodes[i].communityIdx !== nodes[j].communityIdx && randUnif() < 0.03) {
+        addEdge(i, j, 1);
+      }
+    }
+  }
+
+  // --- Scales ---
+  const influenceExtent = d3.extent(nodes, d => d.influence);
+  const sentimentExtent = [-1, 0, 1];
+  const rMin = 4, rMax = 32;
+
+  const scales = {
+    linear: d3.scaleLinear().domain(influenceExtent).range([rMin, rMax]),
+    sqrt: d3.scaleSqrt().domain(influenceExtent).range([rMin, rMax]),
+    log: d3.scaleLog().domain([Math.max(1, influenceExtent[0]), influenceExtent[1]]).range([rMin, rMax])
+  };
+
+  const colorScale = d3.scaleDiverging(sentimentExtent, tolDiverging);
+
+  const edgeWidthScale = d3.scaleSqrt()
+    .domain(d3.extent(links, d => d.weight))
+    .range([0.5, 2.5]);
+
+  let currentScale = "sqrt";
+  const getR = d => scales[currentScale](Math.max(1, d.influence));
+
+  const annotations = {
+    sqrt: "Sqrt maps influence to circle area proportionally \u2014 the perceptually honest default.",
+    linear: "Linear radius makes high-influence nodes dominate disproportionately. Area grows as r\u00B2, so a 3\u00D7 value looks 9\u00D7 bigger.",
+    log: "Log compresses the range: small and large nodes look similar. Useful for spanning orders of magnitude, but hides variation here."
+  };
+
+  // --- SVG setup ---
+  const svg = d3.select("#chart")
+    .attr("width", W)
+    .attr("height", H)
+    .attr("viewBox", [0, 0, W, H]);
+
+  const g = svg.append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+  // Links
+  const linkG = g.append("g").attr("stroke", "#999").attr("stroke-opacity", 0.35);
+  const linkSel = linkG.selectAll("line")
+    .data(links)
+    .join("line")
+      .attr("stroke-width", d => edgeWidthScale(d.weight));
+
+  // Nodes
+  const nodeG = g.append("g");
+  const nodeSel = nodeG.selectAll("circle")
+    .data(nodes, d => d.id)
+    .join("circle")
+      .attr("fill", d => colorScale(d.sentiment))
+      .attr("stroke", "#fff")
+      .attr("stroke-width", 1.5)
+      .attr("r", d => getR(d))
+      .attr("cursor", "grab")
+      .attr("opacity", 0.92);
+
+  // Labels for high-influence nodes
+  const labelThreshold = d3.quantile(nodes.map(d => d.influence).sort(d3.ascending), 0.85);
+  const labelG = g.append("g")
+    .attr("font-size", 10)
+    .attr("font-family", "system-ui, -apple-system, sans-serif")
+    .attr("pointer-events", "none");
+
+  const labelSel = labelG.selectAll("text")
+    .data(nodes.filter(d => d.influence >= labelThreshold), d => d.id)
+    .join("text")
+      .attr("text-anchor", "middle")
+      .attr("fill", "#333")
+      .attr("dy", d => -getR(d) - 4)
+      .text(d => d.label);
+
+  // --- Force simulation ---
+  const simulation = d3.forceSimulation(nodes)
+    .force("link", d3.forceLink(links).id(d => d.id).distance(60).strength(0.15))
+    .force("charge", d3.forceManyBody().strength(-120).distanceMax(350))
+    .force("center", d3.forceCenter(width / 2, height / 2))
+    .force("collide", d3.forceCollide(d => getR(d) + 2).strength(0.8).iterations(2))
+    .force("x", d3.forceX(width / 2).strength(0.04))
+    .force("y", d3.forceY(height / 2).strength(0.04))
+    .velocityDecay(0.45)
+    .on("tick", ticked);
+
+  function ticked() {
+    // Clamp to bounds
+    for (const d of nodes) {
+      const r = getR(d);
+      d.x = Math.max(r + margin.left, Math.min(width - r, d.x));
+      d.y = Math.max(r + margin.top, Math.min(height - r, d.y));
+    }
+
+    linkSel
+      .attr("x1", d => d.source.x)
+      .attr("y1", d => d.source.y)
+      .attr("x2", d => d.target.x)
+      .attr("y2", d => d.target.y);
+
+    nodeSel
+      .attr("cx", d => d.x)
+      .attr("cy", d => d.y);
+
+    labelSel
+      .attr("x", d => d.x)
+      .attr("y", d => d.y)
+      .attr("dy", d => -getR(d) - 4);
+  }
+
+  // --- Drag ---
+  const drag = d3.drag()
+    .on("start", (event, d) => {
+      if (!event.active) simulation.alphaTarget(0.3).restart();
+      d.fx = d.x; d.fy = d.y;
+      d3.select(event.sourceEvent.target).attr("cursor", "grabbing");
+    })
+    .on("drag", (event, d) => {
+      d.fx = event.x; d.fy = event.y;
+    })
+    .on("end", (event, d) => {
+      if (!event.active) simulation.alphaTarget(0);
+      d.fx = null; d.fy = null;
+      d3.select(event.sourceEvent.target).attr("cursor", "grab");
+    });
+
+  nodeSel.call(drag);
+
+  // --- Tooltip ---
+  const tooltip = d3.select("#tooltip");
+
+  nodeSel
+    .on("pointerenter", (event, d) => {
+      tooltip.style("display", "block").html(
+        `<div class="name">${d.label}</div>` +
+        `<div class="stat">Community: ${d.community}</div>` +
+        `<div class="stat">Influence: <span>${d.influence}</span></div>` +
+        `<div class="stat">Sentiment: <span>${d.sentiment > 0 ? "+" : ""}${d.sentiment.toFixed(2)}</span></div>` +
+        `<div class="stat">Connections: <span>${d.degree}</span></div>`
+      );
+      // Highlight neighborhood
+      const neighbors = new Set();
+      links.forEach(l => {
+        const sid = typeof l.source === "object" ? l.source.id : l.source;
+        const tid = typeof l.target === "object" ? l.target.id : l.target;
+        if (sid === d.id) neighbors.add(tid);
+        if (tid === d.id) neighbors.add(sid);
+      });
+      neighbors.add(d.id);
+      nodeSel.attr("opacity", n => neighbors.has(n.id) ? 1 : 0.15);
+      linkSel.attr("stroke-opacity", l => {
+        const sid = typeof l.source === "object" ? l.source.id : l.source;
+        const tid = typeof l.target === "object" ? l.target.id : l.target;
+        return (sid === d.id || tid === d.id) ? 0.7 : 0.04;
+      });
+      labelSel.attr("opacity", n => neighbors.has(n.id) ? 1 : 0.1);
+    })
+    .on("pointermove", (event) => {
+      const rect = event.currentTarget.closest(".chart-area").getBoundingClientRect();
+      tooltip
+        .style("left", (event.clientX - rect.left + 14) + "px")
+        .style("top", (event.clientY - rect.top - 10) + "px");
+    })
+    .on("pointerleave", () => {
+      tooltip.style("display", "none");
+      nodeSel.attr("opacity", 0.92);
+      linkSel.attr("stroke-opacity", 0.35);
+      labelSel.attr("opacity", 1);
+    });
+
+  // --- Scale toggle ---
+  d3.select("#scale-select").on("change", function() {
+    currentScale = this.value;
+    d3.select("#annotation").text(annotations[currentScale]);
+
+    // Transition radii
+    nodeSel.transition().duration(600).ease(d3.easeCubicOut)
+      .attr("r", d => getR(d));
+
+    labelSel.transition().duration(600).ease(d3.easeCubicOut)
+      .attr("dy", d => -getR(d) - 4);
+
+    // Update and reheat collision force
+    simulation.force("collide", d3.forceCollide(d => getR(d) + 2).strength(0.8).iterations(2));
+    simulation.alpha(0.4).restart();
+
+    updateSizeLegend();
+  });
+
+  // --- Legends ---
+  function updateSizeLegend() {
+    const container = d3.select("#size-legend");
+    container.html("");
+    const sampleValues = [10, 30, 60, 100];
+    sampleValues.forEach(v => {
+      if (v > influenceExtent[1]) return;
+      const r = scales[currentScale](Math.max(1, v));
+      const item = container.append("div").attr("class", "size-item");
+      const svgEl = item.append("svg")
+        .attr("width", r * 2 + 4).attr("height", r * 2 + 4);
+      svgEl.append("circle")
+        .attr("cx", r + 2).attr("cy", r + 2).attr("r", r)
+        .attr("fill", "#bbb").attr("stroke", "#999").attr("stroke-width", 0.5);
+      item.append("span").text(v);
+    });
+  }
+  updateSizeLegend();
+
+  // Color legend
+  (() => {
+    const container = d3.select("#color-legend");
+    container.append("span").attr("class", "lbl").text("-1 (negative)");
+    const canvas = document.createElement("canvas");
+    canvas.width = 140; canvas.height = 12;
+    const ctx = canvas.getContext("2d");
+    for (let i = 0; i < 140; i++) {
+      ctx.fillStyle = tolDiverging(i / 139);
+      ctx.fillRect(i, 0, 1, 12);
+    }
+    const img = container.append("img")
+      .attr("class", "bar")
+      .attr("src", canvas.toDataURL())
+      .attr("width", 140).attr("height", 12)
+      .style("border-radius", "2px");
+    container.append("span").attr("class", "lbl").text("+1 (positive)");
+  })();
+
+})();
+</script>
+</body>
+</html>

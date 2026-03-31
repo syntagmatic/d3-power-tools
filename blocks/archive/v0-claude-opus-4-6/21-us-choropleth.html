@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Broadband Access by State (%)</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: #fafafa; padding: 20px; color: #333; }
+  h1 { font-size: 18px; font-weight: 600; text-align: center; margin-bottom: 4px; }
+  .subtitle { font-size: 12px; color: #888; text-align: center; margin-bottom: 16px; }
+  svg { display: block; margin: 0 auto; }
+  .state { cursor: pointer; stroke: #fff; stroke-width: 0.5px; transition: opacity 0.15s; }
+  .state:hover { stroke: #333; stroke-width: 1.5px; }
+  .tooltip {
+    position: absolute; pointer-events: none; background: rgba(0,0,0,0.82);
+    color: #fff; padding: 6px 10px; border-radius: 4px; font-size: 12px;
+    line-height: 1.5; white-space: nowrap; opacity: 0; transition: opacity 0.15s;
+  }
+  .legend-label { font-size: 10px; fill: #666; }
+  .legend-title { font-size: 11px; fill: #333; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>Broadband Access by State (%)</h1>
+<p class="subtitle">Synthetic data for demonstration. Click a state to zoom; click background to reset.</p>
+<div id="chart"></div>
+<div class="tooltip" id="tooltip"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+import * as topojson from "https://cdn.jsdelivr.net/npm/topojson-client@3/+esm";
+
+// --- Synthetic data for 50 states + DC ---
+const stateList = [
+  {fips:"01",name:"Alabama",abbr:"AL"},{fips:"02",name:"Alaska",abbr:"AK"},
+  {fips:"04",name:"Arizona",abbr:"AZ"},{fips:"05",name:"Arkansas",abbr:"AR"},
+  {fips:"06",name:"California",abbr:"CA"},{fips:"08",name:"Colorado",abbr:"CO"},
+  {fips:"09",name:"Connecticut",abbr:"CT"},{fips:"10",name:"Delaware",abbr:"DE"},
+  {fips:"11",name:"District of Columbia",abbr:"DC"},{fips:"12",name:"Florida",abbr:"FL"},
+  {fips:"13",name:"Georgia",abbr:"GA"},{fips:"15",name:"Hawaii",abbr:"HI"},
+  {fips:"16",name:"Idaho",abbr:"ID"},{fips:"17",name:"Illinois",abbr:"IL"},
+  {fips:"18",name:"Indiana",abbr:"IN"},{fips:"19",name:"Iowa",abbr:"IA"},
+  {fips:"20",name:"Kansas",abbr:"KS"},{fips:"21",name:"Kentucky",abbr:"KY"},
+  {fips:"22",name:"Louisiana",abbr:"LA"},{fips:"23",name:"Maine",abbr:"ME"},
+  {fips:"24",name:"Maryland",abbr:"MD"},{fips:"25",name:"Massachusetts",abbr:"MA"},
+  {fips:"26",name:"Michigan",abbr:"MI"},{fips:"27",name:"Minnesota",abbr:"MN"},
+  {fips:"28",name:"Mississippi",abbr:"MS"},{fips:"29",name:"Missouri",abbr:"MO"},
+  {fips:"30",name:"Montana",abbr:"MT"},{fips:"31",name:"Nebraska",abbr:"NE"},
+  {fips:"32",name:"Nevada",abbr:"NV"},{fips:"33",name:"New Hampshire",abbr:"NH"},
+  {fips:"34",name:"New Jersey",abbr:"NJ"},{fips:"35",name:"New Mexico",abbr:"NM"},
+  {fips:"36",name:"New York",abbr:"NY"},{fips:"37",name:"North Carolina",abbr:"NC"},
+  {fips:"38",name:"North Dakota",abbr:"ND"},{fips:"39",name:"Ohio",abbr:"OH"},
+  {fips:"40",name:"Oklahoma",abbr:"OK"},{fips:"41",name:"Oregon",abbr:"OR"},
+  {fips:"42",name:"Pennsylvania",abbr:"PA"},{fips:"44",name:"Rhode Island",abbr:"RI"},
+  {fips:"45",name:"South Carolina",abbr:"SC"},{fips:"46",name:"South Dakota",abbr:"SD"},
+  {fips:"47",name:"Tennessee",abbr:"TN"},{fips:"48",name:"Texas",abbr:"TX"},
+  {fips:"49",name:"Utah",abbr:"UT"},{fips:"50",name:"Vermont",abbr:"VT"},
+  {fips:"51",name:"Virginia",abbr:"VA"},{fips:"53",name:"Washington",abbr:"WA"},
+  {fips:"54",name:"West Virginia",abbr:"WV"},{fips:"55",name:"Wisconsin",abbr:"WI"},
+  {fips:"56",name:"Wyoming",abbr:"WY"}
+];
+
+// Seeded pseudo-random for reproducibility
+const seed = 42;
+let rngState = seed;
+const rng = () => { rngState = (rngState * 16807 + 0) % 2147483647; return rngState / 2147483647; };
+
+const categories = ["Urban", "Suburban", "Rural", "Mixed"];
+const data = new Map(stateList.map(s => {
+  const value = +(60 + rng() * 38).toFixed(1);
+  const category = categories[Math.floor(rng() * categories.length)];
+  return [s.fips, { ...s, value, category }];
+}));
+
+// --- Load proper TopoJSON geometry ---
+const us = await d3.json("https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json");
+const features = topojson.feature(us, us.objects.states).features;
+const stateMesh = topojson.mesh(us, us.objects.states, (a, b) => a !== b);
+
+// Build a FIPS lookup from stateList for name/abbr matching
+const fipsLookup = new Map(stateList.map(s => [s.fips, s]));
+
+// Tag features with padded FIPS for data joining
+features.forEach(f => {
+  f.id = String(f.id).padStart(2, "0");
+});
+
+const geojson = { type: "FeatureCollection", features };
+
+// --- Layout ---
+const width = 960, height = 620;
+const legendHeight = 50;
+
+const svg = d3.select("#chart").append("svg")
+    .attr("viewBox", `0 0 ${width} ${height}`)
+    .attr("width", "100%")
+    .attr("style", "max-width: 960px;");
+
+// Projection & path
+const projection = d3.geoAlbersUsa()
+    .fitSize([width - 40, height - legendHeight - 80], geojson)
+    .translate([width / 2, (height - legendHeight) / 2 - 10]);
+
+const path = d3.geoPath(projection);
+
+// Color scale — 5 discrete threshold steps
+const thresholds = [65, 72, 80, 88];
+const colorScale = d3.scaleThreshold()
+    .domain(thresholds)
+    .range(d3.schemeBlues[5]);
+
+const tooltip = d3.select("#tooltip");
+
+// Background rect for click-to-reset
+const g = svg.append("g");
+
+svg.append("rect")
+    .attr("width", width)
+    .attr("height", height)
+    .attr("fill", "none")
+    .attr("pointer-events", "all")
+    .on("click", resetZoom);
+
+// Draw states
+g.selectAll(".state")
+  .data(features, d => d.id)
+  .join("path")
+    .attr("class", "state")
+    .attr("d", path)
+    .attr("fill", d => {
+      const rec = data.get(d.id);
+      return rec ? colorScale(rec.value) : "#ccc";
+    })
+    .on("pointerenter", (event, d) => {
+      const rec = data.get(d.id);
+      if (!rec) return;
+      d3.select(event.currentTarget)
+          .attr("fill", d3.color(colorScale(rec.value)).darker(0.4));
+      tooltip.style("opacity", 1)
+          .html(`<strong>${rec.name}</strong><br>Broadband: ${rec.value}%<br>Type: ${rec.category}`);
+    })
+    .on("pointermove", (event) => {
+      tooltip
+          .style("left", (event.pageX + 12) + "px")
+          .style("top", (event.pageY - 28) + "px");
+    })
+    .on("pointerleave", (event, d) => {
+      const rec = data.get(d.id);
+      d3.select(event.currentTarget)
+          .attr("fill", rec ? colorScale(rec.value) : "#ccc");
+      tooltip.style("opacity", 0);
+    })
+    .on("click", (event, d) => {
+      event.stopPropagation();
+      zoomToState(d);
+    });
+
+// State boundary mesh for crisp borders
+g.append("path")
+    .datum(stateMesh)
+    .attr("fill", "none")
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 0.5)
+    .attr("stroke-linejoin", "round")
+    .attr("d", path);
+
+// --- Zoom to state ---
+const zoom = d3.zoom()
+    .scaleExtent([1, 8])
+    .on("zoom", (event) => g.attr("transform", event.transform));
+
+svg.call(zoom);
+
+function zoomToState(d) {
+  const [[x0, y0], [x1, y1]] = path.bounds(d);
+  const dx = x1 - x0, dy = y1 - y0;
+  const x = (x0 + x1) / 2, y = (y0 + y1) / 2;
+  const scale = Math.max(1, Math.min(8, 0.9 / Math.max(dx / width, dy / (height - legendHeight))));
+  const translate = [width / 2 - scale * x, (height - legendHeight) / 2 - scale * y];
+
+  svg.transition().duration(750).call(
+    zoom.transform,
+    d3.zoomIdentity.translate(translate[0], translate[1]).scale(scale)
+  );
+}
+
+function resetZoom() {
+  svg.transition().duration(750).call(zoom.transform, d3.zoomIdentity);
+}
+
+// --- Legend ---
+const legendWidth = 280;
+const legendX = (width - legendWidth) / 2;
+const legendY = height - legendHeight - 5;
+const legendG = svg.append("g")
+    .attr("transform", `translate(${legendX}, ${legendY})`);
+
+const stepWidth = legendWidth / 5;
+const legendLabels = ["<65", "65–72", "72–80", "80–88", "≥88"];
+const legendColors = d3.schemeBlues[5];
+
+legendG.selectAll("rect")
+  .data(legendColors)
+  .join("rect")
+    .attr("x", (_, i) => i * stepWidth)
+    .attr("y", 0)
+    .attr("width", stepWidth)
+    .attr("height", 14)
+    .attr("fill", d => d);
+
+legendG.selectAll(".legend-label")
+  .data(legendLabels)
+  .join("text")
+    .attr("class", "legend-label")
+    .attr("x", (_, i) => i * stepWidth + stepWidth / 2)
+    .attr("y", 28)
+    .attr("text-anchor", "middle")
+    .text(d => d);
+
+legendG.append("text")
+    .attr("class", "legend-title")
+    .attr("x", legendWidth / 2)
+    .attr("y", -6)
+    .attr("text-anchor", "middle")
+    .text("Broadband Access (%)");
+</script>
+</body>
+</html>

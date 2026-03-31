@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Zoomable Treemap — File System Explorer</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: #f8f8f8; color: #222; }
+
+  #header { padding: 16px 24px 6px; }
+  #header h1 { font-size: 18px; font-weight: 700; letter-spacing: -0.3px; }
+  #header .subtitle { font-size: 13px; color: #666; margin-top: 2px; }
+
+  #breadcrumb {
+    padding: 6px 24px 10px; font-size: 13px;
+    display: flex; gap: 2px; align-items: center; flex-wrap: wrap;
+  }
+  #breadcrumb span {
+    cursor: pointer; color: #4477AA; padding: 2px 4px; border-radius: 3px;
+  }
+  #breadcrumb span:hover { background: #e8f0fa; text-decoration: underline; }
+  #breadcrumb span.current { color: #222; cursor: default; font-weight: 600; }
+  #breadcrumb span.current:hover { background: none; text-decoration: none; }
+  #breadcrumb .sep { color: #aaa; cursor: default; padding: 0 1px; }
+  #breadcrumb .sep:hover { background: none; }
+
+  #legend {
+    padding: 0 24px 8px; display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px;
+  }
+  #legend .item { display: flex; align-items: center; gap: 5px; }
+  #legend .swatch { width: 12px; height: 12px; border-radius: 2px; }
+
+  svg { display: block; }
+  #chart text { pointer-events: none; }
+  .group-label { fill: #fff; font-size: 12px; font-weight: 600; }
+  .leaf-label { fill: #333; font-size: 10px; }
+  .leaf-size { fill: #666; font-size: 9px; font-family: monospace; }
+
+  #tooltip {
+    position: absolute; pointer-events: none; display: none;
+    background: rgba(20,20,20,0.9); color: #fff; padding: 8px 12px;
+    border-radius: 5px; font-size: 12px; line-height: 1.5;
+    max-width: 280px; z-index: 10; box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+  }
+  #tooltip .path { color: #aaa; font-size: 11px; }
+  #tooltip .size { font-family: monospace; }
+</style>
+</head>
+<body>
+<div id="header">
+  <h1>File System Explorer</h1>
+  <div class="subtitle" id="totalSize"></div>
+</div>
+<div id="breadcrumb"></div>
+<div id="legend"></div>
+<div id="chart"></div>
+<div id="tooltip"></div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+// ── Tol colorblind-safe palette: Bright (7) + Muted[0] for 8 dirs ──
+const palette = [
+  "#4477AA","#EE6677","#228833","#CCBB44",
+  "#66CCEE","#AA3377","#CC6677","#332288"
+];
+
+// ── Seeded PRNG (Lehmer) ──
+const seeded = (seed) => {
+  let s = seed;
+  return () => { s = (s * 16807) % 2147483647; return (s - 1) / 2147483646; };
+};
+const rng = seeded(2024);
+
+// ── Synthetic file-system data (~400 files, 3 levels, 8 top dirs) ──
+const topDirs = ["Documents","Photos","Code","Music","Videos","Downloads","Projects","Archives"];
+
+const subDirPool = {
+  Documents: ["Work","Personal","Finance","Taxes","Legal","Drafts"],
+  Photos:    ["Vacation","Family","Pets","Nature","Events","Screenshots"],
+  Code:      ["Frontend","Backend","Scripts","Libraries","Tests","DevOps"],
+  Music:     ["Rock","Jazz","Classical","Electronic","Ambient"],
+  Videos:    ["Movies","Tutorials","Recordings","Shorts"],
+  Downloads: ["Software","Installers","Updates","Temp","Misc"],
+  Projects:  ["Alpha","Beta","Gamma","Delta","Epsilon","Zeta"],
+  Archives:  ["2021","2022","2023","2024"]
+};
+
+const extPool = {
+  Documents: [".docx",".pdf",".txt",".xlsx",".md",".pptx"],
+  Photos:    [".jpg",".png",".raw",".heic",".webp"],
+  Code:      [".js",".ts",".py",".go",".rs",".html",".css"],
+  Music:     [".mp3",".flac",".wav",".aac"],
+  Videos:    [".mp4",".mkv",".mov",".webm"],
+  Downloads: [".zip",".dmg",".iso",".tar.gz",".deb"],
+  Projects:  [".md",".json",".yml",".toml",".lock"],
+  Archives:  [".zip",".tar.gz",".7z",".rar"]
+};
+
+const stems = [
+  "report","summary","draft","notes","data","backup","readme","config",
+  "index","main","utils","test","setup","build","output","cache","log",
+  "image","photo","track","clip","doc","sheet","plan","todo","sketch"
+];
+
+const pick = (arr) => arr[Math.floor(rng() * arr.length)];
+
+// Log-normal-ish sizes: exp(uniform * range) scaled to KB
+const logSize = () => Math.round(Math.exp(rng() * 10 + 4)); // ~55 bytes to ~1.1 MB
+
+const children = [];
+let totalFiles = 0;
+
+for (const dir of topDirs) {
+  const subs = subDirPool[dir];
+  const dirChildren = [];
+  for (const sub of subs) {
+    const fileCount = 6 + Math.floor(rng() * 12); // 6-17 files per subdir
+    const files = [];
+    for (let i = 0; i < fileCount; i++) {
+      const ext = pick(extPool[dir]);
+      const name = pick(stems) + (Math.floor(rng() * 3) > 0 ? "" : Math.floor(rng() * 99)) + ext;
+      files.push({ name, size: logSize() });
+      totalFiles++;
+    }
+    dirChildren.push({ name: sub, children: files });
+  }
+  children.push({ name: dir, children: dirChildren });
+}
+
+const fsData = { name: "root", children };
+
+// ── Layout ──
+const m = 2, width = 1196, height = 656;
+
+const root = d3.hierarchy(fsData)
+  .sum(d => d.size || 0)
+  .sort((a, b) => b.value - a.value);
+
+d3.treemap()
+  .size([width, height])
+  .paddingOuter(2).paddingTop(22)
+  .paddingInner(1)
+  .tile(d3.treemapResquarify)
+  (root);
+
+// ── Color: categorical by top-level ancestor ──
+const color = d3.scaleOrdinal().domain(topDirs).range(palette);
+
+const cellFill = (d) => {
+  let n = d; while (n.depth > 1) n = n.parent;
+  const base = d3.hcl(color(n.data.name));
+  if (d.depth === 1) { base.l = 45; base.c *= 0.9; }
+  else if (d.depth === 2) { base.l = 60; base.c *= 0.7; }
+  else { base.l = 72 + rng() * 10; base.c *= 0.5; }
+  return base.toString();
+};
+
+// ── Format ──
+const fmt = (bytes) => {
+  if (bytes >= 1e9) return (bytes / 1e9).toFixed(1) + " GB";
+  if (bytes >= 1e6) return (bytes / 1e6).toFixed(1) + " MB";
+  if (bytes >= 1e3) return (bytes / 1e3).toFixed(1) + " KB";
+  return bytes + " B";
+};
+
+document.getElementById("totalSize").textContent =
+  `${totalFiles} files across ${topDirs.length} directories — ${fmt(root.value)} total`;
+
+// ── Legend ──
+d3.select("#legend").selectAll(".item").data(topDirs).join("div")
+  .attr("class", "item")
+  .html(name => `<div class="swatch" style="background:${color(name)}"></div>${name}`);
+
+// ── SVG ──
+const svg = d3.select("#chart").append("svg")
+  .attr("width", width + 2 * m).attr("height", height + 2 * m)
+  .attr("viewBox", `0 0 ${width + 2 * m} ${height + 2 * m}`)
+  .style("max-width", "100%");
+
+const g = svg.append("g").attr("transform", `translate(${m},${m})`);
+
+// Clip path so transitions stay clean
+g.append("clipPath")
+  .attr("id", "treemap-clip")
+  .append("rect")
+  .attr("width", width)
+  .attr("height", height);
+
+const container = g.append("g")
+  .attr("clip-path", "url(#treemap-clip)");
+
+// ── Scales for zoom (domain swap technique) ──
+const x = d3.scaleLinear().domain([root.x0, root.x1]).rangeRound([0, width]);
+const y = d3.scaleLinear().domain([root.y0, root.y1]).rangeRound([0, height]);
+
+let currentFocus = root;
+
+// ── Render ──
+const cell = container.selectAll("g")
+  .data(root.descendants().slice(1), d => d.data.name + d.depth + (d.parent ? d.parent.data.name : ""))
+  .join("g")
+    .attr("transform", d => `translate(${x(d.x0)},${y(d.y0)})`);
+
+cell.append("rect")
+  .attr("width", d => Math.max(0, x(d.x1) - x(d.x0)))
+  .attr("height", d => Math.max(0, y(d.y1) - y(d.y0)))
+  .attr("fill", d => cellFill(d))
+  .attr("stroke", "#fff")
+  .attr("stroke-width", d => d.height > 0 ? 1.5 : 0.5);
+
+cell.filter(d => d.height > 0).append("text")
+  .attr("class", "group-label")
+  .attr("x", 4).attr("y", 15)
+  .text(d => d.data.name);
+
+const leaves = cell.filter(d => d.height === 0);
+leaves.append("text")
+  .attr("class", "leaf-label")
+  .attr("x", 3).attr("y", 13)
+  .text(d => d.data.name);
+
+leaves.append("text")
+  .attr("class", "leaf-size")
+  .attr("x", 3).attr("y", 24)
+  .text(d => fmt(d.value));
+
+// ── Visibility + label fitting ──
+const updateVisibility = (focus, duration) => {
+  cell.each(function(d) {
+    const vis = d.ancestors().includes(focus);
+    const el = d3.select(this);
+    const sw = Math.max(0, x(d.x1) - x(d.x0));
+    const sh = Math.max(0, y(d.y1) - y(d.y0));
+    (duration > 0 ? el.transition("opacity").duration(duration) : el).attr("opacity", vis ? 1 : 0);
+    el.style("pointer-events", vis ? "auto" : "none");
+    [[".group-label",40,18],[".leaf-label",30,16],[".leaf-size",40,28]]
+      .forEach(([c,mw,mh]) => el.select(c).attr("opacity", sw > mw && sh > mh ? 1 : 0));
+  });
+};
+
+updateVisibility(currentFocus, 0);
+
+// ── Breadcrumb ──
+const updateBreadcrumb = (focus) => {
+  const path = focus.ancestors().reverse();
+  const items = path.flatMap((d, i) => i ? [{sep: true}, d] : [d]);
+  d3.select("#breadcrumb").selectAll("span").data(items).join("span")
+    .attr("class", d => d.sep ? "sep" : d === focus ? "current" : null)
+    .text(d => d.sep ? "/" : d.depth === 0 ? "root" : d.data.name)
+    .style("cursor", d => d.sep || d === focus ? null : "pointer")
+    .on("click", (event, d) => { if (!d.sep && d !== focus) zoomTo(d); });
+};
+
+updateBreadcrumb(currentFocus);
+
+// ── Tooltip ──
+const tooltip = d3.select("#tooltip");
+
+cell.on("pointerenter", (event, d) => {
+  tooltip.style("display", "block")
+    .html(`<div class="path">/${d.ancestors().reverse().slice(1).map(a => a.data.name).join("/")}</div>
+           <div><strong>${d.data.name}</strong></div>
+           <div class="size">${fmt(d.value)}${d.height > 0 ? ` (${d.leaves().length} files)` : ""}</div>`);
+})
+.on("pointermove", ({pageX, pageY}) => {
+  tooltip.style("left", pageX + 14 + "px").style("top", pageY - 10 + "px");
+})
+.on("pointerleave", () => {
+  tooltip.style("display", "none");
+});
+
+// ── Zoom interaction ──
+const zoomTo = (target) => {
+  if (target === currentFocus) { if (target.parent) zoomTo(target.parent); return; }
+
+  currentFocus = target;
+
+  cell.interrupt("zoom").interrupt("opacity");
+
+  // Update scale domains to the target's bounds
+  x.domain([target.x0, target.x1]);
+  y.domain([target.y0, target.y1]);
+
+  const t = d3.transition("zoom").duration(750);
+
+  cell.transition(t)
+    .attr("transform", d => `translate(${x(d.x0)},${y(d.y0)})`)
+    .select("rect")
+      .attr("width", d => Math.max(0, x(d.x1) - x(d.x0)))
+      .attr("height", d => Math.max(0, y(d.y1) - y(d.y0)));
+
+  // Recalculate label visibility after transition ends
+  t.on("end", () => updateVisibility(currentFocus, 0));
+
+  // Immediate: hide labels for non-descendants, update opacity
+  updateVisibility(currentFocus, 400);
+
+  updateBreadcrumb(currentFocus);
+};
+
+cell.on("click", (event, d) => {
+  event.stopPropagation();
+  zoomTo(d.height > 0 ? d : d.parent);
+});
+
+// Click on background to zoom out
+svg.on("click", () => {
+  if (currentFocus.parent) zoomTo(currentFocus.parent);
+});
+
+cell.style("cursor", "pointer");
+</script>
+</body>
+</html>

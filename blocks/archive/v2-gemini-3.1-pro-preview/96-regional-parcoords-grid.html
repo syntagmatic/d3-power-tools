@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Regional Parallel Coordinates Grid</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      margin: 20px;
+      background: #f4f4f9;
+      color: #333;
+    }
+    .header {
+      margin-bottom: 20px;
+    }
+    h1 {
+      font-size: 24px;
+      margin: 0 0 8px 0;
+    }
+    p {
+      font-size: 15px;
+      color: #555;
+      margin: 0;
+    }
+    #vis {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      width: max-content;
+    }
+    .panel {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+      position: relative;
+    }
+    .region-label {
+      font-size: 14px;
+      font-weight: 600;
+      fill: #111;
+    }
+    .axis-label {
+      font-size: 11px;
+      font-weight: 600;
+      fill: #444;
+      text-anchor: middle;
+      pointer-events: none;
+    }
+    .axis text {
+      font-size: 10px;
+      fill: #666;
+    }
+    .domain {
+      stroke: #bbb;
+    }
+    .tick line {
+      stroke: #ddd;
+    }
+    .brush .selection {
+      fill: #69b3a2;
+      fill-opacity: 0.3;
+      stroke: #fff;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Regional Parallel Coordinates</h1>
+    <p>200 cars, 6 axes, 4 regions. 2×2 grid. Brush any axis to filter across all regions.</p>
+  </div>
+  <div id="vis"></div>
+
+  <script>
+    // Data Generation
+    const regions = ["North America", "Europe", "Asia", "South America"];
+    const dimensions = ["MPG", "Cylinders", "Displacement", "Horsepower", "Weight", "Acceleration"];
+
+    const data = Array.from({length: 200}, (_, i) => {
+      const region = regions[i % 4];
+      const offset = (i % 4) * 4;
+      return {
+        Region: region,
+        MPG: 10 + offset + Math.random() * 25,
+        Cylinders: [4, 6, 8][Math.floor(Math.random() * 3)],
+        Displacement: 80 + offset * 15 + Math.random() * 300,
+        Horsepower: 50 + offset * 10 + Math.random() * 200,
+        Weight: 1500 + offset * 150 + Math.random() * 2500,
+        Acceleration: 8 + offset * 0.5 + Math.random() * 10
+      };
+    });
+
+    // Layout
+    const width = 450;
+    const height = 300;
+    const margin = {top: 50, right: 30, bottom: 30, left: 30};
+
+    const dpr = window.devicePixelRatio || 1;
+    const container = d3.select("#vis");
+
+    // Scales
+    const yScales = {};
+    dimensions.forEach(dim => {
+      yScales[dim] = d3.scaleLinear()
+        .domain(d3.extent(data, d => d[dim]))
+        .nice()
+        .range([height - margin.bottom, margin.top]);
+    });
+
+    const xScale = d3.scalePoint()
+      .domain(dimensions)
+      .range([margin.left, width - margin.right]);
+
+    // Panels
+    const panels = container.selectAll(".panel")
+      .data(regions)
+      .join("div")
+      .attr("class", "panel")
+      .style("width", `${width}px`)
+      .style("height", `${height}px`);
+
+    panels.each(function(region) {
+      const p = d3.select(this);
+      
+      const canvas = p.append("canvas")
+        .attr("width", width * dpr)
+        .attr("height", height * dpr)
+        .style("width", `${width}px`)
+        .style("height", `${height}px`)
+        .style("position", "absolute")
+        .style("top", 0)
+        .style("left", 0);
+        
+      const ctx = canvas.node().getContext("2d");
+      ctx.scale(dpr, dpr);
+      
+      const svg = p.append("svg")
+        .attr("width", width)
+        .attr("height", height)
+        .style("position", "absolute")
+        .style("top", 0)
+        .style("left", 0);
+        
+      svg.append("text")
+        .attr("class", "region-label")
+        .attr("x", margin.left - 10)
+        .attr("y", margin.top / 2 - 5)
+        .text(region);
+        
+      const axes = svg.selectAll(".axis")
+        .data(dimensions)
+        .join("g")
+        .attr("class", "axis")
+        .attr("transform", d => `translate(${xScale(d)},0)`);
+        
+      axes.each(function(dim) {
+        d3.select(this).call(d3.axisLeft(yScales[dim]));
+        
+        d3.select(this).append("text")
+          .attr("class", "axis-label")
+          .attr("y", margin.top - 15)
+          .text(dim);
+      });
+    });
+
+    // Brushing
+    const brushes = {};
+    const activeFilters = {};
+
+    dimensions.forEach(dim => {
+      brushes[dim] = d3.brushY()
+        .extent([[-10, margin.top], [10, height - margin.bottom]])
+        .on("start brush end", function(event) {
+          if (!event.sourceEvent) return; // Prevent loops from programmatically applied brushes
+          
+          const selection = event.selection;
+          
+          if (selection) {
+            const [y0, y1] = selection;
+            const yDomain0 = yScales[dim].invert(y0);
+            const yDomain1 = yScales[dim].invert(y1);
+            activeFilters[dim] = [Math.min(yDomain0, yDomain1), Math.max(yDomain0, yDomain1)];
+          } else {
+            delete activeFilters[dim];
+          }
+          
+          const activeNode = this;
+          d3.selectAll(`.brush-${dim}`)
+            .filter(function() { return this !== activeNode; })
+            .call(brushes[dim].move, selection);
+            
+          updateCanvases();
+        });
+    });
+
+    panels.each(function() {
+      const svg = d3.select(this).select("svg");
+      const axes = svg.selectAll(".axis");
+      
+      axes.each(function(dim) {
+        d3.select(this).append("g")
+          .attr("class", `brush brush-${dim}`)
+          .call(brushes[dim]);
+      });
+    });
+
+    // Rendering
+    const colors = {
+      "North America": "#4e79a7",
+      "Europe": "#f28e2c",
+      "Asia": "#e15759",
+      "South America": "#76b7b2"
+    };
+
+    function updateCanvases() {
+      panels.each(function(region) {
+        const canvas = d3.select(this).select("canvas").node();
+        const ctx = canvas.getContext("2d");
+        
+        ctx.clearRect(0, 0, width, height);
+        
+        const regionData = data.filter(d => d.Region === region);
+        
+        // Draw background
+        ctx.strokeStyle = "rgba(200, 200, 200, 0.25)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        regionData.forEach(d => {
+          dimensions.forEach((dim, i) => {
+            const x = xScale(dim);
+            const y = yScales[dim](d[dim]);
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          });
+        });
+        ctx.stroke();
+        
+        // Draw foreground
+        const selectedData = regionData.filter(d => {
+          for (const dim in activeFilters) {
+            const [min, max] = activeFilters[dim];
+            if (d[dim] < min || d[dim] > max) return false;
+          }
+          return true;
+        });
+        
+        if (selectedData.length > 0) {
+          ctx.strokeStyle = colors[region] || "rgba(31, 119, 180, 0.8)";
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          selectedData.forEach(d => {
+            dimensions.forEach((dim, i) => {
+              const x = xScale(dim);
+              const y = yScales[dim](d[dim]);
+              if (i === 0) ctx.moveTo(x, y);
+              else ctx.lineTo(x, y);
+            });
+          });
+          ctx.stroke();
+        }
+      });
+    }
+
+    updateCanvases();
+  </script>
+</body>
+</html>

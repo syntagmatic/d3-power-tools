@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Skill Growth Sparklines</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: #0d1117;
+    color: #c9d1d9;
+    padding: 32px;
+  }
+  h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; color: #e6edf3; }
+  .subtitle { font-size: 13px; color: #8b949e; margin-bottom: 20px; }
+  table {
+    width: 100%;
+    max-width: 960px;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  thead th {
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid #30363d;
+    color: #8b949e;
+    font-weight: 500;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+  }
+  thead th:hover { color: #e6edf3; }
+  thead th.sorted-asc::after { content: " ▲"; font-size: 10px; }
+  thead th.sorted-desc::after { content: " ▼"; font-size: 10px; }
+  tbody td {
+    padding: 6px 12px;
+    border-bottom: 1px solid #21262d;
+    vertical-align: middle;
+  }
+  tbody tr:hover { background: #161b22; }
+  .skill-name { font-weight: 500; color: #e6edf3; }
+  .category-badge {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+  }
+  .num { font-variant-numeric: tabular-nums; text-align: right; }
+  .sparkline-cell { padding: 4px 8px; }
+  .growth-pos { color: #3fb950; }
+  .growth-neg { color: #f85149; }
+  .tooltip {
+    position: absolute;
+    background: #1c2128;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 12px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s;
+    z-index: 10;
+    line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+<h1>Skill Growth Sparklines</h1>
+<p class="subtitle">Score trajectories across 8 evaluation rounds — click any column header to sort</p>
+<table id="table">
+  <thead>
+    <tr>
+      <th data-key="name">Skill</th>
+      <th data-key="category">Category</th>
+      <th data-key="current" class="num">Current</th>
+      <th data-key="growth" class="num">Growth</th>
+      <th data-key="sparkline">Trend</th>
+      <th data-key="peak" class="num">Peak</th>
+      <th data-key="volatility" class="num">σ</th>
+    </tr>
+  </thead>
+  <tbody></tbody>
+</table>
+<div class="tooltip" id="tip"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+const categories = [
+  { name: "Seeing patterns", color: "#7ee787", bg: "rgba(126,231,135,0.12)" },
+  { name: "Seeing structure", color: "#79c0ff", bg: "rgba(121,192,255,0.12)" },
+  { name: "Seeing place", color: "#d2a8ff", bg: "rgba(210,168,255,0.12)" },
+  { name: "Seeing change", color: "#ffa657", bg: "rgba(255,166,87,0.12)" },
+  { name: "Making it legible", color: "#f778ba", bg: "rgba(247,120,186,0.12)" },
+  { name: "Making it work", color: "#ff7b72", bg: "rgba(255,123,114,0.12)" },
+];
+
+const skillDefs = [
+  ["parallel-coordinates", 0], ["brushing", 0], ["linked-views", 0],
+  ["distributions", 0], ["small-multiples", 0],
+  ["hierarchy-layouts", 1], ["hierarchy-interaction", 1], ["edge-bundling", 1],
+  ["force", 1], ["network", 1],
+  ["cartography", 2],
+  ["time-series", 3], ["motion", 3], ["shape-morphing", 3],
+  ["scales", 4], ["color", 4], ["visual-texture", 4],
+  ["annotation", 4], ["data-table", 4], ["canvas-accessibility", 4],
+  ["canvas", 5], ["webgl", 5], ["navigation", 5], ["responsive", 5],
+];
+
+const rounds = 8;
+const rng = d3.randomLcg(42);
+const rand = d3.randomNormal.source(rng)(0, 1);
+
+const skills = skillDefs.map(([name, catIdx]) => {
+  const cat = categories[catIdx];
+  const base = 40 + rng() * 35;
+  const trend = (rng() - 0.3) * 4;
+  const vol = 1.5 + rng() * 4;
+  const scores = Array.from({ length: rounds }, (_, i) => {
+    const v = base + trend * i + rand() * vol;
+    return Math.max(10, Math.min(99, Math.round(v * 10) / 10));
+  });
+  const current = scores[scores.length - 1];
+  const growth = current - scores[0];
+  const peak = d3.max(scores);
+  const volatility = d3.deviation(scores);
+  return { name, category: cat.name, catColor: cat.color, catBg: cat.bg, scores, current, growth, peak, volatility };
+});
+
+const sparkW = 120, sparkH = 28, sparkPad = 2;
+const globalMin = d3.min(skills, d => d3.min(d.scores));
+const globalMax = d3.max(skills, d => d3.max(d.scores));
+const yScale = d3.scaleLinear().domain([globalMin - 2, globalMax + 2]).range([sparkH - sparkPad, sparkPad]);
+const xScale = d3.scaleLinear().domain([0, rounds - 1]).range([sparkPad, sparkW - sparkPad]);
+const line = d3.line().x((_, i) => xScale(i)).y(d => yScale(d)).curve(d3.curveMonotoneX);
+const area = d3.area().x((_, i) => xScale(i)).y0(sparkH).y1(d => yScale(d)).curve(d3.curveMonotoneX);
+
+const tbody = d3.select("#table tbody");
+const tip = d3.select("#tip");
+
+let sortKey = "growth", sortDir = -1;
+
+function render() {
+  const sorted = [...skills].sort((a, b) => {
+    let va = a[sortKey], vb = b[sortKey];
+    if (sortKey === "sparkline") { va = a.growth; vb = b.growth; }
+    if (typeof va === "string") return sortDir * va.localeCompare(vb);
+    return sortDir * (va - vb);
+  });
+
+  tbody.selectAll("tr").remove();
+  const rows = tbody.selectAll("tr").data(sorted).join("tr");
+
+  rows.append("td").attr("class", "skill-name").text(d => d.name);
+  rows.append("td").html(d =>
+    `<span class="category-badge" style="color:${d.catColor};background:${d.catBg}">${d.category}</span>`
+  );
+  rows.append("td").attr("class", "num").text(d => d.current.toFixed(1));
+  rows.append("td").attr("class", d => `num ${d.growth >= 0 ? "growth-pos" : "growth-neg"}`)
+    .text(d => (d.growth >= 0 ? "+" : "") + d.growth.toFixed(1));
+
+  const sparkCells = rows.append("td").attr("class", "sparkline-cell");
+  sparkCells.each(function(d) {
+    const svg = d3.select(this).append("svg")
+      .attr("width", sparkW).attr("height", sparkH)
+      .style("display", "block");
+
+    const color = d.growth >= 0 ? "#3fb950" : "#f85149";
+
+    svg.append("path")
+      .datum(d.scores)
+      .attr("d", area)
+      .attr("fill", color)
+      .attr("opacity", 0.1);
+
+    svg.append("path")
+      .datum(d.scores)
+      .attr("d", line)
+      .attr("fill", "none")
+      .attr("stroke", color)
+      .attr("stroke-width", 1.5);
+
+    svg.append("circle")
+      .attr("cx", xScale(rounds - 1))
+      .attr("cy", yScale(d.scores[rounds - 1]))
+      .attr("r", 2.5)
+      .attr("fill", color);
+
+    // invisible hover targets per point
+    svg.selectAll(".hover-dot")
+      .data(d.scores)
+      .join("circle")
+      .attr("cx", (_, i) => xScale(i))
+      .attr("cy", v => yScale(v))
+      .attr("r", 8)
+      .attr("fill", "transparent")
+      .on("pointerenter", (event, v) => {
+        const i = d.scores.indexOf(v);
+        tip.style("opacity", 1)
+          .html(`<strong>${d.name}</strong><br>Round ${i + 1}: <span style="color:${color}">${v.toFixed(1)}</span>`);
+        const rect = event.target.getBoundingClientRect();
+        tip.style("left", rect.left + window.scrollX - 40 + "px")
+          .style("top", rect.top + window.scrollY - 52 + "px");
+      })
+      .on("pointerleave", () => tip.style("opacity", 0));
+  });
+
+  rows.append("td").attr("class", "num").text(d => d.peak.toFixed(1));
+  rows.append("td").attr("class", "num").text(d => d.volatility.toFixed(1));
+}
+
+d3.selectAll("thead th").on("click", function() {
+  const key = this.dataset.key;
+  if (sortKey === key) sortDir *= -1;
+  else { sortKey = key; sortDir = key === "name" || key === "category" ? 1 : -1; }
+  d3.selectAll("thead th").classed("sorted-asc", false).classed("sorted-desc", false);
+  d3.select(this).classed(sortDir === 1 ? "sorted-asc" : "sorted-desc", true);
+  render();
+});
+
+// initial sort indicator
+d3.select('th[data-key="growth"]').classed("sorted-desc", true);
+render();
+</script>
+</body>
+</html>

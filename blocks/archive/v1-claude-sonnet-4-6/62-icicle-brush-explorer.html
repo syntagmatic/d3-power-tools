@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Icicle Brush Explorer</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa; color: #333;
+    display: flex; flex-direction: column;
+    height: 100vh; overflow: hidden;
+  }
+  .header {
+    padding: 10px 24px; display: flex; align-items: center; gap: 14px;
+    border-bottom: 1px solid #e0e0e0; background: #fff; flex-shrink: 0;
+  }
+  .header h1 { font-size: 17px; font-weight: 600; letter-spacing: -0.3px; }
+  .badge {
+    background: #4477AA; color: #fff; padding: 2px 12px; border-radius: 12px;
+    font-size: 12px; font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+  }
+  .hint { font-size: 12px; color: #888; margin-left: auto; }
+  #breadcrumb {
+    padding: 6px 24px; font-size: 13px; color: #555; min-height: 30px;
+    display: flex; align-items: center; gap: 0;
+    border-bottom: 1px solid #eee; background: #fff; flex-shrink: 0;
+  }
+  #breadcrumb .crumb { cursor: pointer; color: #4477AA; padding: 2px 4px; border-radius: 3px; }
+  #breadcrumb .crumb:hover { background: #e8f0fe; text-decoration: underline; }
+  #breadcrumb .crumb.current { color: #333; cursor: default; font-weight: 600; }
+  #breadcrumb .crumb.current:hover { background: none; text-decoration: none; }
+  #breadcrumb .sep { margin: 0 2px; color: #bbb; }
+  .main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  #icicle-container { flex: 1; min-height: 0; position: relative; }
+  #histogram-container {
+    height: 200px; flex-shrink: 0; padding: 0 24px;
+    border-top: 1px solid #e0e0e0; background: #fff;
+  }
+  .hist-label { font-size: 12px; fill: #666; }
+  .selection { fill: rgba(68,119,170,0.15); stroke: #4477AA; stroke-width: 1; }
+  .tooltip {
+    position: absolute; background: rgba(30,30,30,0.92); color: #fff;
+    padding: 8px 12px; border-radius: 5px; font-size: 12px;
+    pointer-events: none; z-index: 20; white-space: pre-line;
+    line-height: 1.5; display: none; max-width: 300px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+  }
+  .tooltip b { color: #66CCEE; }
+  .tooltip .mono { font-family: "SF Mono", Monaco, "Cascadia Code", monospace; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Icicle Brush Explorer</h1>
+  <span class="badge" id="counter">all files</span>
+  <span class="hint">Click directories to zoom &middot; Brush histogram to filter by size</span>
+</div>
+<div id="breadcrumb"></div>
+<div class="main">
+  <div id="icicle-container"></div>
+  <div id="histogram-container"></div>
+</div>
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+// --- Tol palette ---
+const TOL = ["#4477AA","#EE6677","#228833","#CCBB44","#66CCEE","#AA3377","#BBBBBB"];
+const TOL_LIGHT = ["#88AACC","#F4A0A8","#66B366","#DDCC77","#99DDEE","#CC77AA","#CCCCCC"];
+
+// --- Synthetic file-system data (~500 leaves) ---
+const EXT = ["js","ts","tsx","css","scss","json","md","png","svg","woff2","html","yml"];
+const DIRS = ["src","lib","packages","docs","tests","config","assets","scripts"];
+const SUBS = ["core","utils","api","models","views","hooks","components","services","store","types"];
+const FILE_PREFIXES = ["index","main","app","helper","config","handler","router","schema","test","data"];
+
+const seededRandom = (() => {
+  let s = 42;
+  return () => { s = (s * 16807) % 2147483647; return (s - 1) / 2147483646; };
+})();
+
+const pick = (arr) => arr[Math.floor(seededRandom() * arr.length)];
+
+const buildTree = () => {
+  const root = { name: "project", children: [] };
+  let leafCount = 0;
+  const targetLeaves = 500;
+
+  for (const dir of DIRS) {
+    const dirNode = { name: dir, children: [] };
+    const nSubs = 2 + Math.floor(seededRandom() * 5);
+    for (let s = 0; s < nSubs && leafCount < targetLeaves; s++) {
+      const subName = SUBS[s % SUBS.length] + (s >= SUBS.length ? s : "");
+      const subNode = { name: subName, children: [] };
+      // Some subdirs get another level of nesting
+      if (seededRandom() > 0.6 && leafCount < targetLeaves - 10) {
+        const nDeep = 1 + Math.floor(seededRandom() * 3);
+        for (let d = 0; d < nDeep && leafCount < targetLeaves; d++) {
+          const deepNode = { name: pick(["internal","__tests__","helpers","generated"]) + (d > 0 ? d : ""), children: [] };
+          const nFiles = 3 + Math.floor(seededRandom() * 8);
+          for (let f = 0; f < nFiles && leafCount < targetLeaves; f++) {
+            const ext = pick(EXT);
+            // Log-normal distribution: mostly small, some very large
+            const size = Math.round(Math.exp(5 + seededRandom() * 7.5 + (ext === "png" || ext === "woff2" ? 3 : 0)));
+            deepNode.children.push({ name: `${pick(FILE_PREFIXES)}${f}.${ext}`, size, type: ext });
+            leafCount++;
+          }
+          subNode.children.push(deepNode);
+        }
+      }
+      const nFiles = 4 + Math.floor(seededRandom() * 12);
+      for (let f = 0; f < nFiles && leafCount < targetLeaves; f++) {
+        const ext = pick(EXT);
+        const size = Math.round(Math.exp(5 + seededRandom() * 7.5 + (ext === "png" || ext === "woff2" ? 3 : 0)));
+        subNode.children.push({ name: `${pick(FILE_PREFIXES)}${f}.${ext}`, size, type: ext });
+        leafCount++;
+      }
+      dirNode.children.push(subNode);
+    }
+    root.children.push(dirNode);
+  }
+  return root;
+};
+
+const treeData = buildTree();
+const hierarchy = d3.hierarchy(treeData)
+  .sum(d => d.size || 0)
+  .sort((a, b) => b.value - a.value);
+
+// Assign top-level color index
+hierarchy.children.forEach((c, i) => {
+  c.each(n => { n.data._colorIdx = i % TOL.length; });
+});
+hierarchy.data._colorIdx = -1;
+
+// Precompute leaf set for each node (for brush matching)
+hierarchy.each(n => {
+  n._leaves = n.leaves();
+  n._leafSizes = new Float64Array(n._leaves.map(l => l.data.size));
+});
+
+// --- Layout ---
+const icicleEl = document.getElementById("icicle-container");
+const tooltipEl = document.getElementById("tooltip");
+
+let currentFocus = hierarchy;
+let brushRange = null; // [lo, hi] in bytes
+
+const getPath = (d) => d.ancestors().reverse().map(a => a.data.name).join("/");
+const formatSize = (bytes) => {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + " KB";
+  if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + " MB";
+  return (bytes / 1073741824).toFixed(1) + " GB";
+};
+
+const isDescendant = (node, ancestor) => {
+  let n = node;
+  while (n) { if (n === ancestor) return true; n = n.parent; }
+  return false;
+};
+
+const nodeMatchesBrush = (node) => {
+  if (!brushRange) return true;
+  const [lo, hi] = brushRange;
+  if (!node.children) return node.data.size >= lo && node.data.size <= hi;
+  // A directory matches if any leaf matches
+  return node._leafSizes.some(s => s >= lo && s <= hi);
+};
+
+// How many leaves match in a subtree
+const matchCount = (node) => {
+  if (!brushRange) return node._leaves.length;
+  const [lo, hi] = brushRange;
+  let count = 0;
+  for (let i = 0; i < node._leafSizes.length; i++) {
+    if (node._leafSizes[i] >= lo && node._leafSizes[i] <= hi) count++;
+  }
+  return count;
+};
+
+// --- Partition layout (compute once) ---
+const computePartition = () => {
+  const rect = icicleEl.getBoundingClientRect();
+  const w = rect.width || 1200;
+  const h = rect.height || 500;
+  d3.partition().size([w, h]).padding(1)(hierarchy);
+  return { w, h };
+};
+
+let { w: icicleW, h: icicleH } = computePartition();
+
+// --- Icicle SVG ---
+const svg = d3.select("#icicle-container").append("svg")
+  .attr("width", "100%").attr("height", "100%")
+  .style("display", "block");
+
+const x = d3.scaleLinear().range([0, icicleW]);
+const y = d3.scaleLinear().range([0, icicleH]);
+
+const cellG = svg.append("g");
+
+const renderIcicle = (animate = true) => {
+  // Scale domain: map currentFocus subtree to fill the viewport
+  x.domain([currentFocus.x0, currentFocus.x1]).range([0, icicleW]);
+  const maxY = d3.max(currentFocus.descendants(), d => d.y1);
+  y.domain([currentFocus.y0, maxY]).range([0, icicleH]);
+
+  const descendants = currentFocus.descendants();
+
+  const cells = cellG.selectAll("g.cell")
+    .data(descendants, d => getPath(d));
+
+  cells.exit()
+    .transition().duration(animate ? 400 : 0)
+    .attr("opacity", 0)
+    .remove();
+
+  const enter = cells.enter().append("g")
+    .attr("class", "cell")
+    .attr("opacity", 0);
+
+  enter.append("rect");
+  enter.append("text")
+    .attr("pointer-events", "none")
+    .attr("fill", "#fff")
+    .attr("font-size", 11)
+    .attr("font-weight", 500)
+    .attr("dy", "0.35em");
+
+  const merged = enter.merge(cells);
+  const dur = animate ? 750 : 0;
+
+  merged.transition().duration(dur)
+    .attr("opacity", 1);
+
+  merged.select("rect")
+    .attr("cursor", d => d.children ? "pointer" : "default")
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 1)
+    .transition().duration(dur)
+    .attr("x", d => x(d.x0))
+    .attr("y", d => y(d.y0))
+    .attr("width", d => Math.max(0, x(d.x1) - x(d.x0)))
+    .attr("height", d => Math.max(0, y(d.y1) - y(d.y0)))
+    .attr("fill", d => {
+      if (d === currentFocus) return "#ddd";
+      const idx = d.data._colorIdx;
+      if (idx < 0) return "#888";
+      return d.children ? TOL_LIGHT[idx] : TOL[idx];
+    })
+    .attr("opacity", d => nodeMatchesBrush(d) ? (d === currentFocus ? 0.4 : 1.0) : 0.08);
+
+  merged.select("text")
+    .transition().duration(dur)
+    .attr("x", d => x(d.x0) + 4)
+    .attr("y", d => y(d.y0) + Math.max(0, y(d.y1) - y(d.y0)) / 2)
+    .attr("opacity", d => nodeMatchesBrush(d) ? 1 : 0.1)
+    .text(d => {
+      const rw = x(d.x1) - x(d.x0);
+      const rh = y(d.y1) - y(d.y0);
+      if (rw < 40 || rh < 14) return "";
+      const label = d.data.name;
+      const maxChars = Math.floor((rw - 8) / 6.5);
+      return label.length > maxChars ? label.slice(0, maxChars - 1) + "\u2026" : label;
+    });
+
+  // Event handlers (re-bindingneeded after join)
+  merged.select("rect")
+    .on("click", (event, d) => {
+      if (d.children && d !== currentFocus) zoomTo(d);
+    })
+    .on("pointerenter", (event, d) => {
+      if (d === currentFocus) return;
+      d3.select(event.currentTarget).attr("stroke", "#333").attr("stroke-width", 1.5);
+      const matched = matchCount(d);
+      const total = d._leaves.length;
+      const brushInfo = brushRange ? `\n<span class="mono">${matched}/${total}</span> files in range` : "";
+      tooltipEl.style.display = "block";
+      tooltipEl.innerHTML =
+        `<b>${getPath(d)}</b>\nSize: <span class="mono">${formatSize(d.value)}</span>` +
+        (d.data.type ? `\nType: ${d.data.type}` : "") +
+        (d.children ? `\n${total} files` : "") +
+        brushInfo;
+    })
+    .on("pointermove", (event) => {
+      const bx = event.clientX + 14;
+      const by = event.clientY - 14;
+      tooltipEl.style.left = bx + "px";
+      tooltipEl.style.top = by + "px";
+    })
+    .on("pointerleave", (event) => {
+      d3.select(event.currentTarget).attr("stroke", "#fff").attr("stroke-width", 1);
+      tooltipEl.style.display = "none";
+    });
+};
+
+// --- Zoom ---
+const zoomTo = (node) => {
+  currentFocus = node;
+  renderIcicle(true);
+  renderBreadcrumb();
+  drawHistogram();
+  updateCounter();
+};
+
+// --- Breadcrumb ---
+const breadcrumbEl = document.getElementById("breadcrumb");
+
+const renderBreadcrumb = () => {
+  breadcrumbEl.innerHTML = "";
+  const ancestors = currentFocus.ancestors().reverse();
+  ancestors.forEach((a, i) => {
+    if (i > 0) {
+      const sep = document.createElement("span");
+      sep.className = "sep";
+      sep.textContent = "/";
+      breadcrumbEl.appendChild(sep);
+    }
+    const span = document.createElement("span");
+    span.className = "crumb" + (i === ancestors.length - 1 ? " current" : "");
+    span.textContent = a.data.name;
+    if (i < ancestors.length - 1) {
+      span.addEventListener("click", () => zoomTo(a));
+    }
+    breadcrumbEl.appendChild(span);
+  });
+};
+
+// --- Histogram ---
+const histMargin = { top: 16, right: 24, bottom: 36, left: 56 };
+
+const drawHistogram = () => {
+  const container = document.getElementById("histogram-container");
+  container.innerHTML = "";
+  const cw = container.clientWidth - 48; // account for padding
+  const ch = 200;
+  const iw = cw - histMargin.left - histMargin.right;
+  const ih = ch - histMargin.top - histMargin.bottom;
+
+  const leaves = currentFocus.leaves();
+  const sizes = leaves.map(l => l.data.size).filter(s => s > 0);
+
+  // Log-scale histogram
+  const xMin = d3.min(sizes) * 0.8;
+  const xMax = d3.max(sizes) * 1.2;
+  const histX = d3.scaleLog().domain([xMin, xMax]).range([0, iw]).clamp(true);
+
+  // Log-spaced thresholds
+  const logMin = Math.log10(xMin);
+  const logMax = Math.log10(xMax);
+  const nBins = 30;
+  const thresholds = d3.range(nBins + 1).map(i => Math.pow(10, logMin + (logMax - logMin) * i / nBins));
+
+  const bins = d3.bin().domain(histX.domain()).thresholds(thresholds)(sizes);
+  const histY = d3.scaleLinear()
+    .domain([0, d3.max(bins, b => b.length) || 1])
+    .range([ih, 0])
+    .nice();
+
+  const histSvg = d3.select(container).append("svg")
+    .attr("width", cw).attr("height", ch);
+
+  const g = histSvg.append("g")
+    .attr("transform", `translate(${histMargin.left},${histMargin.top})`);
+
+  // Bars
+  g.selectAll("rect.bar")
+    .data(bins)
+    .join("rect")
+      .attr("class", "bar")
+      .attr("x", b => histX(b.x0))
+      .attr("y", b => histY(b.length))
+      .attr("width", b => Math.max(1, histX(b.x1) - histX(b.x0) - 1))
+      .attr("height", b => ih - histY(b.length))
+      .attr("fill", "#4477AA")
+      .attr("opacity", 0.7)
+      .attr("rx", 1);
+
+  // X axis
+  g.append("g")
+    .attr("transform", `translate(0,${ih})`)
+    .call(d3.axisBottom(histX).ticks(6, "~s"))
+    .selectAll("text").attr("font-size", 11);
+
+  g.append("text")
+    .attr("class", "hist-label")
+    .attr("x", iw / 2).attr("y", ih + 32)
+    .attr("text-anchor", "middle")
+    .text("File size (log scale)");
+
+  // Y axis
+  g.append("g")
+    .call(d3.axisLeft(histY).ticks(5))
+    .selectAll("text").attr("font-size", 11);
+
+  g.append("text")
+    .attr("class", "hist-label")
+    .attr("transform", `rotate(-90)`)
+    .attr("x", -ih / 2).attr("y", -42)
+    .attr("text-anchor", "middle")
+    .text("Count");
+
+  // Brush
+  const brush = d3.brushX()
+    .extent([[0, 0], [iw, ih]])
+    .on("brush end", (event) => {
+      if (!event.selection) {
+        brushRange = null;
+      } else {
+        const [bx0, bx1] = event.selection;
+        brushRange = [histX.invert(bx0), histX.invert(bx1)];
+      }
+
+      // Highlight histogram bars within brush
+      g.selectAll("rect.bar")
+        .attr("opacity", b => {
+          if (!brushRange) return 0.7;
+          return (b.x1 > brushRange[0] && b.x0 < brushRange[1]) ? 0.9 : 0.2;
+        })
+        .attr("fill", b => {
+          if (!brushRange) return "#4477AA";
+          return (b.x1 > brushRange[0] && b.x0 < brushRange[1]) ? "#4477AA" : "#aaa";
+        });
+
+      renderIcicle(false);
+      updateCounter();
+    });
+
+  g.append("g").attr("class", "hist-brush").call(brush);
+
+  // If there was a previous brush range, restore it
+  if (brushRange) {
+    const bx0 = histX(Math.max(brushRange[0], xMin));
+    const bx1 = histX(Math.min(brushRange[1], xMax));
+    g.select(".hist-brush").call(brush.move, [bx0, bx1]);
+  }
+};
+
+// --- Counter ---
+const updateCounter = () => {
+  const el = document.getElementById("counter");
+  if (!brushRange) {
+    const total = currentFocus.leaves().length;
+    el.textContent = `${total} files`;
+    return;
+  }
+  const leaves = currentFocus.leaves();
+  const [lo, hi] = brushRange;
+  const matched = leaves.filter(l => l.data.size >= lo && l.data.size <= hi).length;
+  el.textContent = `${matched} / ${leaves.length} files`;
+};
+
+// --- Init ---
+renderIcicle(false);
+renderBreadcrumb();
+drawHistogram();
+updateCounter();
+
+// --- Resize ---
+const ro = new ResizeObserver(() => {
+  const rect = icicleEl.getBoundingClientRect();
+  icicleW = rect.width || 1200;
+  icicleH = rect.height || 500;
+  d3.partition().size([icicleW, icicleH]).padding(1)(hierarchy);
+  x.range([0, icicleW]);
+  y.range([0, icicleH]);
+  renderIcicle(false);
+  drawHistogram();
+});
+ro.observe(icicleEl);
+</script>
+</body>
+</html>

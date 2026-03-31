@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>US Election Swing Map</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://unpkg.com/topojson-client@3"></script>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; background: #f9f9f9; margin: 0; padding: 20px; }
+        #controls { margin-bottom: 20px; text-align: center; }
+        .map-path { stroke: #fff; stroke-width: 0.2px; }
+        .map-path.dimmed { fill-opacity: 0.1 !important; stroke-opacity: 0.1 !important; }
+        #container { display: flex; flex-direction: column; align-items: center; }
+        .histogram-bar { stroke: #fff; stroke-width: 1px; }
+        .brush .selection { fill: #444; fill-opacity: 0.3; stroke: #fff; }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <h2>Election Margin & Swing Timeline</h2>
+        <label for="year-slider">Election Year: <span id="year-label" style="font-weight: bold;">2004</span></label><br>
+        <input type="range" id="year-slider" min="0" max="4" value="0" step="1" style="width: 300px; margin-top: 10px;">
+    </div>
+    <div id="container">
+        <svg id="map" width="960" height="600"></svg>
+        <svg id="histogram" width="600" height="200"></svg>
+    </div>
+
+    <script>
+        const years = [2004, 2008, 2012, 2016, 2020];
+        let currentYearIdx = 0;
+        let countyData = {};
+
+        const mapSvg = d3.select("#map");
+        const histSvg = d3.select("#histogram");
+
+        const margin = {top: 20, right: 20, bottom: 40, left: 40};
+        const histWidth = +histSvg.attr("width") - margin.left - margin.right;
+        const histHeight = +histSvg.attr("height") - margin.top - margin.bottom;
+
+        const histG = histSvg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+        
+        const colorScale = d3.scaleLinear()
+            .domain([-100, 0, 100])
+            .range(["#0015BC", "#EEEEEE", "#FF0000"])
+            .clamp(true);
+
+        const path = d3.geoPath();
+        const mapG = mapSvg.append("g");
+
+        const brush = d3.brushX()
+            .extent([[0, 0], [histWidth, histHeight]])
+            .on("brush end", brushed);
+            
+        let currentBrushRange = null;
+
+        function initData(counties) {
+            counties.forEach(d => {
+                let currentMargin = (Math.random() - 0.5) * 80; 
+                const margins = [];
+                for(let i=0; i<5; i++) {
+                    margins.push(currentMargin);
+                    currentMargin += (Math.random() - 0.5) * 40; 
+                    currentMargin = Math.max(-100, Math.min(100, currentMargin));
+                }
+                countyData[d.id] = margins;
+            });
+        }
+
+        d3.json("https://cdn.jsdelivr.net/npm/us-atlas@3/counties-albers-10m.json").then(us => {
+            const counties = topojson.feature(us, us.objects.counties).features;
+            
+            initData(counties);
+            
+            mapG.selectAll("path")
+                .data(counties)
+                .enter().append("path")
+                .attr("class", "map-path")
+                .attr("d", path)
+                .attr("id", d => "county-" + d.id);
+
+            mapSvg.append("path")
+                .datum(topojson.mesh(us, us.objects.states, (a, b) => a !== b))
+                .attr("fill", "none")
+                .attr("stroke", "#000")
+                .attr("stroke-width", 0.5)
+                .attr("stroke-linejoin", "round")
+                .attr("d", path);
+
+            histG.append("g").attr("class", "x-axis").attr("transform", `translate(0,${histHeight})`);
+            histG.append("g").attr("class", "y-axis");
+            histG.append("g").attr("class", "brush-group").call(brush);
+
+            histSvg.append("text")
+                .attr("text-anchor", "middle")
+                .attr("x", histWidth/2)
+                .attr("y", histHeight + margin.bottom - 5)
+                .style("font-size", "14px")
+                .text("Margin Magnitude (Blue < 0 < Red)");
+
+            updateView();
+        });
+
+        d3.select("#year-slider").on("input", function() {
+            currentYearIdx = +this.value;
+            d3.select("#year-label").text(years[currentYearIdx]);
+            updateView();
+        });
+
+        function updateView() {
+            mapG.selectAll(".map-path")
+                .transition().duration(400)
+                .attr("fill", d => {
+                    const val = countyData[d.id] ? countyData[d.id][currentYearIdx] : 0;
+                    return colorScale(val);
+                });
+
+            const values = Object.values(countyData).map(m => m[currentYearIdx]);
+            
+            const x = d3.scaleLinear()
+                .domain([-100, 100])
+                .range([0, histWidth]);
+
+            const bin = d3.bin()
+                .domain(x.domain())
+                .thresholds(x.ticks(40));
+
+            const bins = bin(values);
+
+            const y = d3.scaleLinear()
+                .domain([0, d3.max(bins, d => d.length)])
+                .range([histHeight, 0]);
+
+            histG.select(".x-axis").transition().duration(400).call(d3.axisBottom(x));
+            histG.select(".y-axis").transition().duration(400).call(d3.axisLeft(y).ticks(5));
+
+            const bars = histG.selectAll(".histogram-bar").data(bins);
+
+            bars.enter().append("rect")
+                .attr("class", "histogram-bar")
+                .attr("x", d => x(d.x0) + 1)
+                .attr("width", d => Math.max(0, x(d.x1) - x(d.x0) - 1))
+                .attr("y", histHeight)
+                .attr("height", 0)
+                .merge(bars)
+                .transition().duration(400)
+                .attr("x", d => x(d.x0) + 1)
+                .attr("width", d => Math.max(0, x(d.x1) - x(d.x0) - 1))
+                .attr("y", d => y(d.length))
+                .attr("height", d => histHeight - y(d.length))
+                .attr("fill", d => {
+                    const mid = (d.x0 + d.x1) / 2;
+                    return colorScale(mid);
+                });
+
+            bars.exit().remove();
+            
+            applyBrushFilter();
+        }
+
+        function brushed(event) {
+            currentBrushRange = event.selection;
+            applyBrushFilter();
+        }
+
+        function applyBrushFilter() {
+            if (!currentBrushRange) {
+                mapG.selectAll(".map-path").classed("dimmed", false);
+                return;
+            }
+
+            const x = d3.scaleLinear()
+                .domain([-100, 100])
+                .range([0, histWidth]);
+
+            const [x0, x1] = currentBrushRange.map(x.invert);
+
+            mapG.selectAll(".map-path").classed("dimmed", d => {
+                const val = countyData[d.id] ? countyData[d.id][currentYearIdx] : 0;
+                return val < x0 || val > x1;
+            });
+        }
+    </script>
+</body>
+</html>

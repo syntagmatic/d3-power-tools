@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Linked Scatterplot Matrix (SPLOM)</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #fafafa;
+    display: flex;
+    justify-content: center;
+    padding: 24px;
+  }
+  .cell-frame {
+    fill: none;
+    stroke: #ccc;
+    stroke-width: 0.5;
+  }
+  .axis text {
+    font-size: 9px;
+    font-family: ui-monospace, "SFMono-Regular", monospace;
+    fill: #666;
+  }
+  .axis line, .axis path {
+    stroke: #ccc;
+  }
+  .column-label {
+    font-size: 11px;
+    font-weight: 600;
+    fill: #333;
+  }
+  .brush .overlay { cursor: crosshair; }
+  .brush .selection {
+    fill: steelblue;
+    fill-opacity: 0.12;
+    stroke: steelblue;
+    stroke-width: 1;
+    stroke-opacity: 0.4;
+  }
+  .legend { font-size: 11px; }
+  .legend text { fill: #333; }
+</style>
+</head>
+<body>
+<script type="module">
+
+// --- Data generation ---
+const rng = d3.randomLcg(42);
+const normal = (mu, sigma) => d3.randomNormal.source(rng)(mu, sigma)();
+
+const species = ["setosa", "versicolor", "virginica"];
+const params = {
+  setosa:     { sl: [5.0, 0.35], sw: [3.4, 0.38], pl: [1.5, 0.18], pw: [0.25, 0.10] },
+  versicolor: { sl: [5.9, 0.52], sw: [2.8, 0.31], pl: [4.3, 0.47], pw: [1.3,  0.20] },
+  virginica:  { sl: [6.6, 0.64], sw: [3.0, 0.32], pl: [5.6, 0.55], pw: [2.0,  0.27] },
+};
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const columns = ["sepal_length", "sepal_width", "petal_length", "petal_width"];
+const colKeys = ["sl", "sw", "pl", "pw"];
+const ranges = { sl: [4, 8], sw: [2, 4.5], pl: [1, 7], pw: [0.1, 2.5] };
+
+const data = [];
+const counts = [67, 67, 66]; // ~200 total
+species.forEach((sp, si) => {
+  const p = params[sp];
+  for (let i = 0; i < counts[si]; i++) {
+    const row = { species: sp, _i: data.length };
+    colKeys.forEach((ck, ci) => {
+      row[columns[ci]] = clamp(normal(p[ck][0], p[ck][1]), ranges[ck][0], ranges[ck][1]);
+    });
+    data.push(row);
+  }
+});
+
+// --- Layout ---
+const n = columns.length;
+const cellSize = 150;
+const pad = 20; // padding inside each cell for axes
+const labelSpace = 40; // space for column labels
+const margin = { top: labelSpace, right: 20, bottom: 20, left: labelSpace };
+const totalW = margin.left + n * cellSize + margin.right;
+const totalH = margin.top + n * cellSize + margin.bottom;
+
+const colorMap = { setosa: "#4477AA", versicolor: "#EE6677", virginica: "#228833" };
+const color = d => colorMap[d.species];
+
+// Scales: one per column, maps data value -> [0, cellSize - 2*pad]
+const innerSize = cellSize - 2 * pad;
+const scales = Object.fromEntries(columns.map(col =>
+  [col, d3.scaleLinear().domain(d3.extent(data, d => d[col])).nice().range([0, innerSize])]));
+
+// --- SVG ---
+const svg = d3.select("body").append("svg")
+    .attr("width", totalW)
+    .attr("height", totalH);
+
+// Dispatch for cross-cell brush communication
+const dispatch = d3.dispatch("brush");
+let brushedSet = null; // Set of _i indices, or null = all selected
+
+// --- Column labels ---
+columns.forEach((col, i) => {
+  const label = col.replace("_", " ");
+  // Top labels
+  svg.append("text")
+    .attr("class", "column-label")
+    .attr("x", margin.left + i * cellSize + cellSize / 2)
+    .attr("y", margin.top - 10)
+    .attr("text-anchor", "middle")
+    .text(label);
+  // Left labels
+  svg.append("text")
+    .attr("class", "column-label")
+    .attr("x", margin.left - 10)
+    .attr("y", margin.top + i * cellSize + cellSize / 2)
+    .attr("text-anchor", "middle")
+    .attr("transform", `rotate(-90, ${margin.left - 10}, ${margin.top + i * cellSize + cellSize / 2})`)
+    .text(label);
+});
+
+// --- KDE for diagonal cells ---
+const SQ2PI = Math.sqrt(2 * Math.PI);
+const kde = (bw, vals, pts) => pts.map(x => [x,
+  d3.mean(vals, v => Math.exp(-0.5 * ((x - v) / bw) ** 2)) / (bw * SQ2PI)]);
+
+// Grid-line axis helper
+const gridAxis = (parent, axis, keepText) => parent.append("g").attr("class", "axis")
+  .call(axis.ticks(4).tickSize(-innerSize))
+  .call(g => g.selectAll(".tick line").attr("stroke-opacity", 0.15))
+  .call(g => { if (!keepText) g.selectAll(".tick text").remove(); })
+  .call(g => g.select(".domain").remove());
+
+// --- Draw cells ---
+const cellGroups = [];
+const diagGroups = [];
+for (let row = 0; row < n; row++) {
+  for (let col = 0; col < n; col++) {
+    const g = svg.append("g")
+      .attr("transform", `translate(${margin.left + col * cellSize}, ${margin.top + row * cellSize})`);
+
+    // Cell frame
+    g.append("rect")
+      .attr("class", "cell-frame")
+      .attr("width", cellSize)
+      .attr("height", cellSize);
+
+    const inner = g.append("g")
+      .attr("transform", `translate(${pad}, ${pad})`);
+
+    const xCol = columns[col];
+    const yCol = columns[row];
+    const xScale = scales[xCol];
+    const yScale = scales[yCol];
+
+    if (row === col) {
+      // Diagonal: KDE density curves per species
+      // Compute full-data densities for background
+      const grouped = d3.group(data, d => d.species);
+      const extent = xScale.domain();
+      const allDensities = [...grouped].map(([sp, rows]) => {
+        const values = rows.map(d => d[xCol]);
+        const sorted = [...values].sort(d3.ascending);
+        const std = d3.deviation(values);
+        const iqr = d3.quantile(sorted, 0.75) - d3.quantile(sorted, 0.25);
+        const bw = 0.9 * Math.min(std, iqr / 1.34) * Math.pow(values.length, -0.2);
+        const ticks = d3.ticks(extent[0] - 3 * bw, extent[1] + 3 * bw, 100);
+        return { species: sp, density: kde(bw, values, ticks), bw, ticks };
+      });
+      const maxDensity = d3.max(allDensities, s => d3.max(s.density, d => d[1]));
+      const densityY = d3.scaleLinear().domain([0, maxDensity]).range([innerSize, 0]);
+
+      const area = d3.area()
+        .x(d => xScale(d[0]))
+        .y0(innerSize)
+        .y1(d => densityY(d[1]))
+        .curve(d3.curveBasis);
+
+      const fgPaths = allDensities.map(({ species: sp, density }) => {
+        inner.append("path")
+          .datum(density).attr("d", area)
+          .attr("fill", "#ddd").attr("fill-opacity", 0.3)
+          .attr("stroke", "#bbb").attr("stroke-width", 0.5);
+        return { species: sp, path: inner.append("path")
+          .datum(density).attr("d", area)
+          .attr("fill", colorMap[sp]).attr("fill-opacity", 0.25)
+          .attr("stroke", colorMap[sp]).attr("stroke-width", 1.5) };
+      });
+
+      diagGroups.push({ xCol, inner, fgPaths, allDensities, densityY, area, xScale });
+
+      gridAxis(inner, d3.axisBottom(xScale), true)
+        .attr("transform", `translate(0, ${innerSize})`);
+    } else {
+      // Off-diagonal: scatterplot
+      const yScaleFlipped = yScale.copy().range([innerSize, 0]);
+      gridAxis(inner, d3.axisBottom(xScale)).attr("transform", `translate(0, ${innerSize})`);
+      gridAxis(inner, d3.axisLeft(yScaleFlipped));
+
+      const circles = inner.selectAll("circle")
+        .data(data)
+        .join("circle")
+          .attr("cx", d => xScale(d[xCol]))
+          .attr("cy", d => yScaleFlipped(d[yCol]))
+          .attr("r", 4)
+          .attr("fill", color)
+          .attr("fill-opacity", 0.6)
+          .attr("stroke", "none");
+
+      // Store references for brush updates
+      cellGroups.push({ row, col, circles, xCol, yCol, xScale, yScale: yScaleFlipped, inner });
+
+      // Brush
+      const brush = d3.brush()
+        .extent([[0, 0], [innerSize, innerSize]])
+        .on("brush end", function(event) {
+          if (event.type === "brush" && event.selection) {
+            const [[x0, y0], [x1, y1]] = event.selection;
+            const selected = new Set();
+            data.forEach(d => {
+              const cx = xScale(d[xCol]);
+              const cy = yScaleFlipped(d[yCol]);
+              if (cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1) {
+                selected.add(d._i);
+              }
+            });
+            dispatch.call("brush", null, { selected, source: `${row}-${col}` });
+          } else if (event.type === "end" && !event.selection) {
+            dispatch.call("brush", null, { selected: null, source: `${row}-${col}` });
+          }
+        });
+
+      inner.append("g")
+        .attr("class", "brush")
+        .call(brush);
+    }
+  }
+}
+
+// --- Brush listener: update all cells ---
+dispatch.on("brush", ({ selected, source }) => {
+  brushedSet = selected;
+
+  // Update scatter cells
+  for (const { circles } of cellGroups) {
+    circles.attr("fill-opacity", d => {
+      if (!brushedSet) return 0.6;
+      return brushedSet.has(d._i) ? 0.6 : 0.1;
+    });
+  }
+
+  // Update diagonal KDE cells
+  for (const { xCol, fgPaths, allDensities, densityY, area, xScale } of diagGroups) {
+    if (!brushedSet) {
+      // No brush — restore full-data densities
+      for (const { species: sp, path } of fgPaths) {
+        const orig = allDensities.find(d => d.species === sp);
+        path.datum(orig.density).attr("d", area)
+          .attr("fill-opacity", 0.25)
+          .attr("stroke-width", 1.5);
+      }
+    } else {
+      // Recompute KDE from brushed subset, scaled proportionally
+      for (const { species: sp, path } of fgPaths) {
+        const orig = allDensities.find(d => d.species === sp);
+        const fullGroup = data.filter(d => d.species === sp);
+        const subset = fullGroup.filter(d => brushedSet.has(d._i));
+        if (subset.length < 2) {
+          path.attr("d", null);
+          continue;
+        }
+        const values = subset.map(d => d[xCol]);
+        const density = kde(orig.bw, values, orig.ticks);
+        // Scale density by fraction selected so it stays within the original y range
+        const scale = subset.length / fullGroup.length;
+        const scaled = density.map(([x, y]) => [x, y * scale]);
+        path.datum(scaled).attr("d", area)
+          .attr("fill-opacity", 0.35)
+          .attr("stroke-width", 2);
+      }
+    }
+  }
+});
+
+// --- Legend ---
+const legend = svg.append("g")
+  .attr("class", "legend")
+  .attr("transform", `translate(${margin.left + n * cellSize - 180}, ${totalH - 14})`);
+
+species.forEach((sp, i) => {
+  const lg = legend.append("g")
+    .attr("transform", `translate(${i * 65}, 0)`);
+  lg.append("circle")
+    .attr("r", 5)
+    .attr("fill", colorMap[sp])
+    .attr("fill-opacity", 0.7);
+  lg.append("text")
+    .attr("x", 9)
+    .attr("dy", "0.35em")
+    .text(sp);
+});
+
+</script>
+</body>
+</html>

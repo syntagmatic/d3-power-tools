@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebGL Density Heatmap — 5M Points, Semantic Zoom</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #fafafa; font-family: system-ui, -apple-system, sans-serif; }
+  #container { position: relative; width: 1200px; height: 800px; margin: 20px auto 0; }
+  canvas { position: absolute; top: 0; left: 0; }
+  #glCanvas { pointer-events: none; }
+  svg { position: absolute; top: 0; left: 0; }
+  .axis text { font-size: 11px; fill: #555; }
+  .axis line, .axis path { stroke: #bbb; }
+  #hud {
+    position: absolute; top: 12px; right: 16px;
+    background: rgba(255,255,255,0.92); border: 1px solid #ddd;
+    padding: 8px 14px; border-radius: 6px; font-size: 12px;
+    color: #333; z-index: 10; pointer-events: none;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    line-height: 1.6;
+  }
+  #legend {
+    position: absolute; bottom: 60px; right: 16px;
+    background: rgba(255,255,255,0.92); border: 1px solid #ddd;
+    padding: 8px 12px; border-radius: 6px; font-size: 11px;
+    color: #555; z-index: 10; pointer-events: none;
+  }
+  #legend canvas { position: static; display: block; margin-bottom: 4px; }
+  #legend .labels { display: flex; justify-content: space-between; font-family: "SF Mono", Monaco, monospace; }
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="glCanvas"></canvas>
+  <svg id="overlay"></svg>
+  <div id="hud"></div>
+  <div id="legend"></div>
+</div>
+<script>
+(() => {
+  const W = 1200, H = 800;
+  const margin = { top: 40, right: 60, bottom: 50, left: 60 };
+  const plotW = W - margin.left - margin.right;
+  const plotH = H - margin.top - margin.bottom;
+  const dpr = window.devicePixelRatio || 1;
+  const N = 5_000_000;
+
+  // --- Seeded PRNG (mulberry32) ---
+  const mulberry32 = (a) => () => {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t ^= t + Math.imul(t ^ t >>> 7, 61 | t);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+  const rng = mulberry32(12345);
+  const randn = () => {
+    let u; do { u = rng(); } while (u === 0);
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * rng());
+  };
+
+  // --- Generate 5M points: 6 Gaussian clusters with varied structure ---
+  const clusters = [
+    { cx: 0.22, cy: 0.28, sx: 0.06, sy: 0.04, w: 0.25 },
+    { cx: 0.72, cy: 0.68, sx: 0.09, sy: 0.07, w: 0.20 },
+    { cx: 0.50, cy: 0.18, sx: 0.04, sy: 0.10, w: 0.15 },  // vertical streak
+    { cx: 0.30, cy: 0.78, sx: 0.07, sy: 0.03, w: 0.15 },  // flat ellipse
+    { cx: 0.82, cy: 0.25, sx: 0.03, sy: 0.03, w: 0.10 },  // tight ball
+    { cx: 0.55, cy: 0.50, sx: 0.15, sy: 0.12, w: 0.15 },  // diffuse background
+  ];
+
+  // Data coordinates in [0,1] range
+  const dataX = new Float32Array(N);
+  const dataY = new Float32Array(N);
+  const clusterIds = new Uint8Array(N);
+
+  // Precompute cumulative weights for cluster assignment
+  const cumW = [];
+  let wSum = 0;
+  for (const c of clusters) { wSum += c.w; cumW.push(wSum); }
+
+  for (let i = 0; i < N; i++) {
+    const r = rng() * wSum;
+    let ci = 0;
+    while (ci < cumW.length - 1 && r > cumW[ci]) ci++;
+    const c = clusters[ci];
+    dataX[i] = c.cx + randn() * c.sx;
+    dataY[i] = c.cy + randn() * c.sy;
+    clusterIds[i] = ci;
+  }
+
+  // --- D3 scales ---
+  const xScale = d3.scaleLinear().domain([0, 1]).range([margin.left, margin.left + plotW]);
+  const yScale = d3.scaleLinear().domain([0, 1]).range([margin.top + plotH, margin.top]); // Y-up
+
+  // --- Pixel positions for WebGL (computed once) ---
+  const pixelPos = new Float32Array(N * 2);
+  for (let i = 0; i < N; i++) {
+    pixelPos[i * 2] = xScale(dataX[i]);
+    pixelPos[i * 2 + 1] = yScale(dataY[i]);
+  }
+
+  // Tol bright palette
+  const tolHex = ["#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE", "#AA3377"];
+  const tolRGBA = tolHex.map(h => {
+    const c = d3.rgb(h);
+    return [c.r / 255, c.g / 255, c.b / 255, 0.75];
+  });
+
+  const clusterColors = new Float32Array(N * 4);
+  for (let i = 0; i < N; i++) {
+    const c = tolRGBA[clusterIds[i]];
+    clusterColors[i * 4] = c[0];
+    clusterColors[i * 4 + 1] = c[1];
+    clusterColors[i * 4 + 2] = c[2];
+    clusterColors[i * 4 + 3] = c[3];
+  }
+
+  // --- CPU density grid (Gaussian-blurred binning) ---
+  const gridSize = 512;
+  const grid = new Float32Array(gridSize * gridSize);
+
+  for (let i = 0; i < N; i++) {
+    const gx = Math.floor(dataX[i] * (gridSize - 1));
+    const gy = Math.floor((1 - dataY[i]) * (gridSize - 1)); // flip Y for texture
+    if (gx >= 0 && gx < gridSize && gy >= 0 && gy < gridSize) {
+      grid[gy * gridSize + gx] += 1;
+    }
+  }
+
+  // Separable Gaussian blur (radius 4, sigma ~1.5)
+  const kernel = [1, 4, 7, 10, 7, 4, 1];
+  const kR = 3;
+  const kSum = kernel.reduce((a, b) => a + b);
+
+  function blurPass(src, dst, dim, stride, len) {
+    for (let j = 0; j < len; j++) {
+      for (let i = 0; i < dim; i++) {
+        let sum = 0;
+        for (let k = -kR; k <= kR; k++) {
+          const ii = Math.min(Math.max(i + k, 0), dim - 1);
+          sum += src[j * stride + ii * (stride === 1 ? gridSize : 1)] * kernel[k + kR];
+        }
+        dst[j * stride + i * (stride === 1 ? gridSize : 1)] = sum;
+      }
+    }
+  }
+
+  // Two-pass blur
+  const temp = new Float32Array(gridSize * gridSize);
+  const blurred = new Float32Array(gridSize * gridSize);
+
+  // Horizontal pass
+  for (let y = 0; y < gridSize; y++) {
+    for (let x = 0; x < gridSize; x++) {
+      let s = 0;
+      for (let k = -kR; k <= kR; k++) {
+        const xi = Math.min(Math.max(x + k, 0), gridSize - 1);
+        s += grid[y * gridSize + xi] * kernel[k + kR];
+      }
+      temp[y * gridSize + x] = s;
+    }
+  }
+  // Vertical pass
+  for (let y = 0; y < gridSize; y++) {
+    for (let x = 0; x < gridSize; x++) {
+      let s = 0;
+      for (let k = -kR; k <= kR; k++) {
+        const yi = Math.min(Math.max(y + k, 0), gridSize - 1);
+        s += temp[yi * gridSize + x] * kernel[k + kR];
+      }
+      blurred[y * gridSize + x] = s / (kSum * kSum);
+    }
+  }
+
+  let maxDensity = 0;
+  for (let i = 0; i < blurred.length; i++) if (blurred[i] > maxDensity) maxDensity = blurred[i];
+
+  // Color ramp: dark blue → cyan → yellow → white (perceptual heat)
+  const rampStops = [
+    [0.00, [250, 250, 250]],  // background
+    [0.01, [30, 50, 100]],
+    [0.10, [35, 90, 160]],
+    [0.25, [40, 150, 200]],
+    [0.45, [80, 200, 170]],
+    [0.65, [180, 220, 80]],
+    [0.85, [245, 225, 60]],
+    [1.00, [255, 255, 255]],
+  ];
+
+  const colorRamp = (t) => {
+    for (let i = 1; i < rampStops.length; i++) {
+      if (t <= rampStops[i][0]) {
+        const f = (t - rampStops[i - 1][0]) / (rampStops[i][0] - rampStops[i - 1][0]);
+        const a = rampStops[i - 1][1], b = rampStops[i][1];
+        return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
+      }
+    }
+    return rampStops[rampStops.length - 1][1];
+  };
+
+  const texData = new Uint8Array(gridSize * gridSize * 4);
+  for (let i = 0; i < gridSize * gridSize; i++) {
+    const t = Math.pow(blurred[i] / maxDensity, 0.45); // gamma for perceptual scaling
+    const c = colorRamp(t);
+    texData[i * 4] = c[0];
+    texData[i * 4 + 1] = c[1];
+    texData[i * 4 + 2] = c[2];
+    texData[i * 4 + 3] = 255;
+  }
+
+  // --- WebGL setup ---
+  const canvas = document.getElementById("glCanvas");
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + "px";
+  canvas.style.height = H + "px";
+
+  const gl = canvas.getContext("webgl2", { antialias: true, premultipliedAlpha: false, alpha: true });
+  if (!gl) { document.body.innerHTML = "<p>WebGL 2 required</p>"; return; }
+  gl.viewport(0, 0, W * dpr, H * dpr);
+
+  // Shader helpers
+  const mkShader = (src, type) => {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+    return s;
+  };
+  const mkProgram = (vSrc, fSrc) => {
+    const p = gl.createProgram();
+    gl.attachShader(p, mkShader(vSrc, gl.VERTEX_SHADER));
+    gl.attachShader(p, mkShader(fSrc, gl.FRAGMENT_SHADER));
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) console.error(gl.getProgramInfoLog(p));
+    return p;
+  };
+
+  // --- Heatmap quad program ---
+  const heatProg = mkProgram(
+`#version 300 es
+in vec2 a_position;
+uniform vec4 u_srcRect;  // source UV rect [u0, v0, uW, vH]
+uniform vec4 u_dstRect;  // destination pixel rect [x, y, w, h]
+uniform vec2 u_resolution;
+out vec2 v_uv;
+void main() {
+  vec2 pos = u_dstRect.xy + a_position * u_dstRect.zw;
+  vec2 clip = (pos / u_resolution) * 2.0 - 1.0;
+  clip.y = -clip.y;
+  gl_Position = vec4(clip, 0.0, 1.0);
+  v_uv = u_srcRect.xy + a_position * u_srcRect.zw;
+}`,
+`#version 300 es
+precision mediump float;
+uniform sampler2D u_tex;
+uniform float u_opacity;
+in vec2 v_uv;
+out vec4 fragColor;
+void main() {
+  vec4 c = texture(u_tex, v_uv);
+  fragColor = vec4(c.rgb, c.a * u_opacity);
+}`
+  );
+
+  // --- Points program ---
+  const pointsProg = mkProgram(
+`#version 300 es
+in vec2 a_position;
+in vec4 a_color;
+uniform vec2 u_resolution;
+uniform vec2 u_translate;
+uniform float u_scale;
+uniform float u_dpr;
+uniform float u_pointSize;
+out vec4 v_color;
+void main() {
+  vec2 pos = a_position * u_scale + u_translate;
+  vec2 clip = (pos / u_resolution) * 2.0 - 1.0;
+  clip.y = -clip.y;
+  gl_Position = vec4(clip, 0.0, 1.0);
+  gl_PointSize = u_pointSize * u_dpr;
+  v_color = a_color;
+}`,
+`#version 300 es
+precision mediump float;
+in vec4 v_color;
+uniform float u_opacity;
+out vec4 fragColor;
+void main() {
+  float dist = length(gl_PointCoord - 0.5);
+  if (dist > 0.5) discard;
+  float aa = 1.0 - smoothstep(0.35, 0.5, dist);
+  fragColor = vec4(v_color.rgb, v_color.a * aa * u_opacity);
+}`
+  );
+
+  // --- Upload buffers ---
+  const posBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, pixelPos, gl.STATIC_DRAW);
+
+  const colBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, colBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, clusterColors, gl.STATIC_DRAW);
+
+  const quadVerts = new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]);
+  const quadBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, quadVerts, gl.STATIC_DRAW);
+
+  // Heatmap texture
+  const heatTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, heatTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gridSize, gridSize, 0, gl.RGBA, gl.UNSIGNED_BYTE, texData);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+  // --- VAOs ---
+  const heatVAO = gl.createVertexArray();
+  gl.bindVertexArray(heatVAO);
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  const hpLoc = gl.getAttribLocation(heatProg, "a_position");
+  gl.enableVertexAttribArray(hpLoc);
+  gl.vertexAttribPointer(hpLoc, 2, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+
+  const pointsVAO = gl.createVertexArray();
+  gl.bindVertexArray(pointsVAO);
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+  const ppLoc = gl.getAttribLocation(pointsProg, "a_position");
+  gl.enableVertexAttribArray(ppLoc);
+  gl.vertexAttribPointer(ppLoc, 2, gl.FLOAT, false, 0, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, colBuf);
+  const pcLoc = gl.getAttribLocation(pointsProg, "a_color");
+  gl.enableVertexAttribArray(pcLoc);
+  gl.vertexAttribPointer(pcLoc, 4, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+
+  // --- SVG overlay (axes + zoom target) ---
+  const svg = d3.select("#overlay").attr("width", W).attr("height", H);
+  svg.append("rect").attr("width", W).attr("height", H)
+    .attr("fill", "none").attr("pointer-events", "all").style("cursor", "grab");
+
+  const xAxisG = svg.append("g")
+    .attr("class", "axis")
+    .attr("transform", `translate(0,${margin.top + plotH})`);
+  const yAxisG = svg.append("g")
+    .attr("class", "axis")
+    .attr("transform", `translate(${margin.left},0)`);
+
+  // Clip rect for plot area
+  svg.append("defs").append("clipPath").attr("id", "plotClip")
+    .append("rect").attr("x", margin.left).attr("y", margin.top)
+    .attr("width", plotW).attr("height", plotH);
+
+  // Title
+  svg.append("text")
+    .attr("x", margin.left + plotW / 2).attr("y", 24)
+    .attr("text-anchor", "middle")
+    .attr("fill", "#333").attr("font-size", 15).attr("font-weight", 600)
+    .text("5M-Point Density Heatmap — Scroll to Zoom, Drag to Pan");
+
+  // --- LOD state machine with hysteresis ---
+  // density mode below k=4, points mode at k>=4
+  // Hysteresis: enter points at k>=4.0, exit back to density at k<3.2
+  const LOD = { DENSITY: 0, CROSSFADE: 1, POINTS: 2 };
+  let lodState = LOD.DENSITY;
+  const ENTER_POINTS_K = 4.0;
+  const EXIT_POINTS_K = 3.2;
+  // Cross-fade band for smooth transition
+  const FADE_LO = 3.2;
+  const FADE_HI = 4.5;
+
+  function updateLOD(k) {
+    if (lodState === LOD.DENSITY && k >= ENTER_POINTS_K) {
+      lodState = LOD.POINTS;
+    } else if (lodState === LOD.POINTS && k < EXIT_POINTS_K) {
+      lodState = LOD.DENSITY;
+    }
+  }
+
+  // --- Color ramp legend ---
+  const legendDiv = document.getElementById("legend");
+  const legendCanvas = document.createElement("canvas");
+  legendCanvas.width = 180;
+  legendCanvas.height = 14;
+  legendCanvas.style.width = "180px";
+  legendCanvas.style.height = "14px";
+  legendCanvas.style.borderRadius = "2px";
+  const lctx = legendCanvas.getContext("2d");
+  for (let x = 0; x < 180; x++) {
+    const t = x / 179;
+    const c = colorRamp(t);
+    lctx.fillStyle = `rgb(${c[0]|0},${c[1]|0},${c[2]|0})`;
+    lctx.fillRect(x, 0, 1, 14);
+  }
+  legendDiv.appendChild(legendCanvas);
+  const labelsDiv = document.createElement("div");
+  labelsDiv.className = "labels";
+  labelsDiv.innerHTML = "<span>Low</span><span>Density</span><span>High</span>";
+  legendDiv.appendChild(labelsDiv);
+
+  // --- Draw functions ---
+  let currentTransform = d3.zoomIdentity;
+  const hud = document.getElementById("hud");
+
+  function drawHeatmap(transform) {
+    // Compute the visible data-space rect from the transform
+    // Transform maps: screen = data_pixel * k + tx
+    // So data_pixel = (screen - tx) / k
+    // The plot area in screen coords: [margin.left, margin.top] to [margin.left+plotW, margin.top+plotH]
+    // Map to UV coordinates [0,1] for the texture
+    const dataLeft = (margin.left - transform.x) / transform.k;
+    const dataRight = (margin.left + plotW - transform.x) / transform.k;
+    const dataTop = (margin.top - transform.y) / transform.k;
+    const dataBottom = (margin.top + plotH - transform.y) / transform.k;
+
+    // Convert pixel positions to UV (texture coords)
+    const u0 = (dataLeft - margin.left) / plotW;
+    const u1 = (dataRight - margin.left) / plotW;
+    const v0 = (dataTop - margin.top) / plotH;
+    const v1 = (dataBottom - margin.top) / plotH;
+
+    gl.useProgram(heatProg);
+    gl.bindVertexArray(heatVAO);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, heatTex);
+    gl.uniform1i(gl.getUniformLocation(heatProg, "u_tex"), 0);
+    gl.uniform2f(gl.getUniformLocation(heatProg, "u_resolution"), W, H);
+
+    // Source UV rect
+    gl.uniform4f(gl.getUniformLocation(heatProg, "u_srcRect"), u0, v0, u1 - u0, v1 - v0);
+    // Destination: fill the plot area
+    gl.uniform4f(gl.getUniformLocation(heatProg, "u_dstRect"),
+      margin.left, margin.top, plotW, plotH);
+
+    // Opacity for cross-fade
+    const k = transform.k;
+    let heatOpacity = 1.0;
+    if (k >= FADE_LO && k <= FADE_HI) {
+      heatOpacity = 1.0 - (k - FADE_LO) / (FADE_HI - FADE_LO);
+    } else if (k > FADE_HI) {
+      heatOpacity = 0.0;
+    }
+    gl.uniform1f(gl.getUniformLocation(heatProg, "u_opacity"), heatOpacity);
+
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  function drawPoints(transform) {
+    const k = transform.k;
+    let pointOpacity = 1.0;
+    if (k >= FADE_LO && k <= FADE_HI) {
+      pointOpacity = (k - FADE_LO) / (FADE_HI - FADE_LO);
+    } else if (k < FADE_LO) {
+      pointOpacity = 0.0;
+    }
+    if (pointOpacity <= 0.001) return;
+
+    // Point size: start small, grow slightly with zoom
+    const ptSize = Math.min(2.0 + Math.log2(k) * 0.5, 6.0);
+
+    gl.useProgram(pointsProg);
+    gl.bindVertexArray(pointsVAO);
+    gl.uniform2f(gl.getUniformLocation(pointsProg, "u_resolution"), W, H);
+    gl.uniform2f(gl.getUniformLocation(pointsProg, "u_translate"), transform.x, transform.y);
+    gl.uniform1f(gl.getUniformLocation(pointsProg, "u_scale"), k);
+    gl.uniform1f(gl.getUniformLocation(pointsProg, "u_dpr"), dpr);
+    gl.uniform1f(gl.getUniformLocation(pointsProg, "u_pointSize"), ptSize);
+    gl.uniform1f(gl.getUniformLocation(pointsProg, "u_opacity"), pointOpacity);
+
+    gl.drawArrays(gl.POINTS, 0, N);
+  }
+
+  function draw(transform) {
+    currentTransform = transform;
+    updateLOD(transform.k);
+
+    // Scissor to plot area to avoid drawing over axes
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(margin.left * dpr, (H - margin.top - plotH) * dpr, plotW * dpr, plotH * dpr);
+
+    gl.clearColor(250 / 255, 250 / 255, 250 / 255, 1.0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+    drawHeatmap(transform);
+    drawPoints(transform);
+
+    gl.disable(gl.SCISSOR_TEST);
+
+    // Update axes
+    const zx = transform.rescaleX(xScale);
+    const zy = transform.rescaleY(yScale);
+    xAxisG.call(d3.axisBottom(zx).ticks(Math.min(12, plotW / 80)));
+    yAxisG.call(d3.axisLeft(zy).ticks(Math.min(10, plotH / 60)));
+
+    // HUD
+    const mode = transform.k < FADE_LO ? "Density" :
+      transform.k > FADE_HI ? "Points (by cluster)" : "Cross-fade";
+    hud.innerHTML = `zoom: ${transform.k.toFixed(1)}x<br>mode: ${mode}<br>points: ${(N / 1e6).toFixed(0)}M`;
+  }
+
+  // --- d3.zoom ---
+  const zoom = d3.zoom()
+    .scaleExtent([1, 200])
+    .translateExtent([[0, 0], [W, H]])
+    .extent([[margin.left, margin.top], [margin.left + plotW, margin.top + plotH]])
+    .on("zoom", ({ transform }) => {
+      draw(transform);
+      svg.select("rect").style("cursor",
+        transform.k > 1 ? "grabbing" : "grab");
+    });
+
+  svg.call(zoom);
+
+  // Debounced draw via rAF
+  let pendingTransform = null;
+  let rafId = null;
+  const debouncedZoom = d3.zoom()
+    .scaleExtent([1, 200])
+    .translateExtent([[0, 0], [W, H]])
+    .extent([[margin.left, margin.top], [margin.left + plotW, margin.top + plotH]]);
+
+  // Initial draw
+  draw(d3.zoomIdentity);
+
+  // Context loss handling
+  canvas.addEventListener("webglcontextlost", e => e.preventDefault());
+  canvas.addEventListener("webglcontextrestored", () => draw(currentTransform));
+})();
+</script>
+</body>
+</html>

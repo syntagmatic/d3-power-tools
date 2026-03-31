@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hex-Binned US GPS Density Map</title>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <script src="https://cdn.jsdelivr.net/npm/topojson-client@3"></script>
+  <script src="https://cdn.jsdelivr.net/npm/d3-hexbin@0.2/build/d3-hexbin.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0d1117;
+      color: #cdd9e5;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      padding: 28px 16px;
+      gap: 14px;
+    }
+
+    header { text-align: center; }
+
+    h1 {
+      font-size: 0.95rem;
+      font-weight: 500;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+      color: #8b949e;
+      margin-bottom: 4px;
+    }
+
+    .subtitle {
+      font-size: 0.76rem;
+      color: #3d444d;
+    }
+
+    #controls {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      font-size: 0.83rem;
+      color: #8b949e;
+    }
+
+    .ctrl { display: flex; align-items: center; gap: 9px; }
+
+    input[type=range] {
+      -webkit-appearance: none;
+      width: 160px;
+      height: 4px;
+      background: #21262d;
+      border-radius: 2px;
+      outline: none;
+      cursor: pointer;
+    }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px; height: 14px;
+      border-radius: 50%;
+      background: #f97316;
+      cursor: pointer;
+      box-shadow: 0 0 0 2px #0d1117, 0 0 0 4px #f9731640;
+    }
+    input[type=range]::-moz-range-thumb {
+      width: 14px; height: 14px;
+      border-radius: 50%;
+      background: #f97316;
+      border: none;
+      cursor: pointer;
+    }
+
+    #map-wrap {
+      position: relative;
+      border-radius: 6px;
+      overflow: hidden;
+      box-shadow: 0 0 0 1px #21262d, 0 12px 48px rgba(0,0,0,0.7);
+      background: #060d18;
+    }
+
+    canvas { display: block; }
+
+    #overlay-svg {
+      position: absolute;
+      top: 0; left: 0;
+      pointer-events: none;
+    }
+
+    #legend {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      font-size: 0.74rem;
+      color: #3d444d;
+    }
+
+    #legend-canvas { border-radius: 2px; }
+
+    #loading {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #484f58;
+      font-size: 0.85rem;
+      letter-spacing: 0.05em;
+      background: #060d18;
+      border-radius: 6px;
+    }
+
+    #tooltip {
+      position: fixed;
+      background: rgba(13, 17, 23, 0.94);
+      border: 1px solid #30363d;
+      color: #cdd9e5;
+      padding: 5px 10px;
+      border-radius: 4px;
+      font-size: 0.78rem;
+      pointer-events: none;
+      display: none;
+      z-index: 100;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>US GPS Activity &mdash; Hex Bin Density</h1>
+    <p class="subtitle">20,000 synthetic points, weighted by metro population</p>
+  </header>
+
+  <div id="controls">
+    <div class="ctrl">
+      <span>Hex radius</span>
+      <input type="range" id="slider" min="4" max="16" value="8" step="1">
+      <span id="radius-label" style="min-width:3.2em">8 px</span>
+    </div>
+    <span style="color:#2d333b">|</span>
+    <span id="bin-count" style="color:#484f58"></span>
+  </div>
+
+  <div id="map-wrap">
+    <canvas id="canvas"></canvas>
+    <svg id="overlay-svg"></svg>
+    <div id="loading">Loading map data&hellip;</div>
+  </div>
+
+  <div id="legend">
+    <span>fewer points</span>
+    <canvas id="legend-canvas" width="200" height="10"></canvas>
+    <span>more points</span>
+  </div>
+
+  <div id="tooltip"></div>
+
+  <script>
+  (async () => {
+    const W = 960, H = 580;
+
+    // ── Box-Muller Gaussian ────────────────────────────────────────────────
+    const gauss = () => {
+      let u, v;
+      do { u = Math.random(); } while (u === 0);
+      do { v = Math.random(); } while (v === 0);
+      return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+    };
+
+    // ── US metro centers: [lon, lat, weight] ──────────────────────────────
+    // weight ≈ metro population in millions; drives both sampling probability
+    // and cluster spread (larger metros → tighter clusters).
+    const METROS = [
+      [-74.006,  40.713, 20.0], // New York–Newark
+      [-118.243, 34.052, 13.0], // Los Angeles
+      [-87.629,  41.878,  9.5], // Chicago
+      [-95.369,  29.760,  7.2], // Houston
+      [-97.330,  32.753,  7.5], // Dallas–Fort Worth
+      [-77.036,  38.907,  6.4], // Washington DC
+      [-80.191,  25.774,  6.2], // Miami
+      [-75.165,  39.952,  6.1], // Philadelphia
+      [-84.386,  33.749,  6.1], // Atlanta
+      [-71.058,  42.360,  4.9], // Boston
+      [-122.419, 37.774,  4.7], // San Francisco Bay Area
+      [-83.045,  42.331,  4.4], // Detroit
+      [-122.332, 47.606,  4.0], // Seattle
+      [-93.265,  44.979,  3.7], // Minneapolis–St. Paul
+      [-117.161, 32.715,  3.3], // San Diego
+      [-82.457,  27.951,  3.1], // Tampa
+      [-104.990, 39.739,  3.0], // Denver
+      [-76.612,  39.290,  2.9], // Baltimore
+      [-90.190,  38.627,  2.8], // St. Louis
+      [-81.379,  28.538,  2.6], // Orlando
+      [-80.843,  35.227,  2.6], // Charlotte
+      [-98.494,  29.424,  2.5], // San Antonio
+      [-122.676, 45.524,  2.5], // Portland
+      [-121.894, 37.339,  2.0], // San José
+      [-86.761,  36.162,  2.0], // Nashville
+      [-84.512,  39.103,  2.3], // Cincinnati
+      [-115.139, 36.172,  2.2], // Las Vegas
+      [-94.579,  39.099,  2.2], // Kansas City
+      [-81.519,  41.499,  2.1], // Cleveland
+      [-83.000,  39.961,  2.1], // Columbus
+      [-86.158,  39.768,  2.1], // Indianapolis
+      [-79.995,  40.440,  2.3], // Pittsburgh
+      [-87.955,  43.038,  1.6], // Milwaukee
+      [-71.412,  41.823,  1.6], // Providence
+      [-81.655,  30.332,  1.5], // Jacksonville
+      [-97.508,  35.481,  1.4], // Oklahoma City
+      [-90.048,  35.149,  1.4], // Memphis
+      [-78.639,  35.786,  1.4], // Raleigh
+      [-98.187,  26.196,  1.4], // McAllen–Edinburg
+      [-111.891, 40.761,  1.2], // Salt Lake City
+      [-157.823, 21.307,  1.0], // Honolulu
+      [-110.926, 32.221,  1.0], // Tucson
+      [-96.700,  40.813,  0.9], // Omaha
+      [-106.650, 35.085,  0.9], // Albuquerque
+      [-72.685,  41.763,  0.9], // Hartford
+      [-116.407, 43.615,  0.7], // Boise
+      [-149.900, 61.218,  0.3], // Anchorage
+      // Low-weight rural spread points
+      [-100.346, 43.549,  0.4], // Sioux Falls area
+      [-105.937, 35.687,  0.4], // Santa Fe area
+      [-89.401,  43.074,  0.3], // Madison area
+      [-83.743,  42.280,  0.3], // Ann Arbor area
+    ];
+
+    // ── Synthetic point generation ────────────────────────────────────────
+    function generatePoints(n) {
+      const total = METROS.reduce((s, m) => s + m[2], 0);
+      const pts = [];
+      for (let i = 0; i < n; i++) {
+        // Weighted random city selection
+        let r = Math.random() * total, metro;
+        for (const m of METROS) { r -= m[2]; if (r <= 0) { metro = m; break; } }
+        if (!metro) metro = METROS[METROS.length - 1];
+        // Spread: large metros cluster tightly, small metros spread further
+        const spread = 0.28 + 0.55 * Math.exp(-metro[2] / 5);
+        pts.push([
+          metro[0] + gauss() * spread,
+          metro[1] + gauss() * spread * 0.68, // latitudinal compression
+        ]);
+      }
+      return pts;
+    }
+
+    // ── DOM ───────────────────────────────────────────────────────────────
+    const canvas = document.getElementById('canvas');
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext('2d');
+
+    const svgEl = document.getElementById('overlay-svg');
+    svgEl.setAttribute('width', W);
+    svgEl.setAttribute('height', H);
+    document.getElementById('map-wrap').style.width = W + 'px';
+
+    const svg = d3.select(svgEl);
+
+    // ── Projection ────────────────────────────────────────────────────────
+    const projection = d3.geoAlbersUsa().scale(1300).translate([W / 2, H / 2]);
+    const pathGen   = d3.geoPath().projection(projection);
+    const canvasPathGen = d3.geoPath().projection(projection).context(ctx);
+
+    // ── Fetch TopoJSON ────────────────────────────────────────────────────
+    let us;
+    try {
+      us = await d3.json('https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json');
+    } catch (e) {
+      document.getElementById('loading').textContent = 'Failed to load map data.';
+      return;
+    }
+    document.getElementById('loading').style.display = 'none';
+
+    const nationFeature = topojson.feature(us, us.objects.nation);
+    const statesMesh    = topojson.mesh(us, us.objects.states, (a, b) => a !== b);
+
+    // State borders in SVG (drawn on top of canvas hexagons)
+    svg.append('path')
+      .datum(statesMesh)
+      .attr('d', pathGen)
+      .attr('fill', 'none')
+      .attr('stroke', '#1e3a52')
+      .attr('stroke-width', 0.55);
+
+    // Nation outline
+    svg.append('path')
+      .datum(nationFeature)
+      .attr('d', pathGen)
+      .attr('fill', 'none')
+      .attr('stroke', '#2d5a8a')
+      .attr('stroke-width', 1.2);
+
+    // ── Project synthetic points ──────────────────────────────────────────
+    const rawPts = generatePoints(20000);
+    const pts    = rawPts.map(p => projection(p)).filter(Boolean);
+    // AlbersUsa returns null for coordinates outside its clipping bounds
+
+    // ── Color scale: dark→warm ramp suits dark background ─────────────────
+    const colorFn = t => d3.interpolateYlOrRd(0.08 + t * 0.92);
+
+    // ── Gradient legend ───────────────────────────────────────────────────
+    const lc   = document.getElementById('legend-canvas');
+    const lctx = lc.getContext('2d');
+    for (let i = 0; i < 200; i++) {
+      lctx.fillStyle = colorFn(i / 199);
+      lctx.fillRect(i, 0, 1, 10);
+    }
+
+    // ── Hexbin render ─────────────────────────────────────────────────────
+    let currentBins = [];
+
+    function render(radius) {
+      const hexbin = d3.hexbin()
+        .x(d => d[0])
+        .y(d => d[1])
+        .radius(radius)
+        .extent([[0, 0], [W, H]]);
+
+      currentBins = hexbin(pts);
+      const maxCount = d3.max(currentBins, d => d.length) || 1;
+      const color = d => colorFn(d.length / maxCount);
+
+      // Clear canvas
+      ctx.clearRect(0, 0, W, H);
+
+      // Nation fill on canvas (ocean stays as body background)
+      ctx.fillStyle = '#0a1826';
+      ctx.beginPath();
+      canvasPathGen(nationFeature);
+      ctx.fill();
+
+      // Hexagons — build path once and translate per bin
+      const hexPath = new Path2D(hexbin.hexagon());
+
+      for (const bin of currentBins) {
+        ctx.save();
+        ctx.translate(bin.x, bin.y);
+        ctx.fillStyle = color(bin);
+        ctx.fill(hexPath);
+        ctx.restore();
+      }
+
+      // Stats
+      document.getElementById('bin-count').textContent =
+        `${currentBins.length.toLocaleString()} bins · max ${maxCount} pts`;
+    }
+
+    // ── Controls ──────────────────────────────────────────────────────────
+    const slider      = document.getElementById('slider');
+    const radiusLabel = document.getElementById('radius-label');
+
+    slider.addEventListener('input', () => {
+      const r = +slider.value;
+      radiusLabel.textContent = r + ' px';
+      render(r);
+    });
+
+    // ── Tooltip ───────────────────────────────────────────────────────────
+    const tooltip = document.getElementById('tooltip');
+
+    canvas.addEventListener('mousemove', e => {
+      const rect  = canvas.getBoundingClientRect();
+      const mx    = e.clientX - rect.left;
+      const my    = e.clientY - rect.top;
+      const rSnap = (+slider.value) * 1.5; // hit radius
+      const rSnap2 = rSnap * rSnap;
+
+      let nearest = null, bestD2 = rSnap2;
+      for (const bin of currentBins) {
+        const dx = bin.x - mx, dy = bin.y - my;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < bestD2) { bestD2 = d2; nearest = bin; }
+      }
+
+      if (nearest) {
+        tooltip.style.display = 'block';
+        tooltip.style.left    = (e.clientX + 14) + 'px';
+        tooltip.style.top     = (e.clientY - 34) + 'px';
+        tooltip.textContent   = nearest.length + (nearest.length === 1 ? ' point' : ' points');
+      } else {
+        tooltip.style.display = 'none';
+      }
+    });
+
+    canvas.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+
+    // ── Initial render ────────────────────────────────────────────────────
+    render(8);
+  })();
+  </script>
+</body>
+</html>
