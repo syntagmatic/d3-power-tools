@@ -99,19 +99,17 @@
   }
 
   /* --- Timeline --- */
-  #timeline .bar-bg { fill: #333; }
-  #timeline .bar-fg { fill: #4477AA; }
-  #timeline .axis text { fill: #888; font-size: 10px; }
-  #timeline .axis path, #timeline .axis line { stroke: #444; }
-  #timeline .brush .selection {
-    fill: #4477AA;
-    fill-opacity: 0.2;
-    stroke: #4477AA;
-    stroke-width: 1;
-  }
+  .bar-bg { fill: #333; }
+  .bar-fg { fill: #4477AA; }
+  .axis text { fill: #888; }
+  .axis path, .axis line { stroke: #444; }
+  #timeline .axis text { font-size: 10px; }
+  #timeline .brush .selection { fill: #4477AA; fill-opacity: 0.2; stroke: #4477AA; stroke-width: 1; }
+  #colors .axis text { font-size: 9px; }
+  #colors .brush .selection { fill: #fff; fill-opacity: 0.1; stroke: #aaa; stroke-width: 1; }
 
   /* --- Network & Colors --- */
-  #network canvas, #colors canvas {
+  #network canvas, #colors canvas, #network svg, #colors svg {
     position: absolute;
     top: 0;
     left: 0;
@@ -121,12 +119,6 @@
     fill: #aaa;
     pointer-events: none;
   }
-  #network .selected-label {
-    font-size: 11px;
-    fill: #fff;
-    font-weight: 600;
-  }
-
   /* --- Block list --- */
   #blocklist {
     overflow-y: auto;
@@ -150,29 +142,19 @@
     object-fit: cover;
     flex-shrink: 0;
   }
+  .block-desc, .block-author, .block-date { overflow: hidden; text-overflow: ellipsis; }
   .block-desc {
     flex: 1;
     font-size: 12px;
     color: #bbb;
     white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
-  .block-author {
+  .block-author, .block-date {
     font-size: 11px;
-    color: #666;
-    width: 80px;
     flex-shrink: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
-  .block-date {
-    font-size: 11px;
-    color: #555;
-    width: 70px;
-    flex-shrink: 0;
-    text-align: right;
-  }
+  .block-author { color: #666; width: 80px; }
+  .block-date { color: #555; width: 70px; text-align: right; }
   .api-badge {
     display: inline-block;
     font-size: 9px;
@@ -269,15 +251,7 @@
 <div class="tooltip" id="tooltip"></div>
 
 <script type="module">
-
-//State management
-// ============================================================
-
 const state = { timeRange: null, selectedApi: null, filteredIndices: null };
-
-//BitFilter
-// ============================================================
-
 class BitFilter {
   #n; #masks;
   constructor(n) { this.#n = n; this.#masks = new Map(); }
@@ -312,10 +286,6 @@ class BitFilter {
     return indices;
   }
 }
-
-//Dirty-flag rendering
-// ============================================================
-
 const LAYER = { TIMELINE: 1, NETWORK: 2, COLORS: 4, LIST: 8, ALL: 15 };
 let dirtyLayers = 0;
 const updaters = {};
@@ -323,48 +293,28 @@ const updaters = {};
 function markDirty(layers) {
   const wasDirty = dirtyLayers;
   dirtyLayers |= layers;
-  if (!wasDirty) requestAnimationFrame(flush);
+  if (!wasDirty) requestAnimationFrame(() => {
+    const d = dirtyLayers; dirtyLayers = 0;
+    ["timeline", "network", "colors", "list"].forEach((name, i) => { if (d & (1 << i) && updaters[name]) updaters[name](); });
+  });
 }
-
-function flush() {
-  const d = dirtyLayers;
-  dirtyLayers = 0;
-  if (d & LAYER.TIMELINE && updaters.timeline) updaters.timeline();
-  if (d & LAYER.NETWORK && updaters.network) updaters.network();
-  if (d & LAYER.COLORS && updaters.colors) updaters.colors();
-  if (d & LAYER.LIST && updaters.list) updaters.list();
-}
-
-//Tooltip
-// ============================================================
-
 const tooltipEl = document.getElementById("tooltip");
 
 function setupLayers(el, width, height) {
   const dpr = devicePixelRatio;
-  const canvas = d3.select(el).append("canvas")
+  const ctx = d3.select(el).append("canvas")
     .attr("width", width * dpr).attr("height", height * dpr)
     .style("width", width + "px").style("height", height + "px")
-    .node();
-  const ctx = canvas.getContext("2d");
+    .node().getContext("2d");
   ctx.scale(dpr, dpr);
-  const svg = d3.select(el).append("svg")
-    .attr("width", width).attr("height", height)
-    .style("position", "absolute").style("top", 0).style("left", 0);
-  return { ctx, svg };
+  return { ctx, svg: d3.select(el).append("svg").attr("width", width).attr("height", height) };
 }
 
 function showTooltip(x, y, html) {
-  tooltipEl.style.display = "block";
+  Object.assign(tooltipEl.style, { display: "block", left: (x + 12) + "px", top: (y - 10) + "px" });
   tooltipEl.innerHTML = html;
-  tooltipEl.style.left = (x + 12) + "px";
-  tooltipEl.style.top = (y - 10) + "px";
 }
 function hideTooltip() { tooltipEl.style.display = "none"; }
-
-//Data loading
-// ============================================================
-
 async function fetchWithProgress(url, label) {
   const loadingText = document.getElementById("loading-text");
   const progressFill = document.getElementById("progress-fill");
@@ -373,11 +323,7 @@ async function fetchWithProgress(url, label) {
   const response = await fetch(url);
   const contentLength = +response.headers.get("Content-Length") || 0;
 
-  if (!contentLength || !response.body) {
-    const json = await response.json();
-    progressFill.style.width = "100%";
-    return json;
-  }
+  if (!contentLength || !response.body) { progressFill.style.width = "100%"; return response.json(); }
 
   const reader = response.body.getReader();
   const chunks = [];
@@ -391,81 +337,42 @@ async function fetchWithProgress(url, label) {
     progressFill.style.width = Math.round((received / contentLength) * 100) + "%";
   }
 
-  const blob = new Blob(chunks);
-  const text = await blob.text();
-  return JSON.parse(text);
+  return JSON.parse(await new Blob(chunks).text());
 }
-
-//Data processing
-// ============================================================
-
 function processApiData(raw) {
-  const blocks = raw.map((d, i) => ({
-    id: d.id || d.userId + "/" + i,
-    userId: d.userId || "unknown",
-    description: d.description || "",
-    created: d.created_at ? new Date(d.created_at) : null,
-    api: d.api || {},
-    thumbnail: d.thumbnail || null,
-  })).filter(d => d.created !== null);
-
-  blocks.sort((a, b) => a.created - b.created);
-  blocks.forEach((d, i) => d.idx = i);
+  const blocks = raw.flatMap((d, i) => {
+    if (!d.created_at) return [];
+    return [{ id: d.id || d.userId + "/" + i, userId: d.userId || "unknown",
+      description: d.description || "", created: new Date(d.created_at),
+      api: d.api || {}, thumbnail: d.thumbnail || null }];
+  });
+  blocks.sort((a, b) => a.created - b.created).forEach((d, i) => d.idx = i);
   return blocks;
 }
 
 function buildCooccurrence(blocks, topN = 60) {
-  // Count total occurrences of each API function
   const apiCounts = new Map();
-  for (const b of blocks) {
-    for (const fn of Object.keys(b.api)) {
-      apiCounts.set(fn, (apiCounts.get(fn) || 0) + 1);
-    }
-  }
+  for (const b of blocks) for (const fn of Object.keys(b.api))
+    apiCounts.set(fn, (apiCounts.get(fn) || 0) + 1);
 
-  // Top N by count
-  const topFuncs = [...apiCounts.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, topN)
-    .map(d => d[0]);
+  const topFuncs = [...apiCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, topN).map(d => d[0]);
   const topSet = new Set(topFuncs);
 
-  // Co-occurrence
   const cooc = new Map();
   for (const b of blocks) {
     const funcs = Object.keys(b.api).filter(f => topSet.has(f));
-    for (let i = 0; i < funcs.length; i++) {
-      for (let j = i + 1; j < funcs.length; j++) {
-        const key = funcs[i] < funcs[j]
-          ? funcs[i] + "|" + funcs[j]
-          : funcs[j] + "|" + funcs[i];
-        cooc.set(key, (cooc.get(key) || 0) + 1);
-      }
+    for (let i = 0; i < funcs.length; i++) for (let j = i + 1; j < funcs.length; j++) {
+      const key = funcs[i] < funcs[j] ? funcs[i] + "|" + funcs[j] : funcs[j] + "|" + funcs[i];
+      cooc.set(key, (cooc.get(key) || 0) + 1);
     }
   }
 
-  // Build nodes and edges
-  const nodes = topFuncs.map(fn => ({
-    id: fn,
-    label: fn.replace(/^d3\./, ""),
-    count: apiCounts.get(fn),
-  }));
-
+  const nodes = topFuncs.map(fn => ({ id: fn, label: fn.replace(/^d3\./, ""), count: apiCounts.get(fn) }));
   const minWeight = Math.max(5, d3.quantile([...cooc.values()].sort(d3.ascending), 0.5));
-  const links = [];
-  for (const [key, weight] of cooc) {
-    if (weight >= minWeight) {
-      const [source, target] = key.split("|");
-      links.push({ source, target, weight });
-    }
-  }
-
+  const links = [...cooc].filter(([, w]) => w >= minWeight)
+    .map(([k, weight]) => { const [source, target] = k.split("|"); return { source, target, weight }; });
   return { nodes, links };
 }
-
-//View 1: Timeline
-// ============================================================
-
 function createTimeline(container, blocks, bitFilter) {
   const el = document.getElementById(container);
   const { width, height } = el.getBoundingClientRect();
@@ -481,10 +388,11 @@ function createTimeline(container, blocks, bitFilter) {
 
   const x = d3.scaleUtc().domain(d3.extent(blocks, d => d.created)).range([0, innerW]);
 
-  const bins = d3.bin()
+  const binner = d3.bin()
     .value(d => d.created)
     .domain(x.domain())
-    .thresholds(d3.utcMonth.range(...x.domain()))(blocks);
+    .thresholds(d3.utcMonth.range(...x.domain()));
+  const bins = binner(blocks);
 
   const maxCount = d3.max(bins, b => b.length);
   const y = d3.scaleLinear().domain([0, maxCount]).nice().range([innerH, 0]);
@@ -494,18 +402,8 @@ function createTimeline(container, blocks, bitFilter) {
     .attr("y", d => y(d.length)).attr("height", d => innerH - y(d.length));
   g.selectAll(".bar-bg").data(bins).join("rect").attr("class", "bar-bg").call(barAttrs);
   const fgBars = g.selectAll(".bar-fg").data(bins).join("rect").attr("class", "bar-fg").call(barAttrs);
-
-  // Axes
-  g.append("g")
-    .attr("class", "axis")
-    .attr("transform", `translate(0,${innerH})`)
-    .call(d3.axisBottom(x).ticks(d3.utcYear.every(1)));
-
-  g.append("g")
-    .attr("class", "axis")
-    .call(d3.axisLeft(y).ticks(4));
-
-  // Brush
+  g.append("g").attr("class", "axis").attr("transform", `translate(0,${innerH})`).call(d3.axisBottom(x).ticks(d3.utcYear.every(1)));
+  g.append("g").attr("class", "axis").call(d3.axisLeft(y).ticks(4));
   const brush = d3.brushX()
     .extent([[0, 0], [innerW, innerH]])
     .on("brush end", event => {
@@ -523,28 +421,16 @@ function createTimeline(container, blocks, bitFilter) {
     });
 
   const brushG = g.append("g").attr("class", "brush").call(brush);
-
-  // Update: recompute foreground bins from filtered data
   updaters.timeline = () => {
     const indices = state.filteredIndices;
     const filtered = indices ? blocks.filter(d => indices.has(d.idx)) : blocks;
-    const thresholds = d3.utcMonth.range(...x.domain());
-    const filteredBins = d3.bin()
-      .value(d => d.created)
-      .domain(x.domain())
-      .thresholds(thresholds)(filtered);
-
-    fgBars.data(filteredBins)
+    fgBars.data(binner(filtered))
       .attr("y", d => y(d.length))
       .attr("height", d => innerH - y(d.length));
   };
 
   return { brush, brushG };
 }
-
-//View 2: API Network
-// ============================================================
-
 function createNetwork(container, blocks, graph, bitFilter) {
   const el = document.getElementById(container);
   const { width, height } = el.getBoundingClientRect();
@@ -554,18 +440,8 @@ function createNetwork(container, blocks, graph, bitFilter) {
 
   const nodes = graph.nodes.map(d => ({ ...d }));
   const links = graph.links.map(d => ({ ...d }));
-
-  // Node size scale
-  const rScale = d3.scaleSqrt()
-    .domain(d3.extent(nodes, d => d.count))
-    .range([3, 16]);
-
-  // Edge thickness
-  const wScale = d3.scaleLinear()
-    .domain(d3.extent(links, d => d.weight))
-    .range([0.3, 2.5]);
-
-  // Force simulation — pre-compute
+  const rScale = d3.scaleSqrt().domain(d3.extent(nodes, d => d.count)).range([3, 16]);
+  const wScale = d3.scaleLinear().domain(d3.extent(links, d => d.weight)).range([0.3, 2.5]);
   const simulation = d3.forceSimulation(nodes)
     .force("link", d3.forceLink(links).id(d => d.id)
       .distance(d => 60 / Math.sqrt(Math.max(1, d.weight / 50))))
@@ -577,87 +453,62 @@ function createNetwork(container, blocks, graph, bitFilter) {
     .stop();
 
   for (let i = 0; i < 300; i++) simulation.tick();
-
-  // Clamp positions
   for (const n of nodes) {
-    n.x = Math.max(rScale(n.count), Math.min(innerW - rScale(n.count), n.x));
-    n.y = Math.max(rScale(n.count), Math.min(innerH - rScale(n.count), n.y));
+    const r = rScale(n.count);
+    n.x = Math.max(r, Math.min(innerW - r, n.x));
+    n.y = Math.max(r, Math.min(innerH - r, n.y));
   }
 
   const { ctx, svg } = setupLayers(el, width, height);
 
-  const gLabels = svg.append("g")
-    .attr("transform", `translate(${margin.left},${margin.top})`);
-
-  // Top labels
   const topNodes = nodes.slice().sort((a, b) => b.count - a.count).slice(0, 15);
-  gLabels.selectAll(".node-label")
-    .data(topNodes)
-    .join("text")
-      .attr("class", "node-label")
-      .attr("x", d => d.x)
-      .attr("y", d => d.y - rScale(d.count) - 3)
-      .attr("text-anchor", "middle")
-      .text(d => d.label);
+  svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`)
+    .selectAll(".node-label").data(topNodes).join("text")
+    .attr("class", "node-label").attr("text-anchor", "middle")
+    .attr("x", d => d.x).attr("y", d => d.y - rScale(d.count) - 3).text(d => d.label);
 
-  // Quadtree for hit detection
   const quadtree = d3.quadtree()
     .x(d => d.x).y(d => d.y)
     .addAll(nodes);
 
   const findNearest = e => { const [mx, my] = d3.pointer(e); return quadtree.find(mx - margin.left, my - margin.top, 20); };
 
-  // Interaction
-  const interactionRect = svg.append("rect")
-    .attr("x", margin.left).attr("y", margin.top)
-    .attr("width", innerW).attr("height", innerH)
-    .attr("fill", "none").attr("pointer-events", "all");
-
   let hoveredNode = null;
 
-  interactionRect.on("pointermove", event => {
-    const nearest = findNearest(event);
-    if (nearest !== hoveredNode) {
-      hoveredNode = nearest;
-      if (nearest) {
-        showTooltip(event.clientX, event.clientY,
-          `<strong>${nearest.id}</strong><br>${d3.format(",")(nearest.count)} blocks`);
-      } else {
-        hideTooltip();
+  svg.append("rect")
+    .attr("x", margin.left).attr("y", margin.top)
+    .attr("width", innerW).attr("height", innerH)
+    .attr("fill", "none").attr("pointer-events", "all")
+    .on("pointermove", event => {
+      const nearest = findNearest(event);
+      if (nearest !== hoveredNode) {
+        hoveredNode = nearest;
+        nearest ? showTooltip(event.clientX, event.clientY,
+          `<strong>${nearest.id}</strong><br>${d3.format(",")(nearest.count)} blocks`) : hideTooltip();
+        markDirty(LAYER.NETWORK);
       }
-      markDirty(LAYER.NETWORK);
-    }
-  }).on("pointerleave", () => {
-    hoveredNode = null;
-    hideTooltip();
-    markDirty(LAYER.NETWORK);
-  }).on("click", event => {
-    const nearest = findNearest(event);
-    if (nearest && nearest.id !== state.selectedApi) {
-      state.selectedApi = nearest.id;
-      bitFilter.set("api", d => d.api && d.api[nearest.id], blocks);
-    } else {
-      state.selectedApi = null;
-      bitFilter.clear("api");
-    }
-    state.filteredIndices = bitFilter.filtered();
-    markDirty(LAYER.ALL);
-  });
+    }).on("pointerleave", () => {
+      hoveredNode = null; hideTooltip(); markDirty(LAYER.NETWORK);
+    }).on("click", event => {
+      const nearest = findNearest(event);
+      if (nearest && nearest.id !== state.selectedApi) {
+        state.selectedApi = nearest.id;
+        bitFilter.set("api", d => d.api && d.api[nearest.id], blocks);
+      } else { state.selectedApi = null; bitFilter.clear("api"); }
+      state.filteredIndices = bitFilter.filtered();
+      markDirty(LAYER.ALL);
+    });
 
-  // Draw function
   function draw() {
     ctx.clearRect(0, 0, width, height);
     ctx.save();
     ctx.translate(margin.left, margin.top);
 
     const selectedApi = state.selectedApi;
-    const connectedNodes = new Set();
-    if (selectedApi) {
-      connectedNodes.add(selectedApi);
-      for (const l of links) {
-        if (l.source.id === selectedApi) connectedNodes.add(l.target.id);
-        if (l.target.id === selectedApi) connectedNodes.add(l.source.id);
-      }
+    const connectedNodes = new Set(selectedApi ? [selectedApi] : []);
+    if (selectedApi) for (const l of links) {
+      if (l.source.id === selectedApi) connectedNodes.add(l.target.id);
+      if (l.target.id === selectedApi) connectedNodes.add(l.source.id);
     }
 
     for (const l of links) {
@@ -671,27 +522,17 @@ function createNetwork(container, blocks, graph, bitFilter) {
       ctx.stroke();
     }
 
-    // Nodes
     for (const n of nodes) {
       const r = rScale(n.count);
       const active = !selectedApi || connectedNodes.has(n.id);
       const hovered = n === hoveredNode;
-
+      const selected = n.id === selectedApi;
       ctx.beginPath();
       ctx.arc(n.x, n.y, hovered ? r + 2 : r, 0, Math.PI * 2);
-      if (n.id === selectedApi) {
-        ctx.fillStyle = "#4477AA";
-        ctx.strokeStyle = "#fff";
-        ctx.lineWidth = 2;
-        ctx.fill();
-        ctx.stroke();
-      } else if (hovered) {
-        ctx.fillStyle = "#6699CC";
-        ctx.fill();
-      } else {
-        ctx.fillStyle = active ? "rgba(68,119,170,0.7)" : "rgba(68,119,170,0.15)";
-        ctx.fill();
-      }
+      ctx.fillStyle = selected ? "#4477AA" : hovered ? "#6699CC"
+        : active ? "rgba(68,119,170,0.7)" : "rgba(68,119,170,0.15)";
+      ctx.fill();
+      if (selected) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke(); }
     }
 
     ctx.restore();
@@ -700,10 +541,6 @@ function createNetwork(container, blocks, graph, bitFilter) {
   updaters.network = draw;
   draw();
 }
-
-//View 3: Color Distribution
-// ============================================================
-
 function createColorView(container, blocks, colorMap, bitFilter) {
   const el = document.getElementById(container);
   const { width, height } = el.getBoundingClientRect();
@@ -712,30 +549,22 @@ function createColorView(container, blocks, colorMap, bitFilter) {
   const innerH = height - margin.top - margin.bottom;
 
   const colorAgg = new Map();
-
   for (const [blockId, colors] of colorMap) {
     const block = blocks.find(b => b.id === blockId);
     if (!block) continue;
     for (const [hex, count] of Object.entries(colors)) {
       if (!hex.match(/^#[0-9a-fA-F]{6}$/)) continue;
       const c = d3.hcl(hex);
-      if (isNaN(c.h) || isNaN(c.c) || isNaN(c.l)) continue;
-      // Round for aggregation
-      const hBin = Math.round(c.h / 3) * 3;
-      const lBin = Math.round(c.l / 3) * 3;
-      const key = hBin + "," + lBin;
-      if (!colorAgg.has(key)) {
-        colorAgg.set(key, { h: hBin, l: lBin, hex, count: 0, blockIndices: new Set() });
-      }
-      const entry = colorAgg.get(key);
-      entry.count += count;
-      entry.blockIndices.add(block.idx);
+      if (isNaN(c.h + c.c + c.l)) continue;
+      const h = Math.round(c.h / 3) * 3, l = Math.round(c.l / 3) * 3, key = h + "," + l;
+      if (!colorAgg.has(key)) colorAgg.set(key, { h, l, hex, count: 0, blockIndices: new Set() });
+      colorAgg.get(key).count += count;
+      colorAgg.get(key).blockIndices.add(block.idx);
     }
   }
 
   const colorPoints = [...colorAgg.values()];
 
-  // Scales
   const x = d3.scaleLinear().domain([0, 360]).range([0, innerW]);
   const y = d3.scaleLinear().domain([0, 100]).range([innerH, 0]);
   const rScale = d3.scaleSqrt()
@@ -744,40 +573,22 @@ function createColorView(container, blocks, colorMap, bitFilter) {
 
   const { ctx, svg } = setupLayers(el, width, height);
 
-  const gAxes = svg.append("g")
-    .attr("transform", `translate(${margin.left},${margin.top})`);
-
-  gAxes.append("g")
-    .attr("class", "axis")
-    .attr("transform", `translate(0,${innerH})`)
-    .call(d3.axisBottom(x).tickValues([0, 60, 120, 180, 240, 300, 360])
-      .tickFormat(d => d + "\u00B0"));
-
-  gAxes.append("g")
-    .attr("class", "axis")
-    .call(d3.axisLeft(y).ticks(5));
-
-  gAxes.selectAll(".axis text").style("fill", "#888").style("font-size", "9px");
-  gAxes.selectAll(".axis path, .axis line").style("stroke", "#444");
-
+  const gAxes = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+  gAxes.append("g").attr("class", "axis").attr("transform", `translate(0,${innerH})`)
+    .call(d3.axisBottom(x).tickValues([0, 60, 120, 180, 240, 300, 360]).tickFormat(d => d + "\u00B0"));
+  gAxes.append("g").attr("class", "axis").call(d3.axisLeft(y).ticks(5));
   [["Hue", innerW / 2, innerH + 20, null], ["Lightness", -innerH / 2, -28, "rotate(-90)"]].forEach(([t, lx, ly, tr]) =>
-    gAxes.append("text").attr("x", lx).attr("y", ly).attr("text-anchor", "middle")
-      .attr("transform", tr).style("fill", "#666").style("font-size", "9px").text(t));
+    gAxes.append("text").attr("x", lx).attr("y", ly).attr("text-anchor", "middle").attr("transform", tr).style("fill", "#666").style("font-size", "9px").text(t));
 
-  // 2D brush for hue × lightness selection
   const brush = d3.brush()
     .extent([[0, 0], [innerW, innerH]])
     .on("brush end", event => {
       if (event.selection) {
         const [[bx0, by0], [bx1, by1]] = event.selection;
-        const hueRange = [x.invert(bx0), x.invert(bx1)];
-        const lightRange = [y.invert(by1), y.invert(by0)]; // y is inverted
-
-        // Collect all block indices from color points inside the brush
+        const [h0, h1, l0, l1] = [x.invert(bx0), x.invert(bx1), y.invert(by1), y.invert(by0)];
         const brushedBlocks = new Set();
         for (const p of colorPoints) {
-          if (p.h >= hueRange[0] && p.h <= hueRange[1] &&
-              p.l >= lightRange[0] && p.l <= lightRange[1]) {
+          if (p.h >= h0 && p.h <= h1 && p.l >= l0 && p.l <= l1) {
             for (const bi of p.blockIndices) brushedBlocks.add(bi);
           }
         }
@@ -789,15 +600,7 @@ function createColorView(container, blocks, colorMap, bitFilter) {
       markDirty(LAYER.TIMELINE | LAYER.NETWORK | LAYER.LIST);
     });
 
-  const colorBrushG = gAxes.append("g")
-    .attr("class", "brush")
-    .call(brush);
-
-  colorBrushG.select(".selection")
-    .style("fill", "#fff")
-    .style("fill-opacity", 0.1)
-    .style("stroke", "#aaa")
-    .style("stroke-width", 1);
+  const colorBrushG = gAxes.append("g").attr("class", "brush").call(brush);
 
   function draw() {
     ctx.clearRect(0, 0, width, height);
@@ -806,13 +609,8 @@ function createColorView(container, blocks, colorMap, bitFilter) {
     const indices = state.filteredIndices;
     const hasFilter = indices !== null;
     for (const p of colorPoints) {
-      let passes = true;
-      if (hasFilter) {
-        passes = false;
-        for (const bi of p.blockIndices) {
-          if (indices.has(bi)) { passes = true; break; }
-        }
-      }
+      let passes = !hasFilter;
+      if (!passes) for (const bi of p.blockIndices) if (indices.has(bi)) { passes = true; break; }
       ctx.globalAlpha = passes ? (hasFilter ? 0.8 : 0.5) : 0.08;
       ctx.fillStyle = p.hex;
       ctx.beginPath();
@@ -827,88 +625,37 @@ function createColorView(container, blocks, colorMap, bitFilter) {
 
   return { brush, brushG: colorBrushG };
 }
-
-//View 4: Block List
-// ============================================================
-
 function createBlockList(container, blocks) {
   const el = document.getElementById(container);
   const formatDate = d3.utcFormat("%Y-%m");
+  el.addEventListener("click", e => {
+    const row = e.target.closest(".block-row");
+    if (row?.dataset.url) window.open(row.dataset.url, "_blank");
+  });
 
   function renderList() {
     const indices = state.filteredIndices;
-    const filtered = indices
-      ? blocks.filter(d => indices.has(d.idx))
-      : blocks;
-
-    // Sort by date descending
-    const sorted = filtered.slice().sort((a, b) => b.created - a.created);
-
-    // Limit rendered rows for performance
-    const maxRows = 200;
-    const shown = sorted.slice(0, maxRows);
-
-    // Update status
-    const total = blocks.length;
-    const count = filtered.length;
+    const filtered = indices ? blocks.filter(d => indices.has(d.idx)) : blocks;
+    const shown = filtered.slice().sort((a, b) => b.created - a.created).slice(0, 200);
     document.getElementById("status").textContent =
-      `Showing ${d3.format(",")(count)} of ${d3.format(",")(total)} blocks`;
-
-    // Virtual-ish rendering: just cap at 200 rows
-    el.innerHTML = "";
-    const frag = document.createDocumentFragment();
-
-    for (const b of shown) {
-      const row = document.createElement("div");
-      row.className = "block-row";
-      row.onclick = () => window.open(`https://blocks.roadtolarissa.com/${b.userId}/${b.id}`, "_blank");
-      const topApis = Object.entries(b.api)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 3)
-        .map(([fn]) => `<span class="api-badge">${fn.replace("d3.", "")}</span>`)
-        .join("");
-      row.innerHTML =
+      `Showing ${d3.format(",")(filtered.length)} of ${d3.format(",")(blocks.length)} blocks`;
+    el.innerHTML = shown.map(b => {
+      const apis = Object.entries(b.api).sort((a, b) => b[1] - a[1]).slice(0, 3)
+        .map(([fn]) => `<span class="api-badge">${fn.replace("d3.", "")}</span>`).join("");
+      return `<div class="block-row" data-url="https://blocks.roadtolarissa.com/${b.userId}/${b.id}">` +
         (b.thumbnail ? `<img class="block-thumb" loading="lazy" src="${b.thumbnail}" onerror="this.style.display='none'">` : "") +
-        `<span class="block-desc">${b.description || "(untitled)"} ${topApis}</span>` +
+        `<span class="block-desc">${b.description || "(untitled)"} ${apis}</span>` +
         `<span class="block-author">${b.userId}</span>` +
-        `<span class="block-date">${formatDate(b.created)}</span>`;
-      frag.appendChild(row);
-    }
-
-    el.appendChild(frag);
+        `<span class="block-date">${formatDate(b.created)}</span></div>`;
+    }).join("");
   }
 
   updaters.list = renderList;
   renderList();
 }
-
-//Reset
-// ============================================================
-
 let colorParts = null;
-
-function setupReset(bitFilter, timelineParts) {
-  d3.select("#reset-btn").on("click", () => {
-    for (const d of ["time","api","thumb","color"]) bitFilter.clear(d);
-    Object.assign(state, { timeRange: null, selectedApi: null, filteredIndices: null });
-    document.getElementById("thumb-filter").checked = false;
-    if (timelineParts) {
-      timelineParts.brushG.call(timelineParts.brush.move, null);
-    }
-    if (colorParts) {
-      colorParts.brushG.call(colorParts.brush.move, null);
-    }
-    markDirty(LAYER.ALL);
-  });
-}
-
-//Main
-// ============================================================
-
 async function main() {
   const loadingEl = document.getElementById("loading");
-
-  // Load primary data
   const raw = await fetchWithProgress(
     "https://storage.googleapis.com/bb-search-data/parsed/blocks-api.json",
     "Loading blocks-api.json (10 MB)..."
@@ -920,41 +667,35 @@ async function main() {
   const blocks = processApiData(raw);
   const bitFilter = new BitFilter(blocks.length);
 
-  // Build co-occurrence graph
   const graph = buildCooccurrence(blocks, 60);
-
-  // Render views
   const timelineParts = createTimeline("timeline", blocks, bitFilter);
   createNetwork("network", blocks, graph, bitFilter);
   createBlockList("blocklist", blocks);
 
-  setupReset(bitFilter, timelineParts);
+  d3.select("#reset-btn").on("click", () => {
+    for (const d of ["time","api","thumb","color"]) bitFilter.clear(d);
+    Object.assign(state, { timeRange: null, selectedApi: null, filteredIndices: null });
+    document.getElementById("thumb-filter").checked = false;
+    for (const p of [timelineParts, colorParts]) if (p) p.brushG.call(p.brush.move, null);
+    markDirty(LAYER.ALL);
+  });
 
-  // Thumbnail filter
   document.getElementById("thumb-filter").addEventListener("change", (e) => {
-    if (e.target.checked) {
-      bitFilter.set("thumb", d => !!d.thumbnail, blocks);
-    } else {
-      bitFilter.clear("thumb");
-    }
+    if (e.target.checked) bitFilter.set("thumb", d => !!d.thumbnail, blocks);
+    else bitFilter.clear("thumb");
     state.filteredIndices = bitFilter.filtered();
     markDirty(LAYER.ALL);
   });
 
-  // Hide loading
   loadingEl.classList.add("hidden");
   setTimeout(() => loadingEl.remove(), 500);
 
-  // Load colors in background
   try {
     const rawColors = await fetchWithProgress(
       "https://storage.googleapis.com/bb-search-data/parsed/blocks-colors.json",
       "Loading colors..."
     );
-    const colorMap = new Map();
-    for (const d of rawColors) {
-      if (d.colors && d.id) colorMap.set(d.id, d.colors);
-    }
+    const colorMap = new Map(rawColors.filter(d => d.colors && d.id).map(d => [d.id, d.colors]));
     colorParts = createColorView("colors", blocks, colorMap, bitFilter);
     d3.select("#colors .panel-label").text(`Color usage (${d3.format(",")(colorMap.size)} blocks)`);
   } catch (e) {
