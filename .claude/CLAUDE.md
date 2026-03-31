@@ -89,6 +89,12 @@ python3 scripts/iterate-block.py --target hierarchy-bundles --max-experiments 50
 
 The loop: propose compaction via `claude -p` → audit → keep if LOC drops and composite holds → repeat. On completion, squash-merges the iterate branch to main.
 
+**After every autoresearch run completes**, regenerate and commit the iterations index:
+```bash
+python3 -c "from scripts.iterate_lib import generate_progress_html; generate_progress_html()"
+git add evals/iterations/index.html && git commit -m "Refresh iterations index"
+```
+
 - **Index page:** `evals/iterations/index.html` — master list with sparkline charts, expandable diffs, score tooltips with auditor feedback, proposer explanations, stress test flags, durations
 - **Experiment data:** `evals/iterations/{NNN}-block-{id}.json` — per-experiment scores, diffs, proposer explanation, flags
 - **History:** `evals/iterations/history.tsv` — append-only log
