@@ -5,8 +5,8 @@ Loads a block, injects a rAF frame counter, performs sustained interactions
 (brush, drag, pan), and reports min/median/p5 FPS over the interaction window.
 
 Usage:
-  python3 scripts/bench-fps.py blocks/standalone/blockbuilder.html
-  python3 scripts/bench-fps.py blocks/standalone/blockbuilder.html --interactions brush,drag
+  python3 scripts/bench-fps.py blocks/blockbuilder-explorer.html
+  python3 scripts/bench-fps.py blocks/blockbuilder-explorer.html --interactions brush,drag
   python3 scripts/bench-fps.py --all --block-set v2-claude-opus-4-6
   python3 scripts/bench-fps.py --all --block-set standalone --out evals/block-fps.json
 """
