@@ -110,8 +110,8 @@
     stroke-width: 1;
   }
 
-  /* --- Network --- */
-  #network canvas {
+  /* --- Network & Colors --- */
+  #network canvas, #colors canvas {
     position: absolute;
     top: 0;
     left: 0;
@@ -125,13 +125,6 @@
     font-size: 11px;
     fill: #fff;
     font-weight: 600;
-  }
-
-  /* --- Colors --- */
-  #colors canvas {
-    position: absolute;
-    top: 0;
-    left: 0;
   }
 
   /* --- Block list --- */
@@ -277,35 +270,12 @@
 
 <script type="module">
 
-// ============================================================
-// State management
+//State management
 // ============================================================
 
-function createStore(initialState) {
-  let state = { ...initialState };
-  const listeners = new Set();
-  return {
-    getState: () => state,
-    setState(updates) {
-      const prev = state;
-      state = { ...state, ...updates };
-      for (const fn of listeners) fn(state, prev);
-    },
-    subscribe(fn) {
-      listeners.add(fn);
-      return () => listeners.delete(fn);
-    },
-  };
-}
+const state = { timeRange: null, selectedApi: null, filteredIndices: null };
 
-const store = createStore({
-  timeRange: null,     // [Date, Date] or null
-  selectedApi: null,   // function name string or null
-  filteredIndices: null, // Set or null (null = all)
-});
-
-// ============================================================
-// BitFilter
+//BitFilter
 // ============================================================
 
 class BitFilter {
@@ -343,8 +313,7 @@ class BitFilter {
   }
 }
 
-// ============================================================
-// Dirty-flag rendering
+//Dirty-flag rendering
 // ============================================================
 
 const LAYER = { TIMELINE: 1, NETWORK: 2, COLORS: 4, LIST: 8, ALL: 15 };
@@ -366,11 +335,24 @@ function flush() {
   if (d & LAYER.LIST && updaters.list) updaters.list();
 }
 
-// ============================================================
-// Tooltip
+//Tooltip
 // ============================================================
 
 const tooltipEl = document.getElementById("tooltip");
+
+function setupLayers(el, width, height) {
+  const dpr = devicePixelRatio;
+  const canvas = d3.select(el).append("canvas")
+    .attr("width", width * dpr).attr("height", height * dpr)
+    .style("width", width + "px").style("height", height + "px")
+    .node();
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  const svg = d3.select(el).append("svg")
+    .attr("width", width).attr("height", height)
+    .style("position", "absolute").style("top", 0).style("left", 0);
+  return { ctx, svg };
+}
 
 function showTooltip(x, y, html) {
   tooltipEl.style.display = "block";
@@ -380,8 +362,7 @@ function showTooltip(x, y, html) {
 }
 function hideTooltip() { tooltipEl.style.display = "none"; }
 
-// ============================================================
-// Data loading
+//Data loading
 // ============================================================
 
 async function fetchWithProgress(url, label) {
@@ -415,18 +396,15 @@ async function fetchWithProgress(url, label) {
   return JSON.parse(text);
 }
 
-// ============================================================
-// Data processing
+//Data processing
 // ============================================================
 
 function processApiData(raw) {
-  const fmt = d3.utcParse("%Y-%m-%dT%H:%M:%S.%LZ");
   const blocks = raw.map((d, i) => ({
-    idx: i,
     id: d.id || d.userId + "/" + i,
     userId: d.userId || "unknown",
     description: d.description || "",
-    created: d.created_at ? (fmt(d.created_at) || new Date(d.created_at)) : null,
+    created: d.created_at ? new Date(d.created_at) : null,
     api: d.api || {},
     thumbnail: d.thumbnail || null,
   })).filter(d => d.created !== null);
@@ -485,15 +463,12 @@ function buildCooccurrence(blocks, topN = 60) {
   return { nodes, links };
 }
 
-// ============================================================
-// View 1: Timeline
+//View 1: Timeline
 // ============================================================
 
 function createTimeline(container, blocks, bitFilter) {
   const el = document.getElementById(container);
-  const rect = el.getBoundingClientRect();
-  const width = rect.width;
-  const height = rect.height;
+  const { width, height } = el.getBoundingClientRect();
   const margin = { top: 24, right: 16, bottom: 24, left: 50 };
   const innerW = width - margin.left - margin.right;
   const innerH = height - margin.top - margin.bottom;
@@ -504,9 +479,7 @@ function createTimeline(container, blocks, bitFilter) {
   const g = svg.append("g")
     .attr("transform", `translate(${margin.left},${margin.top})`);
 
-  // Scales
-  const timeExtent = d3.extent(blocks, d => d.created);
-  const x = d3.scaleUtc().domain(timeExtent).range([0, innerW]);
+  const x = d3.scaleUtc().domain(d3.extent(blocks, d => d.created)).range([0, innerW]);
 
   const bins = d3.bin()
     .value(d => d.created)
@@ -516,25 +489,11 @@ function createTimeline(container, blocks, bitFilter) {
   const maxCount = d3.max(bins, b => b.length);
   const y = d3.scaleLinear().domain([0, maxCount]).nice().range([innerH, 0]);
 
-  // Background bars
-  g.selectAll(".bar-bg")
-    .data(bins)
-    .join("rect")
-      .attr("class", "bar-bg")
-      .attr("x", d => x(d.x0) + 0.5)
-      .attr("width", d => Math.max(0, x(d.x1) - x(d.x0) - 1))
-      .attr("y", d => y(d.length))
-      .attr("height", d => innerH - y(d.length));
-
-  // Foreground bars
-  const fgBars = g.selectAll(".bar-fg")
-    .data(bins)
-    .join("rect")
-      .attr("class", "bar-fg")
-      .attr("x", d => x(d.x0) + 0.5)
-      .attr("width", d => Math.max(0, x(d.x1) - x(d.x0) - 1))
-      .attr("y", d => y(d.length))
-      .attr("height", d => innerH - y(d.length));
+  const barAttrs = s => s.attr("x", d => x(d.x0) + 0.5)
+    .attr("width", d => Math.max(0, x(d.x1) - x(d.x0) - 1))
+    .attr("y", d => y(d.length)).attr("height", d => innerH - y(d.length));
+  g.selectAll(".bar-bg").data(bins).join("rect").attr("class", "bar-bg").call(barAttrs);
+  const fgBars = g.selectAll(".bar-fg").data(bins).join("rect").attr("class", "bar-fg").call(barAttrs);
 
   // Axes
   g.append("g")
@@ -553,13 +512,13 @@ function createTimeline(container, blocks, bitFilter) {
       if (event.selection) {
         const [px0, px1] = event.selection;
         const range = [x.invert(px0), x.invert(px1)];
-        store.setState({ timeRange: range });
+        state.timeRange = range;
         bitFilter.set("time", d => d.created >= range[0] && d.created <= range[1], blocks);
       } else {
-        store.setState({ timeRange: null });
+        state.timeRange = null;
         bitFilter.clear("time");
       }
-      store.setState({ filteredIndices: bitFilter.filtered() });
+      state.filteredIndices = bitFilter.filtered();
       markDirty(LAYER.NETWORK | LAYER.COLORS | LAYER.LIST);
     });
 
@@ -567,7 +526,7 @@ function createTimeline(container, blocks, bitFilter) {
 
   // Update: recompute foreground bins from filtered data
   updaters.timeline = () => {
-    const indices = store.getState().filteredIndices;
+    const indices = state.filteredIndices;
     const filtered = indices ? blocks.filter(d => indices.has(d.idx)) : blocks;
     const thresholds = d3.utcMonth.range(...x.domain());
     const filteredBins = d3.bin()
@@ -583,20 +542,16 @@ function createTimeline(container, blocks, bitFilter) {
   return { brush, brushG };
 }
 
-// ============================================================
-// View 2: API Network
+//View 2: API Network
 // ============================================================
 
 function createNetwork(container, blocks, graph, bitFilter) {
   const el = document.getElementById(container);
-  const rect = el.getBoundingClientRect();
-  const width = rect.width;
-  const height = rect.height;
+  const { width, height } = el.getBoundingClientRect();
   const margin = { top: 24, right: 8, bottom: 8, left: 8 };
   const innerW = width - margin.left - margin.right;
   const innerH = height - margin.top - margin.bottom;
 
-  // Clone nodes/links for simulation
   const nodes = graph.nodes.map(d => ({ ...d }));
   const links = graph.links.map(d => ({ ...d }));
 
@@ -629,19 +584,7 @@ function createNetwork(container, blocks, graph, bitFilter) {
     n.y = Math.max(rScale(n.count), Math.min(innerH - rScale(n.count), n.y));
   }
 
-  // Canvas setup
-  const dpr = devicePixelRatio;
-  const canvas = d3.select(el).append("canvas")
-    .attr("width", width * dpr).attr("height", height * dpr)
-    .style("width", width + "px").style("height", height + "px")
-    .node();
-  const ctx = canvas.getContext("2d");
-  ctx.scale(dpr, dpr);
-
-  // SVG overlay for labels and interaction
-  const svg = d3.select(el).append("svg")
-    .attr("width", width).attr("height", height)
-    .style("position", "absolute").style("top", 0).style("left", 0);
+  const { ctx, svg } = setupLayers(el, width, height);
 
   const gLabels = svg.append("g")
     .attr("transform", `translate(${margin.left},${margin.top})`);
@@ -662,6 +605,8 @@ function createNetwork(container, blocks, graph, bitFilter) {
     .x(d => d.x).y(d => d.y)
     .addAll(nodes);
 
+  const findNearest = e => { const [mx, my] = d3.pointer(e); return quadtree.find(mx - margin.left, my - margin.top, 20); };
+
   // Interaction
   const interactionRect = svg.append("rect")
     .attr("x", margin.left).attr("y", margin.top)
@@ -671,9 +616,7 @@ function createNetwork(container, blocks, graph, bitFilter) {
   let hoveredNode = null;
 
   interactionRect.on("pointermove", event => {
-    const [mx, my] = d3.pointer(event);
-    const nx = mx - margin.left, ny = my - margin.top;
-    const nearest = quadtree.find(nx, ny, 20);
+    const nearest = findNearest(event);
     if (nearest !== hoveredNode) {
       hoveredNode = nearest;
       if (nearest) {
@@ -684,28 +627,20 @@ function createNetwork(container, blocks, graph, bitFilter) {
       }
       markDirty(LAYER.NETWORK);
     }
-  });
-
-  interactionRect.on("pointerleave", () => {
+  }).on("pointerleave", () => {
     hoveredNode = null;
     hideTooltip();
     markDirty(LAYER.NETWORK);
-  });
-
-  interactionRect.on("click", event => {
-    const [mx, my] = d3.pointer(event);
-    const nx = mx - margin.left, ny = my - margin.top;
-    const nearest = quadtree.find(nx, ny, 20);
-    const currentApi = store.getState().selectedApi;
-
-    if (nearest && nearest.id !== currentApi) {
-      store.setState({ selectedApi: nearest.id });
+  }).on("click", event => {
+    const nearest = findNearest(event);
+    if (nearest && nearest.id !== state.selectedApi) {
+      state.selectedApi = nearest.id;
       bitFilter.set("api", d => d.api && d.api[nearest.id], blocks);
     } else {
-      store.setState({ selectedApi: null });
+      state.selectedApi = null;
       bitFilter.clear("api");
     }
-    store.setState({ filteredIndices: bitFilter.filtered() });
+    state.filteredIndices = bitFilter.filtered();
     markDirty(LAYER.ALL);
   });
 
@@ -715,27 +650,22 @@ function createNetwork(container, blocks, graph, bitFilter) {
     ctx.save();
     ctx.translate(margin.left, margin.top);
 
-    const selectedApi = store.getState().selectedApi;
+    const selectedApi = state.selectedApi;
     const connectedNodes = new Set();
     if (selectedApi) {
       connectedNodes.add(selectedApi);
       for (const l of links) {
-        const sid = typeof l.source === "object" ? l.source.id : l.source;
-        const tid = typeof l.target === "object" ? l.target.id : l.target;
-        if (sid === selectedApi) connectedNodes.add(tid);
-        if (tid === selectedApi) connectedNodes.add(sid);
+        if (l.source.id === selectedApi) connectedNodes.add(l.target.id);
+        if (l.target.id === selectedApi) connectedNodes.add(l.source.id);
       }
     }
 
-    // Edges
     for (const l of links) {
-      const s = typeof l.source === "object" ? l.source : nodes.find(n => n.id === l.source);
-      const t = typeof l.target === "object" ? l.target : nodes.find(n => n.id === l.target);
       const active = !selectedApi ||
-        (connectedNodes.has(s.id) && connectedNodes.has(t.id));
+        (connectedNodes.has(l.source.id) && connectedNodes.has(l.target.id));
       ctx.beginPath();
-      ctx.moveTo(s.x, s.y);
-      ctx.lineTo(t.x, t.y);
+      ctx.moveTo(l.source.x, l.source.y);
+      ctx.lineTo(l.target.x, l.target.y);
       ctx.strokeStyle = active ? "rgba(68,119,170,0.4)" : "rgba(68,119,170,0.06)";
       ctx.lineWidth = active ? wScale(l.weight) : 0.3;
       ctx.stroke();
@@ -771,22 +701,17 @@ function createNetwork(container, blocks, graph, bitFilter) {
   draw();
 }
 
-// ============================================================
-// View 3: Color Distribution
+//View 3: Color Distribution
 // ============================================================
 
 function createColorView(container, blocks, colorMap, bitFilter) {
   const el = document.getElementById(container);
-  const rect = el.getBoundingClientRect();
-  const width = rect.width;
-  const height = rect.height;
+  const { width, height } = el.getBoundingClientRect();
   const margin = { top: 28, right: 12, bottom: 24, left: 40 };
   const innerW = width - margin.left - margin.right;
   const innerH = height - margin.top - margin.bottom;
 
-  // Aggregate colors across all blocks
   const colorAgg = new Map();
-  const blockColorIndex = new Map(); // hex -> Set of block indices
 
   for (const [blockId, colors] of colorMap) {
     const block = blocks.find(b => b.id === blockId);
@@ -817,19 +742,7 @@ function createColorView(container, blocks, colorMap, bitFilter) {
     .domain(d3.extent(colorPoints, d => d.count))
     .range([1, 8]);
 
-  // Canvas
-  const dpr = devicePixelRatio;
-  const canvas = d3.select(el).append("canvas")
-    .attr("width", width * dpr).attr("height", height * dpr)
-    .style("width", width + "px").style("height", height + "px")
-    .node();
-  const ctx = canvas.getContext("2d");
-  ctx.scale(dpr, dpr);
-
-  // SVG overlay for axes and brush
-  const svg = d3.select(el).append("svg")
-    .attr("width", width).attr("height", height)
-    .style("position", "absolute").style("top", 0).style("left", 0);
+  const { ctx, svg } = setupLayers(el, width, height);
 
   const gAxes = svg.append("g")
     .attr("transform", `translate(${margin.left},${margin.top})`);
@@ -847,19 +760,9 @@ function createColorView(container, blocks, colorMap, bitFilter) {
   gAxes.selectAll(".axis text").style("fill", "#888").style("font-size", "9px");
   gAxes.selectAll(".axis path, .axis line").style("stroke", "#444");
 
-  // Axis labels
-  gAxes.append("text")
-    .attr("x", innerW / 2).attr("y", innerH + 20)
-    .attr("text-anchor", "middle")
-    .style("fill", "#666").style("font-size", "9px")
-    .text("Hue");
-
-  gAxes.append("text")
-    .attr("transform", "rotate(-90)")
-    .attr("x", -innerH / 2).attr("y", -28)
-    .attr("text-anchor", "middle")
-    .style("fill", "#666").style("font-size", "9px")
-    .text("Lightness");
+  [["Hue", innerW / 2, innerH + 20, null], ["Lightness", -innerH / 2, -28, "rotate(-90)"]].forEach(([t, lx, ly, tr]) =>
+    gAxes.append("text").attr("x", lx).attr("y", ly).attr("text-anchor", "middle")
+      .attr("transform", tr).style("fill", "#666").style("font-size", "9px").text(t));
 
   // 2D brush for hue × lightness selection
   const brush = d3.brush()
@@ -882,7 +785,7 @@ function createColorView(container, blocks, colorMap, bitFilter) {
       } else {
         bitFilter.clear("color");
       }
-      store.setState({ filteredIndices: bitFilter.filtered() });
+      state.filteredIndices = bitFilter.filtered();
       markDirty(LAYER.TIMELINE | LAYER.NETWORK | LAYER.LIST);
     });
 
@@ -900,38 +803,22 @@ function createColorView(container, blocks, colorMap, bitFilter) {
     ctx.clearRect(0, 0, width, height);
     ctx.save();
     ctx.translate(margin.left, margin.top);
-
-    const indices = store.getState().filteredIndices;
+    const indices = state.filteredIndices;
     const hasFilter = indices !== null;
-
-    // Background (dimmed) when filtered
-    if (hasFilter) {
-      ctx.globalAlpha = 0.08;
-      for (const p of colorPoints) {
-        ctx.fillStyle = p.hex;
-        ctx.beginPath();
-        ctx.arc(x(p.h), y(p.l), rScale(p.count), 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
-
-    // Foreground
-    ctx.globalAlpha = hasFilter ? 0.8 : 0.5;
     for (const p of colorPoints) {
+      let passes = true;
       if (hasFilter) {
-        // Check if any of this color's blocks pass the filter
-        let passes = false;
+        passes = false;
         for (const bi of p.blockIndices) {
           if (indices.has(bi)) { passes = true; break; }
         }
-        if (!passes) continue;
       }
+      ctx.globalAlpha = passes ? (hasFilter ? 0.8 : 0.5) : 0.08;
       ctx.fillStyle = p.hex;
       ctx.beginPath();
       ctx.arc(x(p.h), y(p.l), rScale(p.count), 0, Math.PI * 2);
       ctx.fill();
     }
-
     ctx.restore();
   }
 
@@ -941,8 +828,7 @@ function createColorView(container, blocks, colorMap, bitFilter) {
   return { brush, brushG: colorBrushG };
 }
 
-// ============================================================
-// View 4: Block List
+//View 4: Block List
 // ============================================================
 
 function createBlockList(container, blocks) {
@@ -950,7 +836,7 @@ function createBlockList(container, blocks) {
   const formatDate = d3.utcFormat("%Y-%m");
 
   function renderList() {
-    const indices = store.getState().filteredIndices;
+    const indices = state.filteredIndices;
     const filtered = indices
       ? blocks.filter(d => indices.has(d.idx))
       : blocks;
@@ -996,23 +882,15 @@ function createBlockList(container, blocks) {
   renderList();
 }
 
-// ============================================================
-// Reset
+//Reset
 // ============================================================
 
 let colorParts = null;
 
 function setupReset(bitFilter, timelineParts) {
   d3.select("#reset-btn").on("click", () => {
-    bitFilter.clear("time");
-    bitFilter.clear("api");
-    bitFilter.clear("thumb");
-    bitFilter.clear("color");
-    store.setState({
-      timeRange: null,
-      selectedApi: null,
-      filteredIndices: null,
-    });
+    for (const d of ["time","api","thumb","color"]) bitFilter.clear(d);
+    Object.assign(state, { timeRange: null, selectedApi: null, filteredIndices: null });
     document.getElementById("thumb-filter").checked = false;
     if (timelineParts) {
       timelineParts.brushG.call(timelineParts.brush.move, null);
@@ -1024,8 +902,7 @@ function setupReset(bitFilter, timelineParts) {
   });
 }
 
-// ============================================================
-// Main
+//Main
 // ============================================================
 
 async function main() {
@@ -1060,7 +937,7 @@ async function main() {
     } else {
       bitFilter.clear("thumb");
     }
-    store.setState({ filteredIndices: bitFilter.filtered() });
+    state.filteredIndices = bitFilter.filtered();
     markDirty(LAYER.ALL);
   });
 
