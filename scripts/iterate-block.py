@@ -201,12 +201,21 @@ def main():
     work_html = iter_dir / f"{args.target}.html"
     shutil.copy2(source_html, work_html)
 
+    # Save baseline copy for redesign runs (before/after comparison)
+    if is_redesign:
+        baseline_dir = PROJ / "evals" / "iterations" / "baselines"
+        baseline_dir.mkdir(parents=True, exist_ok=True)
+        baseline_copy = baseline_dir / f"{args.target}.html"
+        shutil.copy2(source_html, baseline_copy)
+
     ensure_iterations_dir()
 
     print(f"=== Block Iteration: {args.target} ===")
     print(f"Source: {args.block_set or 'blocks/'}")
     print(f"Branch: {branch}")
     print(f"Worktree: {wt_path}")
+    if is_redesign:
+        print(f"Baseline saved: {baseline_copy}")
     print()
 
     # Establish baseline
