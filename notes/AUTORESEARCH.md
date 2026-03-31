@@ -94,7 +94,9 @@ def decide_prompt(time_before, time_after, features_pass):
 
 **Convergence:** 3 consecutive discards stops the run (configurable via `--convergence-discards`).
 
-## Results so far (2026-03-30)
+## Results
+
+### Early runs (2026-03-30 morning)
 
 | Block | Before | After | Experiments | Keeps | Composite |
 |-------|--------|-------|-------------|-------|-----------|
@@ -103,6 +105,23 @@ def decide_prompt(time_before, time_after, features_pass):
 | hierarchy-bundles | 1012 | 846 | 13 | 11 | 5.2→5.7 |
 | 04-bee-swarm-census | 265 | 241 | 6 | 5 | 7.7→7.7 |
 | 32-shape-morphing-gallery | 451 | 360 | 12 | 9 | 6.6→6.3 |
+
+### Batch run (2026-03-30, 5 parallel)
+
+| Block | Before | After | Experiments | Keeps | Composite |
+|-------|--------|-------|-------------|-------|-----------|
+| 11-zoomable-treemap | 433 | 313 | 14 | 7 | 7.2→7.9 |
+| 18-collapsible-tree-search | 694 | 522 | 26 | 20 | 7.2→7.7 |
+| hierarchy-bundles | 846 | 748 | 17 | 10 | 6.2→7.0 |
+| 04-bee-swarm-census | 241 | 221 | 10 | 5 | 7.7→7.9 |
+| blockbuilder-explorer | 1120 | 1120 | 3 | 0 | 7.2 (no change) |
+
+**Findings:**
+- Sonnet-generated blocks with verbose non-idiomatic D3 benefit most (18-collapsible-tree-search: 77% keep rate, 25% reduction).
+- Already-compact blocks (<250 lines) yield diminishing returns quickly.
+- blockbuilder-explorer couldn't iterate: stress_test auditor consistently fails on it (crossfilter + 34K rows too complex for screenshot-based analysis). Needs a skip mechanism or targeted manual fixes.
+- Proposer timeouts (300s) crashed 3 of 5 runs mid-experiment. Restart picks up from last keep, but wastes budget.
+- Required infrastructure fixes: broken-images tolerance in render checks, partial composite when one audit dimension fails, isNaN guard for non-numeric block IDs in index.html.
 
 ## Next steps
 
