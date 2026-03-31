@@ -5,8 +5,8 @@
 - [ ] Run full audit sweep to populate best-blocks.json
   All 108 blocks across all block-sets. Currently only 8/108 entries. Prerequisite for folder flatten and discriminator training.
 
-- [ ] Build discriminator training pipeline
-  Combine block-tags.json (semantic), block-features.json (structural), and audit scores into training dataset. 24 input features → 4 dimension scores + composite. Start with linear regression or random forest baseline. Use iteration history (~400+ experiments) as additional data.
+- [x] Build discriminator training pipeline
+  Done. Ridge regression baseline: R²=0.56 train, CV R²=-0.33 (overfits on 104 samples). Top predictors: brush (-), geo (-), function_count (-), d3_api_count (+). Needs more data to generalize.
 
 - [ ] Validate semantic tag quality (spot-check encoding_density)
   encoding_density heavily concentrated at 2 (64/108 blocks). May be real or sonnet defaulting when uncertain. Spot-check 10 blocks tagged density=2 against code. Re-tag with `--force` if miscalibrated.
@@ -21,5 +21,5 @@
 
 ## Project structure
 
-- [ ] Flatten blocks/ to single dir with archive
-  Once best-blocks.json has full coverage: promote best version to blocks/{id}.html, archive old versions to blocks/archive/{block-set}/. Update manifest, scripts, paths. Provenance in block-tags.json.
+- [x] Flatten blocks/ to single dir with archive
+  Done. 108 blocks at blocks/{id}.html, 11 old dirs at blocks/archive/. Selected by: 95 highest composite, 8 best-blocks.json, 5 priority. v1-sonnet won 72/108.
