@@ -610,10 +610,9 @@ for (const [key, data] of groupEntries) {{
     const types = run.exps.map(d => d.proposer_type).filter(Boolean);
     if (types.includes("block-redesign")) {{ run.type = "redesign"; return; }}
     if (types.includes("block-lines")) return; // already "refactor"
-    // Fallback: infer from descriptions
-    const descs = run.exps.filter(d => d.decision !== "baseline").map(d => d.description || "");
-    if (descs.some(r => /composite/.test(r) && !/lines/.test(r)) ||
-        descs.every(r => /no quality improvement/.test(r))) run.type = "redesign";
+    // Fallback for older data: redesign keeps say "+N composite", refactor keeps say "-N lines"
+    const keeps = run.exps.filter(d => d.decision === "keep").map(d => d.description || "");
+    if (keeps.some(r => /^\+.*composite/.test(r))) run.type = "redesign";
   }});
   // Tag each experiment with its run type
   const runTypeByIdx = new Map();
@@ -683,21 +682,16 @@ for (const [key, data] of groupEntries) {{
 
   // Dots: circles for refactor, diamonds for redesign
   const diamond = d3.symbol().type(d3.symbolDiamond).size(48);
-  svg.selectAll(".dot").data(chrono).join(enter => {{
-    return enter.append(d => {{
-      const rt = runTypeByIdx.get(chrono.indexOf(d));
-      return document.createElementNS("http://www.w3.org/2000/svg", rt === "redesign" ? "path" : "circle");
-    }});
-  }})
-    .each(function(d, i) {{
-      const rt = runTypeByIdx.get(i);
-      const cls = `dot-${{d.decision === "keep" ? "keep" : d.decision === "baseline" ? "baseline" : "discard"}}`;
-      if (rt === "redesign") {{
-        d3.select(this).attr("d", diamond).attr("transform", `translate(${{x(i)}},${{y(d.metric)}})`).attr("class", cls);
-      }} else {{
-        d3.select(this).attr("cx", x(i)).attr("cy", y(d.metric)).attr("r", 4).attr("class", cls);
-      }}
-    }});
+  const dotCls = d => d.decision === "keep" ? "dot-keep" : d.decision === "baseline" ? "dot-baseline" : "dot-discard";
+  const indexed = chrono.map((d, i) => ({{ ...d, _i: i, _rt: runTypeByIdx.get(i) }}));
+  // Refactor dots (circles)
+  svg.selectAll(".dot-refactor").data(indexed.filter(d => d._rt !== "redesign")).join("circle")
+    .attr("cx", d => x(d._i)).attr("cy", d => y(d.metric)).attr("r", 4)
+    .attr("class", dotCls);
+  // Redesign dots (diamonds)
+  svg.selectAll(".dot-redesign").data(indexed.filter(d => d._rt === "redesign")).join("path")
+    .attr("d", diamond).attr("transform", d => `translate(${{x(d._i)}},${{y(d.metric)}})`)
+    .attr("class", dotCls);
 
   // Legend (only when both run types present)
   if (runTypes.length > 1) {{
