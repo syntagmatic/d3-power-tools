@@ -64,3 +64,42 @@ Moving from subjective review to empirical testing is the correct direction. Sta
 4. Wire the eval-as-CI pipeline.
 
 Token efficiency is the binding constraint for AI tool usage right now. The plan gets this right.
+
+---
+
+## Discriminator evaluation
+
+**Date:** March 31, 2026
+**Reviewer:** Gemini
+
+The **discriminator training plan** for autoresearch in this project is currently in its "Baseline" phase—the infrastructure is built, but the model is not yet operational for decision-making.
+
+### Current state: the overfitting gap
+
+The discriminator is a Ridge regression model designed to predict a block's `composite` quality score based on 34 structural and semantic features (e.g., `lines`, `d3_api_count`, `has_transition`).
+
+*   **Performance:** It currently has an **R² of 0.56** on training data but a **CV R² of -0.33**. 
+*   **Diagnosis:** It is severely overfitting. With only 104 training samples against 34 features, the model is "memorizing" specific blocks rather than learning generalizable D3 quality patterns.
+
+### Feature engineering insights
+
+The model has already yielded high-signal insights despite the overfitting:
+*   **Top negative predictors:** `interaction_brush`, `has_geo`, and `function_count`. This suggests that complex, interactive, or boilerplate-heavy blocks currently score lower in audits (likely due to higher "Stress Test" or "Cognitive Load" failure rates).
+*   **Top positive predictors:** `d3_api_count` and `has_timer`.
+*   **Weakness:** Many features like `renderer_webgl` or `has_reduced_motion` have 0.0 coefficients because they are too sparse in the current dataset.
+
+### Evaluation of the plan
+
+The project's stated plan (found in `notes/TODO.md` and `notes/IDEAS.md`) involves a full audit sweep, heuristic replacement of expensive LLM audits, and visual regression detection.
+
+*   **Full audit sweep:** Fixing data scarcity is the correct first move.
+*   **Heuristic replacement:** This "symbolic" discriminator approach is likely to be more robust and cheaper than the linear model for catching technical regressions.
+*   **Visual regression detection:** This fills a major blind spot; the linear model cannot yet "see" broken layouts that pass structural checks.
+
+### Strategic recommendations
+
+1.  **Guided compaction:** Feed top coefficients back into `proposer-prompts/block.md` (e.g., "Avoid increasing function_count; ensure RAF coalescing").
+2.  **Early-exit filtering:** Use the discriminator to score proposed changes *before* the 600s audit; discard immediately if the predicted score drops >1.0.
+3.  **Dimensional specialization:** Train separate small models for `stress_test` (technical) vs `visual_critic` (aesthetic), as predictive features are likely disjoint.
+4.  **Feature pruning:** Reduce the 34 features to the top 10 most impactful to improve CV R² until the dataset exceeds 500 samples.
+
