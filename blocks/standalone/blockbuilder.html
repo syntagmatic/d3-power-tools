@@ -94,7 +94,7 @@
   /* --- Middle row --- */
   .middle {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1.4fr 0.6fr;
     gap: 6px;
   }
 
@@ -109,7 +109,7 @@
   #colors .brush .selection { fill: #fff; fill-opacity: 0.1; stroke: #aaa; stroke-width: 1; }
 
   /* --- Network & Colors --- */
-  #network canvas, #colors canvas, #network svg, #colors svg {
+  #network canvas, #colors canvas, #network svg, #colors svg, #right-panel > .panel-view canvas, #right-panel > .panel-view svg {
     position: absolute;
     top: 0;
     left: 0;
@@ -200,6 +200,49 @@
     color: #888;
   }
 
+  /* --- Panel tabs --- */
+  .panel-tabs {
+    position: absolute;
+    top: 4px;
+    right: 8px;
+    display: flex;
+    gap: 2px;
+    z-index: 3;
+  }
+  .panel-tab {
+    font-size: 10px;
+    padding: 2px 8px;
+    border: 1px solid #444;
+    border-radius: 3px;
+    background: #222;
+    color: #888;
+    cursor: pointer;
+  }
+  .panel-tab:hover { color: #bbb; }
+  .panel-tab.active { background: #333; color: #ccc; border-color: #666; }
+  .panel-view { display: none; position: absolute; inset: 0; }
+  .panel-view.active { display: block; }
+
+  /* --- Thumbnail wall --- */
+  .thumb-wall {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+    gap: 2px;
+    padding: 26px 4px 4px;
+    overflow-y: auto;
+    height: 100%;
+  }
+  .thumb-wall img {
+    width: 100%;
+    aspect-ratio: 230/120;
+    object-fit: cover;
+    border-radius: 2px;
+    cursor: pointer;
+    opacity: 0.85;
+    transition: opacity 0.1s;
+  }
+  .thumb-wall img:hover { opacity: 1; }
+
   /* --- Tooltip --- */
   .tooltip {
     position: fixed;
@@ -236,8 +279,16 @@
     <div id="network" class="panel">
       <span class="panel-label">D3 API co-occurrence</span>
     </div>
-    <div id="colors" class="panel">
-      <span class="panel-label">Color usage</span>
+    <div id="right-panel" class="panel">
+      <span class="panel-label" id="right-label">Color usage</span>
+      <div class="panel-tabs">
+        <button class="panel-tab active" data-view="colors">Colors</button>
+        <button class="panel-tab" data-view="thumbs">Thumbnails</button>
+      </div>
+      <div id="colors" class="panel-view active"></div>
+      <div id="thumbs" class="panel-view">
+        <div class="thumb-wall" id="thumb-wall"></div>
+      </div>
     </div>
   </div>
   <div id="blocklist" class="panel"></div>
@@ -286,7 +337,7 @@ class BitFilter {
     return indices;
   }
 }
-const LAYER = { TIMELINE: 1, NETWORK: 2, COLORS: 4, LIST: 8, ALL: 15 };
+const LAYER = { TIMELINE: 1, NETWORK: 2, COLORS: 4, LIST: 8, THUMBS: 16, ALL: 31 };
 let dirtyLayers = 0;
 const updaters = {};
 
@@ -295,7 +346,7 @@ function markDirty(layers) {
   dirtyLayers |= layers;
   if (!wasDirty) requestAnimationFrame(() => {
     const d = dirtyLayers; dirtyLayers = 0;
-    ["timeline", "network", "colors", "list"].forEach((name, i) => { if (d & (1 << i) && updaters[name]) updaters[name](); });
+    ["timeline", "network", "colors", "list", "thumbs"].forEach((name, i) => { if (d & (1 << i) && updaters[name]) updaters[name](); });
   });
 }
 const tooltipEl = document.getElementById("tooltip");
@@ -417,7 +468,7 @@ function createTimeline(container, blocks, bitFilter) {
         bitFilter.clear("time");
       }
       state.filteredIndices = bitFilter.filtered();
-      markDirty(LAYER.NETWORK | LAYER.COLORS | LAYER.LIST);
+      markDirty(LAYER.NETWORK | LAYER.COLORS | LAYER.LIST | LAYER.THUMBS);
     });
 
   const brushG = g.append("g").attr("class", "brush").call(brush);
@@ -499,12 +550,34 @@ function createNetwork(container, blocks, graph, bitFilter) {
       markDirty(LAYER.ALL);
     });
 
+  // Build lookup: api function → set of block indices that use it
+  const apiToBlocks = new Map();
+  for (const n of nodes) apiToBlocks.set(n.id, new Set());
+  for (const b of blocks) {
+    for (const fn of Object.keys(b.api)) {
+      if (apiToBlocks.has(fn)) apiToBlocks.get(fn).add(b.idx);
+    }
+  }
+
   function draw() {
     ctx.clearRect(0, 0, width, height);
     ctx.save();
     ctx.translate(margin.left, margin.top);
 
     const selectedApi = state.selectedApi;
+    const indices = state.filteredIndices;
+    const hasFilter = indices !== null;
+
+    // Compute which nodes are "hot" — used by filtered blocks
+    const hotNodes = new Set();
+    if (hasFilter) {
+      for (const n of nodes) {
+        const bset = apiToBlocks.get(n.id);
+        if (bset) for (const bi of bset) if (indices.has(bi)) { hotNodes.add(n.id); break; }
+      }
+    }
+
+    // Selected-node neighbors
     const connectedNodes = new Set(selectedApi ? [selectedApi] : []);
     if (selectedApi) for (const l of links) {
       if (l.source.id === selectedApi) connectedNodes.add(l.target.id);
@@ -512,8 +585,11 @@ function createNetwork(container, blocks, graph, bitFilter) {
     }
 
     for (const l of links) {
-      const active = !selectedApi ||
+      const selActive = !selectedApi ||
         (connectedNodes.has(l.source.id) && connectedNodes.has(l.target.id));
+      const filterActive = !hasFilter ||
+        (hotNodes.has(l.source.id) && hotNodes.has(l.target.id));
+      const active = selActive && filterActive;
       ctx.beginPath();
       ctx.moveTo(l.source.x, l.source.y);
       ctx.lineTo(l.target.x, l.target.y);
@@ -524,7 +600,9 @@ function createNetwork(container, blocks, graph, bitFilter) {
 
     for (const n of nodes) {
       const r = rScale(n.count);
-      const active = !selectedApi || connectedNodes.has(n.id);
+      const selActive = !selectedApi || connectedNodes.has(n.id);
+      const filterActive = !hasFilter || hotNodes.has(n.id);
+      const active = selActive && filterActive;
       const hovered = n === hoveredNode;
       const selected = n.id === selectedApi;
       ctx.beginPath();
@@ -543,7 +621,8 @@ function createNetwork(container, blocks, graph, bitFilter) {
 }
 function createColorView(container, blocks, colorMap, bitFilter) {
   const el = document.getElementById(container);
-  const { width, height } = el.getBoundingClientRect();
+  const parent = el.closest(".panel");
+  const { width, height } = parent.getBoundingClientRect();
   const margin = { top: 28, right: 12, bottom: 24, left: 40 };
   const innerW = width - margin.left - margin.right;
   const innerH = height - margin.top - margin.bottom;
@@ -597,7 +676,7 @@ function createColorView(container, blocks, colorMap, bitFilter) {
         bitFilter.clear("color");
       }
       state.filteredIndices = bitFilter.filtered();
-      markDirty(LAYER.TIMELINE | LAYER.NETWORK | LAYER.LIST);
+      markDirty(LAYER.TIMELINE | LAYER.NETWORK | LAYER.LIST | LAYER.THUMBS);
     });
 
   const colorBrushG = gAxes.append("g").attr("class", "brush").call(brush);
@@ -690,6 +769,35 @@ async function main() {
   loadingEl.classList.add("hidden");
   setTimeout(() => loadingEl.remove(), 500);
 
+  // Tab switching
+  const tabs = document.querySelectorAll("#right-panel .panel-tab");
+  const views = document.querySelectorAll("#right-panel .panel-view");
+  const rightLabel = document.getElementById("right-label");
+  tabs.forEach(tab => tab.addEventListener("click", () => {
+    const target = tab.dataset.view;
+    tabs.forEach(t => t.classList.toggle("active", t === tab));
+    views.forEach(v => v.classList.toggle("active", v.id === target));
+    rightLabel.textContent = target === "colors" ? "Color usage" : "Thumbnails";
+    if (target === "thumbs") updateThumbWall();
+  }));
+
+  // Thumbnail wall
+  const thumbWall = document.getElementById("thumb-wall");
+  function updateThumbWall() {
+    const indices = state.filteredIndices;
+    const filtered = indices ? blocks.filter(d => indices.has(d.idx)) : blocks;
+    const withThumbs = filtered.filter(d => d.thumbnail).slice(0, 500);
+    thumbWall.innerHTML = withThumbs.map(b =>
+      `<img src="${b.thumbnail}" loading="lazy" title="${b.description || b.userId + '/' + b.id}" onerror="this.remove()">`
+    ).join("");
+    rightLabel.textContent = `Thumbnails (${withThumbs.length})`;
+  }
+  updaters.thumbs = () => {
+    if (document.querySelector('#right-panel .panel-tab[data-view="thumbs"]').classList.contains("active")) {
+      updateThumbWall();
+    }
+  };
+
   try {
     const rawColors = await fetchWithProgress(
       "https://storage.googleapis.com/bb-search-data/parsed/blocks-colors.json",
@@ -697,9 +805,9 @@ async function main() {
     );
     const colorMap = new Map(rawColors.filter(d => d.colors && d.id).map(d => [d.id, d.colors]));
     colorParts = createColorView("colors", blocks, colorMap, bitFilter);
-    d3.select("#colors .panel-label").text(`Color usage (${d3.format(",")(colorMap.size)} blocks)`);
+    d3.select("#right-label").text(`Color usage (${d3.format(",")(colorMap.size)} blocks)`);
   } catch (e) {
-    d3.select("#colors .panel-label").text("Color data unavailable");
+    d3.select("#right-label").text("Color data unavailable");
     console.warn("Failed to load colors:", e);
   }
 }
