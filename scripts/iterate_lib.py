@@ -104,6 +104,21 @@ def git_squash_merge(branch, base, message, cwd=None):
 WORKTREES_DIR = PROJ / "temp" / "worktrees"
 
 
+def worktree_is_active(branch):
+    """Check if a worktree for this branch already exists and is active.
+
+    Returns the worktree path if active, None otherwise.
+    """
+    wt_path = WORKTREES_DIR / branch.replace("/", "-")
+    if not wt_path.exists():
+        return None
+    r = subprocess.run(["git", "worktree", "list", "--porcelain"],
+                       capture_output=True, text=True, cwd=str(PROJ))
+    if str(wt_path) in r.stdout:
+        return wt_path
+    return None
+
+
 def worktree_create(branch):
     """Create a git worktree on a new branch. Returns worktree path.
 

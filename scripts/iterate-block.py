@@ -20,7 +20,7 @@ from iterate_lib import (
     PROJ, append_tsv, check_convergence, compute_diff, decide_block,
     ensure_iterations_dir, generate_progress_html, git_commit, git_sha,
     git_squash_merge, next_experiment_id, render_block, update_best,
-    worktree_create, worktree_remove, write_experiment,
+    worktree_create, worktree_is_active, worktree_remove, write_experiment,
 )
 
 MANIFEST = json.loads((PROJ / "blocks" / "manifest.json").read_text())
@@ -165,8 +165,15 @@ def main():
 
     wait_for = block.get("wait_for", "svg")
 
-    # Create isolated worktree for this iteration
+    # Abort if another run is already iterating this target
     branch = f"iterate/block-{args.target}"
+    existing = worktree_is_active(branch)
+    if existing:
+        print(f"ERROR: Target {args.target} is already being iterated at {existing}")
+        print(f"If the previous run crashed, clean up with: git worktree remove {existing}")
+        sys.exit(1)
+
+    # Create isolated worktree for this iteration
     wt_path = worktree_create(branch)
 
     # source_html in the worktree (where git commits will land)
