@@ -1,8 +1,8 @@
 # D3 Power Tools
 
-## What This Is
+## What this is
 
-Skills for building advanced D3.js visualizations. Each one captures the judgment calls — where the tick falls, when to use color vs. position, why this projection — that separate a chart that communicates from one that merely renders. See [CONVICTIONS.md](../notes/CONVICTIONS.md) for the philosophy.
+Skills for building D3.js visualizations. Each one is about the judgment calls -- where the ticks fall, when to use color vs position, why this projection -- not the API. See [CONVICTIONS.md](../notes/CONVICTIONS.md) for the philosophy.
 
 Skills work across contexts: Claude Code, Gemini, and eventually as interactive tutorials for humans.
 
@@ -61,13 +61,12 @@ Examples live in `skills/*/examples/` and double as test fixtures. Add new test 
 
 ## Blocks
 
-Example visualizations live in `blocks/`. Each version is a generation run against the manifest.
+Example visualizations live in `blocks/`. Best version of each block lives at `blocks/{id}.html`. Old generation runs archived in `blocks/archive/`.
 
 - `blocks/manifest.json` — prompts and skill lists (always current)
-- `blocks/{version}-{model}/` — generated blocks, one dir per version+model combo
-- `blocks/{version}-{model}/generation.json` — provenance: model, per-block status
-
-**Directory naming:** `v{N}-{model-id}`, e.g. `v0-claude-opus-4-6`, `v1-gemini-3-flash-preview`.
+- `blocks/{id}.html` — best version of each block (107 files)
+- `blocks/archive/{version}-{model}/` — all generation runs, for training data
+- `evals/best-blocks.json` — provenance: which block-set each promoted block came from
 
 **Generating blocks:**
 ```bash
@@ -82,10 +81,10 @@ Both read manifest, run 5 parallel workers, skip existing files. Safe to re-run 
 
 ```bash
 # Compact a block (6 experiments, sonnet auditor)
-python3 scripts/iterate-block.py --target 04-bee-swarm-census --block-set v2-claude-opus-4-6 --max-experiments 6 --model sonnet
+python3 scripts/iterate-block.py --target 04-bee-swarm-census --max-experiments 6 --model sonnet
 
 # Longer run for large blocks
-python3 scripts/iterate-block.py --target hierarchy-bundles --block-set standalone --max-experiments 50 --model sonnet
+python3 scripts/iterate-block.py --target hierarchy-bundles --max-experiments 50 --model sonnet
 ```
 
 The loop: propose compaction via `claude -p` → audit → keep if LOC drops and composite holds → repeat. On completion, squash-merges the iterate branch to main.

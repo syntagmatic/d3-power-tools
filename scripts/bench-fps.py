@@ -247,14 +247,14 @@ def detect_interactions(block_id, features=None):
 
 
 def find_html(block_id, block_set=None):
-    sets = [block_set] if block_set else [
-        "standalone", "v2-claude-opus-4-6", "v0-claude-opus-4-6",
-        "v2-claude-sonnet-4-6", "v1-claude-sonnet-4-6",
-    ]
-    for bs in sets:
-        p = PROJ / "blocks" / bs / f"{block_id}.html"
+    if block_set:
+        p = PROJ / "blocks" / block_set / f"{block_id}.html"
         if p.exists():
             return p
+    # Flat structure
+    p = PROJ / "blocks" / f"{block_id}.html"
+    if p.exists():
+        return p
     return None
 
 

@@ -148,7 +148,7 @@ def run_proposer(prompt, html_path):
 def main():
     ap = argparse.ArgumentParser(description="Iterate on a block for compaction")
     ap.add_argument("--target", required=True, help="Block ID, e.g. 47-hierarchical-edge-bundling")
-    ap.add_argument("--block-set", required=True, help="Source block set, e.g. v2-claude-opus-4-6")
+    ap.add_argument("--block-set", default=None, help="Source block set (default: flat blocks/ dir)")
     ap.add_argument("--max-experiments", type=int, default=15)
     ap.add_argument("--model", default="sonnet", help="Model for auditing")
     ap.add_argument("--convergence-discards", type=int, default=3)
@@ -159,7 +159,10 @@ def main():
     if not block:
         print(f"Block {args.target} not found in manifest"); sys.exit(1)
 
-    source_html = PROJ / "blocks" / args.block_set / f"{args.target}.html"
+    if args.block_set:
+        source_html = PROJ / "blocks" / args.block_set / f"{args.target}.html"
+    else:
+        source_html = PROJ / "blocks" / f"{args.target}.html"
     if not source_html.exists():
         print(f"Source block not found: {source_html}"); sys.exit(1)
 
@@ -177,7 +180,10 @@ def main():
     wt_path = worktree_create(branch)
 
     # source_html in the worktree (where git commits will land)
-    wt_source = wt_path / "blocks" / args.block_set / f"{args.target}.html"
+    if args.block_set:
+        wt_source = wt_path / "blocks" / args.block_set / f"{args.target}.html"
+    else:
+        wt_source = wt_path / "blocks" / f"{args.target}.html"
 
     # Working copy in temp/ (not tracked, used by proposer and auditor)
     iter_dir = PROJ / "temp" / "iterate" / f"block-{args.target}"
@@ -188,7 +194,7 @@ def main():
     ensure_iterations_dir()
 
     print(f"=== Block Iteration: {args.target} ===")
-    print(f"Source: {args.block_set}")
+    print(f"Source: {args.block_set or 'blocks/'}")
     print(f"Branch: {branch}")
     print(f"Worktree: {wt_path}")
     print()

@@ -59,8 +59,13 @@ D3_INTERACTIONS = {
 
 
 def find_html(block_id):
+    # Flat structure first
+    p = PROJ / "blocks" / f"{block_id}.html"
+    if p.exists():
+        return p
+    # Fall back to archive
     for bs in BLOCK_SETS:
-        p = PROJ / "blocks" / bs / f"{block_id}.html"
+        p = PROJ / "blocks" / "archive" / bs / f"{block_id}.html"
         if p.exists():
             return p
     return None
