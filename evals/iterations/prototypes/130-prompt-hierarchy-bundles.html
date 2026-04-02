@@ -1,0 +1,755 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hierarchical Layouts with Edge Bundles</title>
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: Inter, Arial, sans-serif;
+    background: #f0f2f5;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px;
+    min-height: 100vh;
+  }
+  .container {
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+    padding: 20px;
+    max-width: 960px;
+    width: 100%;
+  }
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+  .controls button {
+    padding: 6px 14px;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    background: #fff;
+    cursor: pointer;
+    font-size: 13px;
+    font-family: inherit;
+    transition: all 0.15s;
+  }
+  .controls button:hover { background: #f3f4f6; }
+  .controls button.active {
+    background: #3b82f6;
+    color: #fff;
+    border-color: #3b82f6;
+  }
+  .controls button.regenerate {
+    background: #22c55e;
+    color: #fff;
+    border-color: #22c55e;
+  }
+  .controls button.regenerate:hover { background: #16a34a; }
+  .second-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 12px;
+    font-size: 13px;
+  }
+  .second-row label { display: flex; align-items: center; gap: 6px; }
+  .second-row input[type="range"] { width: 120px; }
+  .second-row .link-toggle {
+    padding: 5px 12px;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    background: #fff;
+    cursor: pointer;
+    font-size: 13px;
+    font-family: inherit;
+  }
+  .second-row .link-toggle:hover { background: #f3f4f6; }
+  svg { display: block; margin: 0 auto; }
+  .node-shape { cursor: pointer; }
+  .node-shape.highlighted { stroke: #facc15 !important; stroke-width: 2.5px !important; fill: #fef08a !important; }
+  .bundle-link.highlighted { stroke: #f59e0b !important; stroke-opacity: 0.8 !important; stroke-width: 2px !important; }
+  .bundle-link.faded { stroke-opacity: 0.03 !important; }
+  .node-shape.faded { opacity: 0.1 !important; }
+  .hierarchy-link { fill: none; stroke: #94a3b8; stroke-width: 1; stroke-opacity: 0.3; }
+  footer {
+    margin-top: 12px;
+    font-size: 12px;
+    color: #9ca3af;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="controls" id="layout-buttons"></div>
+  <div class="second-row">
+    <label>Bundling <input type="range" id="bundling-slider" min="0" max="1" step="0.01" value="0.85"> <span id="bundling-val">85%</span></label>
+    <button class="link-toggle" id="link-toggle">Links Behind</button>
+    <label id="hierarchy-toggle-label" style="display:none"><input type="checkbox" id="hierarchy-toggle"> Show Hierarchy</label>
+  </div>
+  <svg id="viz"></svg>
+</div>
+<footer>Built with D3.js v7</footer>
+
+<script type="module">
+const W = 900, H = 900;
+const svg = d3.select("#viz")
+  .attr("width", W).attr("height", H)
+  .attr("viewBox", [-W/2, -H/2, W, H]);
+
+// Layer groups — order matters for link toggle
+const gLinksBehind = svg.append("g").attr("class", "links-behind");
+const gHierarchy = svg.append("g").attr("class", "hierarchy-links");
+const gNodes = svg.append("g").attr("class", "nodes");
+const gLinksOnTop = svg.append("g").attr("class", "links-on-top");
+
+const layouts = [
+  { id: "pack", label: "Circle Pack" },
+  { id: "treemap", label: "Treemap" },
+  { id: "dendrogram", label: "Dendrogram" },
+  { id: "radial", label: "Radial Tree" },
+  { id: "icicle", label: "Icicle" },
+  { id: "sunburst", label: "Sunburst" },
+  { id: "force", label: "Force" }
+];
+
+let currentLayout = "pack";
+let root, nodesById, connections, bundlePaths;
+let simulation = null;
+let selectedNode = null;
+let linkMode = "behind"; // behind, on-top, hidden
+const linkModes = ["behind", "on-top", "hidden"];
+const linkLabels = { behind: "Links Behind", "on-top": "Links On Top", hidden: "Links Hidden" };
+
+// Color
+const groupColor = d3.scaleOrdinal();
+let depthOpacity;
+
+// ── Data Generation ──
+function generateData() {
+  const nodes = [{ id: "root", parent: null, depth: 0 }];
+  const rng = d3.randomLcg(Math.random());
+  const rand = d3.randomUniform.source(rng)(0, 1);
+
+  // Build hierarchy: ~200 nodes, max depth 7
+  function addChildren(parentId, depth) {
+    if (depth >= 7 || nodes.length >= 220) return;
+    const nKids = depth < 2 ? Math.floor(rand() * 4) + 2 : Math.floor(rand() * 5) + 1;
+    for (let i = 0; i < nKids && nodes.length < 220; i++) {
+      const id = `${parentId}.${i}`;
+      nodes.push({ id, parent: parentId, depth });
+      if (depth < 6 && rand() < (depth < 3 ? 0.8 : 0.4)) {
+        addChildren(id, depth + 1);
+      }
+    }
+  }
+  addChildren("root", 1);
+
+  // Stratify
+  const stratify = d3.stratify().id(d => d.id).parentId(d => d.parent);
+  root = stratify(nodes);
+  root.count().sort((a, b) => b.value - a.value);
+
+  nodesById = new Map(root.descendants().map(d => [d.data.id, d]));
+  const leaves = root.leaves();
+
+  // Connections between random leaf pairs
+  connections = [];
+  const maxConn = Math.min(300, leaves.length * (leaves.length - 1) / 2);
+  const connSet = new Set();
+  while (connections.length < maxConn) {
+    const a = leaves[Math.floor(rand() * leaves.length)];
+    const b = leaves[Math.floor(rand() * leaves.length)];
+    if (a === b) continue;
+    const key = a.data.id < b.data.id ? `${a.data.id}|${b.data.id}` : `${b.data.id}|${a.data.id}`;
+    if (connSet.has(key)) continue;
+    connSet.add(key);
+    connections.push({ source: a, target: b });
+  }
+
+  // LCA paths
+  bundlePaths = connections.map(c => c.source.path(c.target));
+
+  // Color setup
+  const topGroups = root.children || [];
+  const colors = d3.shuffle(d3.schemeTableau10.slice());
+  groupColor.domain(topGroups.map(d => d.data.id)).range(colors);
+  depthOpacity = d3.scaleLinear().domain([0, root.height]).range([0.4, 1.0]);
+
+  // Initialize positions
+  root.each(d => { d.current_x = 0; d.current_y = 0; });
+}
+
+function getGroup(d) {
+  let n = d;
+  while (n.parent && n.parent.parent) n = n.parent;
+  return n.data.id;
+}
+
+function nodeColor(d) {
+  const base = groupColor(getGroup(d));
+  if (!d.children) return d3.color(base).brighter(0.4).formatHex();
+  return base;
+}
+
+function nodeStroke(d) {
+  return d3.color(groupColor(getGroup(d))).darker(0.6).formatHex();
+}
+
+// ── Layout Computers ──
+const packLayout = d3.pack().size([W * 0.9, H * 0.9]).padding(3);
+const treemapLayout = d3.treemap().size([W * 0.8, H * 0.8]).padding(2).round(true);
+const treeLayout = d3.tree();
+const partitionLayout = d3.partition();
+
+function computeLayout(layoutId) {
+  root.count().sort((a, b) => b.value - a.value);
+  const allNodes = root.descendants();
+
+  if (layoutId === "pack") {
+    packLayout(root);
+    allNodes.forEach(d => {
+      d.target_x = d.x - W * 0.45;
+      d.target_y = d.y - H * 0.45;
+      d.target_r = d.r;
+      d.target_shape = "circle";
+    });
+  } else if (layoutId === "treemap") {
+    treemapLayout(root);
+    allNodes.forEach(d => {
+      d.target_x = (d.x0 + d.x1) / 2 - W * 0.4;
+      d.target_y = (d.y0 + d.y1) / 2 - H * 0.4;
+      d.target_w = d.x1 - d.x0;
+      d.target_h = d.y1 - d.y0;
+      d.target_shape = "rect";
+    });
+  } else if (layoutId === "dendrogram") {
+    treeLayout.size([H * 0.8, W * 0.8])(root);
+    allNodes.forEach(d => {
+      d.target_x = d.y - W * 0.4;
+      d.target_y = d.x - H * 0.4;
+      d.target_r = 4;
+      d.target_shape = "circle";
+    });
+  } else if (layoutId === "radial") {
+    treeLayout.size([2 * Math.PI, Math.min(W, H) * 0.38])(root);
+    allNodes.forEach(d => {
+      d.target_x = d.y * Math.cos(d.x - Math.PI / 2);
+      d.target_y = d.y * Math.sin(d.x - Math.PI / 2);
+      d.target_r = 4;
+      d.target_shape = "circle";
+    });
+  } else if (layoutId === "icicle") {
+    partitionLayout.size([W * 0.85, H * 0.85])(root);
+    allNodes.forEach(d => {
+      d.target_x = (d.x0 + d.x1) / 2 - W * 0.425;
+      d.target_y = (d.y0 + d.y1) / 2 - H * 0.425;
+      d.target_w = d.x1 - d.x0;
+      d.target_h = d.y1 - d.y0;
+      d.target_shape = "rect";
+    });
+  } else if (layoutId === "sunburst") {
+    partitionLayout.size([2 * Math.PI, Math.min(W, H) * 0.44])(root);
+    const radiusScale = d3.scaleSqrt()
+      .domain([0, Math.min(W, H) * 0.44])
+      .range([0, Math.min(W, H) * 0.44]);
+    allNodes.forEach(d => {
+      d.target_x0 = d.x0;
+      d.target_x1 = d.x1;
+      d.target_y0_arc = radiusScale(d.y0);
+      d.target_y1_arc = radiusScale(d.y1);
+      // For position interpolation, use centroid
+      const angle = (d.x0 + d.x1) / 2;
+      const r = (radiusScale(d.y0) + radiusScale(d.y1)) / 2;
+      d.target_x = r * Math.cos(angle - Math.PI / 2);
+      d.target_y = r * Math.sin(angle - Math.PI / 2);
+      d.target_shape = "arc";
+    });
+  } else if (layoutId === "force") {
+    // Positions set by simulation — targets are current positions initially
+    const sizeScale = d3.scaleSqrt().domain([1, root.value]).range([3, 24]);
+    allNodes.forEach(d => {
+      d.target_r = sizeScale(d.value);
+      d.target_shape = "circle";
+      // Initialize force positions from current positions
+      if (d.fx === undefined) {
+        d.x = d.current_x;
+        d.y = d.current_y;
+      }
+    });
+  }
+}
+
+// ── Arc generator for sunburst ──
+const arcGen = d3.arc()
+  .startAngle(d => d.sa)
+  .endAngle(d => d.ea)
+  .innerRadius(d => d.ir)
+  .outerRadius(d => d.or);
+
+// ── Node shape path generators ──
+function nodeShapePath(d, layout) {
+  if (layout === "sunburst") {
+    return arcGen({ sa: d.draw_sa, ea: d.draw_ea, ir: d.draw_ir, or: d.draw_or });
+  }
+  if (d.draw_shape === "rect" || (layout === "treemap" || layout === "icicle") && d.draw_w > 0) {
+    const w = d.draw_w || 1, h = d.draw_h || 1;
+    const cr = layout === "treemap" ? Math.min(4, w / 3, h / 3) : 0;
+    if (cr > 0) {
+      return `M${-w/2 + cr},${-h/2}h${w - 2*cr}a${cr},${cr} 0 0 1 ${cr},${cr}v${h - 2*cr}a${cr},${cr} 0 0 1 ${-cr},${cr}h${-(w - 2*cr)}a${cr},${cr} 0 0 1 ${-cr},${-cr}v${-(h - 2*cr)}a${cr},${cr} 0 0 1 ${cr},${-cr}z`;
+    }
+    return `M${-w/2},${-h/2}h${w}v${h}h${-w}z`;
+  }
+  const r = d.draw_r || 4;
+  return d3.arc()({ innerRadius: 0, outerRadius: r, startAngle: 0, endAngle: 2 * Math.PI });
+}
+
+// ── Rendering ──
+function render() {
+  const allNodes = root.descendants();
+  const leaves = root.leaves();
+
+  // Nodes
+  const nodeGroups = gNodes.selectAll("g.node-g")
+    .data(allNodes, d => d.data.id)
+    .join(
+      enter => {
+        const g = enter.append("g").attr("class", "node-g");
+        g.append("path").attr("class", "node-shape");
+        return g;
+      },
+      update => update,
+      exit => exit.transition().duration(600).attr("opacity", 0).remove()
+    );
+
+  updateNodePositions(currentLayout, false);
+}
+
+function updateNodePositions(layout, animated = true) {
+  const allNodes = root.descendants();
+  const duration = animated ? 1200 : 0;
+  const showHierarchy = ["dendrogram", "radial", "force"].includes(layout);
+
+  d3.select("#hierarchy-toggle-label").style("display", showHierarchy ? "" : "none");
+
+  if (layout === "sunburst") {
+    // For sunburst: each node needs arc params
+    allNodes.forEach(d => {
+      d.source_x = d.current_x;
+      d.source_y = d.current_y;
+      d.source_sa = d.draw_sa ?? 0;
+      d.source_ea = d.draw_ea ?? 0;
+      d.source_ir = d.draw_ir ?? 0;
+      d.source_or = d.draw_or ?? 0;
+      d.source_r = d.draw_r ?? 4;
+      d.source_w = d.draw_w ?? 0;
+      d.source_h = d.draw_h ?? 0;
+      d.source_shape = d.draw_shape ?? "circle";
+    });
+  } else {
+    allNodes.forEach(d => {
+      d.source_x = d.current_x;
+      d.source_y = d.current_y;
+      d.source_r = d.draw_r ?? 4;
+      d.source_w = d.draw_w ?? 0;
+      d.source_h = d.draw_h ?? 0;
+      d.source_shape = d.draw_shape ?? "circle";
+      d.source_sa = d.draw_sa ?? 0;
+      d.source_ea = d.draw_ea ?? 0;
+      d.source_ir = d.draw_ir ?? 0;
+      d.source_or = d.draw_or ?? 0;
+    });
+  }
+
+  if (!animated) {
+    // Instant
+    allNodes.forEach(d => {
+      if (layout === "sunburst") {
+        d.current_x = d.target_x;
+        d.current_y = d.target_y;
+        d.draw_sa = d.target_x0;
+        d.draw_ea = d.target_x1;
+        d.draw_ir = d.target_y0_arc;
+        d.draw_or = d.target_y1_arc;
+        d.draw_shape = "arc";
+        d.draw_r = 0;
+        d.draw_w = 0;
+        d.draw_h = 0;
+      } else if (layout === "treemap" || layout === "icicle") {
+        d.current_x = d.target_x;
+        d.current_y = d.target_y;
+        d.draw_w = d.target_w;
+        d.draw_h = d.target_h;
+        d.draw_shape = "rect";
+        d.draw_r = 0;
+        d.draw_sa = 0; d.draw_ea = 0; d.draw_ir = 0; d.draw_or = 0;
+      } else {
+        d.current_x = d.target_x;
+        d.current_y = d.target_y;
+        d.draw_r = d.target_r || 4;
+        d.draw_shape = "circle";
+        d.draw_w = 0;
+        d.draw_h = 0;
+        d.draw_sa = 0; d.draw_ea = 0; d.draw_ir = 0; d.draw_or = 0;
+      }
+    });
+    drawFrame(layout);
+    return;
+  }
+
+  // Animated transition via tween
+  const t = svg.transition().duration(duration).ease(d3.easeCubicInOut);
+  t.tween("layout", () => {
+    return time => {
+      allNodes.forEach(d => {
+        d.current_x = d.source_x + (d.target_x - d.source_x) * time;
+        d.current_y = d.source_y + (d.target_y - d.source_y) * time;
+
+        if (layout === "sunburst") {
+          d.draw_sa = (d.source_sa || 0) + ((d.target_x0 || 0) - (d.source_sa || 0)) * time;
+          d.draw_ea = (d.source_ea || 0) + ((d.target_x1 || 0) - (d.source_ea || 0)) * time;
+          d.draw_ir = (d.source_ir || 0) + ((d.target_y0_arc || 0) - (d.source_ir || 0)) * time;
+          d.draw_or = (d.source_or || 0) + ((d.target_y1_arc || 0) - (d.source_or || 0)) * time;
+          d.draw_r = d.source_r * (1 - time);
+          d.draw_w = (d.source_w || 0) * (1 - time);
+          d.draw_h = (d.source_h || 0) * (1 - time);
+          d.draw_shape = time > 0.5 ? "arc" : d.source_shape;
+        } else if (layout === "treemap" || layout === "icicle") {
+          d.draw_w = (d.source_w || 0) + ((d.target_w || 0) - (d.source_w || 0)) * time;
+          d.draw_h = (d.source_h || 0) + ((d.target_h || 0) - (d.source_h || 0)) * time;
+          d.draw_r = (d.source_r || 0) * (1 - time);
+          d.draw_sa = (d.source_sa || 0) * (1 - time);
+          d.draw_ea = (d.source_ea || 0) * (1 - time);
+          d.draw_ir = (d.source_ir || 0) * (1 - time);
+          d.draw_or = (d.source_or || 0) * (1 - time);
+          d.draw_shape = time > 0.5 ? "rect" : d.source_shape;
+        } else {
+          d.draw_r = (d.source_r || 0) + ((d.target_r || 4) - (d.source_r || 0)) * time;
+          d.draw_w = (d.source_w || 0) * (1 - time);
+          d.draw_h = (d.source_h || 0) * (1 - time);
+          d.draw_sa = (d.source_sa || 0) * (1 - time);
+          d.draw_ea = (d.source_ea || 0) * (1 - time);
+          d.draw_ir = (d.source_ir || 0) * (1 - time);
+          d.draw_or = (d.source_or || 0) * (1 - time);
+          d.draw_shape = time > 0.5 ? "circle" : d.source_shape;
+        }
+      });
+      drawFrame(layout);
+    };
+  });
+}
+
+function drawFrame(layout) {
+  const allNodes = root.descendants();
+  const beta = +d3.select("#bundling-slider").property("value");
+
+  // Update node shapes
+  gNodes.selectAll("g.node-g")
+    .data(allNodes, d => d.data.id)
+    .each(function(d) {
+      const g = d3.select(this);
+      const isSunburstArc = d.draw_shape === "arc" && (d.draw_ea - d.draw_sa) > 0.001;
+      const isRect = d.draw_shape === "rect" && d.draw_w > 0.5 && d.draw_h > 0.5;
+      const isCircle = d.draw_shape === "circle" && d.draw_r > 0.5;
+
+      if (isSunburstArc) {
+        g.attr("transform", "translate(0,0)");
+      } else {
+        g.attr("transform", `translate(${d.current_x},${d.current_y})`);
+      }
+
+      const path = g.select("path.node-shape");
+
+      if (isSunburstArc) {
+        const p = arcGen({ sa: d.draw_sa, ea: d.draw_ea, ir: d.draw_ir, or: d.draw_or });
+        path.attr("d", p || "M0,0");
+      } else if (isRect) {
+        const w = d.draw_w, h = d.draw_h;
+        const cr = layout === "treemap" ? Math.min(4, w / 3, h / 3) : 0;
+        if (cr > 0.5) {
+          path.attr("d", `M${-w/2 + cr},${-h/2}h${w - 2*cr}a${cr},${cr} 0 0 1 ${cr},${cr}v${h - 2*cr}a${cr},${cr} 0 0 1 ${-cr},${cr}h${-(w - 2*cr)}a${cr},${cr} 0 0 1 ${-cr},${-cr}v${-(h - 2*cr)}a${cr},${cr} 0 0 1 ${cr},${-cr}z`);
+        } else {
+          path.attr("d", `M${-w/2},${-h/2}h${w}v${h}h${-w}z`);
+        }
+      } else if (isCircle) {
+        const r = d.draw_r;
+        path.attr("d", `M0,${-r}A${r},${r} 0 1 1 0,${r}A${r},${r} 0 1 1 0,${-r}Z`);
+      } else {
+        path.attr("d", "M0,0");
+      }
+
+      // Visibility for tiny nodes
+      const tooSmall = (d.draw_shape === "circle" && d.draw_r < 2) ||
+        (d.draw_shape === "rect" && (d.draw_w < 2 || d.draw_h < 2));
+
+      path.attr("fill", nodeColor(d))
+        .attr("stroke", nodeStroke(d))
+        .attr("stroke-width", 1)
+        .attr("fill-opacity", tooSmall ? 0 : depthOpacity(d.depth))
+        .attr("stroke-opacity", tooSmall ? 0 : 1);
+    });
+
+  // Bundle links
+  const line = d3.line()
+    .curve(d3.curveBundle.beta(beta))
+    .x(d => d.current_x)
+    .y(d => d.current_y);
+
+  const linkGroup = linkMode === "on-top" ? gLinksOnTop : gLinksBehind;
+  const otherGroup = linkMode === "on-top" ? gLinksBehind : gLinksOnTop;
+  otherGroup.selectAll("path.bundle-link").remove();
+
+  if (linkMode === "hidden") {
+    gLinksBehind.selectAll("path.bundle-link").remove();
+    gLinksOnTop.selectAll("path.bundle-link").remove();
+  } else {
+    linkGroup.selectAll("path.bundle-link")
+      .data(bundlePaths, (d, i) => i)
+      .join("path")
+      .attr("class", "bundle-link")
+      .attr("fill", "none")
+      .attr("stroke", "#888")
+      .attr("stroke-opacity", 0.15)
+      .attr("stroke-width", 1)
+      .attr("d", d => line(d));
+  }
+
+  // Hierarchy links
+  const showHierarchy = ["dendrogram", "radial", "force"].includes(layout) &&
+    d3.select("#hierarchy-toggle").property("checked");
+  const hierLinks = showHierarchy ? root.links() : [];
+  gHierarchy.selectAll("line.hier-link")
+    .data(hierLinks, d => d.source.data.id + "-" + d.target.data.id)
+    .join("line")
+    .attr("class", "hier-link hierarchy-link")
+    .attr("x1", d => d.source.current_x)
+    .attr("y1", d => d.source.current_y)
+    .attr("x2", d => d.target.current_x)
+    .attr("y2", d => d.target.current_y);
+
+  // Re-apply selection/hover styling
+  applySelectionStyling();
+}
+
+// ── Interaction ──
+function getConnectedInfo(node) {
+  const nodeLeafIds = new Set(node.leaves().map(d => d.data.id));
+  if (node.children === undefined || node.children === null) nodeLeafIds.add(node.data.id);
+  const connectedLeafIds = new Set();
+  const connectedLinkIndices = new Set();
+  bundlePaths.forEach((path, i) => {
+    const srcId = path[0].data.id;
+    const tgtId = path[path.length - 1].data.id;
+    if (nodeLeafIds.has(srcId) || nodeLeafIds.has(tgtId)) {
+      connectedLeafIds.add(srcId);
+      connectedLeafIds.add(tgtId);
+      connectedLinkIndices.add(i);
+    }
+  });
+  return { connectedLeafIds, connectedLinkIndices };
+}
+
+let hoveredNode = null;
+
+function applySelectionStyling() {
+  const active = selectedNode || hoveredNode;
+  if (!active) {
+    gNodes.selectAll("path.node-shape").classed("highlighted", false).classed("faded", false);
+    gLinksBehind.selectAll("path.bundle-link").classed("highlighted", false).classed("faded", false);
+    gLinksOnTop.selectAll("path.bundle-link").classed("highlighted", false).classed("faded", false);
+    return;
+  }
+
+  const { connectedLeafIds, connectedLinkIndices } = getConnectedInfo(active);
+
+  gNodes.selectAll("g.node-g").each(function(d) {
+    const path = d3.select(this).select("path.node-shape");
+    const isConnected = connectedLeafIds.has(d.data.id) || d === active;
+    path.classed("highlighted", isConnected);
+    path.classed("faded", selectedNode && !isConnected);
+  });
+
+  [gLinksBehind, gLinksOnTop].forEach(g => {
+    g.selectAll("path.bundle-link").each(function(d, i) {
+      const el = d3.select(this);
+      const isConn = connectedLinkIndices.has(i);
+      el.classed("highlighted", isConn);
+      el.classed("faded", selectedNode && !isConn);
+      if (isConn) this.parentNode.appendChild(this); // raise
+    });
+  });
+}
+
+function setupInteraction() {
+  gNodes.selectAll("g.node-g")
+    .on("mouseenter", (event, d) => {
+      hoveredNode = d;
+      applySelectionStyling();
+    })
+    .on("mouseleave", () => {
+      hoveredNode = null;
+      applySelectionStyling();
+    })
+    .on("click", (event, d) => {
+      event.stopPropagation();
+      selectedNode = selectedNode === d ? null : d;
+      applySelectionStyling();
+    });
+
+  svg.on("click", () => {
+    selectedNode = null;
+    applySelectionStyling();
+  });
+}
+
+// ── Force Simulation ──
+function startForce() {
+  const allNodes = root.descendants();
+  const sizeScale = d3.scaleSqrt().domain([1, root.value]).range([3, 24]);
+
+  allNodes.forEach(d => {
+    d.x = d.current_x;
+    d.y = d.current_y;
+    d.vx = 0;
+    d.vy = 0;
+    d.target_r = sizeScale(d.value);
+  });
+
+  const links = root.links().map(d => ({ source: d.source, target: d.target }));
+
+  simulation = d3.forceSimulation(allNodes)
+    .force("link", d3.forceLink(links).id(d => d.data.id).distance(20).strength(0.5))
+    .force("charge", d3.forceManyBody().strength(-40).distanceMax(200))
+    .force("collide", d3.forceCollide(d => sizeScale(d.value) + 2).strength(0.7))
+    .force("center", d3.forceCenter(0, 0))
+    .alpha(0.3)
+    .alphaDecay(0.01)
+    .on("tick", () => {
+      allNodes.forEach(d => {
+        d.current_x = d.x;
+        d.current_y = d.y;
+        d.target_x = d.x;
+        d.target_y = d.y;
+      });
+      drawFrame("force");
+    });
+
+  // Drag
+  const drag = d3.drag()
+    .on("start", (event, d) => {
+      if (!event.active) simulation.alphaTarget(0.1).restart();
+      d.fx = d.x;
+      d.fy = d.y;
+    })
+    .on("drag", (event, d) => {
+      d.fx = event.x;
+      d.fy = event.y;
+    })
+    .on("end", (event, d) => {
+      if (!event.active) simulation.alphaTarget(0);
+      d.fx = null;
+      d.fy = null;
+    });
+
+  gNodes.selectAll("g.node-g").call(drag);
+}
+
+function stopForce() {
+  if (simulation) {
+    simulation.stop();
+    simulation = null;
+  }
+  // Remove drag
+  gNodes.selectAll("g.node-g").on(".drag", null);
+}
+
+// ── Layout Switching ──
+function switchLayout(layoutId) {
+  if (layoutId === currentLayout) return;
+
+  const prevLayout = currentLayout;
+  currentLayout = layoutId;
+
+  // Stop force if leaving force
+  if (prevLayout === "force") stopForce();
+
+  // Update buttons
+  d3.selectAll("#layout-buttons button.layout-btn")
+    .classed("active", function() { return this.dataset.layout === layoutId; });
+
+  computeLayout(layoutId);
+
+  if (layoutId === "force") {
+    // Transition to approximate positions first, then start simulation
+    const allNodes = root.descendants();
+    allNodes.forEach(d => {
+      d.target_x = d.current_x;
+      d.target_y = d.current_y;
+    });
+    drawFrame(layoutId);
+    startForce();
+  } else {
+    updateNodePositions(layoutId, true);
+  }
+}
+
+// ── Controls ──
+function setupControls() {
+  const btnContainer = d3.select("#layout-buttons");
+
+  layouts.forEach(l => {
+    btnContainer.append("button")
+      .attr("class", `layout-btn${l.id === currentLayout ? " active" : ""}`)
+      .attr("data-layout", l.id)
+      .text(l.label)
+      .on("click", () => switchLayout(l.id));
+  });
+
+  btnContainer.append("button")
+    .attr("class", "regenerate")
+    .text("New Dataset")
+    .on("click", regenerate);
+
+  d3.select("#bundling-slider").on("input", function() {
+    d3.select("#bundling-val").text(Math.round(this.value * 100) + "%");
+    drawFrame(currentLayout);
+  });
+
+  d3.select("#link-toggle").on("click", function() {
+    const idx = linkModes.indexOf(linkMode);
+    linkMode = linkModes[(idx + 1) % linkModes.length];
+    d3.select(this).text(linkLabels[linkMode]);
+    drawFrame(currentLayout);
+  });
+
+  d3.select("#hierarchy-toggle").on("change", () => drawFrame(currentLayout));
+}
+
+function regenerate() {
+  stopForce();
+  selectedNode = null;
+  hoveredNode = null;
+  generateData();
+  computeLayout(currentLayout);
+  render();
+  setupInteraction();
+  if (currentLayout === "force") startForce();
+}
+
+// ── Init ──
+generateData();
+computeLayout(currentLayout);
+setupControls();
+render();
+setupInteraction();
+</script>
+</body>
+</html>

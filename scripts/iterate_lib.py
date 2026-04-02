@@ -188,6 +188,21 @@ def decide_prompt(time_before, time_after, features_pass):
     return "keep", f"-{time_before - time_after:.0f}s"
 
 
+def decide_prompt_quality(time_before, time_after, composite_before, composite_after, features_pass):
+    """Prompt track v2: optimize both gen time and quality."""
+    if not features_pass:
+        return "discard", "missing required features"
+    if composite_after is None:
+        return "discard", "audit failed"
+    if composite_after < composite_before - 0.3:
+        return "discard", f"quality regression ({composite_before:.1f}→{composite_after:.1f})"
+    faster = time_after < time_before * 0.9
+    better = composite_after > composite_before + 0.2
+    if faster or better:
+        return "keep", f"{time_after:.0f}s/{composite_after:.1f} (was {time_before:.0f}s/{composite_before:.1f})"
+    return "discard", f"no improvement ({time_before:.0f}s/{composite_before:.1f} → {time_after:.0f}s/{composite_after:.1f})"
+
+
 # === TSV logging ===
 
 def ensure_iterations_dir():
@@ -421,11 +436,13 @@ def generate_progress_html():
     best_prompts = BEST_DIR / "best-prompts.json"
 
     # Build experiments array for JS (records + diffs + scores + links)
+    proto_dir = ITERATIONS_DIR / "prototypes"
     js_experiments = []
     for r in records:
         key = (r["track"], r["target"], r["exp"])
         e = exp_lookup.get(key, {})
         exp_file = f"{r['exp']:03d}-{r['track']}-{r['target']}.json"
+        proto_file = f"prototypes/{r['exp']:03d}-{r['track']}-{r['target']}.html"
         js_experiments.append({
             **r,
             "scores": e.get("scores", {}),
@@ -435,6 +452,12 @@ def generate_progress_html():
             "composite_after": e.get("composite_after", e.get("composite")),
             "lines_before": e.get("lines_before", e.get("lines")),
             "lines_after": e.get("lines_after", e.get("lines")),
+            "gen_time_s": e.get("gen_time_s"),
+            "gen_time_before": e.get("gen_time_before"),
+            "gen_time_after": e.get("gen_time_after"),
+            "prompt_len": e.get("prompt_len"),
+            "prompt_len_before": e.get("prompt_len_before"),
+            "prompt_len_after": e.get("prompt_len_after"),
             "git_sha": e.get("git_sha", ""),
             "proposer": e.get("proposer", ""),
             "propose_time_s": e.get("propose_time_s"),
@@ -442,6 +465,7 @@ def generate_progress_html():
             "flags": e.get("scores", {}).get("flags", []),
             "proposer_type": e.get("proposer_type", ""),
             "json_file": exp_file if (ITERATIONS_DIR / exp_file).exists() else None,
+            "prototype_file": proto_file if (ITERATIONS_DIR / proto_file).exists() else None,
         })
 
     # Block set lookup for linking to source blocks
@@ -483,7 +507,7 @@ def generate_progress_html():
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <style>
   * {{ box-sizing: border-box; }}
-  body {{ font-family: system-ui, -apple-system, sans-serif; padding: 32px 40px; background: #fafafa; color: #222; max-width: 1100px; }}
+  body {{ font-family: system-ui, -apple-system, sans-serif; padding: 32px 40px; background: #fafafa; color: #222; max-width: 1200px; }}
   h1 {{ font-size: 22px; font-weight: 400; margin: 0 0 2px; }} h1 b {{ font-weight: 600; }}
   .page-meta {{ color: #888; font-size: 13px; margin-bottom: 8px; }}
   .nav {{ display: flex; gap: 16px; font-size: 12px; margin-bottom: 28px; flex-wrap: wrap; }}
@@ -704,7 +728,10 @@ for (const [key, data] of groupEntries) {{
 
   // --- Experiment table ---
   const table = section.append("table");
-  const cols = ["#", "Decision", metricLabel, "Δ", "Composite", "Scores", "Propose", "Audit", "Flags", "Proposer", "Diff", "JSON"];
+  const isPrompt = track === "prompt";
+  const cols = isPrompt
+    ? ["#", "Decision", "Gen Time", "Prompt Len", "Composite", "Scores", "Propose", "Audit", "Flags", "Diff", "Links"]
+    : ["#", "Decision", "Lines", "Δ", "Composite", "Scores", "Propose", "Audit", "Flags", "Proposer", "Diff", "Links"];
   table.append("thead").append("tr").selectAll("th").data(cols).join("th").text(d => d);
   const tbody = table.append("tbody");
 
@@ -727,8 +754,39 @@ for (const [key, data] of groupEntries) {{
     }} else {{
       decisionCell.text(d.decision);
     }}
-    tr.append("td").attr("class", "mono").text(d.metric || "–");
-    tr.append("td").attr("class", "mono").text(d.delta || "–");
+
+    if (isPrompt) {{
+      // Gen Time: show before→after for non-baselines, single value for baselines
+      const gtCell = tr.append("td").attr("class", "mono");
+      if (d.decision === "baseline") {{
+        const t = d.gen_time_s;
+        gtCell.text(t != null ? `${{Math.round(t)}}s` : d.metric ? `${{d.metric}}s` : "–");
+      }} else {{
+        const tb = d.gen_time_before, ta = d.gen_time_after;
+        if (tb != null && ta != null) {{
+          const delta = ta - tb;
+          const arrow = delta <= -1 ? " ↓" : delta >= 1 ? " ↑" : "";
+          gtCell.text(`${{Math.round(tb)}}→${{Math.round(ta)}}s${{arrow}}`);
+          if (delta < -5) gtCell.style("color", "#2e7d32");
+          else if (delta > 5) gtCell.style("color", "#c62828");
+        }} else gtCell.text(d.metric ? `${{d.metric}}s` : "–");
+      }}
+      // Prompt Len: show before→after for non-baselines
+      const plCell = tr.append("td").attr("class", "mono");
+      if (d.decision === "baseline") {{
+        const pl = d.prompt_len;
+        plCell.text(pl != null ? `${{pl}}` : "–");
+      }} else {{
+        const pb = d.prompt_len_before, pa = d.prompt_len_after;
+        if (pb != null && pa != null) {{
+          const delta = pa - pb;
+          plCell.text(`${{pb}}→${{pa}} (${{delta >= 0 ? "+" : ""}}${{delta}})`);
+        }} else plCell.text("–");
+      }}
+    }} else {{
+      tr.append("td").attr("class", "mono").text(d.metric || "–");
+      tr.append("td").attr("class", "mono").text(d.delta || "–");
+    }}
 
     // Composite
     const comp = d.composite_after ?? d.scores?.composite;
@@ -775,10 +833,12 @@ for (const [key, data] of groupEntries) {{
       }});
     }} else flagsCell.text("–");
 
-    // Proposer summary (truncated)
-    const propCell = tr.append("td").attr("class", "proposer-cell");
-    const propText = d.proposer || "–";
-    propCell.attr("title", propText).text(propText.length > 80 ? propText.slice(0, 77) + "…" : propText);
+    // Proposer summary (truncated) — block track only
+    if (!isPrompt) {{
+      const propCell = tr.append("td").attr("class", "proposer-cell");
+      const propText = d.proposer || "–";
+      propCell.attr("title", propText).text(propText.length > 80 ? propText.slice(0, 77) + "…" : propText);
+    }}
 
     // Diff toggle (show if there's a diff, proposer, or flags)
     const hasDiffContent = d.diff || d.proposer;
@@ -794,10 +854,12 @@ for (const [key, data] of groupEntries) {{
         }});
     }} else diffCell.text("–");
 
-    // JSON link
-    const jsonCell = tr.append("td");
-    if (d.json_file) jsonCell.append("a").attr("href", d.json_file).text("json");
-    else jsonCell.text("–");
+    // Links: JSON + prototype
+    const linksCell = tr.append("td");
+    if (d.json_file) linksCell.append("a").attr("href", d.json_file).text("json");
+    if (d.json_file && d.prototype_file) linksCell.append("span").text(" · ");
+    if (d.prototype_file) linksCell.append("a").attr("href", d.prototype_file).attr("target", "_blank").text("proto");
+    if (!d.json_file && !d.prototype_file) linksCell.text("–");
 
     // Detail row (hidden by default): proposer explanation + flags + diff
     const hasFlagsOrContent = hasDiffContent || (d.flags && d.flags.length);

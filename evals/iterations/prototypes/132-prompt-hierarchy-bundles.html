@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hierarchical Layouts with Edge Bundles</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:Inter,system-ui,-apple-system,sans-serif;background:#f0f2f5;display:flex;justify-content:center;padding:24px}
+  .card{background:#fff;border-radius:16px;box-shadow:0 2px 12px rgba(0,0,0,.08);padding:28px 32px;max-width:1100px;width:100%}
+  h2{font-size:1.4rem;font-weight:700;color:#1e293b;margin-bottom:4px}
+  .controls{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 6px}
+  .controls button{padding:6px 14px;border:1.5px solid #cbd5e1;border-radius:8px;background:#fff;color:#475569;font:600 .82rem/1 Inter,system-ui,sans-serif;cursor:pointer;transition:all .15s}
+  .controls button:hover{border-color:#93c5fd;color:#2563eb}
+  .controls button.active{background:#3b82f6;border-color:#3b82f6;color:#fff}
+  .row2{display:flex;flex-wrap:wrap;align-items:center;gap:16px;margin:6px 0 10px;font-size:.82rem;color:#64748b}
+  .row2 label{display:flex;align-items:center;gap:6px}
+  .row2 input[type=range]{width:140px;accent-color:#3b82f6}
+  .row2 button{padding:4px 12px;border:1.5px solid #cbd5e1;border-radius:6px;background:#fff;color:#475569;font:600 .78rem/1 Inter,system-ui,sans-serif;cursor:pointer;transition:all .15s}
+  .row2 button:hover{border-color:#93c5fd;color:#2563eb}
+  .row2 button.active{background:#3b82f6;border-color:#3b82f6;color:#fff}
+  .row2 input[type=checkbox]{accent-color:#3b82f6}
+  footer{text-align:center;font-size:.75rem;color:#94a3b8;margin-top:8px}
+  svg{display:block;margin:0 auto}
+</style>
+</head>
+<body>
+<div class="card">
+  <h2>Hierarchical Layouts</h2>
+  <div class="controls" id="layoutButtons"></div>
+  <div class="row2">
+    <label>Bundling <input type="range" id="bundleSlider" min="0" max="1" step="0.01" value="0.85"> <span id="bundleVal">85%</span></label>
+    <button id="linkToggle">Links Behind</button>
+    <label id="hierLabel" style="display:none"><input type="checkbox" id="hierCheck"> Show Hierarchy</label>
+    <button id="newDataBtn">New Dataset</button>
+  </div>
+  <div id="viz"></div>
+  <footer>Built with D3.js v7</footer>
+</div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+/* ── palette ── */
+const PALETTE = ["#5b7fa5","#5a9e8f","#d4944a","#cd6f6f","#7ea56a","#9478a7","#c4855c"];
+const brighten = c => d3.color(c).brighter(0.6).formatHex();
+const darken  = c => d3.color(c).darker(0.5).formatHex();
+
+/* ── dimensions ── */
+const W = 1020, H = 680;
+const cx = W / 2, cy = H / 2;
+
+/* ── svg ── */
+const svg = d3.select("#viz").append("svg")
+  .attr("viewBox", [-10, -10, W + 20, H + 20].join(" "))
+  .attr("width", "100%")
+  .style("max-height", "680px");
+
+const gLinks    = svg.append("g").attr("class","bundles");
+const gHier     = svg.append("g").attr("class","hier-links");
+const gNodes    = svg.append("g").attr("class","nodes");
+const gLabels   = svg.append("g").attr("class","labels");
+
+/* ── state ── */
+let root, nodesById, allNodes, leaves, connections, bundlePaths;
+let currentLayout = "pack";
+let linkState = 0;          // 0=behind, 1=on-top, 2=hidden
+let selectedNode = null;
+let hoveredNode  = null;
+let simulation   = null;
+let bundleBeta   = 0.15;    // beta = 1 - tension
+let showHier     = false;
+let rafId        = null;
+
+/* ── generate data ── */
+function generateData() {
+  const flat = [{id:"root",parent:null}];
+  const groups = d3.range(PALETTE.length).map(i => {
+    const gid = `g${i}`;
+    flat.push({id: gid, parent: "root"});
+    return gid;
+  });
+  let nodeId = 0;
+  function addChildren(parentId, depth, maxD) {
+    const n = depth === 0 ? d3.randomInt(3,6)() : d3.randomInt(1,5)();
+    for (let i = 0; i < n; i++) {
+      const id = `n${nodeId++}`;
+      flat.push({id, parent: parentId});
+      if (depth < maxD && Math.random() < 0.65) addChildren(id, depth + 1, maxD);
+    }
+  }
+  for (const g of groups) addChildren(g, 0, 5);
+  // Trim or pad to ~200
+  while (flat.length > 220) flat.pop();
+
+  root = d3.stratify().id(d => d.id).parentId(d => d.parent)(flat);
+  root.count().sort((a,b) => b.value - a.value);
+
+  nodesById = new Map(root.descendants().map(d => [d.data.id, d]));
+  allNodes  = root.descendants();
+  leaves    = root.leaves();
+
+  // assign group color
+  const topGroups = root.children || [];
+  topGroups.forEach((g, i) => {
+    const col = PALETTE[i % PALETTE.length];
+    g.each(d => { d._color = col; d._groupIdx = i; });
+  });
+  root._color = "#94a3b8";
+
+  // connections
+  connections = [];
+  for (let i = 0; i < 300; i++) {
+    const s = leaves[d3.randomInt(0, leaves.length)()];
+    const t = leaves[d3.randomInt(0, leaves.length)()];
+    if (s !== t) connections.push({source: s, target: t});
+  }
+  bundlePaths = connections.map(c => c.source.path(c.target));
+}
+
+generateData();
+
+/* ── layouts ── */
+const packLayout = d3.pack().size([W * 0.9, H * 0.9]).padding(4);
+const treemapLayout = d3.treemap().size([W, H]).padding(2).round(true);
+const treeLayout = d3.tree();
+const partitionLayout = d3.partition();
+const forceNodes = () => allNodes.map(d => ({id: d.data.id, node: d, x: d.current_x, y: d.current_y}));
+
+function computeLayout(name) {
+  // Reset root sum for layouts that need it
+  root.count().sort((a,b) => b.value - a.value);
+
+  switch(name) {
+    case "pack": {
+      packLayout(root);
+      const ox = W * 0.05, oy = H * 0.05;
+      root.each(d => { d.target_x = d.x + ox; d.target_y = d.y + oy; d._r = d.r; d._shape = "circle"; });
+      break;
+    }
+    case "treemap": {
+      treemapLayout(root);
+      root.each(d => {
+        d.target_x = (d.x0 + d.x1) / 2;
+        d.target_y = (d.y0 + d.y1) / 2;
+        d._tw = d.x1 - d.x0;
+        d._th = d.y1 - d.y0;
+        d._shape = "rect";
+      });
+      break;
+    }
+    case "dendrogram": {
+      treeLayout.size([H - 60, W - 120])(root);
+      root.each(d => { d.target_x = d.y + 60; d.target_y = d.x + 30; d._r = d.children ? 4 : 3; d._shape = "circle"; });
+      break;
+    }
+    case "radial": {
+      const radius = Math.min(W, H) / 2 - 40;
+      treeLayout.size([2 * Math.PI, radius])(root);
+      root.each(d => {
+        const a = d.x - Math.PI / 2;
+        d.target_x = cx + d.y * Math.cos(a);
+        d.target_y = cy + d.y * Math.sin(a);
+        d._r = d.children ? 4 : 3;
+        d._shape = "circle";
+      });
+      break;
+    }
+    case "icicle": {
+      partitionLayout.size([W, H]).padding(1)(root);
+      root.each(d => {
+        d.target_x = (d.x0 + d.x1) / 2;
+        d.target_y = (d.y0 + d.y1) / 2;
+        d._tw = d.x1 - d.x0;
+        d._th = d.y1 - d.y0;
+        d._shape = "rect";
+      });
+      break;
+    }
+    case "sunburst": {
+      partitionLayout.size([2 * Math.PI, 1]).padding(0.005)(root);
+      const rScale = d3.scaleSqrt().domain([0,1]).range([0, Math.min(W,H)/2 - 20]);
+      root.each(d => {
+        const a = (d.x0 + d.x1) / 2 - Math.PI / 2;
+        const r = (rScale(d.y0) + rScale(d.y1)) / 2;
+        d.target_x = cx + r * Math.cos(a);
+        d.target_y = cy + r * Math.sin(a);
+        d._arcInner = rScale(d.y0);
+        d._arcOuter = rScale(d.y1);
+        d._arcStart = d.x0;
+        d._arcEnd   = d.x1;
+        d._shape = "arc";
+      });
+      break;
+    }
+    case "force": {
+      // positions initialized from current
+      root.each(d => {
+        d.target_x = d.current_x || cx;
+        d.target_y = d.current_y || cy;
+        d._r = Math.max(2, d3.scaleSqrt().domain([0,200]).range([2,18])(d.descendants().length));
+        d._shape = "circle";
+      });
+      break;
+    }
+  }
+}
+
+function initPositions() {
+  computeLayout("pack");
+  root.each(d => {
+    d.current_x = d.target_x;
+    d.current_y = d.target_y;
+  });
+}
+initPositions();
+
+/* ── arc generator for sunburst ── */
+const arcGen = d3.arc();
+
+/* ── bundle line ── */
+const bundleLine = d3.line()
+  .x(d => d.current_x)
+  .y(d => d.current_y)
+  .curve(d3.curveBundle.beta(bundleBeta));
+
+/* ── rendering ── */
+function nodeKey(d) { return d.data.id; }
+
+function nodeOpacity(d) {
+  if (d._shape === "circle" && d._r < 2) return 0;
+  if (d._shape === "rect" && d._tw * d._th < 4) return 0;
+  const depthFade = Math.max(0.35, 1 - d.depth * 0.1);
+  return depthFade;
+}
+
+function nodeFill(d) {
+  return d.children ? d._color : brighten(d._color);
+}
+function nodeStroke(d) {
+  return darken(d._color);
+}
+
+function drawNodes() {
+  const data = allNodes;
+  const sel = gNodes.selectAll("g.node").data(data, nodeKey);
+
+  const enter = sel.enter().append("g").attr("class","node");
+  enter.append("rect").attr("rx",4).attr("ry",4);
+  enter.append("circle");
+  enter.append("path"); // for arcs
+
+  const merged = enter.merge(sel);
+
+  merged.each(function(d) {
+    const g = d3.select(this);
+    const op = nodeOpacity(d);
+
+    // highlight logic
+    let fillColor = nodeFill(d);
+    let strokeColor = nodeStroke(d);
+    let strokeWidth = 0.5;
+    let extraOp = 1;
+
+    if (selectedNode) {
+      const connected = isConnected(d, selectedNode);
+      if (d === selectedNode) { strokeColor = "#facc15"; strokeWidth = 2.5; }
+      else if (connected) { fillColor = "#fef08a"; strokeColor = "#facc15"; strokeWidth = 1.5; }
+      else { extraOp = 0.15; }
+    } else if (hoveredNode && !selectedNode) {
+      const connected = isConnected(d, hoveredNode);
+      if (d === hoveredNode) { strokeColor = "#facc15"; strokeWidth = 2.5; }
+      else if (connected) { fillColor = "#fef08a"; strokeColor = "#facc15"; strokeWidth = 1.5; }
+    }
+
+    const finalOp = op * extraOp;
+
+    g.attr("transform", `translate(${d.current_x},${d.current_y})`);
+
+    // circle
+    const circ = g.select("circle");
+    if (d._shape === "circle") {
+      const r = d._r || 3;
+      circ.attr("r", r).attr("fill", fillColor).attr("stroke", strokeColor)
+        .attr("stroke-width", strokeWidth).attr("opacity", finalOp).style("display", null);
+    } else { circ.style("display","none"); }
+
+    // rect
+    const rect = g.select("rect");
+    if (d._shape === "rect") {
+      const tw = d._tw || 4, th = d._th || 4;
+      rect.attr("x", -tw/2).attr("y", -th/2).attr("width", tw).attr("height", th)
+        .attr("fill", fillColor).attr("stroke", strokeColor)
+        .attr("stroke-width", strokeWidth).attr("opacity", finalOp)
+        .attr("rx", Math.min(4, tw/4)).attr("ry", Math.min(4, th/4))
+        .style("display", null);
+    } else { rect.style("display","none"); }
+
+    // arc (sunburst)
+    const arcP = g.select("path");
+    if (d._shape === "arc") {
+      // sunburst arcs render at origin offset by cx,cy
+      g.attr("transform", `translate(${cx},${cy})`);
+      arcP.attr("d", arcGen({innerRadius: d._arcInner, outerRadius: d._arcOuter, startAngle: d._arcStart, endAngle: d._arcEnd}))
+        .attr("fill", fillColor).attr("stroke", strokeColor)
+        .attr("stroke-width", strokeWidth).attr("opacity", finalOp)
+        .style("display", null);
+    } else { arcP.style("display","none"); }
+  });
+
+  sel.exit().remove();
+
+  // interaction
+  merged
+    .on("mouseenter", (e, d) => { if (!selectedNode) { hoveredNode = d; render(); } })
+    .on("mouseleave", () => { if (!selectedNode) { hoveredNode = null; render(); } })
+    .on("click", (e, d) => {
+      e.stopPropagation();
+      selectedNode = selectedNode === d ? null : d;
+      hoveredNode = null;
+      render();
+    });
+}
+
+function isConnected(a, b) {
+  for (const c of connections) {
+    if ((c.source === a && c.target === b) || (c.source === b && c.target === a) ||
+        c.source === a || c.target === a) {
+      if (b === c.source || b === c.target) return true;
+    }
+  }
+  // check if a is endpoint and b is the focus
+  for (const c of connections) {
+    if ((c.source === b || c.target === b) && (c.source === a || c.target === a)) return true;
+  }
+  return false;
+}
+
+function connectedEndpoints(node) {
+  const set = new Set();
+  for (const c of connections) {
+    if (c.source === node) set.add(c.target);
+    if (c.target === node) set.add(c.source);
+  }
+  return set;
+}
+
+function drawBundles() {
+  if (linkState === 2) { gLinks.selectAll("path").remove(); return; }
+
+  bundleLine.curve(d3.curveBundle.beta(bundleBeta));
+
+  const focus = selectedNode || hoveredNode;
+  const connSet = focus ? connectedEndpoints(focus) : null;
+
+  const sel = gLinks.selectAll("path.bundle").data(bundlePaths);
+  sel.enter().append("path").attr("class","bundle")
+    .attr("fill","none")
+    .merge(sel)
+    .attr("d", d => bundleLine(d))
+    .attr("stroke", d => {
+      if (!focus) return "#94a3b8";
+      const src = d[0], tgt = d[d.length-1];
+      if (src === focus || tgt === focus || connSet.has(src) || connSet.has(tgt)) {
+        if ((src === focus || tgt === focus)) return "#facc15";
+      }
+      return "#94a3b8";
+    })
+    .attr("stroke-opacity", d => {
+      if (!focus) return 0.18;
+      const src = d[0], tgt = d[d.length-1];
+      if ((src === focus || tgt === focus)) return 0.7;
+      return 0.04;
+    })
+    .attr("stroke-width", d => {
+      if (!focus) return 1;
+      const src = d[0], tgt = d[d.length-1];
+      if ((src === focus || tgt === focus)) return 1.8;
+      return 0.5;
+    });
+  sel.exit().remove();
+}
+
+function drawHierLinks() {
+  const showFor = ["dendrogram","radial","force"];
+  const visible = showFor.includes(currentLayout) && showHier;
+
+  if (!visible) { gHier.selectAll("line").remove(); return; }
+
+  const links = root.links();
+  const sel = gHier.selectAll("line.hier").data(links);
+  sel.enter().append("line").attr("class","hier")
+    .attr("stroke","#cbd5e1").attr("stroke-width",0.8).attr("stroke-opacity",0.5)
+    .merge(sel)
+    .attr("x1", d => d.source.current_x).attr("y1", d => d.source.current_y)
+    .attr("x2", d => d.target.current_x).attr("y2", d => d.target.current_y);
+  sel.exit().remove();
+}
+
+function drawLabels() {
+  const showFor = ["pack","treemap","icicle"];
+  if (!showFor.includes(currentLayout) || !root.children) {
+    gLabels.selectAll("text").remove();
+    return;
+  }
+  const groups = root.children;
+  const sel = gLabels.selectAll("text.glabel").data(groups, d => d.data.id);
+  sel.enter().append("text").attr("class","glabel")
+    .attr("text-anchor","middle").attr("dominant-baseline","central")
+    .attr("pointer-events","none").attr("font-weight",600)
+    .merge(sel)
+    .attr("x", d => d.current_x)
+    .attr("y", d => d.current_y)
+    .attr("fill", d => darken(d._color))
+    .attr("font-size", d => {
+      if (currentLayout === "pack") return Math.max(8, Math.min(16, d._r * 0.35)) + "px";
+      if (currentLayout === "treemap" || currentLayout === "icicle") return Math.max(7, Math.min(14, Math.min(d._tw, d._th) * 0.3)) + "px";
+      return "10px";
+    })
+    .attr("opacity", d => {
+      if (currentLayout === "pack") return d._r > 20 ? 0.8 : 0;
+      if (currentLayout === "treemap" || currentLayout === "icicle") return (d._tw > 30 && d._th > 14) ? 0.8 : 0;
+      return 0;
+    })
+    .text((d,i) => ["Systems","Energy","Finance","Health","Media","Research","Logistics"][i] || `Group ${i}`);
+  sel.exit().remove();
+}
+
+function render() {
+  // link ordering
+  if (linkState === 1) { gLinks.raise(); gHier.raise(); }
+  else { gLinks.lower(); gHier.lower(); }
+
+  drawBundles();
+  drawHierLinks();
+  drawNodes();
+  drawLabels();
+}
+
+/* ── transitions ── */
+function switchLayout(name) {
+  if (simulation) { simulation.stop(); simulation = null; }
+  selectedNode = null;
+  hoveredNode = null;
+  currentLayout = name;
+
+  // show/hide hierarchy checkbox
+  const hierLayouts = ["dendrogram","radial","force"];
+  document.getElementById("hierLabel").style.display = hierLayouts.includes(name) ? "" : "none";
+
+  // stash current positions
+  root.each(d => { d.source_x = d.current_x; d.source_y = d.current_y; });
+
+  computeLayout(name);
+
+  if (name === "force") {
+    startForce();
+    return;
+  }
+
+  // interrupt any running transitions
+  svg.interrupt("layout");
+  gNodes.selectAll("g.node").interrupt();
+
+  // animate
+  const dur = 1000;
+  svg.transition("layout").duration(dur).ease(d3.easeCubicInOut)
+    .tween("positions", () => {
+      // Also stash shape properties for interpolation
+      const interps = allNodes.map(d => ({
+        node: d,
+        ix: d3.interpolate(d.source_x, d.target_x),
+        iy: d3.interpolate(d.source_y, d.target_y),
+      }));
+      return t => {
+        for (const {node: d, ix, iy} of interps) {
+          d.current_x = ix(t);
+          d.current_y = iy(t);
+        }
+        render();
+      };
+    });
+}
+
+/* ── force layout ── */
+function startForce() {
+  // Initialize from current positions
+  allNodes.forEach(d => {
+    d.fx_force = null;
+    d.fy_force = null;
+    d.x = d.current_x;
+    d.y = d.current_y;
+    d.vx = 0;
+    d.vy = 0;
+  });
+
+  const links = root.links().map(d => ({source: d.source, target: d.target}));
+
+  simulation = d3.forceSimulation(allNodes)
+    .alpha(0.4)
+    .alphaDecay(0.01)
+    .velocityDecay(0.5)
+    .force("link", d3.forceLink(links).id(d => d.data.id).distance(20).strength(0.8))
+    .force("charge", d3.forceManyBody().strength(-30).distanceMax(200))
+    .force("collide", d3.forceCollide().radius(d => (d._r || 3) + 1).iterations(1))
+    .force("center", d3.forceCenter(cx, cy))
+    .on("tick", () => {
+      allNodes.forEach(d => {
+        d.current_x = d.x;
+        d.current_y = d.y;
+      });
+      render();
+    });
+
+  // drag
+  gNodes.selectAll("g.node").call(
+    d3.drag()
+      .on("start", (e, d) => {
+        if (!e.active) simulation.alphaTarget(0.3).restart();
+        d.fx = d.x; d.fy = d.y;
+      })
+      .on("drag", (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on("end", (e, d) => {
+        if (!e.active) simulation.alphaTarget(0);
+        d.fx = null; d.fy = null;
+      })
+  );
+}
+
+/* ── controls ── */
+const layouts = [
+  {id:"pack",label:"Circle Pack"},
+  {id:"treemap",label:"Treemap"},
+  {id:"dendrogram",label:"Dendrogram"},
+  {id:"radial",label:"Radial Tree"},
+  {id:"icicle",label:"Icicle"},
+  {id:"sunburst",label:"Sunburst"},
+  {id:"force",label:"Force"},
+];
+
+const btnContainer = document.getElementById("layoutButtons");
+for (const l of layouts) {
+  const btn = document.createElement("button");
+  btn.textContent = l.label;
+  btn.dataset.layout = l.id;
+  if (l.id === currentLayout) btn.classList.add("active");
+  btn.addEventListener("click", () => {
+    btnContainer.querySelectorAll("button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    switchLayout(l.id);
+  });
+  btnContainer.appendChild(btn);
+}
+
+// bundle slider
+const slider = document.getElementById("bundleSlider");
+const valSpan = document.getElementById("bundleVal");
+let sliderRaf = null;
+slider.addEventListener("input", () => {
+  const v = +slider.value;
+  bundleBeta = 1 - v; // beta = 1 - tension
+  valSpan.textContent = Math.round(v * 100) + "%";
+  if (!sliderRaf) {
+    sliderRaf = requestAnimationFrame(() => {
+      sliderRaf = null;
+      drawBundles();
+    });
+  }
+});
+
+// link toggle
+const linkBtn = document.getElementById("linkToggle");
+const linkLabels = ["Links Behind","Links On Top","Links Hidden"];
+linkBtn.addEventListener("click", () => {
+  linkState = (linkState + 1) % 3;
+  linkBtn.textContent = linkLabels[linkState];
+  linkBtn.classList.toggle("active", linkState === 1);
+  render();
+});
+
+// hierarchy checkbox
+const hierCheck = document.getElementById("hierCheck");
+hierCheck.addEventListener("change", () => {
+  showHier = hierCheck.checked;
+  render();
+});
+
+// new dataset
+document.getElementById("newDataBtn").addEventListener("click", () => {
+  if (simulation) { simulation.stop(); simulation = null; }
+  generateData();
+  initPositions();
+  // Recompute current layout
+  computeLayout(currentLayout);
+  root.each(d => { d.current_x = d.target_x; d.current_y = d.target_y; });
+  selectedNode = null; hoveredNode = null;
+  render();
+  if (currentLayout === "force") startForce();
+});
+
+// click background to deselect
+svg.on("click", () => {
+  if (selectedNode) { selectedNode = null; hoveredNode = null; render(); }
+});
+
+// initial render
+render();
+</script>
+</body>
+</html>

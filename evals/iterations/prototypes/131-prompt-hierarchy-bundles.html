@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hierarchical Layouts with Edge Bundles</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:Inter,system-ui,-apple-system,sans-serif;background:#f0f2f5;display:flex;justify-content:center;padding:24px}
+  .card{background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,0.08);padding:24px;max-width:960px;width:100%}
+  h2{font-size:1.25rem;font-weight:600;color:#1e293b;margin-bottom:12px;text-align:center}
+  .controls{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-bottom:8px}
+  .controls button{padding:6px 14px;border:1px solid #d1d5db;border-radius:6px;background:#fff;color:#374151;font-size:0.8rem;font-family:inherit;cursor:pointer;transition:all 0.15s}
+  .controls button:hover{background:#eff6ff;border-color:#93c5fd}
+  .controls button.active{background:#3b82f6;color:#fff;border-color:#3b82f6}
+  .slider-row{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:center;margin-bottom:12px;font-size:0.8rem;color:#64748b}
+  .slider-row label{display:flex;align-items:center;gap:4px}
+  .slider-row input[type=range]{width:120px;accent-color:#3b82f6}
+  .slider-row button{padding:4px 10px;border:1px solid #d1d5db;border-radius:6px;background:#fff;color:#374151;font-size:0.75rem;font-family:inherit;cursor:pointer;transition:all 0.15s}
+  .slider-row button:hover{background:#eff6ff;border-color:#93c5fd}
+  .slider-row button.active{background:#3b82f6;color:#fff;border-color:#3b82f6}
+  .slider-row input[type=checkbox]{accent-color:#3b82f6}
+  svg{display:block;margin:0 auto}
+  footer{text-align:center;font-size:0.7rem;color:#94a3b8;margin-top:10px}
+</style>
+</head>
+<body>
+<div class="card">
+  <h2>Hierarchical Layouts</h2>
+  <div class="controls" id="layout-btns"></div>
+  <div class="slider-row">
+    <label>Bundling: <input type="range" id="beta-slider" min="0" max="100" value="85"><span id="beta-val">85%</span></label>
+    <button id="link-toggle">Links Behind</button>
+    <label id="hier-label" style="display:none"><input type="checkbox" id="hier-check" checked> Show Hierarchy</label>
+  </div>
+  <div id="viz"></div>
+  <footer>Built with D3.js v7</footer>
+</div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+const W = 900, H = 900;
+const palette = [d3.schemeTableau10[0], d3.schemeTableau10[1], d3.schemeTableau10[2],
+                 d3.schemeTableau10[4], d3.schemeTableau10[5], d3.schemeTableau10[6],
+                 d3.schemeTableau10[7]];
+
+let root, nodesById, connections, bundlePaths, currentLayout = "pack";
+let selectedNode = null, simulation = null;
+let linkState = "behind"; // behind | top | hidden
+let bundling = 0.85;
+let rafPending = false;
+
+const svg = d3.select("#viz").append("svg")
+  .attr("viewBox", [-W/2, -H/2, W, H].join(" "))
+  .attr("width", W).attr("height", H)
+  .style("max-width", "100%").style("height", "auto");
+
+const gHierLinks = svg.append("g").attr("class", "hier-links");
+const gBundleBack = svg.append("g").attr("class", "bundle-back");
+const gNodes = svg.append("g").attr("class", "nodes");
+const gBundleTop = svg.append("g").attr("class", "bundle-top");
+
+// Background click to deselect
+svg.on("click", e => { if (e.target === svg.node()) { selectedNode = null; updateHighlight(); }});
+
+const layouts = ["Pack","Treemap","Dendrogram","Radial Tree","Icicle","Sunburst","Force"];
+const layoutKeys = ["pack","treemap","dendro","radial","icicle","sunburst","force"];
+
+const btnContainer = d3.select("#layout-btns");
+layouts.forEach((name, i) => {
+  btnContainer.append("button").text(name).attr("data-layout", layoutKeys[i])
+    .classed("active", layoutKeys[i] === "pack")
+    .on("click", function() {
+      const key = this.dataset.layout;
+      if (key === currentLayout) return;
+      btnContainer.selectAll("button").classed("active", false);
+      d3.select(this).classed("active", true);
+      switchLayout(key);
+    });
+});
+btnContainer.append("button").text("New Dataset").on("click", () => { generateData(); switchLayout(currentLayout, true); });
+
+// Slider
+const betaSlider = d3.select("#beta-slider");
+const betaVal = d3.select("#beta-val");
+betaSlider.on("input", function() {
+  bundling = +this.value / 100;
+  betaVal.text(this.value + "%");
+  if (!rafPending) { rafPending = true; requestAnimationFrame(() => { rafPending = false; drawBundles(); }); }
+});
+
+// Link toggle
+const linkToggle = d3.select("#link-toggle");
+linkToggle.on("click", () => {
+  if (linkState === "behind") linkState = "top";
+  else if (linkState === "top") linkState = "hidden";
+  else linkState = "behind";
+  linkToggle.text(linkState === "behind" ? "Links Behind" : linkState === "top" ? "Links On Top" : "Links Hidden");
+  linkToggle.classed("active", linkState !== "hidden");
+  drawBundles();
+});
+
+// Hierarchy checkbox
+const hierCheck = d3.select("#hier-check");
+const hierLabel = d3.select("#hier-label");
+hierCheck.on("change", function() { drawHierLinks(); });
+
+function generateData() {
+  const flat = [{id: "root", parent: null}];
+  const rng = d3.randomLcg(Math.random() * 1e9)();
+  const groups = 5 + Math.floor(Math.random() * 3);
+  for (let g = 0; g < groups; g++) {
+    const gid = `g${g}`;
+    flat.push({id: gid, parent: "root"});
+    const subgroups = 2 + Math.floor(Math.random() * 3);
+    for (let s = 0; s < subgroups; s++) {
+      const sid = `${gid}_s${s}`;
+      flat.push({id: sid, parent: gid});
+      const depth3 = 1 + Math.floor(Math.random() * 3);
+      for (let d = 0; d < depth3; d++) {
+        const did = `${sid}_d${d}`;
+        flat.push({id: did, parent: sid});
+        const depth4 = 1 + Math.floor(Math.random() * 4);
+        for (let e = 0; e < depth4; e++) {
+          const eid = `${did}_e${e}`;
+          flat.push({id: eid, parent: did});
+          if (Math.random() < 0.5) {
+            const depth5 = 1 + Math.floor(Math.random() * 3);
+            for (let f = 0; f < depth5; f++) {
+              const fid = `${eid}_f${f}`;
+              flat.push({id: fid, parent: eid});
+              if (Math.random() < 0.3) {
+                const depth6 = 1 + Math.floor(Math.random() * 2);
+                for (let g2 = 0; g2 < depth6; g2++) {
+                  flat.push({id: `${fid}_g${g2}`, parent: fid});
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  root = d3.stratify().id(d => d.id).parentId(d => d.parent)(flat);
+  root.count().sort((a, b) => b.value - a.value);
+  nodesById = new Map(root.descendants().map(d => [d.data.id, d]));
+
+  const leaves = root.leaves();
+  connections = [];
+  for (let i = 0; i < 300; i++) {
+    const s = leaves[Math.floor(Math.random() * leaves.length)];
+    const t = leaves[Math.floor(Math.random() * leaves.length)];
+    if (s !== t) connections.push({source: s.data.id, target: t.data.id});
+  }
+
+  bundlePaths = connections.map(c => {
+    const s = nodesById.get(c.source), t = nodesById.get(c.target);
+    return s && t ? s.path(t) : null;
+  }).filter(Boolean);
+
+  // Assign colors
+  const topLevel = root.children || [root];
+  topLevel.forEach((child, i) => {
+    const color = d3.color(palette[i % palette.length]);
+    child.each(d => {
+      d._groupColor = color.formatHex();
+      d._fillColor = d.children ? color.formatHex() : d3.color(color).brighter(0.5).formatHex();
+      d._strokeColor = d3.color(color).darker(0.5).formatHex();
+    });
+  });
+  root._groupColor = "#6b7280";
+  root._fillColor = "#6b7280";
+  root._strokeColor = "#374151";
+
+  // Init positions
+  root.each(d => { d.current_x = 0; d.current_y = 0; d._w = 0; d._h = 0; d._r = 0; d._arcStart = 0; d._arcEnd = 0; d._innerR = 0; d._outerR = 0; d._cornerRadius = 0; d._shape = "circle"; });
+}
+
+function depthOpacity(d) {
+  return 0.4 + 0.6 * (d.depth / (root.height || 1));
+}
+
+// Layout computations
+function computePack() {
+  const pack = d3.pack().size([W - 40, H - 40]).padding(2);
+  root.sum(d => d.children ? 0 : 1);
+  pack(root);
+  root.each(d => {
+    d.target_x = d.x - (W - 40) / 2;
+    d.target_y = d.y - (H - 40) / 2;
+    d._target_r = d.r;
+    d._target_shape = "circle";
+    d._target_cornerRadius = d.r;
+    d._target_w = 0; d._target_h = 0;
+    d._target_arcStart = 0; d._target_arcEnd = 0;
+    d._target_innerR = 0; d._target_outerR = 0;
+  });
+}
+
+function computeTreemap() {
+  const treemap = d3.treemap().size([W - 40, H - 40]).padding(2).round(true).tile(d3.treemapSquarify);
+  root.sum(d => d.children ? 0 : 1);
+  treemap(root);
+  root.each(d => {
+    d.target_x = (d.x0 + d.x1) / 2 - (W - 40) / 2;
+    d.target_y = (d.y0 + d.y1) / 2 - (H - 40) / 2;
+    d._target_w = d.x1 - d.x0;
+    d._target_h = d.y1 - d.y0;
+    d._target_r = 0;
+    d._target_shape = "rect";
+    d._target_cornerRadius = 3;
+    d._target_arcStart = 0; d._target_arcEnd = 0;
+    d._target_innerR = 0; d._target_outerR = 0;
+  });
+}
+
+function computeDendro() {
+  const tree = d3.tree().size([H - 80, W - 160]);
+  tree(root);
+  root.each(d => {
+    d.target_x = d.y - (W - 160) / 2;
+    d.target_y = d.x - (H - 80) / 2;
+    d._target_r = d.children ? 3 : 4;
+    d._target_shape = "circle";
+    d._target_cornerRadius = d._target_r;
+    d._target_w = 0; d._target_h = 0;
+    d._target_arcStart = 0; d._target_arcEnd = 0;
+    d._target_innerR = 0; d._target_outerR = 0;
+  });
+}
+
+function computeRadial() {
+  const radius = Math.min(W, H) / 2 - 60;
+  const tree = d3.tree().size([2 * Math.PI, radius])
+    .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth);
+  tree(root);
+  root.each(d => {
+    if (d === root) { d.target_x = 0; d.target_y = 0; }
+    else {
+      d.target_x = d.y * Math.cos(d.x - Math.PI / 2);
+      d.target_y = d.y * Math.sin(d.x - Math.PI / 2);
+    }
+    d._target_r = d.children ? 3 : 4;
+    d._target_shape = "circle";
+    d._target_cornerRadius = d._target_r;
+    d._target_w = 0; d._target_h = 0;
+    d._target_arcStart = 0; d._target_arcEnd = 0;
+    d._target_innerR = 0; d._target_outerR = 0;
+  });
+}
+
+function computeIcicle() {
+  const partition = d3.partition().size([W - 40, H - 40]).padding(1);
+  root.sum(d => d.children ? 0 : 1);
+  partition(root);
+  root.each(d => {
+    d.target_x = (d.x0 + d.x1) / 2 - (W - 40) / 2;
+    d.target_y = (d.y0 + d.y1) / 2 - (H - 40) / 2;
+    d._target_w = d.x1 - d.x0;
+    d._target_h = d.y1 - d.y0;
+    d._target_r = 0;
+    d._target_shape = "rect";
+    d._target_cornerRadius = 2;
+    d._target_arcStart = 0; d._target_arcEnd = 0;
+    d._target_innerR = 0; d._target_outerR = 0;
+  });
+}
+
+function computeSunburst() {
+  const radius = Math.min(W, H) / 2 - 20;
+  const partition = d3.partition().size([2 * Math.PI, radius]);
+  root.sum(d => d.children ? 0 : 1);
+  partition(root);
+  const rScale = d3.scaleSqrt().domain([0, radius]).range([0, radius]);
+  root.each(d => {
+    d.target_x = 0;
+    d.target_y = 0;
+    d._target_arcStart = d.x0;
+    d._target_arcEnd = d.x1;
+    d._target_innerR = rScale(d.y0);
+    d._target_outerR = rScale(d.y1);
+    d._target_shape = "arc";
+    d._target_r = 0; d._target_w = 0; d._target_h = 0;
+    d._target_cornerRadius = 0;
+  });
+}
+
+function computeForce() {
+  root.each(d => {
+    d.target_x = d.current_x;
+    d.target_y = d.current_y;
+    d._target_r = d.children ? Math.max(3, d3.scaleSqrt().domain([0, root.value]).range([3, 20])(d.value)) : 5;
+    d._target_shape = "circle";
+    d._target_cornerRadius = d._target_r;
+    d._target_w = 0; d._target_h = 0;
+    d._target_arcStart = 0; d._target_arcEnd = 0;
+    d._target_innerR = 0; d._target_outerR = 0;
+  });
+}
+
+const arc = d3.arc();
+
+function nodePath(d) {
+  if (d._shape === "arc") {
+    if (Math.abs(d._arcEnd - d._arcStart) < 0.001 && d._outerR < 1) return "";
+    return arc({ startAngle: d._arcStart, endAngle: d._arcEnd, innerRadius: d._innerR, outerRadius: d._outerR }) || "";
+  }
+  if (d._shape === "rect" && d._w > 0 && d._h > 0) {
+    const cr = Math.min(d._cornerRadius, d._w / 2, d._h / 2);
+    const x = -d._w / 2, y = -d._h / 2, w = d._w, h = d._h;
+    if (cr < 0.5) return `M${x},${y}h${w}v${h}h${-w}Z`;
+    return `M${x+cr},${y}h${w-2*cr}a${cr},${cr},0,0,1,${cr},${cr}v${h-2*cr}a${cr},${cr},0,0,1,${-cr},${cr}h${-(w-2*cr)}a${cr},${cr},0,0,1,${-cr},${-cr}v${-(h-2*cr)}a${cr},${cr},0,0,1,${cr},${-cr}Z`;
+  }
+  if (d._shape === "circle" && d._r > 0) {
+    const r = d._r;
+    return `M${-r},0a${r},${r},0,1,1,${2*r},0a${r},${r},0,1,1,${-2*r},0Z`;
+  }
+  return "";
+}
+
+function isTiny(d) {
+  if (d._shape === "circle") return d._r < 2;
+  if (d._shape === "rect") return d._w < 2 || d._h < 2;
+  if (d._shape === "arc") return (d._arcEnd - d._arcStart) * d._outerR < 2;
+  return true;
+}
+
+function drawNodes() {
+  const nodes = root.descendants();
+  const sel = gNodes.selectAll("path.node")
+    .data(nodes, d => d.data.id);
+
+  sel.join(
+    enter => enter.append("path").attr("class", "node")
+      .attr("fill", d => d._fillColor)
+      .attr("stroke", d => d._strokeColor)
+      .attr("stroke-width", 0.5)
+      .attr("cursor", "pointer")
+      .on("pointerenter", (e, d) => onHover(d))
+      .on("pointerleave", () => onHover(null))
+      .on("click", (e, d) => { e.stopPropagation(); onClick(d); }),
+    update => update,
+    exit => exit.remove()
+  )
+    .attr("transform", d => (d._shape === "arc" || d._shape === "sunburst_special") ? "" : `translate(${d.current_x},${d.current_y})`)
+    .attr("d", d => nodePath(d))
+    .attr("fill", d => d._fillColor)
+    .attr("stroke", d => d._strokeColor)
+    .attr("fill-opacity", d => isTiny(d) ? 0 : depthOpacity(d));
+}
+
+const bundleLine = d3.line().x(d => d.current_x).y(d => d.current_y);
+
+function drawBundles() {
+  const beta = 1 - bundling;
+  bundleLine.curve(d3.curveBundle.beta(beta));
+
+  const isHidden = linkState === "hidden";
+  const gActive = linkState === "top" ? gBundleTop : gBundleBack;
+  const gInactive = linkState === "top" ? gBundleBack : gBundleTop;
+
+  gInactive.selectAll("path.bundle").remove();
+
+  if (isHidden) {
+    gActive.selectAll("path.bundle").remove();
+    return;
+  }
+
+  const sel = gActive.selectAll("path.bundle").data(bundlePaths);
+  sel.join(
+    enter => enter.append("path").attr("class", "bundle")
+      .attr("fill", "none").attr("stroke-width", 1),
+    update => update,
+    exit => exit.remove()
+  )
+    .attr("d", d => bundleLine(d))
+    .attr("stroke", d => {
+      const src = d[0], tgt = d[d.length - 1];
+      return src._groupColor || "#999";
+    })
+    .attr("stroke-opacity", 0.15);
+
+  updateHighlight();
+}
+
+function drawHierLinks() {
+  const showHier = hierCheck.property("checked");
+  const hierLayouts = ["dendro", "radial", "force"];
+  const visible = showHier && hierLayouts.includes(currentLayout);
+
+  if (!visible) {
+    gHierLinks.selectAll("line.hier").remove();
+    return;
+  }
+
+  const links = root.links();
+  const sel = gHierLinks.selectAll("line.hier").data(links, d => d.source.data.id + "-" + d.target.data.id);
+  sel.join(
+    enter => enter.append("line").attr("class", "hier")
+      .attr("stroke", "#d1d5db").attr("stroke-width", 0.5),
+    update => update,
+    exit => exit.remove()
+  )
+    .attr("x1", d => d.source.current_x)
+    .attr("y1", d => d.source.current_y)
+    .attr("x2", d => d.target.current_x)
+    .attr("y2", d => d.target.current_y);
+}
+
+// Hover & selection
+let hoveredNode = null;
+
+function getConnected(node) {
+  if (!node) return { links: [], nodeIds: new Set() };
+  const leafIds = new Set(node.leaves().map(d => d.data.id));
+  if (!node.children) leafIds.add(node.data.id);
+  const links = [];
+  const nodeIds = new Set();
+  bundlePaths.forEach((path, i) => {
+    const srcId = path[0].data.id, tgtId = path[path.length - 1].data.id;
+    if (leafIds.has(srcId) || leafIds.has(tgtId)) {
+      links.push(i);
+      nodeIds.add(srcId);
+      nodeIds.add(tgtId);
+    }
+  });
+  return { links, nodeIds };
+}
+
+function onHover(d) {
+  hoveredNode = d;
+  updateHighlight();
+}
+
+function onClick(d) {
+  if (selectedNode === d) selectedNode = null;
+  else selectedNode = d;
+  updateHighlight();
+}
+
+function updateHighlight() {
+  const active = selectedNode || hoveredNode;
+  const isSelection = !!selectedNode;
+
+  if (!active) {
+    gNodes.selectAll("path.node")
+      .attr("fill-opacity", d => isTiny(d) ? 0 : depthOpacity(d))
+      .attr("stroke", d => d._strokeColor)
+      .attr("stroke-width", 0.5);
+    gBundleBack.selectAll("path.bundle").attr("stroke-opacity", 0.15).attr("stroke-width", 1);
+    gBundleTop.selectAll("path.bundle").attr("stroke-opacity", 0.15).attr("stroke-width", 1);
+    return;
+  }
+
+  const { links: connLinks, nodeIds } = getConnected(active);
+  const connSet = new Set(connLinks);
+
+  gNodes.selectAll("path.node")
+    .attr("fill-opacity", d => {
+      if (isTiny(d)) return 0;
+      if (nodeIds.has(d.data.id) || d === active) return 1;
+      return isSelection ? 0.08 : depthOpacity(d) * 0.5;
+    })
+    .attr("stroke", d => (nodeIds.has(d.data.id) || d === active) ? "#facc15" : d._strokeColor)
+    .attr("stroke-width", d => (nodeIds.has(d.data.id) || d === active) ? 2 : 0.5);
+
+  [gBundleBack, gBundleTop].forEach(g => {
+    g.selectAll("path.bundle")
+      .attr("stroke-opacity", (d, i) => connSet.has(i) ? 0.7 : (isSelection ? 0.02 : 0.08))
+      .attr("stroke-width", (d, i) => connSet.has(i) ? 2 : 1)
+      .attr("stroke", (d, i) => connSet.has(i) ? "#facc15" : (d[0]._groupColor || "#999"));
+  });
+}
+
+function interruptAll() {
+  svg.interrupt();
+  gNodes.selectAll("*").interrupt();
+  gBundleBack.selectAll("*").interrupt();
+  gBundleTop.selectAll("*").interrupt();
+  gHierLinks.selectAll("*").interrupt();
+}
+
+function switchLayout(key, forceReset) {
+  interruptAll();
+  if (simulation) { simulation.stop(); simulation = null; }
+
+  const prev = currentLayout;
+  currentLayout = key;
+
+  // Show/hide hier checkbox
+  const hierLayouts = ["dendro", "radial", "force"];
+  hierLabel.style("display", hierLayouts.includes(key) ? "" : "none");
+
+  // Store source positions
+  root.each(d => {
+    d.source_x = d.current_x;
+    d.source_y = d.current_y;
+    d._source_r = d._r;
+    d._source_w = d._w;
+    d._source_h = d._h;
+    d._source_shape = d._shape;
+    d._source_cornerRadius = d._cornerRadius;
+    d._source_arcStart = d._arcStart;
+    d._source_arcEnd = d._arcEnd;
+    d._source_innerR = d._innerR;
+    d._source_outerR = d._outerR;
+  });
+
+  // Compute targets
+  if (key === "pack") computePack();
+  else if (key === "treemap") computeTreemap();
+  else if (key === "dendro") computeDendro();
+  else if (key === "radial") computeRadial();
+  else if (key === "icicle") computeIcicle();
+  else if (key === "sunburst") computeSunburst();
+  else if (key === "force") computeForce();
+
+  if (key === "force") {
+    // Transition to initial positions then start sim
+    animateTransition(800, () => startForce());
+  } else {
+    animateTransition(1000);
+  }
+}
+
+function animateTransition(duration, onEnd) {
+  const t = svg.transition().duration(duration).ease(d3.easeCubicInOut);
+
+  t.tween("layout", () => {
+    return time => {
+      root.each(d => {
+        d.current_x = d.source_x + (d.target_x - d.source_x) * time;
+        d.current_y = d.source_y + (d.target_y - d.source_y) * time;
+        d._r = (d._source_r || 0) + ((d._target_r || 0) - (d._source_r || 0)) * time;
+        d._w = (d._source_w || 0) + ((d._target_w || 0) - (d._source_w || 0)) * time;
+        d._h = (d._source_h || 0) + ((d._target_h || 0) - (d._source_h || 0)) * time;
+        d._cornerRadius = (d._source_cornerRadius || 0) + ((d._target_cornerRadius || 0) - (d._source_cornerRadius || 0)) * time;
+        d._arcStart = (d._source_arcStart || 0) + ((d._target_arcStart || 0) - (d._source_arcStart || 0)) * time;
+        d._arcEnd = (d._source_arcEnd || 0) + ((d._target_arcEnd || 0) - (d._source_arcEnd || 0)) * time;
+        d._innerR = (d._source_innerR || 0) + ((d._target_innerR || 0) - (d._source_innerR || 0)) * time;
+        d._outerR = (d._source_outerR || 0) + ((d._target_outerR || 0) - (d._source_outerR || 0)) * time;
+
+        // Shape transition: switch at midpoint
+        if (time < 0.5) d._shape = d._source_shape || "circle";
+        else d._shape = d._target_shape || "circle";
+      });
+      drawNodes();
+      drawBundles();
+      drawHierLinks();
+    };
+  });
+
+  if (onEnd) t.on("end", onEnd);
+}
+
+function startForce() {
+  const nodes = root.descendants();
+  const rScale = d3.scaleSqrt().domain([0, root.value]).range([3, 20]);
+
+  nodes.forEach(d => {
+    d.x = d.current_x;
+    d.y = d.current_y;
+  });
+
+  const parentLinks = root.links().map(d => ({source: d.source, target: d.target}));
+
+  simulation = d3.forceSimulation(nodes)
+    .alpha(0.3)
+    .alphaDecay(0.01)
+    .velocityDecay(0.5)
+    .force("link", d3.forceLink(parentLinks).id(d => d.data.id).distance(20).strength(0.3))
+    .force("charge", d3.forceManyBody().strength(-40).distanceMax(250))
+    .force("collide", d3.forceCollide().radius(d => (d.children ? rScale(d.value) : 5) + 1).strength(0.5))
+    .force("center", d3.forceCenter(0, 0).strength(0.05))
+    .on("tick", () => {
+      nodes.forEach(d => {
+        d.current_x = d.x;
+        d.current_y = d.y;
+        d._r = d.children ? rScale(d.value) : 5;
+        d._shape = "circle";
+        d._cornerRadius = d._r;
+        d._w = 0; d._h = 0;
+        d._arcStart = 0; d._arcEnd = 0;
+        d._innerR = 0; d._outerR = 0;
+      });
+      drawNodes();
+      drawBundles();
+      drawHierLinks();
+    });
+
+  // Drag
+  const drag = d3.drag()
+    .on("start", (e, d) => {
+      if (!e.active) simulation.alphaTarget(0.3).restart();
+      d.fx = d.x; d.fy = d.y;
+    })
+    .on("drag", (e, d) => { d.fx = e.x; d.fy = e.y; })
+    .on("end", (e, d) => {
+      if (!e.active) simulation.alphaTarget(0);
+      d.fx = null; d.fy = null;
+    });
+
+  gNodes.selectAll("path.node").call(drag);
+}
+
+// Init
+generateData();
+
+// Set initial positions for pack
+computePack();
+root.each(d => {
+  d.current_x = d.target_x;
+  d.current_y = d.target_y;
+  d._r = d._target_r;
+  d._w = d._target_w;
+  d._h = d._target_h;
+  d._shape = d._target_shape;
+  d._cornerRadius = d._target_cornerRadius;
+  d._arcStart = d._target_arcStart;
+  d._arcEnd = d._target_arcEnd;
+  d._innerR = d._target_innerR;
+  d._outerR = d._target_outerR;
+});
+
+drawNodes();
+drawBundles();
+drawHierLinks();
+</script>
+</body>
+</html>

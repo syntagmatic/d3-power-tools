@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hierarchical Layouts</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: Inter, system-ui, -apple-system, sans-serif;
+    background: #f0f2f5;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px;
+    min-height: 100vh;
+  }
+  h2 { font-size: 1.5rem; font-weight: 600; color: #1e293b; margin-bottom: 12px; }
+  .card {
+    background: #fff;
+    border-radius: 16px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.04);
+    padding: 20px;
+    max-width: 960px;
+    width: 100%;
+  }
+  .controls { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; align-items: center; }
+  .controls button {
+    padding: 6px 14px;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    background: #fff;
+    font-size: 0.82rem;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.15s;
+    color: #374151;
+  }
+  .controls button:hover { border-color: #93c5fd; background: #eff6ff; }
+  .controls button.active { background: #3b82f6; color: #fff; border-color: #3b82f6; }
+  .controls-row2 { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 8px; font-size: 0.82rem; color: #4b5563; }
+  .controls-row2 label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+  .controls-row2 input[type=range] { width: 120px; accent-color: #3b82f6; }
+  .controls-row2 button {
+    padding: 4px 10px; border: 1px solid #d1d5db; border-radius: 6px;
+    background: #fff; font-size: 0.78rem; font-family: inherit; cursor: pointer; color: #374151;
+  }
+  .controls-row2 button:hover { border-color: #93c5fd; }
+  svg { display: block; width: 100%; height: auto; }
+  footer { margin-top: 12px; font-size: 0.75rem; color: #9ca3af; }
+</style>
+</head>
+<body>
+<h2>Hierarchical Layouts</h2>
+<div class="card">
+  <div class="controls" id="layout-buttons"></div>
+  <div class="controls-row2" id="controls-row2"></div>
+  <svg id="viz" viewBox="-450 -450 900 900"></svg>
+</div>
+<footer>Built with D3.js v7</footer>
+<script type="module">
+
+const W = 900, H = 900, PAD = 40;
+const usable = W - PAD * 2;
+const halfU = usable / 2;
+
+// --- Colors ---
+const groupHues = ['#4a7fb5','#e07a5f','#5a9e8f','#d4a24e','#8b6fb0','#6b9f6b','#c75d7a'];
+const brighten = c => d3.color(c).brighter(0.6).formatHex();
+const darken = c => d3.color(c).darker(0.8).formatHex();
+
+let currentLayout = 'pack';
+let bundling = 0.85;
+let linkMode = 0; // 0=behind, 1=on top, 2=hidden
+let showHierarchy = true;
+let selectedNode = null;
+let root, connections, nodeMap, leafNodes;
+let simulation = null;
+let forceDirty = false;
+let forceRAFId = null;
+
+const svg = d3.select('#viz');
+const gBundlesBehind = svg.append('g').attr('class','bundles-behind');
+const gHierLinks = svg.append('g').attr('class','hier-links');
+const gNodes = svg.append('g').attr('class','nodes');
+const gLabels = svg.append('g').attr('class','labels');
+const gBundlesTop = svg.append('g').attr('class','bundles-top');
+
+// --- Data generation ---
+function generateData() {
+  const flat = [{id:'root', parent: null}];
+  const groupCount = 5 + Math.floor(Math.random()*3);
+  const groups = [];
+  for (let g = 0; g < groupCount; g++) {
+    const gid = `g${g}`;
+    flat.push({id: gid, parent: 'root'});
+    groups.push(gid);
+    const subCount = 2 + Math.floor(Math.random()*4);
+    for (let s = 0; s < subCount; s++) {
+      const sid = `${gid}-s${s}`;
+      flat.push({id: sid, parent: gid});
+      const leafCount = 3 + Math.floor(Math.random()*8);
+      for (let l = 0; l < leafCount; l++) {
+        const lid = `${sid}-${l}`;
+        flat.push({id: lid, parent: sid});
+        // occasional deeper nesting
+        if (Math.random() < 0.15) {
+          const did = `${lid}-d`;
+          flat.push({id: did, parent: lid});
+          if (Math.random() < 0.3) {
+            flat.push({id: `${did}-e`, parent: did});
+          }
+        }
+      }
+    }
+  }
+  // Trim or pad to ~200
+  while (flat.length > 220) flat.pop();
+
+  root = d3.stratify().id(d => d.id).parentId(d => d.parent)(flat);
+  root.count();
+  root.sort((a,b) => b.value - a.value);
+
+  nodeMap = new Map();
+  root.each(n => { nodeMap.set(n.data.id, n); n.current_x = 0; n.current_y = 0; });
+  leafNodes = root.leaves();
+
+  // Generate connections between leaves
+  connections = [];
+  const connSet = new Set();
+  const target = Math.min(300, leafNodes.length * 3);
+  let attempts = 0;
+  while (connections.length < target && attempts < target * 5) {
+    attempts++;
+    const a = leafNodes[Math.floor(Math.random() * leafNodes.length)];
+    const b = leafNodes[Math.floor(Math.random() * leafNodes.length)];
+    if (a === b) continue;
+    const key = a.data.id < b.data.id ? `${a.data.id}|${b.data.id}` : `${b.data.id}|${a.data.id}`;
+    if (connSet.has(key)) continue;
+    connSet.add(key);
+    connections.push({source: a, target: b, path: a.path(b)});
+  }
+}
+
+// --- Top-level group color ---
+function topGroup(n) {
+  let c = n;
+  while (c.depth > 1) c = c.parent;
+  return c;
+}
+function nodeColor(n) {
+  const gi = topGroup(n).parent ? topGroup(n).parent.children.indexOf(topGroup(n)) : 0;
+  const base = groupHues[gi % groupHues.length];
+  return n.children ? base : brighten(base);
+}
+function nodeStroke(n) {
+  const gi = topGroup(n).parent ? topGroup(n).parent.children.indexOf(topGroup(n)) : 0;
+  return darken(groupHues[gi % groupHues.length]);
+}
+function nodeOpacity(n) {
+  return Math.max(0.4, 1 - n.depth * 0.12);
+}
+
+// --- Layout computers ---
+function computePack() {
+  d3.pack().size([usable, usable]).padding(8)(root);
+  root.each(n => { n.tx = n.x - halfU; n.ty = n.y - halfU; n.tr = n.r; n.tShape = 'circle'; });
+}
+function computeTreemap() {
+  d3.treemap().size([usable, usable]).paddingInner(3).paddingOuter(4).round(true)(root);
+  root.each(n => {
+    n.tx = (n.x0 + n.x1) / 2 - halfU;
+    n.ty = (n.y0 + n.y1) / 2 - halfU;
+    n.tw = n.x1 - n.x0;
+    n.th = n.y1 - n.y0;
+    n.tShape = 'rect';
+  });
+}
+function computeDendrogram() {
+  const treeLayout = d3.tree().size([usable - 40, usable - 80]);
+  treeLayout(root);
+  root.each(n => { n.tx = n.y - halfU + 20; n.ty = n.x - halfU + 20; n.tr = 4; n.tShape = 'circle'; });
+}
+function computeRadial() {
+  const r = halfU - 30;
+  d3.tree().size([2 * Math.PI, r])(root);
+  root.each(n => {
+    const angle = n.x - Math.PI / 2;
+    n.tx = Math.cos(angle) * n.y;
+    n.ty = Math.sin(angle) * n.y;
+    n.tr = 4;
+    n.tShape = 'circle';
+  });
+}
+function computeIcicle() {
+  d3.partition().size([usable, usable]).padding(1)(root);
+  root.each(n => {
+    n.tx = (n.x0 + n.x1) / 2 - halfU;
+    n.ty = (n.y0 + n.y1) / 2 - halfU;
+    n.tw = n.x1 - n.x0;
+    n.th = n.y1 - n.y0;
+    n.tShape = 'rect';
+  });
+}
+function computeSunburst() {
+  d3.partition().size([2 * Math.PI, halfU])(root);
+  const rScale = d3.scaleSqrt().domain([0, halfU]).range([0, halfU]);
+  root.each(n => {
+    n.tArc = { startAngle: n.x0, endAngle: n.x1, innerRadius: rScale(n.y0), outerRadius: rScale(n.y1) };
+    n.tx = 0; n.ty = 0; n.tShape = 'arc';
+  });
+}
+function computeForce() {
+  const rScale = d3.scaleSqrt().domain([0, root.value]).range([3, 30]);
+  root.each(n => { n.tr = n.children ? rScale(n.value) : 3; n.tShape = 'circle'; });
+  const nodes = root.descendants();
+  const links = root.links();
+
+  if (simulation) simulation.stop();
+
+  nodes.forEach(n => { n.x = n.current_x; n.y = n.current_y; });
+
+  simulation = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(links).id(d => d.data.id).distance(20).strength(0.5))
+    .force('charge', d3.forceManyBody().strength(-30))
+    .force('collide', d3.forceCollide(d => d.tr + 2))
+    .force('center', d3.forceCenter(0, 0))
+    .force('bound', () => {
+      nodes.forEach(n => {
+        const lim = halfU - PAD;
+        n.x = Math.max(-lim, Math.min(lim, n.x));
+        n.y = Math.max(-lim, Math.min(lim, n.y));
+      });
+    })
+    .alpha(0.3)
+    .alphaDecay(0.02)
+    .on('tick', () => {
+      nodes.forEach(n => { n.tx = n.x; n.ty = n.y; n.current_x = n.x; n.current_y = n.y; });
+      forceDirty = true;
+    });
+
+  startForceRAF();
+}
+
+function startForceRAF() {
+  if (forceRAFId) return;
+  function loop() {
+    if (currentLayout !== 'force') { forceRAFId = null; return; }
+    if (forceDirty) {
+      forceDirty = false;
+      updatePositions(0);
+      drawBundles();
+      drawHierLinks();
+    }
+    forceRAFId = requestAnimationFrame(loop);
+  }
+  forceRAFId = requestAnimationFrame(loop);
+}
+
+function stopForce() {
+  if (simulation) { simulation.stop(); simulation = null; }
+  if (forceRAFId) { cancelAnimationFrame(forceRAFId); forceRAFId = null; }
+}
+
+const layouts = {
+  pack: computePack,
+  treemap: computeTreemap,
+  dendrogram: computeDendrogram,
+  radial: computeRadial,
+  icicle: computeIcicle,
+  sunburst: computeSunburst,
+  force: computeForce
+};
+
+const layoutLabels = {
+  pack: 'Circle Pack', treemap: 'Treemap', dendrogram: 'Dendrogram',
+  radial: 'Radial Tree', icicle: 'Icicle', sunburst: 'Sunburst', force: 'Force'
+};
+
+const arcGen = d3.arc();
+const bundleLine = d3.line().x(d => d.current_x).y(d => d.current_y).curve(d3.curveBundle.beta(bundling));
+
+// --- Rendering ---
+function shortId(n) {
+  const parts = n.data.id.split('-');
+  return parts[parts.length - 1];
+}
+
+function shouldLabel(n) {
+  if (n.tShape === 'circle') return n.tr > 20;
+  if (n.tShape === 'rect') return (n.tw || 0) * (n.th || 0) > 2000;
+  if (n.tShape === 'arc') {
+    const a = n.tArc;
+    return (a.endAngle - a.startAngle) > 0.15 && (a.outerRadius - a.innerRadius) > 14;
+  }
+  return false;
+}
+
+function isTiny(n) {
+  if (n.tShape === 'circle') return n.tr < 2;
+  if (n.tShape === 'rect') return (n.tw || 0) * (n.th || 0) < 4;
+  return false;
+}
+
+function updateNodes(dur = 600) {
+  const allNodes = root.descendants();
+  const t = svg.transition().duration(dur).ease(d3.easeCubicInOut);
+
+  // Nodes
+  const nodesSel = gNodes.selectAll('.node').data(allNodes, d => d.data.id);
+
+  const enter = nodesSel.enter().append('g').attr('class','node')
+    .attr('transform', d => `translate(${d.current_x},${d.current_y})`)
+    .style('opacity', 0);
+
+  enter.each(function(d) {
+    const g = d3.select(this);
+    g.append('circle').attr('class','shape-circle');
+    g.append('rect').attr('class','shape-rect');
+    g.append('path').attr('class','shape-arc');
+  });
+
+  enter.on('mouseenter', (e,d) => handleHover(d))
+    .on('mouseleave', () => handleHover(null))
+    .on('click', (e,d) => { e.stopPropagation(); handleClick(d); });
+
+  const merged = enter.merge(nodesSel);
+
+  merged.each(function(d) {
+    const g = d3.select(this);
+    g.interrupt();
+    g.select('.shape-circle').interrupt();
+    g.select('.shape-rect').interrupt();
+    g.select('.shape-arc').interrupt();
+  });
+
+  merged.transition(t)
+    .attrTween('transform', function(d) {
+      const sx = d.current_x, sy = d.current_y;
+      const ex = d.tx, ey = d.ty;
+      return t => {
+        d.current_x = sx + (ex - sx) * t;
+        d.current_y = sy + (ey - sy) * t;
+        return `translate(${d.current_x},${d.current_y})`;
+      };
+    })
+    .style('opacity', d => isTiny(d) ? 0 : 1)
+    .on('end', function(d) { d.current_x = d.tx; d.current_y = d.ty; });
+
+  // Circle shape
+  merged.select('.shape-circle').transition(t)
+    .attr('r', d => d.tShape === 'circle' ? d.tr : 0)
+    .attr('fill', d => nodeColor(d))
+    .attr('stroke', d => nodeStroke(d))
+    .attr('stroke-width', 0.5)
+    .attr('fill-opacity', d => d.tShape === 'circle' ? nodeOpacity(d) : 0)
+    .attr('stroke-opacity', d => d.tShape === 'circle' ? 1 : 0);
+
+  // Rect shape
+  merged.select('.shape-rect').transition(t)
+    .attr('x', d => d.tShape === 'rect' ? -(d.tw||0)/2 : 0)
+    .attr('y', d => d.tShape === 'rect' ? -(d.th||0)/2 : 0)
+    .attr('width', d => d.tShape === 'rect' ? (d.tw||0) : 0)
+    .attr('height', d => d.tShape === 'rect' ? (d.th||0) : 0)
+    .attr('rx', d => d.tShape === 'rect' ? Math.min(4, (d.tw||0)/4) : 0)
+    .attr('fill', d => nodeColor(d))
+    .attr('stroke', d => nodeStroke(d))
+    .attr('stroke-width', 0.5)
+    .attr('fill-opacity', d => d.tShape === 'rect' ? nodeOpacity(d) : 0)
+    .attr('stroke-opacity', d => d.tShape === 'rect' ? 1 : 0);
+
+  // Arc shape
+  merged.select('.shape-arc').transition(t)
+    .attrTween('d', function(d) {
+      if (d.tShape !== 'arc') {
+        const prev = this.__prev || {startAngle:0,endAngle:0,innerRadius:0,outerRadius:0};
+        const interp = d3.interpolate(prev, {startAngle:0,endAngle:0,innerRadius:0,outerRadius:0});
+        return t => { this.__prev = interp(t); return arcGen(interp(t)); };
+      }
+      const prev = this.__prev || {startAngle:0,endAngle:0,innerRadius:0,outerRadius:0};
+      const interp = d3.interpolate(prev, d.tArc);
+      return t => { this.__prev = interp(t); return arcGen(interp(t)); };
+    })
+    .attr('fill', d => nodeColor(d))
+    .attr('stroke', d => nodeStroke(d))
+    .attr('stroke-width', 0.5)
+    .attr('fill-opacity', d => d.tShape === 'arc' ? nodeOpacity(d) : 0)
+    .attr('stroke-opacity', d => d.tShape === 'arc' ? 1 : 0);
+
+  nodesSel.exit().transition(t).style('opacity',0).remove();
+
+  // Labels
+  const labelData = allNodes.filter(d => shouldLabel(d) && !isTiny(d));
+  const labelsSel = gLabels.selectAll('.label').data(labelData, d => d.data.id);
+
+  const labelEnter = labelsSel.enter().append('text').attr('class','label')
+    .attr('text-anchor','middle').attr('dominant-baseline','central')
+    .attr('font-size','10px').attr('fill','#1e293b').attr('pointer-events','none')
+    .style('opacity',0);
+
+  labelsSel.exit().transition(t).style('opacity',0).remove();
+
+  const labelMerged = labelEnter.merge(labelsSel);
+  labelMerged.each(function() { d3.select(this).interrupt(); });
+  labelMerged.text(d => shortId(d))
+    .transition(t)
+    .attrTween('x', function(d) {
+      const s = +d3.select(this).attr('x') || d.current_x;
+      return t => s + (d.tx - s) * t;
+    })
+    .attrTween('y', function(d) {
+      const s = +d3.select(this).attr('y') || d.current_y;
+      return t => s + (d.ty - s) * t;
+    })
+    .style('opacity', 0.9);
+
+  // Redraw bundles during transition
+  const timer = d3.timer(() => {
+    drawBundles();
+    drawHierLinks();
+  });
+  t.on('end', () => timer.stop());
+
+  // Drag for force
+  if (currentLayout === 'force') {
+    const drag = d3.drag()
+      .on('start', (e,d) => { if (!e.active) simulation.alphaTarget(0.1).restart(); d.fx = d.x; d.fy = d.y; })
+      .on('drag', (e,d) => { d.fx = e.x; d.fy = e.y; })
+      .on('end', (e,d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; });
+    merged.call(drag);
+  } else {
+    merged.on('.drag', null);
+  }
+}
+
+function updatePositions(dur = 0) {
+  // Instant position update for force ticks
+  const nodes = gNodes.selectAll('.node');
+  nodes.attr('transform', d => `translate(${d.current_x},${d.current_y})`);
+
+  const labels = gLabels.selectAll('.label');
+  labels.attr('x', d => d.current_x).attr('y', d => d.current_y);
+}
+
+function drawBundles() {
+  if (linkMode === 2) {
+    gBundlesBehind.selectAll('path').remove();
+    gBundlesTop.selectAll('path').remove();
+    return;
+  }
+  const container = linkMode === 0 ? gBundlesBehind : gBundlesTop;
+  const other = linkMode === 0 ? gBundlesTop : gBundlesBehind;
+  other.selectAll('path').remove();
+
+  const line = d3.line().x(d => d.current_x).y(d => d.current_y).curve(d3.curveBundle.beta(bundling));
+
+  const paths = container.selectAll('path').data(connections, (d,i) => i);
+  paths.enter().append('path')
+    .attr('fill','none')
+    .attr('stroke','#94a3b8')
+    .attr('stroke-opacity', 0.15)
+    .attr('stroke-width', 0.8)
+    .merge(paths)
+    .attr('d', d => line(d.path));
+  paths.exit().remove();
+}
+
+function drawHierLinks() {
+  const show = showHierarchy && ['dendrogram','radial','force'].includes(currentLayout);
+  if (!show) { gHierLinks.selectAll('line').remove(); return; }
+
+  const links = root.links();
+  const sel = gHierLinks.selectAll('line').data(links, d => `${d.source.data.id}-${d.target.data.id}`);
+  sel.enter().append('line')
+    .attr('stroke','#cbd5e1').attr('stroke-width',0.8).attr('stroke-opacity',0.5)
+    .merge(sel)
+    .attr('x1', d => d.source.current_x).attr('y1', d => d.source.current_y)
+    .attr('x2', d => d.target.current_x).attr('y2', d => d.target.current_y);
+  sel.exit().remove();
+}
+
+// --- Hover/Click interaction ---
+function connectedSet(node) {
+  const s = new Set();
+  s.add(node.data.id);
+  connections.forEach(c => {
+    if (c.source === node || c.target === node) {
+      s.add(c.source.data.id);
+      s.add(c.target.data.id);
+    }
+  });
+  return s;
+}
+
+function handleHover(node) {
+  if (selectedNode) return; // selection overrides hover
+  if (!node) {
+    gNodes.selectAll('.node').select('.shape-circle').attr('stroke', d => nodeStroke(d)).attr('stroke-width', 0.5);
+    gNodes.selectAll('.node').select('.shape-rect').attr('stroke', d => nodeStroke(d)).attr('stroke-width', 0.5);
+    gNodes.selectAll('.node').select('.shape-arc').attr('stroke', d => nodeStroke(d)).attr('stroke-width', 0.5);
+    gNodes.selectAll('.node').style('opacity', d => isTiny(d) ? 0 : 1);
+
+    const container = linkMode === 0 ? gBundlesBehind : gBundlesTop;
+    container.selectAll('path').attr('stroke','#94a3b8').attr('stroke-opacity',0.15).attr('stroke-width',0.8);
+    return;
+  }
+  const connected = connectedSet(node);
+  gNodes.selectAll('.node').each(function(d) {
+    const g = d3.select(this);
+    const isConn = connected.has(d.data.id);
+    if (d === node) {
+      g.select('.shape-circle').attr('stroke','#facc15').attr('stroke-width',2);
+      g.select('.shape-rect').attr('stroke','#facc15').attr('stroke-width',2);
+      g.select('.shape-arc').attr('stroke','#facc15').attr('stroke-width',2);
+    } else if (isConn) {
+      g.select('.shape-circle').attr('fill','#fef08a').attr('stroke','#facc15').attr('stroke-width',1.5);
+      g.select('.shape-rect').attr('fill','#fef08a').attr('stroke','#facc15').attr('stroke-width',1.5);
+      g.select('.shape-arc').attr('fill','#fef08a').attr('stroke','#facc15').attr('stroke-width',1.5);
+    } else {
+      g.select('.shape-circle').attr('stroke', nodeStroke(d)).attr('stroke-width',0.5);
+      g.select('.shape-rect').attr('stroke', nodeStroke(d)).attr('stroke-width',0.5);
+      g.select('.shape-arc').attr('stroke', nodeStroke(d)).attr('stroke-width',0.5);
+    }
+  });
+
+  if (linkMode !== 2) {
+    const container = linkMode === 0 ? gBundlesBehind : gBundlesTop;
+    container.selectAll('path').each(function(d) {
+      const hit = d.source === node || d.target === node;
+      d3.select(this).attr('stroke', hit ? '#facc15' : '#94a3b8')
+        .attr('stroke-opacity', hit ? 0.7 : 0.06)
+        .attr('stroke-width', hit ? 1.5 : 0.8);
+    });
+  }
+}
+
+function handleClick(node) {
+  if (selectedNode === node) {
+    selectedNode = null;
+    resetHighlight();
+    return;
+  }
+  selectedNode = node;
+  const connected = connectedSet(node);
+
+  gNodes.selectAll('.node').each(function(d) {
+    const g = d3.select(this);
+    const isConn = connected.has(d.data.id);
+    if (d === node) {
+      g.style('opacity', 1);
+      g.select('.shape-circle').attr('stroke','#facc15').attr('stroke-width',2.5);
+      g.select('.shape-rect').attr('stroke','#facc15').attr('stroke-width',2.5);
+      g.select('.shape-arc').attr('stroke','#facc15').attr('stroke-width',2.5);
+    } else {
+      g.style('opacity', isConn ? 1 : 0.12);
+      if (isConn) {
+        g.select('.shape-circle').attr('fill','#fef08a').attr('stroke','#facc15').attr('stroke-width',1.5);
+        g.select('.shape-rect').attr('fill','#fef08a').attr('stroke','#facc15').attr('stroke-width',1.5);
+        g.select('.shape-arc').attr('fill','#fef08a').attr('stroke','#facc15').attr('stroke-width',1.5);
+      }
+    }
+  });
+
+  if (linkMode !== 2) {
+    const container = linkMode === 0 ? gBundlesBehind : gBundlesTop;
+    container.selectAll('path').each(function(d) {
+      const hit = d.source === node || d.target === node;
+      d3.select(this).attr('stroke', hit ? '#facc15' : '#94a3b8')
+        .attr('stroke-opacity', hit ? 0.8 : 0.02)
+        .attr('stroke-width', hit ? 2 : 0.5);
+    });
+  }
+}
+
+function resetHighlight() {
+  gNodes.selectAll('.node').each(function(d) {
+    const g = d3.select(this);
+    g.style('opacity', isTiny(d) ? 0 : 1);
+    g.select('.shape-circle').attr('fill', nodeColor(d)).attr('stroke', nodeStroke(d)).attr('stroke-width',0.5);
+    g.select('.shape-rect').attr('fill', nodeColor(d)).attr('stroke', nodeStroke(d)).attr('stroke-width',0.5);
+    g.select('.shape-arc').attr('fill', nodeColor(d)).attr('stroke', nodeStroke(d)).attr('stroke-width',0.5);
+  });
+  if (linkMode !== 2) {
+    const container = linkMode === 0 ? gBundlesBehind : gBundlesTop;
+    container.selectAll('path').attr('stroke','#94a3b8').attr('stroke-opacity',0.15).attr('stroke-width',0.8);
+  }
+}
+
+svg.on('click', () => { selectedNode = null; resetHighlight(); });
+
+// --- Switch layout ---
+function switchLayout(name) {
+  if (name !== 'force') stopForce();
+  currentLayout = name;
+  selectedNode = null;
+
+  // Interrupt everything
+  gNodes.selectAll('*').interrupt();
+  gLabels.selectAll('*').interrupt();
+  gBundlesBehind.selectAll('*').interrupt();
+  gBundlesTop.selectAll('*').interrupt();
+
+  layouts[name]();
+  updateButtons();
+  updateNodes(currentLayout === 'force' ? 0 : 600);
+  if (currentLayout !== 'force') {
+    drawBundles();
+    drawHierLinks();
+  }
+  updateHierCheckVisibility();
+}
+
+// --- Controls ---
+const btnContainer = d3.select('#layout-buttons');
+Object.entries(layoutLabels).forEach(([key, label]) => {
+  btnContainer.append('button').text(label).attr('data-layout', key)
+    .classed('active', key === currentLayout)
+    .on('click', () => switchLayout(key));
+});
+btnContainer.append('button').text('New Dataset').style('margin-left','8px')
+  .on('click', () => {
+    stopForce();
+    selectedNode = null;
+    generateData();
+    layouts[currentLayout]();
+    updateNodes(400);
+    drawBundles();
+    drawHierLinks();
+  });
+
+const row2 = d3.select('#controls-row2');
+
+// Bundling slider
+row2.append('label').html('Bundling: ');
+const slider = row2.append('input').attr('type','range').attr('min',0).attr('max',1).attr('step',0.01).attr('value', bundling);
+const sliderLabel = row2.append('span').text(`${Math.round(bundling*100)}%`);
+let sliderRAF = null;
+slider.on('input', function() {
+  bundling = +this.value;
+  sliderLabel.text(`${Math.round(bundling*100)}%`);
+  if (!sliderRAF) {
+    sliderRAF = requestAnimationFrame(() => { sliderRAF = null; drawBundles(); });
+  }
+});
+
+// Link toggle
+const linkModes = ['Links Behind','Links On Top','Links Hidden'];
+const linkBtn = row2.append('button').text(linkModes[linkMode]).on('click', () => {
+  linkMode = (linkMode + 1) % 3;
+  linkBtn.text(linkModes[linkMode]);
+  drawBundles();
+});
+
+// Hierarchy checkbox
+const hierLabel = row2.append('label').attr('id','hier-check-label');
+const hierCheck = hierLabel.append('input').attr('type','checkbox').property('checked', showHierarchy);
+hierLabel.append('span').text(' Show Hierarchy');
+hierCheck.on('change', function() { showHierarchy = this.checked; drawHierLinks(); });
+
+function updateHierCheckVisibility() {
+  hierLabel.style('display', ['dendrogram','radial','force'].includes(currentLayout) ? '' : 'none');
+}
+updateHierCheckVisibility();
+
+function updateButtons() {
+  btnContainer.selectAll('button[data-layout]').classed('active', function() {
+    return d3.select(this).attr('data-layout') === currentLayout;
+  });
+}
+
+// --- Init ---
+generateData();
+switchLayout('pack');
+
+</script>
+</body>
+</html>

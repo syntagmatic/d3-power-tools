@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hierarchical Layouts with Edge Bundles</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:Inter,system-ui,-apple-system,sans-serif;background:#f0f2f5;display:flex;justify-content:center;padding:24px}
+  .container{background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,0.08);padding:24px;max-width:960px;width:100%}
+  h2{font-size:1.25rem;font-weight:600;color:#1e293b;margin-bottom:12px;text-align:center}
+  .controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px}
+  .controls button{padding:5px 12px;border:1px solid #d1d5db;border-radius:6px;background:#fff;color:#374151;font-size:0.8rem;font-family:inherit;cursor:pointer;transition:all 0.15s}
+  .controls button:hover{background:#eff6ff;border-color:#93c5fd}
+  .controls button.active{background:#3b82f6;color:#fff;border-color:#3b82f6}
+  .row2{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:12px;font-size:0.8rem;color:#4b5563}
+  .row2 label{display:flex;align-items:center;gap:4px;cursor:pointer}
+  .row2 input[type=range]{width:120px;accent-color:#3b82f6}
+  .row2 button{padding:3px 10px;border:1px solid #d1d5db;border-radius:6px;background:#fff;color:#374151;font-size:0.75rem;font-family:inherit;cursor:pointer;transition:all 0.15s}
+  .row2 button:hover{background:#eff6ff;border-color:#93c5fd}
+  .row2 button.active{background:#3b82f6;color:#fff;border-color:#3b82f6}
+  svg{display:block;margin:0 auto}
+  footer{text-align:center;font-size:0.7rem;color:#9ca3af;margin-top:12px}
+</style>
+</head>
+<body>
+<div class="container">
+  <h2>Hierarchical Layouts</h2>
+  <div class="controls" id="controls"></div>
+  <div class="row2" id="row2"></div>
+  <div id="viz"></div>
+  <footer>Built with D3.js v7</footer>
+</div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script type="module">
+
+const W = 900, H = 900;
+const layouts = ['Pack','Treemap','Dendrogram','Radial Tree','Icicle','Sunburst','Force'];
+let currentLayout = 'Pack';
+let bundling = 0.85;
+let linkMode = 'behind'; // behind, top, hidden
+let showHierarchy = true;
+let selectedNode = null;
+let hoveredNode = null;
+let simulation = null;
+let activeTimer = null;
+
+// Color palette — 7 curated hues from schemeTableau10
+const groupColors = ['#4e79a7','#f28e2b','#e15759','#76b7b2','#59a14f','#edc948','#b07aa1'];
+
+const svg = d3.select('#viz').append('svg')
+  .attr('viewBox', `${-W/2} ${-H/2} ${W} ${H}`)
+  .attr('width', W).attr('height', H)
+  .style('max-width','100%').style('height','auto');
+
+const gLinks = svg.append('g').attr('class','bundle-links');
+const gHierLinks = svg.append('g').attr('class','hier-links');
+const gNodes = svg.append('g').attr('class','nodes');
+const gLinksTop = svg.append('g').attr('class','bundle-links-top');
+
+// --- Data generation ---
+function generateData() {
+  const nodes = [{id:'root',parent:null,depth:0}];
+  let id = 1;
+  function addChildren(parentId, depth, maxDepth) {
+    if (depth >= maxDepth) return;
+    const n = depth === 0 ? 5 + Math.floor(Math.random()*3) : 1 + Math.floor(Math.random()*4);
+    for (let i = 0; i < n; i++) {
+      const nodeId = `n${id++}`;
+      nodes.push({id: nodeId, parent: parentId, depth});
+      if (depth < maxDepth - 1 && Math.random() < 0.7) {
+        addChildren(nodeId, depth + 1, maxDepth);
+      }
+    }
+  }
+  addChildren('root', 1, 7);
+  // Pad to ~200 nodes
+  while (nodes.length < 180) {
+    const internals = nodes.filter(n => n.depth > 0 && n.depth < 5);
+    const p = internals[Math.floor(Math.random()*internals.length)];
+    const nodeId = `n${id++}`;
+    nodes.push({id: nodeId, parent: p.id, depth: p.depth + 1});
+  }
+
+  const root = d3.stratify().id(d => d.id).parentId(d => d.parent)(nodes);
+  root.count().sort((a,b) => b.value - a.value);
+
+  const leaves = root.leaves();
+  const connections = [];
+  for (let i = 0; i < 300; i++) {
+    const s = leaves[Math.floor(Math.random()*leaves.length)];
+    const t = leaves[Math.floor(Math.random()*leaves.length)];
+    if (s !== t) connections.push({source: s, target: t});
+  }
+
+  // LCA paths for edge bundling
+  const bundlePaths = connections.map(c => c.source.path(c.target));
+
+  // Assign top-level group index
+  const topGroups = root.children || [];
+  root.each(d => {
+    if (d === root) { d.groupIdx = -1; return; }
+    let anc = d;
+    while (anc.parent && anc.parent !== root) anc = anc.parent;
+    d.groupIdx = topGroups.indexOf(anc) % groupColors.length;
+  });
+
+  return {root, connections, bundlePaths, leaves};
+}
+
+let data = generateData();
+
+// --- Color helpers ---
+function depthOpacity(d) {
+  return d3.scaleLinear().domain([0, data.root.height]).range([0.4, 1.0])(d.depth);
+}
+function nodeColor(d) { return d.groupIdx < 0 ? '#94a3b8' : groupColors[d.groupIdx]; }
+function nodeFill(d) {
+  const c = nodeColor(d);
+  return d.children ? c : d3.color(c).brighter(0.5).toString();
+}
+function nodeStroke(d) {
+  return d3.color(nodeColor(d)).darker(0.5).toString();
+}
+
+// --- Line generator for bundle paths ---
+function bundleLine() {
+  return d3.line()
+    .curve(d3.curveBundle.beta(1 - bundling))
+    .x(d => d.current_x)
+    .y(d => d.current_y);
+}
+
+// --- Layout functions ---
+function applyPack(root) {
+  const pack = d3.pack().size([W * 0.9, H * 0.9]).padding(3);
+  root.count().sort((a,b) => b.value - a.value);
+  pack(root);
+  root.each(d => {
+    d.target_x = d.x - W * 0.45;
+    d.target_y = d.y - H * 0.45;
+    d.target_shape = 'circle';
+    d.target_r = d.r;
+    d.target_w = 0; d.target_h = 0;
+    d.target_startAngle = 0; d.target_endAngle = 0;
+    d.target_innerRadius = 0; d.target_outerRadius = 0;
+    d.target_cornerRadius = d.r;
+  });
+}
+
+function applyTreemap(root) {
+  const treemap = d3.treemap().size([W * 0.85, H * 0.85]).padding(2).round(true)
+    .tile(d3.treemapSquarify);
+  root.count().sort((a,b) => b.value - a.value);
+  treemap(root);
+  root.each(d => {
+    d.target_x = (d.x0 + d.x1) / 2 - W * 0.425;
+    d.target_y = (d.y0 + d.y1) / 2 - H * 0.425;
+    d.target_shape = 'rect';
+    d.target_w = d.x1 - d.x0;
+    d.target_h = d.y1 - d.y0;
+    d.target_r = 0;
+    d.target_cornerRadius = 3;
+    d.target_startAngle = 0; d.target_endAngle = 0;
+    d.target_innerRadius = 0; d.target_outerRadius = 0;
+  });
+}
+
+function applyDendrogram(root) {
+  d3.tree().size([H * 0.8, W * 0.75])(root);
+  root.each(d => {
+    d.target_x = d.y - W * 0.375;
+    d.target_y = d.x - H * 0.4;
+    d.target_shape = 'circle';
+    d.target_r = 4;
+    d.target_w = 0; d.target_h = 0;
+    d.target_cornerRadius = 4;
+    d.target_startAngle = 0; d.target_endAngle = 0;
+    d.target_innerRadius = 0; d.target_outerRadius = 0;
+  });
+}
+
+function applyRadialTree(root) {
+  d3.tree().size([2 * Math.PI, W * 0.38])(root);
+  root.each(d => {
+    const angle = d.x - Math.PI / 2;
+    d.target_x = d.y * Math.cos(angle);
+    d.target_y = d.y * Math.sin(angle);
+    d.target_shape = 'circle';
+    d.target_r = 4;
+    d.target_w = 0; d.target_h = 0;
+    d.target_cornerRadius = 4;
+    d.target_startAngle = 0; d.target_endAngle = 0;
+    d.target_innerRadius = 0; d.target_outerRadius = 0;
+  });
+}
+
+function applyIcicle(root) {
+  const partition = d3.partition().size([W * 0.85, H * 0.85]).padding(1);
+  root.count().sort((a,b) => b.value - a.value);
+  partition(root);
+  root.each(d => {
+    d.target_x = (d.x0 + d.x1) / 2 - W * 0.425;
+    d.target_y = (d.y0 + d.y1) / 2 - H * 0.425;
+    d.target_shape = 'rect';
+    d.target_w = d.x1 - d.x0;
+    d.target_h = d.y1 - d.y0;
+    d.target_r = 0;
+    d.target_cornerRadius = 1;
+    d.target_startAngle = 0; d.target_endAngle = 0;
+    d.target_innerRadius = 0; d.target_outerRadius = 0;
+  });
+}
+
+function applySunburst(root) {
+  const partition = d3.partition().size([2 * Math.PI, 1]).padding(0.005);
+  root.count().sort((a,b) => b.value - a.value);
+  partition(root);
+  const rScale = d3.scaleSqrt().domain([0, 1]).range([0, W * 0.42]);
+  root.each(d => {
+    const midAngle = (d.x0 + d.x1) / 2 - Math.PI / 2;
+    const midR = (rScale(d.y0) + rScale(d.y1)) / 2;
+    d.target_x = midR * Math.cos(midAngle);
+    d.target_y = midR * Math.sin(midAngle);
+    d.target_shape = 'arc';
+    d.target_startAngle = d.x0;
+    d.target_endAngle = d.x1;
+    d.target_innerRadius = rScale(d.y0);
+    d.target_outerRadius = rScale(d.y1);
+    d.target_r = 0;
+    d.target_w = 0; d.target_h = 0;
+    d.target_cornerRadius = 0;
+  });
+}
+
+function applyForce(root) {
+  const rScale = d3.scaleSqrt().domain([0, d3.max(root.descendants(), d => d.value)]).range([3, 25]);
+  root.each(d => {
+    d.target_shape = 'circle';
+    d.target_r = rScale(d.value);
+    d.target_w = 0; d.target_h = 0;
+    d.target_cornerRadius = d.target_r;
+    d.target_startAngle = 0; d.target_endAngle = 0;
+    d.target_innerRadius = 0; d.target_outerRadius = 0;
+  });
+}
+
+// --- Shape path generators ---
+const arcGen = d3.arc();
+
+function nodeShape(d) {
+  if (d.current_shape === 'arc') {
+    return arcGen({
+      startAngle: d.current_startAngle,
+      endAngle: d.current_endAngle,
+      innerRadius: d.current_innerRadius,
+      outerRadius: d.current_outerRadius
+    });
+  }
+  if (d.current_shape === 'rect') {
+    const w = d.current_w, h = d.current_h;
+    if (w < 0.5 || h < 0.5) return '';
+    const cr = Math.min(d.current_cornerRadius, w/2, h/2);
+    return `M${-w/2+cr},${-h/2} h${w-2*cr} a${cr},${cr} 0 0 1 ${cr},${cr} v${h-2*cr} a${cr},${cr} 0 0 1 ${-cr},${cr} h${-(w-2*cr)} a${cr},${cr} 0 0 1 ${-cr},${-cr} v${-(h-2*cr)} a${cr},${cr} 0 0 1 ${cr},${-cr}Z`;
+  }
+  // circle
+  const r = d.current_r;
+  if (r < 0.5) return '';
+  return `M${-r},0 A${r},${r} 0 1 1 ${r},0 A${r},${r} 0 1 1 ${-r},0Z`;
+}
+
+function isTiny(d) {
+  if (d.current_shape === 'circle') return d.current_r < 2;
+  if (d.current_shape === 'rect') return d.current_w < 2 || d.current_h < 2;
+  if (d.current_shape === 'arc') return (d.current_outerRadius - d.current_innerRadius) < 2;
+  return false;
+}
+
+// --- Interaction: find connected nodes/links ---
+function getConnectedSet(node) {
+  if (!node) return {nodes: new Set(), linkIndices: new Set()};
+  const leafIds = new Set(node.leaves().map(d => d.data.id));
+  const linkIndices = new Set();
+  const connectedLeafIds = new Set();
+  data.bundlePaths.forEach((path, i) => {
+    const sId = path[0].data.id;
+    const tId = path[path.length - 1].data.id;
+    if (leafIds.has(sId) || leafIds.has(tId)) {
+      linkIndices.add(i);
+      connectedLeafIds.add(sId);
+      connectedLeafIds.add(tId);
+    }
+  });
+  const nodeSet = new Set();
+  data.root.each(d => {
+    if (connectedLeafIds.has(d.data.id)) nodeSet.add(d);
+  });
+  nodeSet.add(node);
+  return {nodes: nodeSet, linkIndices};
+}
+
+// --- Initialize positions at origin ---
+function initPositions() {
+  data.root.each(d => {
+    d.current_x = 0; d.current_y = 0;
+    d.current_shape = 'circle'; d.current_r = 3;
+    d.current_w = 0; d.current_h = 0;
+    d.current_cornerRadius = 3;
+    d.current_startAngle = 0; d.current_endAngle = 0;
+    d.current_innerRadius = 0; d.current_outerRadius = 0;
+  });
+}
+
+// --- Draw current state ---
+function draw() {
+  const allNodes = data.root.descendants();
+  const activeNode = selectedNode || hoveredNode;
+  const connected = activeNode ? getConnectedSet(activeNode) : null;
+
+  // Bundle links
+  const line = bundleLine();
+  const linkGroup = linkMode === 'top' ? gLinksTop : gLinks;
+  const hideGroup = linkMode === 'top' ? gLinks : gLinksTop;
+  hideGroup.selectAll('path').remove();
+
+  if (linkMode !== 'hidden') {
+    const paths = linkGroup.selectAll('path')
+      .data(data.bundlePaths)
+      .join('path')
+        .attr('fill', 'none')
+        .attr('d', line)
+        .attr('stroke', (d, i) => connected && connected.linkIndices.has(i) ? '#fbbf24' : '#888')
+        .attr('stroke-width', (d, i) => connected && connected.linkIndices.has(i) ? 2 : 0.8)
+        .attr('stroke-opacity', (d, i) => {
+          if (!connected) return 0.25;
+          return connected.linkIndices.has(i) ? 0.9 : 0.05;
+        });
+    // Raise highlighted links on top
+    if (connected) paths.filter((d, i) => connected.linkIndices.has(i)).raise();
+  } else {
+    linkGroup.selectAll('path').remove();
+  }
+
+  // Hierarchy links (dendrogram, radial tree, force only)
+  const hierLayouts = ['Dendrogram','Radial Tree','Force'];
+  const hierVisible = showHierarchy && hierLayouts.includes(currentLayout);
+  const hierLinks = hierVisible ? data.root.links() : [];
+  gHierLinks.selectAll('line')
+    .data(hierLinks, d => d.source.data.id + '-' + d.target.data.id)
+    .join('line')
+      .attr('x1', d => d.source.current_x)
+      .attr('y1', d => d.source.current_y)
+      .attr('x2', d => d.target.current_x)
+      .attr('y2', d => d.target.current_y)
+      .attr('stroke', '#cbd5e1')
+      .attr('stroke-width', 0.8)
+      .attr('stroke-opacity', 0.6);
+
+  // Nodes
+  const nodesSel = gNodes.selectAll('path.node')
+    .data(allNodes, d => d.data.id)
+    .join(
+      enter => enter.append('path').attr('class','node').style('cursor','pointer'),
+      update => update,
+      exit => exit.remove()
+    )
+    .attr('transform', d => {
+      // Arc paths encode their own position; others use translate
+      if (d.current_shape === 'arc') return null;
+      return `translate(${d.current_x},${d.current_y})`;
+    })
+    .attr('d', nodeShape)
+    .attr('fill', d => {
+      if (connected && connected.nodes.has(d)) return '#fbbf24';
+      return nodeFill(d);
+    })
+    .attr('fill-opacity', d => {
+      if (isTiny(d)) return 0;
+      if (connected && !connected.nodes.has(d)) return 0.1;
+      return depthOpacity(d);
+    })
+    .attr('stroke', d => {
+      if (connected && connected.nodes.has(d)) return '#f59e0b';
+      return nodeStroke(d);
+    })
+    .attr('stroke-width', d => connected && connected.nodes.has(d) ? 2 : 0.5)
+    .attr('stroke-opacity', d => isTiny(d) ? 0 : 0.8);
+
+  // Mouse/click interaction
+  nodesSel
+    .on('mouseenter', (e, d) => { if (!selectedNode) { hoveredNode = d; draw(); } })
+    .on('mouseleave', () => { if (!selectedNode) { hoveredNode = null; draw(); } })
+    .on('click', (e, d) => {
+      e.stopPropagation();
+      selectedNode = selectedNode === d ? null : d;
+      hoveredNode = null;
+      draw();
+    });
+
+  svg.on('click', () => {
+    if (selectedNode) { selectedNode = null; hoveredNode = null; draw(); }
+  });
+}
+
+// --- Interpolate all shape properties ---
+function interpolateProps(t) {
+  data.root.each(d => {
+    d.current_x = d.source_x + (d.target_x - d.source_x) * t;
+    d.current_y = d.source_y + (d.target_y - d.source_y) * t;
+    d.current_r = d.source_r + (d.target_r - d.source_r) * t;
+    d.current_w = d.source_w + (d.target_w - d.source_w) * t;
+    d.current_h = d.source_h + (d.target_h - d.source_h) * t;
+    d.current_cornerRadius = d.source_cornerRadius + (d.target_cornerRadius - d.source_cornerRadius) * t;
+    d.current_startAngle = d.source_startAngle + (d.target_startAngle - d.source_startAngle) * t;
+    d.current_endAngle = d.source_endAngle + (d.target_endAngle - d.source_endAngle) * t;
+    d.current_innerRadius = d.source_innerRadius + (d.target_innerRadius - d.source_innerRadius) * t;
+    d.current_outerRadius = d.source_outerRadius + (d.target_outerRadius - d.source_outerRadius) * t;
+    d.current_shape = t > 0.5 ? d.target_shape : d.source_shape;
+  });
+}
+
+// --- Transition to a layout ---
+function transitionTo(layoutName) {
+  // Stop any running simulation or timer
+  if (simulation) { simulation.stop(); simulation = null; }
+  if (activeTimer) { activeTimer.stop(); activeTimer = null; }
+
+  // Interrupt all in-flight D3 transitions
+  svg.interrupt();
+  gNodes.selectAll('*').interrupt();
+  gLinks.selectAll('*').interrupt();
+  gLinksTop.selectAll('*').interrupt();
+  gHierLinks.selectAll('*').interrupt();
+
+  currentLayout = layoutName;
+  updateControls();
+
+  // Stash source positions
+  data.root.each(d => {
+    d.source_x = d.current_x;
+    d.source_y = d.current_y;
+    d.source_shape = d.current_shape;
+    d.source_r = d.current_r;
+    d.source_w = d.current_w;
+    d.source_h = d.current_h;
+    d.source_cornerRadius = d.current_cornerRadius;
+    d.source_startAngle = d.current_startAngle;
+    d.source_endAngle = d.current_endAngle;
+    d.source_innerRadius = d.current_innerRadius;
+    d.source_outerRadius = d.current_outerRadius;
+  });
+
+  // Compute target positions
+  const applyFns = {
+    'Pack': applyPack, 'Treemap': applyTreemap, 'Dendrogram': applyDendrogram,
+    'Radial Tree': applyRadialTree, 'Icicle': applyIcicle, 'Sunburst': applySunburst,
+    'Force': applyForce
+  };
+  applyFns[layoutName](data.root);
+
+  // Remove drag handler for non-force layouts
+  gNodes.selectAll('path.node').on('.drag', null);
+
+  if (layoutName === 'Force') {
+    // Initialize force positions from current layout
+    data.root.each(d => {
+      d.x = d.current_x; d.y = d.current_y;
+      d.vx = 0; d.vy = 0;
+    });
+
+    const nodes = data.root.descendants();
+    const links = data.root.links().map(d => ({source: d.source, target: d.target}));
+    const rScale = d3.scaleSqrt().domain([0, d3.max(nodes, d => d.value)]).range([3, 25]);
+
+    simulation = d3.forceSimulation(nodes)
+      .force('link', d3.forceLink(links).id(d => d.data.id).distance(30).strength(0.3))
+      .force('charge', d3.forceManyBody().strength(-50).distanceMax(200))
+      .force('collide', d3.forceCollide().radius(d => rScale(d.value) + 2).strength(0.7))
+      .force('center', d3.forceCenter(0, 0))
+      .alpha(0.4)
+      .alphaDecay(0.02)
+      .on('tick', () => {
+        data.root.each(d => {
+          d.current_x = d.x; d.current_y = d.y;
+          d.current_shape = d.target_shape;
+          d.current_r = d.target_r;
+          d.current_w = 0; d.current_h = 0;
+          d.current_cornerRadius = d.target_cornerRadius;
+        });
+        draw();
+      });
+
+    // Enable drag with fx/fy pinning
+    gNodes.selectAll('path.node').call(
+      d3.drag()
+        .on('start', (e, d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+        .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
+        .on('end', (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; })
+    );
+
+    // Shape morph transition (radius etc.) while force positions update
+    const dur = 800;
+    activeTimer = d3.timer(elapsed => {
+      const t = Math.min(1, d3.easeCubicInOut(elapsed / dur));
+      data.root.each(d => {
+        d.current_r = d.source_r + (d.target_r - d.source_r) * t;
+        d.current_w = d.source_w + (d.target_w - d.source_w) * t;
+        d.current_h = d.source_h + (d.target_h - d.source_h) * t;
+        d.current_cornerRadius = d.source_cornerRadius + (d.target_cornerRadius - d.source_cornerRadius) * t;
+        d.current_startAngle = d.source_startAngle + (d.target_startAngle - d.source_startAngle) * t;
+        d.current_endAngle = d.source_endAngle + (d.target_endAngle - d.source_endAngle) * t;
+        d.current_innerRadius = d.source_innerRadius + (d.target_innerRadius - d.source_innerRadius) * t;
+        d.current_outerRadius = d.source_outerRadius + (d.target_outerRadius - d.source_outerRadius) * t;
+        d.current_shape = t > 0.5 ? d.target_shape : d.source_shape;
+      });
+      if (elapsed >= dur) { activeTimer.stop(); activeTimer = null; }
+    });
+    return;
+  }
+
+  // Non-force: animate all properties
+  const dur = 1000;
+  activeTimer = d3.timer(elapsed => {
+    const t = Math.min(1, d3.easeCubicInOut(elapsed / dur));
+    interpolateProps(t);
+    draw();
+    if (elapsed >= dur) { activeTimer.stop(); activeTimer = null; }
+  });
+}
+
+// --- Controls ---
+function updateControls() {
+  const c = d3.select('#controls');
+  c.selectAll('button.layout').data(layouts).join('button')
+    .attr('class', d => 'layout' + (d === currentLayout ? ' active' : ''))
+    .text(d => d)
+    .on('click', (e, d) => transitionTo(d));
+
+  c.selectAll('button.newdata').data([1]).join('button')
+    .attr('class', 'newdata')
+    .text('New Dataset')
+    .on('click', () => {
+      if (simulation) { simulation.stop(); simulation = null; }
+      if (activeTimer) { activeTimer.stop(); activeTimer = null; }
+      selectedNode = null; hoveredNode = null;
+      data = generateData();
+      initPositions();
+      transitionTo(currentLayout);
+    });
+
+  // Row 2: slider, link toggle, hierarchy checkbox
+  const r2 = d3.select('#row2');
+  r2.html('');
+
+  const sliderLabel = r2.append('label');
+  sliderLabel.append('span').text('Bundling:');
+  const slider = sliderLabel.append('input').attr('type','range').attr('min',0).attr('max',100).attr('value', bundling*100);
+  const pct = sliderLabel.append('span').text(`${Math.round(bundling*100)}%`);
+  let rafPending = false;
+  slider.on('input', function() {
+    bundling = +this.value / 100;
+    pct.text(`${Math.round(bundling*100)}%`);
+    if (!rafPending) {
+      rafPending = true;
+      requestAnimationFrame(() => { rafPending = false; draw(); });
+    }
+  });
+
+  const linkModes = ['behind','top','hidden'];
+  const linkLabels = ['Links Behind','Links On Top','Links Hidden'];
+  r2.append('button')
+    .text(linkLabels[linkModes.indexOf(linkMode)])
+    .on('click', function() {
+      const idx = (linkModes.indexOf(linkMode) + 1) % 3;
+      linkMode = linkModes[idx];
+      d3.select(this).text(linkLabels[idx]);
+      draw();
+    });
+
+  const hierLayouts = ['Dendrogram','Radial Tree','Force'];
+  if (hierLayouts.includes(currentLayout)) {
+    const hierLabel = r2.append('label');
+    hierLabel.append('input').attr('type','checkbox').property('checked', showHierarchy)
+      .on('change', function() { showHierarchy = this.checked; draw(); });
+    hierLabel.append('span').text(' Show Hierarchy');
+  }
+}
+
+// --- Boot ---
+initPositions();
+updateControls();
+transitionTo('Pack');
+
+</script>
+</body>
+</html>
