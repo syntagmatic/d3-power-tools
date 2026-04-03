@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hierarchical Edge Bundling Explorer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #0a0a0f; color: #ccc; display: flex; height: 100vh; overflow: hidden; }
+  #controls {
+    width: 260px; min-width: 260px; padding: 16px; background: #12121a;
+    border-right: 1px solid #2a2a3a; overflow-y: auto; display: flex; flex-direction: column; gap: 16px;
+  }
+  .section-label { font-weight: 700; font-size: 13px; color: #e0e0e8; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+  .control-label { font-weight: 400; font-size: 12px; color: #888; margin-bottom: 4px; }
+  .control-group { display: flex; flex-direction: column; gap: 4px; }
+  select, button {
+    background: #1a1a28; color: #ccc; border: 1px solid #2a2a3a; border-radius: 4px;
+    padding: 6px 8px; font-size: 12px; cursor: pointer; outline: none;
+  }
+  select:hover, button:hover { border-color: #4a4a6a; }
+  button { background: #222238; text-align: center; }
+  button:active { background: #2a2a48; }
+  input[type="range"] { width: 100%; accent-color: #6a6aff; }
+  .toggle-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #888; }
+  .toggle-row input { accent-color: #6a6aff; }
+  #viz { flex: 1; position: relative; overflow: hidden; }
+  svg { width: 100%; height: 100%; }
+  .node circle { cursor: pointer; }
+  .node text { font-size: 11px; fill: #aaa; pointer-events: none; }
+  .link { fill: none; stroke-opacity: 0.25; mix-blend-mode: screen; }
+  .link.highlighted { stroke-opacity: 0.8; }
+  .node.selected circle { stroke: #fff; stroke-width: 2px; }
+  .node.hovered circle { stroke: #6a6aff; stroke-width: 1.5px; }
+  #info { position: absolute; bottom: 12px; left: 12px; font-size: 11px; color: #555; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <div class="control-group">
+    <div class="section-label">Layout</div>
+    <select id="layoutSelect">
+      <option value="radialCluster">Dendrogram (Radial)</option>
+      <option value="radialTree">Radial Tree</option>
+      <option value="pack">Circle Pack</option>
+      <option value="treemap">Treemap</option>
+      <option value="sunburst">Sunburst</option>
+      <option value="icicle">Icicle</option>
+    </select>
+  </div>
+  <div class="control-group">
+    <div class="section-label">Edge Bundling</div>
+    <div class="control-label">Tension: <span id="tensionVal">0.85</span></div>
+    <input type="range" id="tensionSlider" min="0" max="1" step="0.01" value="0.85">
+  </div>
+  <div class="control-group">
+    <div class="section-label">Display</div>
+    <label class="toggle-row"><input type="checkbox" id="showLinks" checked> Show links</label>
+    <label class="toggle-row"><input type="checkbox" id="linksOnTop"> Links on top</label>
+  </div>
+  <div class="control-group">
+    <div class="section-label">Data</div>
+    <button id="randomizeBtn">Randomize Dataset</button>
+  </div>
+</div>
+<div id="viz">
+  <svg id="svg"></svg>
+  <div id="info">Click node to select. Hover to highlight group.</div>
+</div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+const svg = d3.select("#svg");
+const width = () => document.getElementById("viz").clientWidth;
+const height = () => document.getElementById("viz").clientHeight;
+
+let root, links, allNodes, leafMap, currentLayout = "radialCluster";
+let selectedNode = null;
+
+// --- Synthetic data generation ---
+function generateData() {
+  const groups = ["Engine", "Render", "Network", "Storage", "Auth", "UI", "Analytics", "Cache"];
+  const subgroups = ["Core", "Utils", "API", "Models", "Handlers"];
+  const rows = [{ id: "root", parent: "" }];
+  const leafIds = [];
+
+  const numGroups = 4 + Math.floor(Math.random() * 5);
+  const usedGroups = d3.shuffle(groups.slice()).slice(0, numGroups);
+
+  for (const g of usedGroups) {
+    rows.push({ id: g, parent: "root" });
+    const numSub = 2 + Math.floor(Math.random() * 3);
+    const usedSubs = d3.shuffle(subgroups.slice()).slice(0, numSub);
+    for (const s of usedSubs) {
+      const subId = `${g}.${s}`;
+      rows.push({ id: subId, parent: g });
+      const numLeaves = 2 + Math.floor(Math.random() * 5);
+      for (let i = 0; i < numLeaves; i++) {
+        const leafId = `${subId}.m${i}`;
+        rows.push({ id: leafId, parent: subId, value: 1 + Math.random() * 9 });
+        leafIds.push(leafId);
+      }
+    }
+  }
+
+  const connections = [];
+  const numLinks = Math.floor(leafIds.length * 0.6) + Math.floor(Math.random() * leafIds.length * 0.4);
+  for (let i = 0; i < numLinks; i++) {
+    const a = leafIds[Math.floor(Math.random() * leafIds.length)];
+    let b = leafIds[Math.floor(Math.random() * leafIds.length)];
+    if (a !== b) connections.push({ source: a, target: b });
+  }
+
+  return { rows, connections };
+}
+
+function buildHierarchy(data) {
+  const stratify = d3.stratify().id(d => d.id).parentId(d => d.parent || null);
+  root = stratify(data.rows);
+  root.sum(d => d.value || 0).sort((a, b) => b.value - a.value);
+
+  allNodes = root.descendants();
+  leafMap = new Map(root.leaves().map(d => [d.data.id, d]));
+
+  links = data.connections.map(c => {
+    const s = leafMap.get(c.source), t = leafMap.get(c.target);
+    return s && t ? s.path(t) : null;
+  }).filter(Boolean);
+
+  // Initialize positions
+  allNodes.forEach(d => { d.cx = 0; d.cy = 0; });
+
+  // Color by top-level group
+  const topLevel = root.children || [root];
+  const color = d3.scaleOrdinal(topLevel.map(d => d.data.id), d3.schemeTableau10);
+  allNodes.forEach(d => {
+    const ancestor = d.ancestors().find(a => a.depth === 1);
+    d.color = ancestor ? color(ancestor.data.id) : "#666";
+  });
+}
+
+// --- Layout functions: each sets cx, cy on all nodes ---
+function applyLayout(name) {
+  const w = width(), h = height();
+  const cx = w / 2, cy = h / 2;
+  const r = Math.min(w, h) / 2 - 120;
+
+  if (name === "radialCluster" || name === "radialTree") {
+    const layout = name === "radialCluster"
+      ? d3.cluster().size([2 * Math.PI, r]).separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth)
+      : d3.tree().size([2 * Math.PI, r]).separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth);
+    layout(root);
+    allNodes.forEach(d => {
+      d.cx = cx + d.y * Math.cos(d.x - Math.PI / 2);
+      d.cy = cy + d.y * Math.sin(d.x - Math.PI / 2);
+      d.angle = d.x; // store for label rotation
+    });
+  } else if (name === "pack") {
+    d3.pack().size([Math.min(w, h) - 80, Math.min(w, h) - 80]).padding(3)(root);
+    const off_x = (w - Math.min(w, h) + 80) / 2;
+    const off_y = (h - Math.min(w, h) + 80) / 2;
+    allNodes.forEach(d => { d.cx = d.x + off_x; d.cy = d.y + off_y; });
+  } else if (name === "treemap") {
+    d3.treemap().size([w - 60, h - 60]).padding(2).tile(d3.treemapSquarify)(root);
+    allNodes.forEach(d => { d.cx = 30 + (d.x0 + d.x1) / 2; d.cy = 30 + (d.y0 + d.y1) / 2; });
+  } else if (name === "sunburst") {
+    d3.partition().size([2 * Math.PI, r])(root);
+    allNodes.forEach(d => {
+      const angle = (d.x0 + d.x1) / 2;
+      const radius = (d.y0 + d.y1) / 2;
+      d.cx = cx + radius * Math.cos(angle - Math.PI / 2);
+      d.cy = cy + radius * Math.sin(angle - Math.PI / 2);
+      d.angle = angle;
+    });
+  } else if (name === "icicle") {
+    d3.partition().size([w - 60, h - 60])(root);
+    allNodes.forEach(d => { d.cx = 30 + (d.x0 + d.x1) / 2; d.cy = 30 + (d.y0 + d.y1) / 2; });
+  }
+}
+
+function isRadial(name) { return name === "radialCluster" || name === "radialTree" || name === "sunburst"; }
+
+// --- Rendering ---
+let gLinks, gNodes, nodeSelection, linkSelection;
+
+function initSVG() {
+  svg.selectAll("*").remove();
+  const g = svg.append("g").attr("class", "root");
+  gLinks = g.append("g").attr("class", "links-layer");
+  gNodes = g.append("g").attr("class", "nodes-layer");
+}
+
+function nodeRadius(d) {
+  if (!d.children && !d._children) return 3.5;
+  return d.depth === 0 ? 6 : 4.5;
+}
+
+function render(animate = true) {
+  const dur = animate ? 800 : 0;
+  const tension = +document.getElementById("tensionSlider").value;
+  const beta = 1 - tension;
+  const showLinks = document.getElementById("showLinks").checked;
+  const linksOnTop = document.getElementById("linksOnTop").checked;
+
+  // Link layer order
+  if (linksOnTop) {
+    gLinks.raise();
+  } else {
+    gNodes.raise();
+  }
+
+  // --- Nodes ---
+  const leaves = root.leaves();
+  nodeSelection = gNodes.selectAll("g.node")
+    .data(allNodes, d => d.data.id)
+    .join(
+      enter => {
+        const g = enter.append("g").attr("class", "node")
+          .attr("transform", d => `translate(${d.cx},${d.cy})`);
+        g.append("circle")
+          .attr("r", 0)
+          .attr("fill", d => d.color)
+          .attr("fill-opacity", d => d.children ? 0.3 : 0.8);
+        g.append("text")
+          .attr("dy", "0.35em")
+          .text(d => (!d.children && !d._children) ? d.data.id.split(".").pop() : "");
+        return g;
+      },
+      update => update,
+      exit => exit.transition().duration(dur)
+        .attr("transform", d => `translate(${d.cx},${d.cy})`)
+        .style("opacity", 0).remove()
+    );
+
+  const t = svg.transition().duration(dur).ease(d3.easeCubicInOut);
+
+  nodeSelection.transition(t)
+    .attr("transform", d => `translate(${d.cx},${d.cy})`);
+
+  nodeSelection.select("circle").transition(t)
+    .attr("r", d => nodeRadius(d))
+    .attr("fill", d => d.color)
+    .attr("fill-opacity", d => d.children ? 0.3 : 0.8);
+
+  // Labels
+  const radial = isRadial(currentLayout);
+  nodeSelection.select("text")
+    .text(d => (!d.children && !d._children) ? d.data.id.split(".").pop() : "")
+    .transition(t)
+    .attr("x", d => {
+      if (!radial) return 6;
+      if (d.angle == null) return 6;
+      return d.angle < Math.PI ? 8 : -8;
+    })
+    .attr("text-anchor", d => {
+      if (!radial) return "start";
+      if (d.angle == null) return "start";
+      return d.angle < Math.PI ? "start" : "end";
+    })
+    .attr("transform", d => {
+      if (!radial || d.angle == null) return null;
+      const deg = d.angle * 180 / Math.PI - 90;
+      return `rotate(${deg < 90 || deg > 270 ? deg : deg + 180})`;
+    })
+    .attr("opacity", d => {
+      if (d.children) return 0;
+      if (radial) return labelVisible(d) ? 1 : 0;
+      return 1;
+    });
+
+  // --- Links ---
+  const line = d3.line()
+    .curve(d3.curveBundle.beta(beta))
+    .x(d => d.cx)
+    .y(d => d.cy);
+
+  linkSelection = gLinks.selectAll("path.link")
+    .data(showLinks ? links : [], (d, i) => i)
+    .join(
+      enter => enter.append("path")
+        .attr("class", "link")
+        .attr("stroke", d => {
+          const src = d[0];
+          return src.color;
+        })
+        .attr("stroke-width", 1.2)
+        .attr("d", line)
+        .attr("stroke-opacity", 0),
+      update => update,
+      exit => exit.transition().duration(dur).attr("stroke-opacity", 0).remove()
+    );
+
+  linkSelection.transition(t)
+    .attr("d", line)
+    .attr("stroke-opacity", 0.25)
+    .attr("stroke", d => d[0].color);
+
+  // Interactions
+  nodeSelection
+    .on("mouseenter", (event, d) => highlightGroup(d))
+    .on("mouseleave", clearHighlight)
+    .on("click", (event, d) => selectNode(d));
+}
+
+// Label overlap avoidance for radial layouts
+function labelVisible(d) {
+  if (d.children) return false;
+  // Use angular separation heuristic
+  const leaves = root.leaves();
+  const idx = leaves.indexOf(d);
+  if (idx < 0) return true;
+  const prev = idx > 0 ? leaves[idx - 1] : null;
+  const next = idx < leaves.length - 1 ? leaves[idx + 1] : null;
+  const minAngle = 0.04; // ~2.3 degrees minimum between labels
+  if (prev && prev.angle != null && d.angle != null && Math.abs(d.angle - prev.angle) < minAngle) {
+    // Only show every other label in tight areas
+    if (idx % 2 !== 0) return false;
+  }
+  return true;
+}
+
+// --- Interaction ---
+function highlightGroup(d) {
+  const group = d.ancestors().find(a => a.depth === 1) || d;
+  const groupLeafIds = new Set(group.leaves().map(n => n.data.id));
+
+  nodeSelection.classed("hovered", false);
+  nodeSelection.filter(n => {
+    const a = n.ancestors().find(a => a.depth === 1) || n;
+    return a === group;
+  }).classed("hovered", true);
+
+  linkSelection.classed("highlighted", false).attr("stroke-opacity", 0.06);
+  linkSelection.filter(link => {
+    const srcId = link[0].data.id;
+    const tgtId = link[link.length - 1].data.id;
+    return groupLeafIds.has(srcId) || groupLeafIds.has(tgtId);
+  }).classed("highlighted", true).attr("stroke-opacity", 0.8).raise();
+}
+
+function clearHighlight() {
+  nodeSelection.classed("hovered", false);
+  linkSelection.classed("highlighted", false).attr("stroke-opacity", 0.25);
+}
+
+function selectNode(d) {
+  if (selectedNode === d) {
+    selectedNode = null;
+    nodeSelection.classed("selected", false);
+    clearHighlight();
+    return;
+  }
+  selectedNode = d;
+  nodeSelection.classed("selected", n => n === d);
+
+  // Highlight connected links
+  const leafIds = new Set(d.leaves ? d.leaves().map(n => n.data.id) : [d.data.id]);
+  linkSelection.classed("highlighted", false).attr("stroke-opacity", 0.06);
+  linkSelection.filter(link => {
+    const srcId = link[0].data.id;
+    const tgtId = link[link.length - 1].data.id;
+    return leafIds.has(srcId) || leafIds.has(tgtId);
+  }).classed("highlighted", true).attr("stroke-opacity", 0.8).raise();
+}
+
+// --- Tension slider ---
+document.getElementById("tensionSlider").addEventListener("input", e => {
+  document.getElementById("tensionVal").textContent = (+e.target.value).toFixed(2);
+  const beta = 1 - +e.target.value;
+  const line = d3.line().curve(d3.curveBundle.beta(beta)).x(d => d.cx).y(d => d.cy);
+  linkSelection.attr("d", line);
+});
+
+// --- Layout switcher ---
+document.getElementById("layoutSelect").addEventListener("change", e => {
+  currentLayout = e.target.value;
+  applyLayout(currentLayout);
+  render(true);
+});
+
+// --- Toggle links ---
+document.getElementById("showLinks").addEventListener("change", () => render(true));
+document.getElementById("linksOnTop").addEventListener("change", () => render(false));
+
+// --- Randomize ---
+document.getElementById("randomizeBtn").addEventListener("click", () => {
+  const data = generateData();
+  buildHierarchy(data);
+  applyLayout(currentLayout);
+  render(true);
+});
+
+// --- Resize ---
+window.addEventListener("resize", () => {
+  applyLayout(currentLayout);
+  render(false);
+});
+
+// --- Init ---
+function init() {
+  const data = generateData();
+  buildHierarchy(data);
+  initSVG();
+  applyLayout(currentLayout);
+  render(false);
+}
+
+init();
+</script>
+</body>
+</html>

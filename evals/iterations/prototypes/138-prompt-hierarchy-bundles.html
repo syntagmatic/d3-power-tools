@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hierarchical Edge Bundling Explorer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #1a1a2e; color: #e0e0e0; overflow: hidden; }
+
+  .controls {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+    background: rgba(26, 26, 46, 0.95); backdrop-filter: blur(8px);
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+    padding: 10px 20px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  }
+  .controls label { font-size: 12px; color: #aaa; text-transform: uppercase; letter-spacing: 0.5px; }
+  .controls select, .controls button {
+    background: #2a2a4a; color: #e0e0e0; border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 4px; padding: 5px 10px; font-size: 13px; cursor: pointer;
+  }
+  .controls select:hover, .controls button:hover { border-color: rgba(255,255,255,0.3); }
+  .controls button.active { background: #4a4a8a; border-color: #7070ff; }
+  .controls .slider-group { display: flex; align-items: center; gap: 6px; }
+  .controls input[type="range"] { width: 100px; accent-color: #7070ff; }
+  .controls .tension-val { font-size: 12px; color: #7070ff; min-width: 30px; }
+  .controls .sep { width: 1px; height: 24px; background: rgba(255,255,255,0.1); }
+
+  #viz { width: 100vw; height: 100vh; padding-top: 50px; }
+  svg { width: 100%; height: 100%; }
+
+  .link { fill: none; stroke-linecap: round; }
+  .link-default { stroke: rgba(120, 120, 200, 0.15); stroke-width: 1; }
+  .link-highlight { stroke: #ff6b6b; stroke-width: 2; stroke-opacity: 0.8; }
+  .link-selected { stroke: #ffd93d; stroke-width: 2.5; stroke-opacity: 0.9; }
+
+  .node circle { cursor: pointer; transition: r 0.15s; }
+  .node text { font-size: 10px; fill: #ccc; pointer-events: none; }
+  .node.hovered circle { stroke: #ff6b6b; stroke-width: 2; }
+  .node.selected circle { stroke: #ffd93d; stroke-width: 2.5; }
+
+  .cell { cursor: pointer; stroke: rgba(26, 26, 46, 0.8); stroke-width: 1; }
+  .cell.hovered { stroke: #ff6b6b; stroke-width: 2; }
+  .cell.selected { stroke: #ffd93d; stroke-width: 2.5; }
+  .cell text { font-size: 9px; fill: #fff; pointer-events: none; }
+
+  .tooltip {
+    position: fixed; pointer-events: none; z-index: 100;
+    background: rgba(20, 20, 40, 0.95); border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 6px; padding: 8px 12px; font-size: 12px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4); display: none;
+  }
+  .tooltip .name { font-weight: 600; color: #fff; }
+  .tooltip .detail { color: #aaa; margin-top: 2px; }
+</style>
+</head>
+<body>
+
+<div class="controls">
+  <label>Layout</label>
+  <select id="layoutSelect">
+    <option value="radial">Dendrogram (Radial)</option>
+    <option value="pack">Circle Pack</option>
+    <option value="treemap">Treemap</option>
+    <option value="tree">Radial Tree</option>
+    <option value="sunburst">Sunburst</option>
+    <option value="icicle">Icicle</option>
+  </select>
+  <div class="sep"></div>
+  <div class="slider-group">
+    <label>Tension</label>
+    <input type="range" id="tensionSlider" min="0" max="100" value="85">
+    <span class="tension-val" id="tensionVal">0.85</span>
+  </div>
+  <div class="sep"></div>
+  <button id="toggleLinks" class="active">Links</button>
+  <button id="toggleLinkOrder">Links on Top</button>
+  <div class="sep"></div>
+  <button id="randomizeBtn">Randomize Data</button>
+</div>
+
+<div id="viz"></div>
+<div class="tooltip" id="tooltip"></div>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// --- Synthetic data generation ---
+const groupNames = ["Alpha","Beta","Gamma","Delta","Epsilon","Zeta","Eta","Theta","Iota","Kappa"];
+const subNames = ["core","io","net","util","api","db","auth","cache","log","render","parse","transform","validate","sync","queue"];
+const leafNames = ["init","run","stop","read","write","send","recv","open","close","get","set","push","pull","map","filter","reduce","sort","merge","split","join","encode","decode","hash","check","build"];
+
+function generateData() {
+  const nodes = [{id: "root", parent: null, value: 0}];
+  const nGroups = 4 + Math.floor(Math.random() * 4);
+  const usedGroups = d3.shuffle(groupNames.slice()).slice(0, nGroups);
+
+  for (const g of usedGroups) {
+    nodes.push({id: g, parent: "root", value: 0});
+    const nSubs = 2 + Math.floor(Math.random() * 3);
+    const usedSubs = d3.shuffle(subNames.slice()).slice(0, nSubs);
+    for (const s of usedSubs) {
+      const subId = `${g}.${s}`;
+      nodes.push({id: subId, parent: g, value: 0});
+      const nLeaves = 2 + Math.floor(Math.random() * 5);
+      const usedLeaves = d3.shuffle(leafNames.slice()).slice(0, nLeaves);
+      for (const l of usedLeaves) {
+        nodes.push({id: `${subId}.${l}`, parent: subId, value: 1 + Math.floor(Math.random() * 20)});
+      }
+    }
+  }
+
+  const leaves = nodes.filter(n => !nodes.some(m => m.parent === n.id));
+  const connections = [];
+  const nLinks = Math.floor(leaves.length * 0.8) + Math.floor(Math.random() * leaves.length * 0.5);
+  for (let i = 0; i < nLinks; i++) {
+    const a = leaves[Math.floor(Math.random() * leaves.length)];
+    const b = leaves[Math.floor(Math.random() * leaves.length)];
+    if (a.id !== b.id) connections.push({source: a.id, target: b.id});
+  }
+  return {nodes, connections};
+}
+
+// --- State ---
+let data = generateData();
+let currentLayout = "radial";
+let tension = 0.85;
+let showLinks = true;
+let linksOnTop = true;
+let selectedNode = null;
+let hoveredNode = null;
+
+const width = window.innerWidth;
+const height = window.innerHeight - 50;
+const tooltip = d3.select("#tooltip");
+
+const svg = d3.select("#viz").append("svg")
+  .attr("viewBox", [0, 0, width, height]);
+
+const linkLayer = svg.append("g").attr("class", "link-layer");
+const nodeLayer = svg.append("g").attr("class", "node-layer");
+
+const groupColor = d3.scaleOrdinal(d3.schemeTableau10);
+
+// --- Build hierarchy and links ---
+function buildHierarchy() {
+  const stratify = d3.stratify().id(d => d.id).parentId(d => d.parent);
+  const root = stratify(data.nodes);
+  root.sum(d => d.value || 0).sort((a, b) => b.value - a.value);
+
+  const nodesById = new Map(root.descendants().map(d => [d.data.id, d]));
+  const links = data.connections.map(c => {
+    const s = nodesById.get(c.source);
+    const t = nodesById.get(c.target);
+    return s && t ? s.path(t) : null;
+  }).filter(Boolean);
+
+  // Assign group colors
+  const groups = root.children || [];
+  groups.forEach((g, i) => groupColor(g.data.id));
+
+  return {root, links, nodesById};
+}
+
+// --- Layout functions ---
+function applyLayout(root, layoutType) {
+  const cx = width / 2, cy = height / 2;
+  const radius = Math.min(width, height) / 2 - 120;
+
+  root.each(d => {
+    d._prev_cx = d.current_cx;
+    d._prev_cy = d.current_cy;
+    d._prev_r = d.current_r;
+    d._prev_x0 = d.current_x0;
+    d._prev_y0 = d.current_y0;
+    d._prev_x1 = d.current_x1;
+    d._prev_y1 = d.current_y1;
+  });
+
+  if (layoutType === "radial" || layoutType === "tree") {
+    const layout = layoutType === "radial"
+      ? d3.cluster().size([2 * Math.PI, radius])
+      : d3.tree().size([2 * Math.PI, radius]);
+    layout.separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth);
+    layout(root);
+    root.each(d => {
+      d.current_cx = cx + d.y * Math.cos(d.x - Math.PI / 2);
+      d.current_cy = cy + d.y * Math.sin(d.x - Math.PI / 2);
+      d.current_r = d.children ? 4 : 3;
+      d.layoutType = "point";
+    });
+  } else if (layoutType === "pack") {
+    d3.pack().size([width - 40, height - 40]).padding(3)(root);
+    root.each(d => {
+      d.current_cx = d.x + 20;
+      d.current_cy = d.y + 20;
+      d.current_r = d.r;
+      d.layoutType = "pack";
+    });
+  } else if (layoutType === "treemap") {
+    d3.treemap().size([width - 40, height - 40]).padding(2).round(true)(root);
+    root.each(d => {
+      d.current_x0 = d.x0 + 20;
+      d.current_y0 = d.y0 + 20;
+      d.current_x1 = d.x1 + 20;
+      d.current_y1 = d.y1 + 20;
+      d.current_cx = (d.current_x0 + d.current_x1) / 2;
+      d.current_cy = (d.current_y0 + d.current_y1) / 2;
+      d.current_r = 0;
+      d.layoutType = "rect";
+    });
+  } else if (layoutType === "sunburst") {
+    d3.partition().size([2 * Math.PI, radius])(root);
+    const rScale = d3.scaleSqrt().domain([0, radius]).range([0, radius]);
+    root.each(d => {
+      const angle = (d.x0 + d.x1) / 2;
+      const r = rScale((d.y0 + d.y1) / 2);
+      d.current_cx = cx + r * Math.cos(angle - Math.PI / 2);
+      d.current_cy = cy + r * Math.sin(angle - Math.PI / 2);
+      d.current_r = 0;
+      // Arc data for sunburst rendering
+      d._arcInner = rScale(d.y0);
+      d._arcOuter = rScale(d.y1);
+      d._startAngle = d.x0;
+      d._endAngle = d.x1;
+      d.layoutType = "arc";
+    });
+  } else if (layoutType === "icicle") {
+    d3.partition().size([width - 40, height - 40]).padding(1)(root);
+    root.each(d => {
+      d.current_x0 = d.x0 + 20;
+      d.current_y0 = d.y0 + 20;
+      d.current_x1 = d.x1 + 20;
+      d.current_y1 = d.y1 + 20;
+      d.current_cx = (d.current_x0 + d.current_x1) / 2;
+      d.current_cy = (d.current_y0 + d.current_y1) / 2;
+      d.current_r = 0;
+      d.layoutType = "rect";
+    });
+  }
+}
+
+function getNodeGroup(d) {
+  let n = d;
+  while (n.parent && n.parent.parent) n = n.parent;
+  return n.data.id;
+}
+
+function nodeColor(d) {
+  return groupColor(getNodeGroup(d));
+}
+
+// --- Rendering ---
+function render(animate = true) {
+  const {root, links} = buildHierarchy();
+  applyLayout(root, currentLayout);
+
+  const dur = animate ? 800 : 0;
+  const isRect = currentLayout === "treemap" || currentLayout === "icicle";
+  const isArc = currentLayout === "sunburst";
+  const isPoint = !isRect && !isArc;
+
+  // Layer order
+  if (linksOnTop) {
+    linkLayer.raise();
+  } else {
+    nodeLayer.raise();
+  }
+
+  // --- Nodes ---
+  nodeLayer.selectAll("*").remove();
+
+  if (isRect) {
+    renderRects(root, dur);
+  } else if (isArc) {
+    renderArcs(root, dur);
+  } else {
+    renderCircles(root, dur);
+  }
+
+  // --- Links ---
+  renderLinks(root, links, dur);
+}
+
+function renderCircles(root, dur) {
+  const leaves = root.leaves();
+  const g = nodeLayer.selectAll("g.node")
+    .data(leaves, d => d.data.id)
+    .join(
+      enter => enter.append("g").attr("class", "node")
+        .attr("transform", d => `translate(${d.current_cx},${d.current_cy})`),
+      update => update,
+      exit => exit.remove()
+    );
+
+  g.transition().duration(dur).ease(d3.easeCubicInOut)
+    .attr("transform", d => `translate(${d.current_cx},${d.current_cy})`);
+
+  g.selectAll("circle").data(d => [d]).join("circle")
+    .attr("r", d => Math.max(2, Math.min(d.current_r || 3, 8)))
+    .attr("fill", d => nodeColor(d))
+    .attr("fill-opacity", 0.8)
+    .attr("stroke", "none");
+
+  g.selectAll("text").data(d => [d]).join("text")
+    .text(d => d.data.id.split(".").pop())
+    .attr("dy", "0.35em")
+    .attr("x", d => {
+      if (currentLayout === "pack") return 0;
+      const angle = Math.atan2(d.current_cy - height/2, d.current_cx - width/2);
+      return Math.abs(angle) > Math.PI/2 ? -10 : 10;
+    })
+    .attr("text-anchor", d => {
+      if (currentLayout === "pack") return "middle";
+      const angle = Math.atan2(d.current_cy - height/2, d.current_cx - width/2);
+      return Math.abs(angle) > Math.PI/2 ? "end" : "start";
+    })
+    .attr("font-size", d => currentLayout === "pack" ? Math.min(9, d.current_r * 1.2) + "px" : "9px")
+    .attr("display", d => {
+      if (currentLayout === "pack") return d.current_r > 8 ? null : "none";
+      return leaves.length > 80 ? "none" : null;
+    });
+
+  // Pack: also show group circles
+  if (currentLayout === "pack") {
+    const internals = root.descendants().filter(d => d.children);
+    nodeLayer.selectAll("circle.group")
+      .data(internals, d => d.data.id)
+      .join("circle")
+        .attr("class", "group")
+        .attr("cx", d => d.current_cx)
+        .attr("cy", d => d.current_cy)
+        .attr("r", d => d.current_r)
+        .attr("fill", d => d.depth === 0 ? "none" : nodeColor(d))
+        .attr("fill-opacity", 0.05)
+        .attr("stroke", d => d.depth === 0 ? "none" : nodeColor(d))
+        .attr("stroke-opacity", 0.3)
+        .attr("stroke-width", 1)
+        .lower();
+  }
+
+  addPointInteraction(g, root);
+}
+
+function renderRects(root, dur) {
+  const allNodes = root.descendants().filter(d => d.depth > 0);
+  const g = nodeLayer.selectAll("g.cell")
+    .data(allNodes, d => d.data.id)
+    .join(
+      enter => enter.append("g").attr("class", "cell")
+        .attr("transform", d => `translate(${d.current_x0},${d.current_y0})`)
+    );
+
+  g.transition().duration(dur).ease(d3.easeCubicInOut)
+    .attr("transform", d => `translate(${d.current_x0},${d.current_y0})`);
+
+  g.selectAll("rect").data(d => [d]).join("rect")
+    .attr("width", d => Math.max(0, d.current_x1 - d.current_x0))
+    .attr("height", d => Math.max(0, d.current_y1 - d.current_y0))
+    .attr("fill", d => nodeColor(d))
+    .attr("fill-opacity", d => d.children ? 0.15 : 0.6)
+    .attr("stroke", "rgba(26,26,46,0.8)")
+    .attr("stroke-width", 1)
+    .attr("rx", 1);
+
+  g.selectAll("text").data(d => [d]).join("text")
+    .text(d => d.data.id.split(".").pop())
+    .attr("x", 3).attr("y", 13)
+    .attr("font-size", "9px").attr("fill", "#fff")
+    .attr("display", d => {
+      const w = d.current_x1 - d.current_x0;
+      const h = d.current_y1 - d.current_y0;
+      return (w > 30 && h > 14) ? null : "none";
+    });
+
+  addRectInteraction(g, root);
+}
+
+function renderArcs(root, dur) {
+  const allNodes = root.descendants().filter(d => d.depth > 0);
+  const arc = d3.arc()
+    .innerRadius(d => d._arcInner)
+    .outerRadius(d => d._arcOuter)
+    .startAngle(d => d._startAngle)
+    .endAngle(d => d._endAngle)
+    .padAngle(0.002)
+    .padRadius(Math.min(width, height) / 4);
+
+  const g = nodeLayer.append("g")
+    .attr("transform", `translate(${width/2},${height/2})`);
+
+  g.selectAll("path.arc-cell")
+    .data(allNodes, d => d.data.id)
+    .join("path")
+      .attr("class", "arc-cell")
+      .attr("d", arc)
+      .attr("fill", d => nodeColor(d))
+      .attr("fill-opacity", d => d.children ? 0.2 : 0.6)
+      .attr("stroke", "rgba(26,26,46,0.5)")
+      .attr("stroke-width", 0.5)
+      .attr("cursor", "pointer")
+      .on("mouseenter", (event, d) => handleHover(d, root))
+      .on("mouseleave", () => handleHoverEnd(root))
+      .on("click", (event, d) => handleClick(d, root))
+      .on("mousemove", (event, d) => showTooltip(event, d));
+
+  // Labels for larger arcs
+  g.selectAll("text.arc-label")
+    .data(allNodes.filter(d => !d.children && (d._endAngle - d._startAngle) > 0.06), d => d.data.id)
+    .join("text")
+      .attr("class", "arc-label")
+      .attr("transform", d => {
+        const angle = (d._startAngle + d._endAngle) / 2;
+        const r = (d._arcInner + d._arcOuter) / 2;
+        const deg = angle * 180 / Math.PI - 90;
+        return `rotate(${deg}) translate(${r},0) rotate(${deg > 90 ? -180 : 0})`;
+      })
+      .attr("text-anchor", d => {
+        const deg = ((d._startAngle + d._endAngle) / 2) * 180 / Math.PI - 90;
+        return deg > 90 ? "end" : "start";
+      })
+      .attr("dy", "0.35em")
+      .attr("font-size", "8px")
+      .attr("fill", "#fff")
+      .attr("pointer-events", "none")
+      .text(d => d.data.id.split(".").pop());
+}
+
+function renderLinks(root, links, dur) {
+  if (!showLinks) {
+    linkLayer.selectAll("*").remove();
+    return;
+  }
+
+  const beta = 1 - tension;
+  const line = d3.line()
+    .curve(d3.curveBundle.beta(beta))
+    .x(d => d.current_cx)
+    .y(d => d.current_cy);
+
+  linkLayer.selectAll("path.link")
+    .data(links, (d, i) => i)
+    .join(
+      enter => enter.append("path").attr("class", "link link-default")
+        .attr("d", line),
+      update => update,
+      exit => exit.remove()
+    )
+    .transition().duration(dur).ease(d3.easeCubicInOut)
+    .attr("d", line);
+
+  // Store links for highlighting
+  linkLayer._links = links;
+}
+
+// --- Interaction ---
+function addPointInteraction(g, root) {
+  g.on("mouseenter", (event, d) => {
+    handleHover(d, root);
+    showTooltip(event, d);
+  })
+  .on("mouseleave", () => handleHoverEnd(root))
+  .on("mousemove", (event, d) => showTooltip(event, d))
+  .on("click", (event, d) => handleClick(d, root));
+}
+
+function addRectInteraction(g, root) {
+  g.on("mouseenter", (event, d) => {
+    handleHover(d, root);
+    showTooltip(event, d);
+  })
+  .on("mouseleave", () => handleHoverEnd(root))
+  .on("mousemove", (event, d) => showTooltip(event, d))
+  .on("click", (event, d) => handleClick(d, root));
+}
+
+function handleHover(d, root) {
+  hoveredNode = d;
+  highlightConnections(d, root);
+}
+
+function handleHoverEnd(root) {
+  hoveredNode = null;
+  clearHighlights();
+  if (selectedNode) highlightConnections(selectedNode, root);
+  tooltip.style("display", "none");
+}
+
+function handleClick(d, root) {
+  if (selectedNode === d) {
+    selectedNode = null;
+    clearHighlights();
+  } else {
+    selectedNode = d;
+    highlightConnections(d, root);
+  }
+}
+
+function highlightConnections(node, root) {
+  const links = linkLayer._links;
+  if (!links) return;
+
+  const leafIds = new Set(node.leaves ? node.leaves().map(d => d.data.id) : [node.data.id]);
+
+  linkLayer.selectAll("path.link")
+    .attr("class", d => {
+      const srcId = d[0].data.id;
+      const tgtId = d[d.length - 1].data.id;
+      const connected = leafIds.has(srcId) || leafIds.has(tgtId);
+      if (connected) return selectedNode === node ? "link link-selected" : "link link-highlight";
+      return "link link-default";
+    })
+    .attr("stroke-opacity", d => {
+      const srcId = d[0].data.id;
+      const tgtId = d[d.length - 1].data.id;
+      return (leafIds.has(srcId) || leafIds.has(tgtId)) ? null : 0.05;
+    })
+    .sort((a, b) => {
+      const aH = leafIds.has(a[0].data.id) || leafIds.has(a[a.length-1].data.id);
+      const bH = leafIds.has(b[0].data.id) || leafIds.has(b[b.length-1].data.id);
+      return aH - bH; // highlighted on top
+    });
+
+  // Highlight group nodes
+  const groupId = getNodeGroup(node);
+  nodeLayer.selectAll("g.node circle, g.cell rect, path.arc-cell")
+    .attr("stroke-opacity", function() {
+      const d = d3.select(this).datum();
+      return getNodeGroup(d) === groupId ? 1 : 0.3;
+    });
+}
+
+function clearHighlights() {
+  linkLayer.selectAll("path.link")
+    .attr("class", "link link-default")
+    .attr("stroke-opacity", null);
+  nodeLayer.selectAll("g.node circle, g.cell rect, path.arc-cell")
+    .attr("stroke-opacity", null);
+}
+
+function showTooltip(event, d) {
+  const links = linkLayer._links || [];
+  const leafIds = new Set(d.leaves ? d.leaves().map(n => n.data.id) : [d.data.id]);
+  const connCount = links.filter(l => leafIds.has(l[0].data.id) || leafIds.has(l[l.length-1].data.id)).length;
+
+  tooltip.style("display", "block")
+    .style("left", (event.clientX + 12) + "px")
+    .style("top", (event.clientY - 12) + "px")
+    .html(`<div class="name">${d.data.id}</div>
+           <div class="detail">Value: ${d.value || 0} · Links: ${connCount}</div>`);
+}
+
+// --- Controls ---
+d3.select("#layoutSelect").on("change", function() {
+  currentLayout = this.value;
+  render(true);
+});
+
+d3.select("#tensionSlider").on("input", function() {
+  tension = this.value / 100;
+  d3.select("#tensionVal").text(tension.toFixed(2));
+  // Re-render links only
+  const {root, links} = buildHierarchy();
+  applyLayout(root, currentLayout);
+  const beta = 1 - tension;
+  const line = d3.line()
+    .curve(d3.curveBundle.beta(beta))
+    .x(d => d.current_cx).y(d => d.current_cy);
+  linkLayer.selectAll("path.link").attr("d", line);
+});
+
+d3.select("#toggleLinks").on("click", function() {
+  showLinks = !showLinks;
+  d3.select(this).classed("active", showLinks);
+  if (!showLinks) {
+    linkLayer.selectAll("*").remove();
+  } else {
+    render(false);
+  }
+});
+
+d3.select("#toggleLinkOrder").on("click", function() {
+  linksOnTop = !linksOnTop;
+  d3.select(this).classed("active", linksOnTop);
+  if (linksOnTop) linkLayer.raise();
+  else nodeLayer.raise();
+});
+
+d3.select("#randomizeBtn").on("click", function() {
+  selectedNode = null;
+  hoveredNode = null;
+  data = generateData();
+  render(true);
+});
+
+// --- Init ---
+render(false);
+</script>
+</body>
+</html>

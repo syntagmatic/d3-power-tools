@@ -43,8 +43,12 @@ def find_block(target):
     return None
 
 
-def get_audit_scores(html_path, block_id, model="sonnet"):
+def get_audit_scores(html_path, block_id, model="sonnet", exp_id=None):
     """Render + audit a single block. Returns scores dict or None."""
+    # Use transition evaluator for hierarchy-bundles
+    if block_id == "hierarchy-bundles":
+        return get_transition_scores(html_path, block_id, model=model, exp_id=exp_id)
+
     ss_dir = PROJ / "temp" / "audit-screenshots" / "iterate"
     ss_dir.mkdir(parents=True, exist_ok=True)
     ss_path = ss_dir / f"{block_id}.png"
@@ -95,17 +99,62 @@ def get_audit_scores(html_path, block_id, model="sonnet"):
     return scores
 
 
+def get_transition_scores(html_path, block_id, model="sonnet", exp_id=None):
+    """Run the hierarchy-bundles transition evaluator. Returns scores dict compatible with generic audit."""
+    eval_script = PROJ / "scripts" / "eval-hierarchy-bundles.py"
+    cmd = ["python3", str(eval_script), str(html_path), "--model", model]
+    if exp_id is not None:
+        cmd.extend(["--exp-id", str(exp_id)])
+
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=600, cwd=str(PROJ))
+    if r.returncode != 0:
+        print(f"  Transition eval failed: {(r.stderr or r.stdout or '')[-300:]}")
+        return None
+
+    # Read results from the manifest
+    runs_file = PROJ / "evals" / "experiments" / "hierarchy-bundles-runs.json"
+    if not runs_file.exists():
+        return None
+
+    runs = json.loads(runs_file.read_text())
+    if not runs:
+        return None
+
+    # Use the latest run
+    latest = runs[-1]
+
+    # Build a scores dict compatible with the generic audit format
+    scores = {
+        "transition": latest.get("transition_score"),
+        "transition_note": latest.get("transition_note", ""),
+        "visual_critic": latest.get("visual_critic_score"),
+        "visual_critic_note": latest.get("visual_critic_note", ""),
+        "composite": latest.get("composite"),
+        "flags": [],
+    }
+
+    # Add programmatic issues as flags
+    for issue in latest.get("programmatic_issues", []):
+        scores["flags"].append(issue)
+
+    return scores
+
+
 def format_audit_notes(scores):
     """Format audit scores into a string for the proposer."""
     if not scores:
         return "  (no audit data)"
     notes = []
-    for dim in ("visual_critic", "encoding_integrity", "stress_test", "cognitive_load"):
-        val = scores.get(dim, "?")
+    # Support both generic audit (4 dimensions) and transition evaluator (transition + visual_critic)
+    dims = ("visual_critic", "encoding_integrity", "stress_test", "cognitive_load", "transition")
+    for dim in dims:
+        val = scores.get(dim)
+        if val is None:
+            continue
         note = scores.get(f"{dim}_note", "")
         if note:
             notes.append(f"  {dim} ({val}/10): {note}")
-        elif val != "?":
+        else:
             notes.append(f"  {dim}: {val}/10")
     flags = scores.get("flags", [])
     if flags:
@@ -266,7 +315,7 @@ def main():
     if args.quality:
         print("  Auditing baseline...", end=" ", flush=True)
         t0 = time.time()
-        baseline_scores = get_audit_scores(html_path, args.target, model=args.audit_model)
+        baseline_scores = get_audit_scores(html_path, args.target, model=args.audit_model, exp_id=baseline_exp_id)
         audit_time = time.time() - t0
         if baseline_scores:
             current_composite = baseline_scores.get("composite")
@@ -361,7 +410,7 @@ def main():
         if args.quality and features_pass:
             print("  Auditing...", end=" ", flush=True)
             t0 = time.time()
-            new_scores = get_audit_scores(html_path, args.target, model=args.audit_model)
+            new_scores = get_audit_scores(html_path, args.target, model=args.audit_model, exp_id=exp_id)
             audit_time = time.time() - t0
             if new_scores:
                 new_composite = new_scores.get("composite")

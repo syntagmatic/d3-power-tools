@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hierarchical Edge Bundling Explorer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #0a0a0f; color: #ccc; display: flex; height: 100vh; overflow: hidden; }
+  #controls {
+    width: 260px; min-width: 260px; padding: 16px; background: #111118;
+    border-right: 1px solid #222; overflow-y: auto; display: flex; flex-direction: column; gap: 14px;
+  }
+  .section-label { font-weight: 700; font-size: 13px; color: #eee; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .control-label { font-weight: 400; font-size: 12px; color: #888; margin-bottom: 2px; }
+  .layout-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+  .layout-btn {
+    padding: 6px 8px; border: 1px solid #333; background: #1a1a24; color: #aaa;
+    border-radius: 4px; cursor: pointer; font-size: 11px; text-align: center; transition: all 0.15s;
+  }
+  .layout-btn:hover { border-color: #556; color: #ddd; }
+  .layout-btn.active { border-color: #68f; color: #fff; background: #252540; }
+  .slider-row { display: flex; align-items: center; gap: 8px; }
+  .slider-row input[type=range] { flex: 1; accent-color: #68f; }
+  .slider-val { font-size: 11px; color: #68f; min-width: 32px; text-align: right; }
+  .toggle-row { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 12px; color: #999; }
+  .toggle-row input { accent-color: #68f; }
+  .action-btn {
+    padding: 8px 12px; border: 1px solid #444; background: #1e1e2a; color: #bbb;
+    border-radius: 4px; cursor: pointer; font-size: 12px; transition: all 0.15s;
+  }
+  .action-btn:hover { border-color: #68f; color: #fff; }
+  #viz { flex: 1; position: relative; overflow: hidden; }
+  svg { width: 100%; height: 100%; }
+  .node circle { cursor: pointer; stroke: none; }
+  .node text { font-size: 11px; fill: #999; pointer-events: none; }
+  .node.selected circle { stroke: #fff; stroke-width: 2; }
+  .node.hovered circle, .node.group-highlight circle { filter: brightness(1.4); }
+  .link { fill: none; stroke-opacity: 0.25; mix-blend-mode: screen; }
+  .link.highlighted { stroke-opacity: 0.8; }
+  .space-rect { stroke: none; cursor: pointer; }
+  .space-rect.selected { stroke: #fff; stroke-width: 2; }
+  .pack-circle { fill-opacity: 0.08; stroke: #ffffff10; stroke-width: 1; }
+  .arc-path { cursor: pointer; stroke: #0a0a0f; stroke-width: 0.5; }
+  .arc-path.selected { stroke: #fff; stroke-width: 2; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <div>
+    <div class="section-label">Layout</div>
+    <div class="layout-grid">
+      <button class="layout-btn active" data-layout="pack">Circle Pack</button>
+      <button class="layout-btn" data-layout="treemap">Treemap</button>
+      <button class="layout-btn" data-layout="dendrogram">Dendrogram</button>
+      <button class="layout-btn" data-layout="radial">Radial Tree</button>
+      <button class="layout-btn" data-layout="sunburst">Sunburst</button>
+      <button class="layout-btn" data-layout="icicle">Icicle</button>
+    </div>
+  </div>
+  <div>
+    <div class="section-label">Edge Bundling</div>
+    <div class="control-label">Tension</div>
+    <div class="slider-row">
+      <input type="range" id="tension" min="0" max="1" step="0.01" value="0.85">
+      <span class="slider-val" id="tension-val">0.85</span>
+    </div>
+  </div>
+  <div>
+    <div class="section-label">Links</div>
+    <label class="toggle-row"><input type="checkbox" id="show-links" checked> Show links</label>
+    <label class="toggle-row"><input type="checkbox" id="links-behind"> Links behind nodes</label>
+  </div>
+  <div>
+    <div class="section-label">Data</div>
+    <button class="action-btn" id="randomize">Randomize Dataset</button>
+  </div>
+</div>
+<div id="viz">
+  <svg id="svg"></svg>
+</div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+// ─── Synthetic data generator ───
+const groupNames = ["Alpha","Beta","Gamma","Delta","Epsilon","Zeta","Eta","Theta","Iota","Kappa"];
+const leafNames = ["core","util","api","io","net","db","auth","log","cache","queue","sync","parse","render","route","store","config","test","build","lint","fmt"];
+
+function generateData() {
+  const nodes = [{id: "root", parent: null, size: 0}];
+  const nGroups = 4 + Math.floor(Math.random() * 4); // 4-7
+  const usedGroups = d3.shuffle(groupNames.slice()).slice(0, nGroups);
+  for (const g of usedGroups) {
+    nodes.push({id: g, parent: "root", size: 0});
+    const nSub = 1 + Math.floor(Math.random() * 3); // 1-3 subgroups
+    for (let s = 0; s < nSub; s++) {
+      const subId = `${g}.s${s}`;
+      nodes.push({id: subId, parent: g, size: 0});
+      const nLeaves = 2 + Math.floor(Math.random() * 5); // 2-6 leaves
+      const usedLeaves = d3.shuffle(leafNames.slice()).slice(0, nLeaves);
+      for (const l of usedLeaves) {
+        nodes.push({id: `${subId}.${l}`, parent: subId, size: 1 + Math.floor(Math.random() * 9)});
+      }
+    }
+  }
+  const leaves = nodes.filter(n => n.size > 0);
+  const links = [];
+  const nLinks = Math.floor(leaves.length * 0.8) + Math.floor(Math.random() * leaves.length * 0.5);
+  for (let i = 0; i < nLinks; i++) {
+    const a = leaves[Math.floor(Math.random() * leaves.length)];
+    const b = leaves[Math.floor(Math.random() * leaves.length)];
+    if (a.id !== b.id) links.push({source: a.id, target: b.id});
+  }
+  return {nodes, links};
+}
+
+// ─── State ───
+let data = generateData();
+let currentLayout = "pack";
+let selectedNode = null;
+let tension = 0.85;
+
+const svg = d3.select("#svg");
+const width = () => document.getElementById("viz").clientWidth;
+const height = () => document.getElementById("viz").clientHeight;
+
+// Groups — order matters for layering
+const gLinks = svg.append("g").attr("class", "g-links");
+const gNodes = svg.append("g").attr("class", "g-nodes");
+
+const colorScale = d3.scaleOrdinal(d3.schemeTableau10);
+
+// ─── Build hierarchy ───
+function buildHierarchy(data) {
+  const root = d3.stratify().id(d => d.id).parentId(d => d.parent)(data.nodes);
+  root.sum(d => d.size || 0).sort((a, b) => b.value - a.value);
+  const nodesById = new Map(root.descendants().map(d => [d.data.id, d]));
+  const links = data.links.map(l => {
+    const s = nodesById.get(l.source), t = nodesById.get(l.target);
+    return s && t ? s.path(t) : null;
+  }).filter(Boolean);
+  return {root, links, nodesById};
+}
+
+// ─── Layout computers ───
+function computeLayout(root, layout, w, h) {
+  const mx = 80, my = 60;
+  const r = Math.min(w, h) / 2 - 100;
+
+  if (layout === "pack") {
+    d3.pack().size([w - mx * 2, h - my * 2]).padding(3)(root);
+    root.each(d => { d.cx = d.x + mx; d.cy = d.y + my; d.nodeR = d.r; d.layoutType = "pack"; });
+  } else if (layout === "treemap") {
+    d3.treemap().size([w - mx * 2, h - my * 2]).padding(2).round(true)
+      .tile(d3.treemapSquarify)(root);
+    root.each(d => {
+      d.cx = (d.x0 + d.x1) / 2 + mx; d.cy = (d.y0 + d.y1) / 2 + my;
+      d.rx0 = d.x0 + mx; d.ry0 = d.y0 + my; d.rx1 = d.x1 + mx; d.ry1 = d.y1 + my;
+      d.layoutType = "treemap";
+    });
+  } else if (layout === "dendrogram") {
+    d3.cluster().size([w - mx * 2, h - my * 2])(root);
+    root.each(d => { d.cx = d.x + mx; d.cy = d.y + my; d.layoutType = "dendrogram"; });
+  } else if (layout === "radial") {
+    d3.tree().size([2 * Math.PI, r]).separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth)(root);
+    root.each(d => {
+      d.cx = w / 2 + d.y * Math.cos(d.x - Math.PI / 2);
+      d.cy = h / 2 + d.y * Math.sin(d.x - Math.PI / 2);
+      d.angle = d.x; d.radius = d.y;
+      d.layoutType = "radial";
+    });
+  } else if (layout === "sunburst") {
+    d3.partition().size([2 * Math.PI, r])(root);
+    root.each(d => {
+      const midAngle = (d.x0 + d.x1) / 2;
+      const midR = (d.y0 + d.y1) / 2;
+      d.cx = w / 2 + midR * Math.cos(midAngle - Math.PI / 2);
+      d.cy = h / 2 + midR * Math.sin(midAngle - Math.PI / 2);
+      d.arcX0 = d.x0; d.arcX1 = d.x1; d.arcY0 = d.y0; d.arcY1 = d.y1;
+      d.layoutType = "sunburst";
+    });
+  } else if (layout === "icicle") {
+    d3.partition().size([w - mx * 2, h - my * 2]).padding(1)(root);
+    root.each(d => {
+      d.cx = (d.x0 + d.x1) / 2 + mx; d.cy = (d.y0 + d.y1) / 2 + my;
+      d.rx0 = d.x0 + mx; d.ry0 = d.y0 + my; d.rx1 = d.x1 + mx; d.ry1 = d.y1 + my;
+      d.layoutType = "icicle";
+    });
+  }
+}
+
+// ─── Color for node ───
+function nodeColor(d) {
+  if (d.depth === 0) return "#333";
+  let anc = d;
+  while (anc.depth > 1) anc = anc.parent;
+  return colorScale(anc.data.id);
+}
+
+// ─── Line generator for links ───
+function makeLine() {
+  return d3.line().curve(d3.curveBundle.beta(1 - tension)).x(d => d.cx).y(d => d.cy);
+}
+
+// ─── Render ───
+let hier;
+
+function render(animate = true) {
+  const w = width(), h = height();
+  hier = buildHierarchy(data);
+  computeLayout(hier.root, currentLayout, w, h);
+
+  renderNodes(hier.root, animate, w, h);
+  renderLinks(hier, animate);
+  updateLinkOrder();
+}
+
+function renderNodes(root, animate, w, h) {
+  const dur = animate ? 800 : 0;
+  const descendants = root.descendants();
+  const leaves = root.leaves();
+
+  // Clear previous specialized shapes
+  gNodes.selectAll(".space-rect, .pack-parent, .arc-path, .tree-link").remove();
+
+  if (currentLayout === "pack") {
+    // Translucent parent circles
+    const parents = descendants.filter(d => d.children);
+    gNodes.selectAll(".pack-parent")
+      .data(parents, d => d.data.id)
+      .join(
+        enter => enter.append("circle").attr("class", "pack-parent pack-circle")
+          .attr("cx", d => d.cx).attr("cy", d => d.cy).attr("r", 0)
+          .call(e => e.transition().duration(dur).attr("r", d => d.nodeR)),
+        update => update.call(u => u.transition().duration(dur)
+          .attr("cx", d => d.cx).attr("cy", d => d.cy).attr("r", d => d.nodeR)),
+        exit => exit.transition().duration(dur).attr("r", 0).remove()
+      )
+      .attr("fill", d => nodeColor(d));
+
+    renderCircleNodes(leaves, dur);
+  } else if (currentLayout === "treemap" || currentLayout === "icicle") {
+    renderRectNodes(descendants.filter(d => d.depth > 0), dur);
+  } else if (currentLayout === "sunburst") {
+    renderArcNodes(descendants.filter(d => d.depth > 0), dur, w, h);
+  } else if (currentLayout === "dendrogram" || currentLayout === "radial") {
+    // Tree links
+    const treeLinks = root.links();
+    const linkGen = currentLayout === "radial"
+      ? d3.linkRadial().angle(d => d.x).radius(d => d.y)
+      : d3.linkHorizontal().x(d => d.cx).y(d => d.cy);
+
+    gNodes.selectAll(".tree-link")
+      .data(treeLinks, d => d.source.data.id + "-" + d.target.data.id)
+      .join(
+        enter => enter.append("path").attr("class", "tree-link")
+          .attr("fill", "none").attr("stroke", "#333").attr("stroke-width", 1)
+          .attr("d", currentLayout === "radial" ? linkGen : linkGen)
+          .attr("opacity", 0)
+          .call(e => e.transition().duration(dur).attr("opacity", 1)),
+        update => update.call(u => u.transition().duration(dur).attr("d", linkGen).attr("opacity", 1)),
+        exit => exit.transition().duration(dur).attr("opacity", 0).remove()
+      );
+
+    if (currentLayout === "radial") {
+      gNodes.selectAll(".tree-link").attr("transform", `translate(${w / 2},${h / 2})`);
+    }
+
+    renderCircleNodes(descendants.filter(d => d.depth > 0), dur);
+  }
+}
+
+function renderCircleNodes(nodes, dur) {
+  // Remove rects/arcs
+  gNodes.selectAll(".space-rect, .arc-path").remove();
+
+  const sel = gNodes.selectAll(".node")
+    .data(nodes, d => d.data.id)
+    .join(
+      enter => {
+        const g = enter.append("g").attr("class", "node")
+          .attr("transform", d => `translate(${d.cx},${d.cy})`);
+        g.append("circle")
+          .attr("r", d => currentLayout === "pack" ? d.nodeR || 3 : 0)
+          .attr("fill", d => nodeColor(d))
+          .attr("fill-opacity", d => d.children ? 0.15 : 0.75);
+        g.append("text").text(d => d.children ? "" : d.data.id.split(".").pop());
+        if (dur) g.select("circle").transition().duration(dur)
+          .attr("r", d => currentLayout === "pack" ? (d.nodeR || 3) : Math.max(3, Math.sqrt(d.value || 1) * 1.8));
+        return g;
+      },
+      update => update.call(u => {
+        const t = u.transition().duration(dur).attr("transform", d => `translate(${d.cx},${d.cy})`);
+        u.select("circle").transition().duration(dur)
+          .attr("r", d => currentLayout === "pack" ? (d.nodeR || 3) : Math.max(3, Math.sqrt(d.value || 1) * 1.8))
+          .attr("fill", d => nodeColor(d))
+          .attr("fill-opacity", d => d.children ? 0.15 : 0.75);
+        return u;
+      }),
+      exit => exit.transition().duration(dur).attr("opacity", 0).remove()
+    );
+
+  // Labels
+  sel.select("text")
+    .text(d => d.children ? "" : d.data.id.split(".").pop())
+    .each(function(d) { positionLabel(this, d); });
+
+  // Interactions
+  sel.on("click", (e, d) => {
+    e.stopPropagation();
+    selectedNode = selectedNode === d ? null : d;
+    highlightSelection();
+  }).on("mouseenter", (e, d) => highlightGroup(d))
+    .on("mouseleave", clearHighlight);
+}
+
+function renderRectNodes(nodes, dur) {
+  gNodes.selectAll(".node").remove();
+
+  const sel = gNodes.selectAll(".space-rect")
+    .data(nodes, d => d.data.id)
+    .join(
+      enter => enter.append("rect").attr("class", "space-rect")
+        .attr("x", d => d.rx0).attr("y", d => d.ry0)
+        .attr("width", d => Math.max(0, d.rx1 - d.rx0))
+        .attr("height", d => Math.max(0, d.ry1 - d.ry0))
+        .attr("fill", d => nodeColor(d))
+        .attr("fill-opacity", d => d.children ? 0.2 : 0.7)
+        .attr("opacity", 0)
+        .call(e => e.transition().duration(dur).attr("opacity", 1)),
+      update => update.call(u => u.transition().duration(dur)
+        .attr("x", d => d.rx0).attr("y", d => d.ry0)
+        .attr("width", d => Math.max(0, d.rx1 - d.rx0))
+        .attr("height", d => Math.max(0, d.ry1 - d.ry0))
+        .attr("fill", d => nodeColor(d))
+        .attr("opacity", 1)),
+      exit => exit.transition().duration(dur).attr("opacity", 0).remove()
+    );
+
+  sel.on("click", (e, d) => {
+    e.stopPropagation();
+    selectedNode = selectedNode === d ? null : d;
+    highlightSelection();
+  }).on("mouseenter", (e, d) => highlightGroup(d))
+    .on("mouseleave", clearHighlight);
+
+  // Labels for rects
+  gNodes.selectAll(".rect-label").remove();
+  const labelData = nodes.filter(d => !d.children && (d.rx1 - d.rx0) > 28 && (d.ry1 - d.ry0) > 14);
+  gNodes.selectAll(".rect-label")
+    .data(labelData, d => d.data.id)
+    .join("text")
+    .attr("class", "rect-label")
+    .attr("x", d => (d.rx0 + d.rx1) / 2)
+    .attr("y", d => (d.ry0 + d.ry1) / 2)
+    .attr("text-anchor", "middle").attr("dominant-baseline", "central")
+    .attr("fill", "#ddd").attr("font-size", "11px").attr("pointer-events", "none")
+    .text(d => d.data.id.split(".").pop());
+}
+
+function renderArcNodes(nodes, dur, w, h) {
+  gNodes.selectAll(".node, .space-rect, .rect-label").remove();
+
+  const arcGen = d3.arc()
+    .startAngle(d => d.arcX0)
+    .endAngle(d => d.arcX1)
+    .innerRadius(d => d.arcY0)
+    .outerRadius(d => d.arcY1);
+
+  const sel = gNodes.selectAll(".arc-path")
+    .data(nodes, d => d.data.id)
+    .join(
+      enter => enter.append("path").attr("class", "arc-path")
+        .attr("transform", `translate(${w / 2},${h / 2})`)
+        .attr("d", arcGen)
+        .attr("fill", d => nodeColor(d))
+        .attr("fill-opacity", d => d.children ? 0.3 : 0.75)
+        .attr("opacity", 0)
+        .call(e => e.transition().duration(dur).attr("opacity", 1)),
+      update => update.call(u => u.transition().duration(dur)
+        .attr("transform", `translate(${w / 2},${h / 2})`)
+        .attr("d", arcGen)
+        .attr("fill", d => nodeColor(d))
+        .attr("opacity", 1)),
+      exit => exit.transition().duration(dur).attr("opacity", 0).remove()
+    );
+
+  sel.on("click", (e, d) => {
+    e.stopPropagation();
+    selectedNode = selectedNode === d ? null : d;
+    highlightSelection();
+  }).on("mouseenter", (e, d) => highlightGroup(d))
+    .on("mouseleave", clearHighlight);
+
+  // Arc labels
+  gNodes.selectAll(".arc-label").remove();
+  const labelData = nodes.filter(d => {
+    const angle = d.arcX1 - d.arcX0;
+    const radSpan = d.arcY1 - d.arcY0;
+    return !d.children && angle > 0.06 && radSpan > 15;
+  });
+  gNodes.selectAll(".arc-label")
+    .data(labelData, d => d.data.id)
+    .join("text")
+    .attr("class", "arc-label")
+    .attr("transform", d => {
+      const angle = (d.arcX0 + d.arcX1) / 2;
+      const r = (d.arcY0 + d.arcY1) / 2;
+      const deg = angle * 180 / Math.PI - 90;
+      return `translate(${w / 2},${h / 2}) rotate(${deg}) translate(${r},0)${deg > 90 ? " rotate(180)" : ""}`;
+    })
+    .attr("text-anchor", d => {
+      const deg = (d.arcX0 + d.arcX1) / 2 * 180 / Math.PI - 90;
+      return deg > 90 ? "end" : "start";
+    })
+    .attr("dominant-baseline", "central")
+    .attr("fill", "#ddd").attr("font-size", "11px").attr("pointer-events", "none")
+    .text(d => d.data.id.split(".").pop());
+}
+
+function positionLabel(el, d) {
+  const text = d3.select(el);
+  if (d.children) { text.attr("opacity", 0); return; }
+
+  if (currentLayout === "radial") {
+    const deg = d.angle * 180 / Math.PI - 90;
+    const flip = deg > 90;
+    text.attr("dx", flip ? -8 : 8)
+      .attr("dy", "0.35em")
+      .attr("text-anchor", flip ? "end" : "start")
+      .attr("transform", `rotate(${flip ? deg + 180 : deg})`)
+      .attr("opacity", 1);
+  } else if (currentLayout === "dendrogram") {
+    text.attr("dx", d.children ? -8 : 8)
+      .attr("dy", "0.35em")
+      .attr("text-anchor", d.children ? "end" : "start")
+      .attr("transform", null)
+      .attr("opacity", 1);
+  } else if (currentLayout === "pack") {
+    const r = d.nodeR || 3;
+    if (r < 12) { text.attr("opacity", 0); return; }
+    text.attr("dx", 0).attr("dy", "0.35em")
+      .attr("text-anchor", "middle").attr("transform", null).attr("opacity", 1);
+  } else {
+    text.attr("dx", 8).attr("dy", "0.35em")
+      .attr("text-anchor", "start").attr("transform", null).attr("opacity", 1);
+  }
+}
+
+function renderLinks(hier, animate) {
+  const dur = animate ? 800 : 0;
+  const line = makeLine();
+  const visible = document.getElementById("show-links").checked;
+
+  const sel = gLinks.selectAll(".link")
+    .data(visible ? hier.links : [], (d, i) => {
+      const s = d[0].data.id, t = d[d.length - 1].data.id;
+      return s < t ? s + "|" + t : t + "|" + s;
+    })
+    .join(
+      enter => enter.append("path").attr("class", "link")
+        .attr("d", line)
+        .attr("stroke", d => nodeColor(d[0]))
+        .attr("stroke-width", 1.5)
+        .attr("stroke-opacity", 0)
+        .call(e => e.transition().duration(dur).attr("stroke-opacity", 0.25)),
+      update => update.call(u => u.transition().duration(dur)
+        .attr("d", line)
+        .attr("stroke", d => nodeColor(d[0]))
+        .attr("stroke-opacity", 0.25)),
+      exit => exit.transition().duration(dur).attr("stroke-opacity", 0).remove()
+    );
+}
+
+function updateLinkOrder() {
+  const behind = document.getElementById("links-behind").checked;
+  if (behind) {
+    gLinks.lower();
+  } else {
+    gLinks.raise();
+  }
+}
+
+// ─── Highlighting ───
+function highlightSelection() {
+  gNodes.selectAll(".node").classed("selected", d => d === selectedNode);
+  gNodes.selectAll(".space-rect").classed("selected", d => d === selectedNode);
+  gNodes.selectAll(".arc-path").classed("selected", d => d === selectedNode);
+
+  if (selectedNode && hier) {
+    const leafIds = new Set(selectedNode.leaves().map(d => d.data.id));
+    gLinks.selectAll(".link")
+      .classed("highlighted", d => leafIds.has(d[0].data.id) || leafIds.has(d[d.length - 1].data.id))
+      .attr("stroke-opacity", d => {
+        const connected = leafIds.has(d[0].data.id) || leafIds.has(d[d.length - 1].data.id);
+        return connected ? 0.8 : 0.08;
+      });
+  } else {
+    gLinks.selectAll(".link").classed("highlighted", false).attr("stroke-opacity", 0.25);
+  }
+}
+
+function highlightGroup(d) {
+  let groupRoot = d;
+  while (groupRoot.depth > 1) groupRoot = groupRoot.parent;
+  const groupIds = new Set(groupRoot.descendants().map(n => n.data.id));
+
+  gNodes.selectAll(".node").classed("group-highlight", n => groupIds.has(n.data.id));
+  gNodes.selectAll(".space-rect").attr("fill-opacity", n => groupIds.has(n.data.id) ? (n.children ? 0.35 : 0.9) : (n.children ? 0.1 : 0.35));
+  gNodes.selectAll(".arc-path").attr("fill-opacity", n => groupIds.has(n.data.id) ? (n.children ? 0.5 : 0.9) : (n.children ? 0.15 : 0.35));
+
+  if (hier) {
+    const leafIds = new Set(groupRoot.leaves().map(n => n.data.id));
+    gLinks.selectAll(".link")
+      .attr("stroke-opacity", l => {
+        const connected = leafIds.has(l[0].data.id) || leafIds.has(l[l.length - 1].data.id);
+        return connected ? 0.6 : 0.06;
+      });
+  }
+}
+
+function clearHighlight() {
+  gNodes.selectAll(".node").classed("group-highlight", false);
+  gNodes.selectAll(".space-rect").attr("fill-opacity", d => d.children ? 0.2 : 0.7);
+  gNodes.selectAll(".arc-path").attr("fill-opacity", d => d.children ? 0.3 : 0.75);
+  if (selectedNode) highlightSelection();
+  else gLinks.selectAll(".link").attr("stroke-opacity", 0.25);
+}
+
+// ─── Controls ───
+document.querySelectorAll(".layout-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".layout-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    currentLayout = btn.dataset.layout;
+    selectedNode = null;
+    render(true);
+  });
+});
+
+document.getElementById("tension").addEventListener("input", e => {
+  tension = +e.target.value;
+  document.getElementById("tension-val").textContent = tension.toFixed(2);
+  if (hier) renderLinks(hier, false);
+});
+
+document.getElementById("show-links").addEventListener("change", () => { if (hier) renderLinks(hier, true); });
+document.getElementById("links-behind").addEventListener("change", updateLinkOrder);
+
+document.getElementById("randomize").addEventListener("click", () => {
+  data = generateData();
+  selectedNode = null;
+  render(true);
+});
+
+svg.on("click", () => {
+  selectedNode = null;
+  highlightSelection();
+});
+
+// ─── Resize ───
+const ro = new ResizeObserver(() => render(false));
+ro.observe(document.getElementById("viz"));
+
+// ─── Init ───
+render(false);
+</script>
+</body>
+</html>

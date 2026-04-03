@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hierarchical Edge Bundling Explorer</title>
+<style>
+* { margin: 0; box-sizing: border-box; }
+body { background: #1a1a2e; color: #e0e0e0; font-family: system-ui, sans-serif; overflow: hidden; }
+#controls {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+  display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+  background: rgba(26,26,46,0.95); border-bottom: 1px solid #333;
+  flex-wrap: wrap;
+}
+#controls label { font-size: 12px; color: #aaa; }
+#controls select, #controls button {
+  background: #2a2a4a; color: #e0e0e0; border: 1px solid #444;
+  border-radius: 4px; padding: 4px 10px; font-size: 13px; cursor: pointer;
+}
+#controls button:hover { background: #3a3a5a; }
+#controls input[type=range] { width: 100px; accent-color: #6c8cd5; }
+.toggle-group { display: flex; align-items: center; gap: 6px; }
+.toggle-group input[type=checkbox] { accent-color: #6c8cd5; }
+#viz { width: 100vw; height: 100vh; }
+.node-label { font-size: 11px; fill: #ccc; pointer-events: none; }
+.node-circle { cursor: pointer; }
+.node-circle.selected { stroke: #fff; stroke-width: 2; }
+.node-rect { cursor: pointer; }
+.node-rect.selected { stroke: #fff; stroke-width: 2; }
+.link { fill: none; stroke-opacity: 0.25; mix-blend-mode: screen; }
+.link.highlighted { stroke-opacity: 0.8; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <label>Layout:
+    <select id="layoutSelect">
+      <option value="radialCluster">Dendrogram</option>
+      <option value="radialTree">Radial Tree</option>
+      <option value="pack">Circle Pack</option>
+      <option value="treemap">Treemap</option>
+      <option value="sunburst">Sunburst</option>
+      <option value="icicle">Icicle</option>
+    </select>
+  </label>
+  <label>Tension: <span id="tensionVal">0.85</span>
+    <input type="range" id="tensionSlider" min="0" max="1" step="0.01" value="0.85">
+  </label>
+  <div class="toggle-group">
+    <label><input type="checkbox" id="showLinks" checked> Links</label>
+    <label><input type="checkbox" id="linksOnTop"> Links on top</label>
+  </div>
+  <button id="randomizeBtn">Randomize Data</button>
+</div>
+<svg id="viz"></svg>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+const svg = d3.select("#viz");
+const width = window.innerWidth;
+const height = window.innerHeight;
+svg.attr("viewBox", [0, 0, width, height]);
+
+const margin = { top: 60, right: 20, bottom: 20, left: 20 };
+const cx = width / 2, cy = height / 2;
+const radius = Math.min(width, height) / 2 - 100;
+
+// Color palette per top-level group
+const groupColor = d3.scaleOrdinal(d3.schemeTableau10);
+
+// --- Synthetic data generation ---
+const departments = ["Engineering", "Design", "Marketing", "Sales", "Research", "Operations"];
+const subgroups = {
+  Engineering: ["Frontend", "Backend", "Infra", "Mobile", "Data"],
+  Design: ["UX", "Visual", "Motion", "Research"],
+  Marketing: ["Content", "Growth", "Brand", "Analytics"],
+  Sales: ["Enterprise", "SMB", "Partnerships", "Solutions"],
+  Research: ["ML", "NLP", "Vision", "Ethics"],
+  Operations: ["HR", "Finance", "Legal", "Facilities"]
+};
+const names = [
+  "Alice","Bob","Carol","Dave","Eve","Frank","Grace","Heidi","Ivan","Judy",
+  "Karl","Liam","Mona","Nick","Olive","Pat","Quinn","Rosa","Sam","Tina",
+  "Uma","Vic","Wendy","Xena","Yuri","Zara","Axel","Beth","Cleo","Drew"
+];
+
+let dataVersion = 0;
+
+function generateData() {
+  dataVersion++;
+  const nodes = [{ id: "root", parent: null, value: 0 }];
+  const usedDepts = departments.slice(0, 3 + Math.floor(Math.random() * 4));
+
+  for (const dept of usedDepts) {
+    nodes.push({ id: dept, parent: "root", value: 0 });
+    const subs = subgroups[dept].slice(0, 2 + Math.floor(Math.random() * (subgroups[dept].length - 1)));
+    for (const sub of subs) {
+      const subId = `${dept}.${sub}`;
+      nodes.push({ id: subId, parent: dept, value: 0 });
+      const count = 2 + Math.floor(Math.random() * 4);
+      const shuffled = d3.shuffle(names.slice()).slice(0, count);
+      for (const name of shuffled) {
+        nodes.push({
+          id: `${subId}.${name}`,
+          parent: subId,
+          value: 10 + Math.floor(Math.random() * 90),
+          leaf: true
+        });
+      }
+    }
+  }
+
+  // Generate cross-links between leaves
+  const leaves = nodes.filter(d => d.leaf);
+  const links = [];
+  const numLinks = Math.floor(leaves.length * 0.8 + Math.random() * leaves.length * 0.5);
+  for (let i = 0; i < numLinks; i++) {
+    const a = leaves[Math.floor(Math.random() * leaves.length)];
+    const b = leaves[Math.floor(Math.random() * leaves.length)];
+    if (a.id !== b.id) links.push({ source: a.id, target: b.id });
+  }
+  return { nodes, links };
+}
+
+// --- State ---
+let currentLayout = "radialCluster";
+let currentData = generateData();
+let selectedNode = null;
+let hoveredGroup = null;
+
+// Layers
+const linkLayer = svg.append("g").attr("class", "link-layer");
+const nodeLayer = svg.append("g").attr("class", "node-layer");
+
+function buildHierarchy(data) {
+  const stratify = d3.stratify().id(d => d.id).parentId(d => d.parent);
+  const root = stratify(data.nodes);
+  root.sum(d => d.value || 1).sort((a, b) => b.value - a.value);
+  return root;
+}
+
+function computeLayout(root, layoutType) {
+  const allNodes = root.descendants();
+
+  switch (layoutType) {
+    case "radialCluster": {
+      const cluster = d3.cluster().size([2 * Math.PI, radius])
+        .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth);
+      cluster(root);
+      allNodes.forEach(d => {
+        d.cx = cx + d.y * Math.cos(d.x - Math.PI / 2);
+        d.cy = cy + d.y * Math.sin(d.x - Math.PI / 2);
+        d.angle = d.x;
+        d.radialR = d.y;
+        d.isRadial = true;
+      });
+      break;
+    }
+    case "radialTree": {
+      const tree = d3.tree().size([2 * Math.PI, radius])
+        .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth);
+      tree(root);
+      allNodes.forEach(d => {
+        d.cx = cx + d.y * Math.cos(d.x - Math.PI / 2);
+        d.cy = cy + d.y * Math.sin(d.x - Math.PI / 2);
+        d.angle = d.x;
+        d.radialR = d.y;
+        d.isRadial = true;
+      });
+      break;
+    }
+    case "pack": {
+      const pack = d3.pack().size([width - margin.left - margin.right, height - margin.top - margin.bottom]).padding(3);
+      pack(root);
+      allNodes.forEach(d => {
+        d.cx = d.x + margin.left;
+        d.cy = d.y + margin.top;
+        d.packR = d.r;
+        d.isRadial = false;
+      });
+      break;
+    }
+    case "treemap": {
+      const treemap = d3.treemap()
+        .size([width - margin.left - margin.right, height - margin.top - margin.bottom])
+        .paddingInner(2).paddingOuter(4).round(true)
+        .tile(d3.treemapSquarify);
+      treemap(root);
+      allNodes.forEach(d => {
+        d.cx = (d.x0 + d.x1) / 2 + margin.left;
+        d.cy = (d.y0 + d.y1) / 2 + margin.top;
+        d.rectW = d.x1 - d.x0;
+        d.rectH = d.y1 - d.y0;
+        d.isRadial = false;
+      });
+      break;
+    }
+    case "sunburst": {
+      const partition = d3.partition().size([2 * Math.PI, radius]);
+      partition(root);
+      allNodes.forEach(d => {
+        const midAngle = (d.x0 + d.x1) / 2;
+        const midR = Math.sqrt((d.y0 * d.y0 + d.y1 * d.y1) / 2);
+        d.cx = cx + midR * Math.cos(midAngle - Math.PI / 2);
+        d.cy = cy + midR * Math.sin(midAngle - Math.PI / 2);
+        d.arcX0 = d.x0; d.arcX1 = d.x1;
+        d.arcY0 = d.y0; d.arcY1 = d.y1;
+        d.angle = midAngle;
+        d.isRadial = true;
+      });
+      break;
+    }
+    case "icicle": {
+      const partition = d3.partition()
+        .size([width - margin.left - margin.right, height - margin.top - margin.bottom])
+        .padding(1);
+      partition(root);
+      allNodes.forEach(d => {
+        d.cx = (d.x0 + d.x1) / 2 + margin.left;
+        d.cy = (d.y0 + d.y1) / 2 + margin.top;
+        d.rectW = d.x1 - d.x0;
+        d.rectH = d.y1 - d.y0;
+        d.isRadial = false;
+      });
+      break;
+    }
+  }
+  return allNodes;
+}
+
+function getTopGroup(d) {
+  let n = d;
+  while (n.parent && n.parent.parent) n = n.parent;
+  return n.data.id;
+}
+
+function buildLCALinks(root, connections) {
+  const byId = new Map(root.descendants().map(d => [d.data.id, d]));
+  return connections.map(c => {
+    const s = byId.get(c.source);
+    const t = byId.get(c.target);
+    if (!s || !t) return null;
+    return { path: s.path(t), source: s, target: t };
+  }).filter(Boolean);
+}
+
+// --- Rendering ---
+const line = d3.line().x(d => d.cx).y(d => d.cy);
+
+function getTension() {
+  return +document.getElementById("tensionSlider").value;
+}
+function getBeta() {
+  return 1 - getTension();
+}
+
+function render(root, data, animate = true) {
+  const allNodes = root.descendants();
+  const leaves = root.leaves();
+  const lcaLinks = buildLCALinks(root, data.links);
+  const duration = animate ? 900 : 0;
+  const t = svg.transition().duration(duration).ease(d3.easeCubicInOut);
+
+  // --- Links ---
+  const showLinks = document.getElementById("showLinks").checked;
+
+  const linkSel = linkLayer.selectAll("path.link")
+    .data(showLinks ? lcaLinks : [], (d, i) => `${d.source.data.id}-${d.target.data.id}-${i}`);
+
+  linkSel.exit().transition(t).attr("stroke-opacity", 0).remove();
+
+  const linkEnter = linkSel.enter().append("path")
+    .attr("class", "link")
+    .attr("stroke-opacity", 0);
+
+  linkSel.merge(linkEnter)
+    .attr("stroke", d => groupColor(getTopGroup(d.source)))
+    .attr("stroke-width", 1.5)
+    .transition(t)
+    .attr("stroke-opacity", 0.25)
+    .attrTween("d", function(d) {
+      const prev = this.__prev || d.path.map(n => ({ cx: n.cx, cy: n.cy }));
+      const next = d.path.map(n => ({ cx: n.cx, cy: n.cy }));
+      this.__prev = next;
+      const interps = prev.map((p, i) => {
+        const n = next[i] || next[next.length - 1];
+        return {
+          cx: d3.interpolateNumber(p.cx, n.cx),
+          cy: d3.interpolateNumber(p.cy, n.cy)
+        };
+      });
+      // Handle length mismatch
+      const maxLen = Math.max(prev.length, next.length);
+      const fullInterps = [];
+      for (let j = 0; j < maxLen; j++) {
+        const pi = prev[Math.min(j, prev.length - 1)];
+        const ni = next[Math.min(j, next.length - 1)];
+        fullInterps.push({
+          cx: d3.interpolateNumber(pi.cx, ni.cx),
+          cy: d3.interpolateNumber(pi.cy, ni.cy)
+        });
+      }
+      const beta = getBeta();
+      const gen = d3.line().x(d => d.cx).y(d => d.cy).curve(d3.curveBundle.beta(beta));
+      return time => {
+        const pts = fullInterps.map(ip => ({ cx: ip.cx(time), cy: ip.cy(time) }));
+        return gen(pts);
+      };
+    });
+
+  // --- Nodes ---
+  const isSpaceFilling = ["treemap", "icicle"].includes(currentLayout);
+  const isSunburst = currentLayout === "sunburst";
+  const isPack = currentLayout === "pack";
+
+  // Remove rects if switching away from space-filling, or circles if switching to space-filling
+  if (isSpaceFilling || isSunburst) {
+    nodeLayer.selectAll("circle.node-circle").transition(t).attr("r", 0).remove();
+    nodeLayer.selectAll("path.node-arc").transition(t).attr("opacity", 0).remove();
+  }
+  if (!isSpaceFilling) {
+    nodeLayer.selectAll("rect.node-rect").transition(t).attr("opacity", 0).remove();
+  }
+  if (!isSunburst) {
+    nodeLayer.selectAll("path.node-arc").transition(t).attr("opacity", 0).remove();
+  }
+
+  const visibleNodes = (isSpaceFilling || isSunburst) ? allNodes.filter(d => d.depth > 0) : leaves;
+
+  if (isSpaceFilling) {
+    renderRects(visibleNodes, t, duration);
+  } else if (isSunburst) {
+    renderArcs(visibleNodes, t, duration);
+  } else {
+    renderCircles(visibleNodes, isPack, t, duration);
+  }
+
+  renderLabels(leaves, t, duration);
+  updateLayerOrder();
+}
+
+function renderCircles(nodes, isPack, t, duration) {
+  const sel = nodeLayer.selectAll("circle.node-circle")
+    .data(nodes, d => d.data.id);
+
+  sel.exit().transition(t).attr("r", 0).attr("opacity", 0).remove();
+
+  const enter = sel.enter().append("circle")
+    .attr("class", "node-circle")
+    .attr("cx", d => d.parent ? d.parent.cx : d.cx)
+    .attr("cy", d => d.parent ? d.parent.cy : d.cy)
+    .attr("r", 0)
+    .attr("fill", d => groupColor(getTopGroup(d)))
+    .attr("fill-opacity", 0.8)
+    .attr("stroke", "none");
+
+  sel.merge(enter)
+    .on("click", (ev, d) => selectNode(d))
+    .on("mouseenter", (ev, d) => highlightGroup(d))
+    .on("mouseleave", () => clearHighlight())
+    .transition(t)
+    .attr("cx", d => d.cx)
+    .attr("cy", d => d.cy)
+    .attr("r", d => isPack ? Math.max(d.packR || 3, 3) : 4)
+    .attr("fill", d => groupColor(getTopGroup(d)))
+    .attr("fill-opacity", 0.8);
+}
+
+function renderRects(nodes, t, duration) {
+  const sel = nodeLayer.selectAll("rect.node-rect")
+    .data(nodes, d => d.data.id);
+
+  sel.exit().transition(t).attr("opacity", 0).remove();
+
+  const enter = sel.enter().append("rect")
+    .attr("class", "node-rect")
+    .attr("x", d => d.cx).attr("y", d => d.cy)
+    .attr("width", 0).attr("height", 0)
+    .attr("fill", d => {
+      const c = d3.color(groupColor(getTopGroup(d)));
+      c.opacity = d.children ? 0.3 : 0.75;
+      return c;
+    })
+    .attr("stroke", d => d.children ? groupColor(getTopGroup(d)) : "none")
+    .attr("stroke-width", d => d.children ? 1 : 0);
+
+  sel.merge(enter)
+    .on("click", (ev, d) => selectNode(d))
+    .on("mouseenter", (ev, d) => highlightGroup(d))
+    .on("mouseleave", () => clearHighlight())
+    .transition(t)
+    .attr("x", d => d.cx - (d.rectW || 0) / 2)
+    .attr("y", d => d.cy - (d.rectH || 0) / 2)
+    .attr("width", d => d.rectW || 0)
+    .attr("height", d => d.rectH || 0)
+    .attr("fill", d => {
+      const c = d3.color(groupColor(getTopGroup(d)));
+      c.opacity = d.children ? 0.3 : 0.75;
+      return c;
+    });
+}
+
+const arc = d3.arc();
+
+function renderArcs(nodes, t, duration) {
+  const rScale = d3.scaleSqrt().domain([0, radius]).range([0, radius]);
+
+  const sel = nodeLayer.selectAll("path.node-arc")
+    .data(nodes, d => d.data.id);
+
+  sel.exit().transition(t).attr("opacity", 0).remove();
+
+  const enter = sel.enter().append("path")
+    .attr("class", "node-arc")
+    .attr("transform", `translate(${cx},${cy})`)
+    .attr("fill", d => {
+      const c = d3.color(groupColor(getTopGroup(d)));
+      c.opacity = d.children ? 0.4 : 0.8;
+      return c;
+    })
+    .attr("stroke", "#1a1a2e")
+    .attr("stroke-width", 0.5)
+    .attr("d", d => arc({
+      innerRadius: rScale(d.arcY0 || 0),
+      outerRadius: rScale(d.arcY0 || 0),
+      startAngle: d.arcX0 || 0,
+      endAngle: d.arcX0 || 0
+    }))
+    .attr("cursor", "pointer");
+
+  sel.merge(enter)
+    .on("click", (ev, d) => selectNode(d))
+    .on("mouseenter", (ev, d) => highlightGroup(d))
+    .on("mouseleave", () => clearHighlight())
+    .transition(t)
+    .attr("transform", `translate(${cx},${cy})`)
+    .attrTween("d", function(d) {
+      const prev = this.__prevArc || { innerRadius: rScale(d.arcY0), outerRadius: rScale(d.arcY0), startAngle: d.arcX0, endAngle: d.arcX0 };
+      const next = {
+        innerRadius: rScale(d.arcY0),
+        outerRadius: rScale(d.arcY1),
+        startAngle: d.arcX0,
+        endAngle: d.arcX1
+      };
+      this.__prevArc = next;
+      const interp = d3.interpolate(prev, next);
+      return time => arc(interp(time));
+    })
+    .attr("fill", d => {
+      const c = d3.color(groupColor(getTopGroup(d)));
+      c.opacity = d.children ? 0.4 : 0.8;
+      return c;
+    });
+}
+
+function renderLabels(leaves, t, duration) {
+  const isRadial = ["radialCluster", "radialTree", "sunburst"].includes(currentLayout);
+  const isSpaceFilling = ["treemap", "icicle"].includes(currentLayout);
+
+  const sel = nodeLayer.selectAll("text.node-label")
+    .data(leaves, d => d.data.id);
+
+  sel.exit().transition(t).attr("opacity", 0).remove();
+
+  const enter = sel.enter().append("text")
+    .attr("class", "node-label")
+    .attr("font-size", 11)
+    .attr("opacity", 0);
+
+  const merged = sel.merge(enter);
+
+  if (isRadial) {
+    merged.transition(t)
+      .attr("transform", d => {
+        const angle = (d.angle || 0) * 180 / Math.PI - 90;
+        const r = (currentLayout === "sunburst")
+          ? Math.sqrt(((d.arcY0 || 0) ** 2 + (d.arcY1 || 0) ** 2) / 2)
+          : (d.radialR || 0);
+        const flip = (d.angle || 0) > Math.PI;
+        return `translate(${cx},${cy}) rotate(${angle}) translate(${r + 8},0)${flip ? " rotate(180)" : ""}`;
+      })
+      .attr("text-anchor", d => (d.angle || 0) > Math.PI ? "end" : "start")
+      .attr("dy", "0.35em")
+      .attr("x", 0).attr("y", 0)
+      .text(d => d.data.id.split(".").pop())
+      .attr("opacity", 1)
+      .on("end", function() { resolveRadialOverlaps(); });
+  } else if (isSpaceFilling) {
+    merged.transition(t)
+      .attr("transform", null)
+      .attr("text-anchor", "middle")
+      .attr("dy", "0.35em")
+      .attr("x", d => d.cx)
+      .attr("y", d => d.cy)
+      .text(d => {
+        if ((d.rectW || 0) < 30 || (d.rectH || 0) < 14) return "";
+        return d.data.id.split(".").pop();
+      })
+      .attr("opacity", d => ((d.rectW || 0) < 30 || (d.rectH || 0) < 14) ? 0 : 1);
+  } else {
+    merged.transition(t)
+      .attr("transform", null)
+      .attr("text-anchor", "middle")
+      .attr("dy", -8)
+      .attr("x", d => d.cx)
+      .attr("y", d => d.cy)
+      .text(d => d.data.id.split(".").pop())
+      .attr("opacity", 1);
+  }
+}
+
+function resolveRadialOverlaps() {
+  const labels = nodeLayer.selectAll("text.node-label").nodes();
+  if (!labels.length) return;
+  const bboxes = labels.map(el => {
+    try { return el.getBoundingClientRect(); }
+    catch { return null; }
+  });
+
+  // Simple overlap check: hide labels that collide with a previously visible one
+  const visible = new Array(labels.length).fill(true);
+  for (let i = 0; i < labels.length; i++) {
+    if (!bboxes[i]) { visible[i] = false; continue; }
+    for (let j = 0; j < i; j++) {
+      if (!visible[j] || !bboxes[j]) continue;
+      if (rectsOverlap(bboxes[i], bboxes[j])) {
+        visible[i] = false;
+        break;
+      }
+    }
+  }
+  labels.forEach((el, i) => {
+    d3.select(el).attr("opacity", visible[i] ? 1 : 0);
+  });
+}
+
+function rectsOverlap(a, b) {
+  return !(a.right < b.left || a.left > b.right || a.bottom < b.top || a.top > b.bottom);
+}
+
+// --- Interaction ---
+function selectNode(d) {
+  selectedNode = selectedNode === d ? null : d;
+  nodeLayer.selectAll(".node-circle, .node-rect, .node-arc")
+    .classed("selected", n => n === selectedNode);
+  highlightConnected(selectedNode);
+}
+
+function highlightGroup(d) {
+  hoveredGroup = d;
+  const groupId = getTopGroup(d);
+  nodeLayer.selectAll(".node-circle, .node-rect, .node-arc")
+    .attr("fill-opacity", n => getTopGroup(n) === groupId ? 1 : 0.2);
+  linkLayer.selectAll("path.link")
+    .classed("highlighted", l => getTopGroup(l.source) === groupId || getTopGroup(l.target) === groupId)
+    .attr("stroke-opacity", l =>
+      (getTopGroup(l.source) === groupId || getTopGroup(l.target) === groupId) ? 0.7 : 0.05
+    );
+}
+
+function clearHighlight() {
+  hoveredGroup = null;
+  if (!selectedNode) {
+    nodeLayer.selectAll(".node-circle, .node-rect, .node-arc").attr("fill-opacity", null);
+    linkLayer.selectAll("path.link").classed("highlighted", false).attr("stroke-opacity", 0.25);
+  }
+}
+
+function highlightConnected(node) {
+  if (!node) {
+    clearHighlight();
+    return;
+  }
+  const leafIds = new Set(node.leaves ? node.leaves().map(d => d.data.id) : [node.data.id]);
+  linkLayer.selectAll("path.link")
+    .classed("highlighted", l => leafIds.has(l.source.data.id) || leafIds.has(l.target.data.id))
+    .attr("stroke-opacity", l =>
+      (leafIds.has(l.source.data.id) || leafIds.has(l.target.data.id)) ? 0.8 : 0.05
+    );
+}
+
+function updateLayerOrder() {
+  const onTop = document.getElementById("linksOnTop").checked;
+  if (onTop) {
+    linkLayer.raise();
+  } else {
+    nodeLayer.raise();
+  }
+}
+
+// --- Tension slider ---
+document.getElementById("tensionSlider").addEventListener("input", function() {
+  document.getElementById("tensionVal").textContent = this.value;
+  // Redraw links immediately with new tension
+  const beta = 1 - +this.value;
+  const gen = d3.line().x(d => d.cx).y(d => d.cy).curve(d3.curveBundle.beta(beta));
+  linkLayer.selectAll("path.link")
+    .attr("d", function(d) {
+      const pts = d.path.map(n => ({ cx: n.cx, cy: n.cy }));
+      return gen(pts);
+    });
+});
+
+// --- Link toggles ---
+document.getElementById("showLinks").addEventListener("change", () => {
+  doRender(false);
+});
+document.getElementById("linksOnTop").addEventListener("change", updateLayerOrder);
+
+// --- Layout switcher ---
+document.getElementById("layoutSelect").addEventListener("change", function() {
+  currentLayout = this.value;
+  doRender(true);
+});
+
+// --- Randomize ---
+document.getElementById("randomizeBtn").addEventListener("click", () => {
+  currentData = generateData();
+  doRender(true);
+});
+
+// --- Main render driver ---
+function doRender(animate) {
+  const root = buildHierarchy(currentData);
+  computeLayout(root, currentLayout);
+  render(root, currentData, animate);
+}
+
+// Initial render
+doRender(false);
+
+// Handle resize
+window.addEventListener("resize", () => {
+  const w = window.innerWidth, h = window.innerHeight;
+  svg.attr("viewBox", [0, 0, w, h]);
+});
+</script>
+</body>
+</html>

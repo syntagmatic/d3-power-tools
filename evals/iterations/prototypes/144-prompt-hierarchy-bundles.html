@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hierarchical Edge Bundling Explorer</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: system-ui, -apple-system, sans-serif; background: #0a0a0f; color: #ccc; display: flex; height: 100vh; overflow: hidden; }
+#controls {
+  width: 260px; min-width: 260px; padding: 16px; background: #12121a;
+  border-right: 1px solid #222; overflow-y: auto; display: flex; flex-direction: column; gap: 12px;
+}
+.section-label { font-weight: 700; font-size: 13px; color: #e0e0e0; margin-bottom: 2px; text-transform: uppercase; letter-spacing: 0.5px; }
+.control-label { font-weight: 400; font-size: 12px; color: #888; margin-bottom: 4px; }
+.control-group { display: flex; flex-direction: column; gap: 4px; }
+.layout-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.layout-btn {
+  padding: 6px 8px; font-size: 11px; border: 1px solid #333; background: #1a1a24;
+  color: #aaa; border-radius: 4px; cursor: pointer; transition: all 0.15s;
+}
+.layout-btn:hover { border-color: #555; color: #ddd; }
+.layout-btn.active { border-color: #5b8def; color: #5b8def; background: #1a2240; }
+input[type="range"] { width: 100%; accent-color: #5b8def; }
+.toggle-row { display: flex; align-items: center; gap: 8px; }
+.toggle-row input { accent-color: #5b8def; }
+.toggle-row label { font-size: 12px; color: #888; cursor: pointer; }
+button.action-btn {
+  padding: 8px 12px; font-size: 12px; border: 1px solid #444; background: #1e1e2a;
+  color: #bbb; border-radius: 4px; cursor: pointer; transition: all 0.15s;
+}
+button.action-btn:hover { border-color: #5b8def; color: #5b8def; }
+#viz { flex: 1; position: relative; }
+svg { width: 100%; height: 100%; }
+.node-rect { cursor: pointer; }
+.node-circle { cursor: pointer; }
+.link { fill: none; pointer-events: none; mix-blend-mode: screen; }
+.label { font-size: 11px; fill: #999; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <div class="control-group">
+    <div class="section-label">Layout</div>
+    <div class="layout-grid">
+      <button class="layout-btn active" data-layout="pack">Circle Pack</button>
+      <button class="layout-btn" data-layout="treemap">Treemap</button>
+      <button class="layout-btn" data-layout="dendrogram">Dendrogram</button>
+      <button class="layout-btn" data-layout="radialTree">Radial Tree</button>
+      <button class="layout-btn" data-layout="sunburst">Sunburst</button>
+      <button class="layout-btn" data-layout="icicle">Icicle</button>
+    </div>
+  </div>
+  <div class="control-group">
+    <div class="section-label">Edge Bundling</div>
+    <div class="control-label">Tension: <span id="tensionVal">0.85</span></div>
+    <input type="range" id="tension" min="0" max="1" step="0.01" value="0.85">
+  </div>
+  <div class="control-group">
+    <div class="section-label">Links</div>
+    <div class="toggle-row">
+      <input type="checkbox" id="showLinks" checked>
+      <label for="showLinks">Show links</label>
+    </div>
+    <div class="toggle-row">
+      <input type="checkbox" id="linksOnTop">
+      <label for="linksOnTop">Links on top</label>
+    </div>
+  </div>
+  <div class="control-group">
+    <div class="section-label">Data</div>
+    <button class="action-btn" id="randomize">Randomize Dataset</button>
+  </div>
+  <div class="control-group" style="margin-top: auto;">
+    <div class="control-label" id="info" style="min-height: 2em;"></div>
+  </div>
+</div>
+<div id="viz">
+  <svg></svg>
+</div>
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+const groupNames = ["Alpha","Beta","Gamma","Delta","Epsilon","Zeta","Eta","Theta","Iota","Kappa"];
+const leafNames = ["core","util","api","io","net","db","auth","cache","log","cfg","srv","rpc","msg","evt","bus","fmt","enc","dec","idx","map"];
+
+function generateData(seed) {
+  const rng = d3.randomLcg(seed);
+  const rand = d3.randomUniform.source(rng)(0, 1);
+  const nGroups = 4 + Math.floor(rand() * 5);
+  const groups = d3.shuffle(groupNames.slice(), rng).slice(0, nGroups);
+  const children = groups.map(g => {
+    const nLeaves = 3 + Math.floor(rand() * 6);
+    const leaves = d3.shuffle(leafNames.slice(), rng).slice(0, nLeaves);
+    return {
+      name: g,
+      children: leaves.map(l => ({ name: `${g}.${l}`, value: 1 + Math.floor(rand() * 9), group: g }))
+    };
+  });
+  const root = { name: "root", children };
+  const allLeaves = children.flatMap(c => c.children.map(l => l.name));
+  const links = [];
+  const nLinks = Math.floor(allLeaves.length * 1.2);
+  for (let i = 0; i < nLinks; i++) {
+    const a = allLeaves[Math.floor(rand() * allLeaves.length)];
+    let b = allLeaves[Math.floor(rand() * allLeaves.length)];
+    if (a !== b && a.split(".")[0] !== b.split(".")[0]) {
+      links.push({ source: a, target: b });
+    }
+  }
+  return { root, links };
+}
+
+let state = {
+  layout: "pack",
+  tension: 0.85,
+  showLinks: true,
+  linksOnTop: false,
+  selected: null,
+  hovered: null,
+  seed: 42
+};
+
+let data = generateData(state.seed);
+
+const svg = d3.select("svg");
+const gLinks = svg.append("g").attr("class", "link-layer");
+const gNodes = svg.append("g").attr("class", "node-layer");
+const gLabels = svg.append("g").attr("class", "label-layer");
+
+const groupColor = d3.scaleOrdinal(d3.schemeTableau10);
+
+function getSize() {
+  const el = document.getElementById("viz");
+  return { width: el.clientWidth, height: el.clientHeight };
+}
+
+function computeLayout(rootData, layoutType, width, height) {
+  const hierarchy = d3.hierarchy(rootData).sum(d => d.value || 0).sort((a, b) => b.value - a.value);
+  const mx = 40, my = 40;
+  const leaves = hierarchy.leaves();
+  const nodeMap = new Map();
+
+  if (layoutType === "pack") {
+    const r = Math.min(width, height) / 2 - 20;
+    d3.pack().size([r * 2, r * 2]).padding(4)(hierarchy);
+    const cx = width / 2, cy = height / 2;
+    hierarchy.each(n => {
+      n.px = n.x - r + cx;
+      n.py = n.y - r + cy;
+    });
+  } else if (layoutType === "treemap") {
+    d3.treemap().size([width - mx * 2, height - my * 2]).padding(3).round(true)(hierarchy);
+    hierarchy.each(n => {
+      n.px = (n.x0 + n.x1) / 2 + mx;
+      n.py = (n.y0 + n.y1) / 2 + my;
+    });
+  } else if (layoutType === "dendrogram") {
+    d3.cluster().size([height - my * 2, width - mx * 4])(hierarchy);
+    hierarchy.each(n => {
+      n.px = n.y + mx * 2;
+      n.py = n.x + my;
+    });
+  } else if (layoutType === "radialTree") {
+    const r = Math.min(width, height) / 2 - 80;
+    d3.tree().size([2 * Math.PI, r]).separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth)(hierarchy);
+    const cx = width / 2, cy = height / 2;
+    hierarchy.each(n => {
+      const angle = n.x, radius = n.y;
+      n.px = cx + radius * Math.cos(angle - Math.PI / 2);
+      n.py = cy + radius * Math.sin(angle - Math.PI / 2);
+      n._angle = n.x; // save for label rotation
+    });
+  } else if (layoutType === "sunburst") {
+    const r = Math.min(width, height) / 2 - 20;
+    d3.partition().size([2 * Math.PI, r])(hierarchy);
+    const cx = width / 2, cy = height / 2;
+    hierarchy.each(n => {
+      const angle = (n.x0 + n.x1) / 2;
+      const radius = (n.y0 + n.y1) / 2;
+      n.px = cx + radius * Math.cos(angle - Math.PI / 2);
+      n.py = cy + radius * Math.sin(angle - Math.PI / 2);
+      n._angle = angle;
+    });
+  } else if (layoutType === "icicle") {
+    d3.partition().size([width - mx * 2, height - my * 2])(hierarchy);
+    hierarchy.each(n => {
+      n.px = (n.x0 + n.x1) / 2 + mx;
+      n.py = (n.y0 + n.y1) / 2 + my;
+    });
+  }
+
+  hierarchy.each(n => { if (n.data.name) nodeMap.set(n.data.name, n); });
+  return { hierarchy, nodeMap, leaves };
+}
+
+function bundlePath(link, nodeMap, hierarchy, tension) {
+  const source = nodeMap.get(link.source);
+  const target = nodeMap.get(link.target);
+  if (!source || !target) return null;
+  const path = source.path(target);
+  const points = path.map(n => [n.px, n.py]);
+  if (points.length < 2) return null;
+  const line = d3.line().curve(d3.curveBundle.beta(tension));
+  return line(points);
+}
+
+function render(transition = true) {
+  const { width, height } = getSize();
+  svg.attr("viewBox", [0, 0, width, height]);
+
+  const { hierarchy, nodeMap, leaves } = computeLayout(data.root, state.layout, width, height);
+  const t = transition ? d3.transition().duration(600).ease(d3.easeCubicInOut) : d3.transition().duration(0);
+  const isRadial = state.layout === "radialTree" || state.layout === "sunburst";
+
+  // Reorder layers
+  if (state.linksOnTop) {
+    gLinks.raise();
+  } else {
+    gNodes.raise();
+  }
+  gLabels.raise();
+
+  // Links
+  const validLinks = state.showLinks ? data.links.filter(l => nodeMap.has(l.source) && nodeMap.has(l.target)) : [];
+  gLinks.selectAll("path.link")
+    .data(validLinks, d => d.source + "~" + d.target)
+    .join(
+      enter => enter.append("path")
+        .attr("class", "link")
+        .attr("d", d => bundlePath(d, nodeMap, hierarchy, state.tension))
+        .attr("stroke", d => {
+          const sg = d.source.split(".")[0];
+          return groupColor(sg);
+        })
+        .attr("stroke-width", 1.2)
+        .attr("stroke-opacity", 0)
+        .call(e => e.transition(t).attr("stroke-opacity", 0.25)),
+      update => update.call(u => u.transition(t)
+        .attr("d", d => bundlePath(d, nodeMap, hierarchy, state.tension))
+        .attr("stroke-opacity", 0.25)),
+      exit => exit.call(e => e.transition(t).attr("stroke-opacity", 0).remove())
+    );
+
+  // Nodes — all leaves get circles
+  const allNodes = hierarchy.descendants().filter(d => d.depth > 0);
+  gNodes.selectAll("circle.node-circle")
+    .data(allNodes, d => d.data.name)
+    .join(
+      enter => enter.append("circle")
+        .attr("class", "node-circle")
+        .attr("cx", d => d.px)
+        .attr("cy", d => d.py)
+        .attr("r", 0)
+        .attr("fill", d => d.children ? d3.color(groupColor(d.data.name || d.data.group)).darker(0.5) : groupColor(d.data.group || d.parent?.data.name))
+        .attr("stroke", "#0a0a0f")
+        .attr("stroke-width", 1)
+        .attr("opacity", d => d.children ? 0.3 : 0.85)
+        .call(e => e.transition(t)
+          .attr("r", d => d.children ? 8 : 5)),
+      update => update.call(u => u.transition(t)
+        .attr("cx", d => d.px)
+        .attr("cy", d => d.py)
+        .attr("fill", d => d.children ? d3.color(groupColor(d.data.name || d.data.group)).darker(0.5) : groupColor(d.data.group || d.parent?.data.name))
+        .attr("r", d => d.children ? 8 : 5)),
+      exit => exit.call(e => e.transition(t).attr("r", 0).remove())
+    )
+    .on("click", (evt, d) => {
+      state.selected = state.selected === d.data.name ? null : d.data.name;
+      highlightSelection(nodeMap);
+    })
+    .on("mouseenter", (evt, d) => {
+      state.hovered = d.data.name;
+      highlightHover(d, nodeMap);
+    })
+    .on("mouseleave", () => {
+      state.hovered = null;
+      clearHighlight();
+    });
+
+  // Labels
+  const labelNodes = allNodes.filter(d => !d.children);
+  gLabels.selectAll("text.label")
+    .data(labelNodes, d => d.data.name)
+    .join(
+      enter => enter.append("text")
+        .attr("class", "label")
+        .attr("x", d => d.px)
+        .attr("y", d => d.py)
+        .attr("opacity", 0)
+        .text(d => d.data.name.split(".")[1])
+        .call(e => e.transition(t).attr("opacity", 1)),
+      update => update.call(u => u.transition(t)
+        .attr("x", d => d.px)
+        .attr("y", d => d.py)
+        .attr("opacity", 1)
+        .text(d => d.data.name.split(".")[1])),
+      exit => exit.call(e => e.transition(t).attr("opacity", 0).remove())
+    )
+    .each(function(d) {
+      const el = d3.select(this);
+      if (isRadial) {
+        const angle = d._angle || 0;
+        const deg = (angle * 180 / Math.PI) - 90;
+        const flip = deg > 90 && deg < 270;
+        el.attr("text-anchor", flip ? "end" : "start")
+          .attr("dx", flip ? -10 : 10)
+          .attr("dy", "0.35em")
+          .attr("transform", `rotate(${flip ? deg + 180 : deg}, ${d.px}, ${d.py})`);
+      } else {
+        el.attr("text-anchor", "start")
+          .attr("dx", 8)
+          .attr("dy", "0.35em")
+          .attr("transform", null);
+      }
+    });
+
+  // Remove label overlaps for non-radial
+  if (!isRadial) removeOverlaps();
+}
+
+function removeOverlaps() {
+  const labels = [];
+  gLabels.selectAll("text.label").each(function(d) {
+    const bbox = this.getBBox();
+    labels.push({ el: this, x: bbox.x, y: bbox.y, w: bbox.width, h: bbox.height });
+  });
+  // Simple greedy: hide labels that overlap earlier ones
+  for (let i = 0; i < labels.length; i++) {
+    for (let j = 0; j < i; j++) {
+      if (d3.select(labels[j].el).attr("opacity") === "0") continue;
+      const a = labels[j], b = labels[i];
+      if (a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y) {
+        d3.select(labels[i].el).attr("opacity", 0);
+        break;
+      }
+    }
+  }
+}
+
+function highlightSelection(nodeMap) {
+  if (!state.selected) {
+    gNodes.selectAll("circle.node-circle").attr("opacity", d => d.children ? 0.3 : 0.85);
+    gLinks.selectAll("path.link").attr("stroke-opacity", 0.25);
+    return;
+  }
+  const connected = new Set([state.selected]);
+  data.links.forEach(l => {
+    if (l.source === state.selected) connected.add(l.target);
+    if (l.target === state.selected) connected.add(l.source);
+  });
+  gNodes.selectAll("circle.node-circle")
+    .attr("opacity", d => connected.has(d.data.name) ? 1 : 0.08);
+  gLinks.selectAll("path.link")
+    .attr("stroke-opacity", d => (d.source === state.selected || d.target === state.selected) ? 0.7 : 0.03);
+}
+
+function highlightHover(node, nodeMap) {
+  const groupName = node.data.group || node.data.name;
+  gNodes.selectAll("circle.node-circle")
+    .attr("opacity", d => {
+      const g = d.data.group || d.data.name;
+      return g === groupName ? 1 : (d.children ? 0.15 : 0.2);
+    });
+  gLinks.selectAll("path.link")
+    .attr("stroke-opacity", d => {
+      return (d.source.startsWith(groupName + ".") || d.target.startsWith(groupName + ".")) ? 0.55 : 0.04;
+    });
+  d3.select("#info").text(`Group: ${groupName}`);
+}
+
+function clearHighlight() {
+  if (state.selected) {
+    // Re-apply selection highlight
+    const { nodeMap } = computeLayout(data.root, state.layout, getSize().width, getSize().height);
+    highlightSelection(nodeMap);
+  } else {
+    gNodes.selectAll("circle.node-circle").attr("opacity", d => d.children ? 0.3 : 0.85);
+    gLinks.selectAll("path.link").attr("stroke-opacity", 0.25);
+  }
+  d3.select("#info").text("");
+}
+
+// Controls
+d3.selectAll(".layout-btn").on("click", function() {
+  d3.selectAll(".layout-btn").classed("active", false);
+  d3.select(this).classed("active", true);
+  state.layout = this.dataset.layout;
+  state.selected = null;
+  render();
+});
+
+d3.select("#tension").on("input", function() {
+  state.tension = +this.value;
+  d3.select("#tensionVal").text(this.value);
+  render(false);
+});
+
+d3.select("#showLinks").on("change", function() {
+  state.showLinks = this.checked;
+  render();
+});
+
+d3.select("#linksOnTop").on("change", function() {
+  state.linksOnTop = this.checked;
+  if (state.linksOnTop) gLinks.raise(); else gNodes.raise();
+  gLabels.raise();
+});
+
+d3.select("#randomize").on("click", () => {
+  state.seed = Math.floor(Math.random() * 10000);
+  data = generateData(state.seed);
+  state.selected = null;
+  groupColor.domain([]); // reset color domain for fresh assignment
+  render();
+});
+
+window.addEventListener("resize", () => render(false));
+
+render();
+</script>
+</body>
+</html>

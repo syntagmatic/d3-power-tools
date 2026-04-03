@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hierarchical Edge Bundling Explorer</title>
+<style>
+* { margin: 0; box-sizing: border-box; }
+body { background: #1a1a2e; color: #e0e0e0; font-family: system-ui, sans-serif; overflow: hidden; }
+
+#controls {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+  display: flex; align-items: center; gap: 18px; padding: 10px 18px;
+  background: #16213e; border-bottom: 1px solid #0f3460; flex-wrap: wrap;
+}
+#controls .section-label {
+  font-weight: 700; font-size: 13px; color: #e94560; text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+#controls label, #controls span { font-size: 12px; color: #a0a0b8; }
+#controls select, #controls button, #controls input[type=range] { font-size: 12px; }
+#controls select {
+  background: #0f3460; color: #e0e0e0; border: 1px solid #533483;
+  padding: 4px 8px; border-radius: 4px; cursor: pointer;
+}
+#controls button {
+  background: #533483; color: #e0e0e0; border: none;
+  padding: 5px 12px; border-radius: 4px; cursor: pointer;
+}
+#controls button:hover { background: #e94560; }
+#controls input[type=range] { width: 100px; accent-color: #e94560; }
+#controls input[type=checkbox] { accent-color: #e94560; }
+
+#viz { width: 100vw; height: 100vh; }
+
+.node circle { cursor: pointer; }
+.node text { font-size: 11px; fill: #c0c0d0; pointer-events: none; }
+.node.selected circle { stroke: #e94560; stroke-width: 2.5px; }
+.link { fill: none; stroke-opacity: 0.25; mix-blend-mode: screen; }
+.link.highlighted { stroke-opacity: 0.85; }
+
+.node-rect { cursor: pointer; stroke: #1a1a2e; stroke-width: 0.5px; }
+.node-rect.selected { stroke: #e94560; stroke-width: 2.5px; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <span class="section-label">Layout</span>
+  <select id="layoutSelect">
+    <option value="dendrogram" selected>Dendrogram</option>
+    <option value="radialTree">Radial Tree</option>
+    <option value="pack">Circle Pack</option>
+    <option value="treemap">Treemap</option>
+    <option value="sunburst">Sunburst</option>
+    <option value="icicle">Icicle</option>
+  </select>
+
+  <span class="section-label">Bundling</span>
+  <label>Tension <span id="tensionVal">0.85</span></label>
+  <input type="range" id="tensionSlider" min="0" max="1" step="0.01" value="0.85">
+
+  <span class="section-label">Links</span>
+  <label><input type="checkbox" id="showLinks" checked> Show</label>
+  <label><input type="checkbox" id="linksOnTop"> On top</label>
+
+  <span class="section-label">Data</span>
+  <button id="randomBtn">Randomize</button>
+</div>
+
+<svg id="viz"></svg>
+
+<script type="module">
+import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+const width = window.innerWidth;
+const height = window.innerHeight;
+const margin = { top: 60, right: 20, bottom: 20, left: 20 };
+const cx = width / 2, cy = height / 2;
+const radius = Math.min(width, height) / 2 - 80;
+
+const svg = d3.select("#viz")
+  .attr("width", width).attr("height", height);
+
+const gLinks = svg.append("g").attr("class", "links-layer");
+const gNodes = svg.append("g").attr("class", "nodes-layer");
+
+// --- Synthetic data generation ---
+const groupNames = ["Analytics", "Platform", "Frontend", "Backend", "Infra", "ML", "Data", "Security"];
+const subgroups = ["Core", "Utils", "API", "Service", "Lib", "Engine", "Store", "Cache"];
+const leafNames = ["init", "parse", "render", "fetch", "transform", "validate", "encode", "decode",
+  "compress", "emit", "listen", "route", "auth", "log", "sync", "merge", "diff", "build",
+  "test", "deploy", "monitor", "alert", "index", "query", "cache", "batch", "stream", "pipe"];
+
+let dataVersion = 0;
+
+function generateData() {
+  dataVersion++;
+  const nodes = [{ id: "root", parent: null }];
+  const numGroups = 4 + Math.floor(Math.random() * 4);
+  const shuffledGroups = d3.shuffle(groupNames.slice()).slice(0, numGroups);
+
+  for (const g of shuffledGroups) {
+    nodes.push({ id: g, parent: "root" });
+    const numSub = 2 + Math.floor(Math.random() * 3);
+    const shuffledSub = d3.shuffle(subgroups.slice()).slice(0, numSub);
+    for (const s of shuffledSub) {
+      const subId = `${g}.${s}`;
+      nodes.push({ id: subId, parent: g });
+      const numLeaves = 2 + Math.floor(Math.random() * 4);
+      const shuffledLeaves = d3.shuffle(leafNames.slice()).slice(0, numLeaves);
+      for (const l of shuffledLeaves) {
+        nodes.push({ id: `${subId}.${l}`, parent: subId, value: 1 + Math.random() * 9 });
+      }
+    }
+  }
+
+  // Generate cross-links between leaves
+  const leaves = nodes.filter(n => n.value != null);
+  const links = [];
+  const numLinks = Math.floor(leaves.length * 0.6) + Math.floor(Math.random() * leaves.length * 0.4);
+  for (let i = 0; i < numLinks; i++) {
+    const a = leaves[Math.floor(Math.random() * leaves.length)];
+    let b = leaves[Math.floor(Math.random() * leaves.length)];
+    if (a !== b) links.push({ source: a.id, target: b.id });
+  }
+
+  return { nodes, links };
+}
+
+// --- State ---
+let data = generateData();
+let currentLayout = "dendrogram";
+let selectedNode = null;
+let hoveredGroup = null;
+let beta = 0.15; // tension 0.85
+
+// --- Color ---
+const groupColor = d3.scaleOrdinal(d3.schemeTableau10);
+
+function nodeColor(d) {
+  // Walk up to depth-1 group
+  let n = d;
+  while (n.depth > 1) n = n.parent;
+  return n ? groupColor(n.data.id) : "#888";
+}
+
+// --- Build hierarchy ---
+function buildHierarchy(data) {
+  const stratify = d3.stratify().id(d => d.id).parentId(d => d.parent);
+  const root = stratify(data.nodes);
+  root.sum(d => d.value || 0).sort((a, b) => b.value - a.value);
+  return root;
+}
+
+// --- Compute LCA paths for bundled links ---
+function computeBundlePaths(root, links) {
+  const byId = new Map(root.descendants().map(d => [d.data.id, d]));
+  return links.map(l => {
+    const s = byId.get(l.source), t = byId.get(l.target);
+    return s && t ? s.path(t) : null;
+  }).filter(Boolean);
+}
+
+// --- Layout functions ---
+// Each sets current_x, current_y (cartesian), and for space-filling: x0,y0,x1,y1 or r
+function applyLayout(root, layoutName) {
+  const innerW = width - margin.left - margin.right;
+  const innerH = height - margin.top - margin.bottom;
+
+  root._layoutType = layoutName;
+
+  if (layoutName === "dendrogram") {
+    const cluster = d3.cluster().size([2 * Math.PI, radius - 40])
+      .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth);
+    cluster(root);
+    root.each(d => {
+      d.current_x = cx + d.y * Math.cos(d.x - Math.PI / 2);
+      d.current_y = cy + d.y * Math.sin(d.x - Math.PI / 2);
+      d._angle = d.x; d._radius = d.y;
+      d._nodeRadius = d.children ? 3 : 4;
+      d._shapeType = "circle";
+    });
+  } else if (layoutName === "radialTree") {
+    const tree = d3.tree().size([2 * Math.PI, radius - 40])
+      .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth);
+    tree(root);
+    root.each(d => {
+      d.current_x = cx + d.y * Math.cos(d.x - Math.PI / 2);
+      d.current_y = cy + d.y * Math.sin(d.x - Math.PI / 2);
+      d._angle = d.x; d._radius = d.y;
+      d._nodeRadius = d.children ? 3 : 4;
+      d._shapeType = "circle";
+    });
+  } else if (layoutName === "pack") {
+    const pack = d3.pack().size([innerW, innerH]).padding(3);
+    pack(root);
+    root.each(d => {
+      d.current_x = margin.left + d.x;
+      d.current_y = margin.top + d.y;
+      d._nodeRadius = d.r || 3;
+      d._shapeType = "circle";
+    });
+  } else if (layoutName === "treemap") {
+    const treemap = d3.treemap().size([innerW, innerH]).padding(2).round(true)
+      .tile(d3.treemapSquarify);
+    treemap(root);
+    root.each(d => {
+      d.current_x = margin.left + (d.x0 + d.x1) / 2;
+      d.current_y = margin.top + (d.y0 + d.y1) / 2;
+      d._rectW = d.x1 - d.x0;
+      d._rectH = d.y1 - d.y0;
+      d._nodeRadius = Math.min(d._rectW, d._rectH) / 2;
+      d._shapeType = "rect";
+    });
+  } else if (layoutName === "sunburst") {
+    const partition = d3.partition().size([2 * Math.PI, radius]);
+    partition(root);
+    root.each(d => {
+      const angle = (d.x0 + d.x1) / 2;
+      const r = (d.y0 + d.y1) / 2;
+      d.current_x = cx + r * Math.cos(angle - Math.PI / 2);
+      d.current_y = cy + r * Math.sin(angle - Math.PI / 2);
+      d._angle = angle; d._radius = r;
+      d._arcInner = d.y0; d._arcOuter = d.y1;
+      d._arcStart = d.x0; d._arcEnd = d.x1;
+      d._nodeRadius = Math.max(3, (d.y1 - d.y0) / 3);
+      d._shapeType = "arc";
+    });
+  } else if (layoutName === "icicle") {
+    const partition = d3.partition().size([innerW, innerH]).padding(1);
+    partition(root);
+    root.each(d => {
+      d.current_x = margin.left + (d.x0 + d.x1) / 2;
+      d.current_y = margin.top + (d.y0 + d.y1) / 2;
+      d._rectW = d.x1 - d.x0;
+      d._rectH = d.y1 - d.y0;
+      d._nodeRadius = Math.min(d._rectW, d._rectH) / 2;
+      d._shapeType = "rect";
+    });
+  }
+}
+
+// --- Line generator for bundled links ---
+function makeLine() {
+  return d3.line()
+    .curve(d3.curveBundle.beta(beta))
+    .x(d => d.current_x)
+    .y(d => d.current_y);
+}
+
+// --- Render ---
+let root, bundlePaths;
+
+function fullRender(animate = true) {
+  root = buildHierarchy(data);
+  applyLayout(root, currentLayout);
+  bundlePaths = computeBundlePaths(root, data.links);
+  renderNodes(animate);
+  renderLinks(animate);
+  updateLayerOrder();
+}
+
+function renderNodes(animate) {
+  const allNodes = root.descendants().filter(d => d.depth > 0);
+  const isSpaceFill = ["treemap", "icicle"].includes(currentLayout);
+  const isArc = currentLayout === "sunburst";
+  const duration = animate ? 900 : 0;
+
+  // Remove old shape types when switching
+  if (isSpaceFill) {
+    gNodes.selectAll("g.node-circle").remove();
+    gNodes.selectAll("g.node-arc").remove();
+    renderRects(allNodes, duration);
+  } else if (isArc) {
+    gNodes.selectAll("g.node-circle").remove();
+    gNodes.selectAll("g.node-rect").remove();
+    renderArcs(allNodes, duration);
+  } else {
+    gNodes.selectAll("g.node-rect").remove();
+    gNodes.selectAll("g.node-arc").remove();
+    renderCircles(allNodes, duration);
+  }
+}
+
+function renderCircles(nodes, duration) {
+  const t = svg.transition().duration(duration).ease(d3.easeCubicInOut);
+  const isRadial = ["dendrogram", "radialTree"].includes(currentLayout);
+
+  const g = gNodes.selectAll("g.node-circle")
+    .data(nodes, d => d.data.id)
+    .join(
+      enter => {
+        const ge = enter.append("g").attr("class", "node-circle")
+          .attr("transform", d => `translate(${d.current_x},${d.current_y})`);
+        ge.append("circle")
+          .attr("r", 0)
+          .attr("fill", d => nodeColor(d))
+          .attr("opacity", d => d.children ? 0.4 : 0.85);
+        ge.append("text")
+          .attr("dy", "0.35em")
+          .attr("opacity", 0)
+          .text(d => d.children ? "" : d.data.id.split(".").pop());
+        ge.on("click", (ev, d) => selectNode(d))
+          .on("mouseenter", (ev, d) => hoverGroup(d, true))
+          .on("mouseleave", (ev, d) => hoverGroup(d, false));
+        return ge;
+      },
+      update => update,
+      exit => exit.transition(t)
+        .attr("transform", d => `translate(${d.current_x || cx},${d.current_y || cy})`)
+        .select("circle").attr("r", 0).end().then(() => exit.remove()).catch(() => {})
+    );
+
+  // Update positions
+  g.transition(t)
+    .attr("transform", d => `translate(${d.current_x},${d.current_y})`);
+  g.select("circle").transition(t)
+    .attr("r", d => d._nodeRadius)
+    .attr("fill", d => nodeColor(d));
+
+  // Labels for leaves
+  g.select("text").each(function(d) {
+    if (d.children) { d3.select(this).attr("opacity", 0); return; }
+    const el = d3.select(this);
+    if (isRadial) {
+      const angle = d._angle * 180 / Math.PI;
+      const flip = angle > 90 && angle < 270;
+      el.transition(t)
+        .attr("transform", `rotate(${flip ? angle - 180 : angle}) translate(${d._nodeRadius + 4},0)`)
+        .attr("text-anchor", flip ? "end" : "start")
+        .attr("opacity", 1);
+    } else {
+      el.transition(t)
+        .attr("transform", null)
+        .attr("x", d._nodeRadius + 4)
+        .attr("text-anchor", "start")
+        .attr("opacity", 1);
+    }
+  });
+
+  // Hide colliding labels
+  requestAnimationFrame(() => hideCollidingLabels(g));
+}
+
+function renderRects(nodes, duration) {
+  const t = svg.transition().duration(duration).ease(d3.easeCubicInOut);
+
+  const g = gNodes.selectAll("g.node-rect")
+    .data(nodes, d => d.data.id)
+    .join(
+      enter => {
+        const ge = enter.append("g").attr("class", "node-rect")
+          .attr("transform", d => `translate(${d.current_x},${d.current_y})`);
+        ge.append("rect")
+          .attr("x", 0).attr("y", 0).attr("width", 0).attr("height", 0)
+          .attr("fill", d => nodeColor(d))
+          .attr("opacity", d => d.children ? 0.3 : 0.75)
+          .attr("rx", 1);
+        ge.append("text")
+          .attr("dy", "0.35em").attr("text-anchor", "middle")
+          .attr("opacity", 0)
+          .text(d => d.children ? "" : d.data.id.split(".").pop());
+        ge.on("click", (ev, d) => selectNode(d))
+          .on("mouseenter", (ev, d) => hoverGroup(d, true))
+          .on("mouseleave", (ev, d) => hoverGroup(d, false));
+        return ge;
+      },
+      update => update,
+      exit => exit.transition(t).style("opacity", 0).remove()
+    );
+
+  g.transition(t)
+    .attr("transform", d => `translate(${d.current_x},${d.current_y})`);
+  g.select("rect").transition(t)
+    .attr("x", d => -d._rectW / 2).attr("y", d => -d._rectH / 2)
+    .attr("width", d => Math.max(0, d._rectW)).attr("height", d => Math.max(0, d._rectH))
+    .attr("fill", d => nodeColor(d));
+  g.select("text").each(function(d) {
+    if (d.children || d._rectW < 30 || d._rectH < 14) {
+      d3.select(this).attr("opacity", 0);
+    } else {
+      d3.select(this).transition(t).attr("opacity", 1);
+    }
+  });
+}
+
+function renderArcs(nodes, duration) {
+  const t = svg.transition().duration(duration).ease(d3.easeCubicInOut);
+  const arc = d3.arc().startAngle(d => d._arcStart).endAngle(d => d._arcEnd)
+    .innerRadius(d => d._arcInner).outerRadius(d => d._arcOuter);
+
+  const g = gNodes.selectAll("g.node-arc")
+    .data(nodes, d => d.data.id)
+    .join(
+      enter => {
+        const ge = enter.append("g").attr("class", "node-arc")
+          .attr("transform", `translate(${cx},${cy})`);
+        ge.append("path")
+          .attr("d", d => {
+            const a = (d._arcStart + d._arcEnd) / 2;
+            return arc({ ...d, _arcStart: a, _arcEnd: a, _arcInner: d._arcInner, _arcOuter: d._arcOuter });
+          })
+          .attr("fill", d => nodeColor(d))
+          .attr("opacity", d => d.children ? 0.4 : 0.8);
+        ge.append("text")
+          .attr("dy", "0.35em").attr("text-anchor", "middle")
+          .attr("opacity", 0)
+          .text(d => d.children ? "" : d.data.id.split(".").pop());
+        ge.on("click", (ev, d) => selectNode(d))
+          .on("mouseenter", (ev, d) => hoverGroup(d, true))
+          .on("mouseleave", (ev, d) => hoverGroup(d, false));
+        return ge;
+      },
+      update => update,
+      exit => exit.transition(t).style("opacity", 0).remove()
+    );
+
+  g.attr("transform", `translate(${cx},${cy})`);
+  g.select("path").transition(t).attrTween("d", function(d) {
+    const prev = d3.select(this).attr("d");
+    const next = arc(d);
+    return d3.interpolate(prev || next, next);
+  }).attr("fill", d => nodeColor(d));
+
+  // Labels
+  g.select("text").each(function(d) {
+    if (d.children) { d3.select(this).attr("opacity", 0); return; }
+    const angle = (d._arcStart + d._arcEnd) / 2;
+    const r = (d._arcInner + d._arcOuter) / 2;
+    const arcLen = (d._arcEnd - d._arcStart) * r;
+    if (arcLen < 30 || (d._arcOuter - d._arcInner) < 14) {
+      d3.select(this).attr("opacity", 0);
+      return;
+    }
+    const x = r * Math.cos(angle - Math.PI / 2);
+    const y = r * Math.sin(angle - Math.PI / 2);
+    const deg = angle * 180 / Math.PI;
+    const flip = deg > 90 && deg < 270;
+    d3.select(this).transition(t)
+      .attr("transform", `translate(${x},${y}) rotate(${flip ? deg - 180 : deg})`)
+      .attr("opacity", 1);
+  });
+}
+
+function hideCollidingLabels(sel) {
+  const rects = [];
+  sel.select("text").each(function(d) {
+    if (d.children) return;
+    const el = d3.select(this);
+    if (+el.attr("opacity") === 0) return;
+    try {
+      const bbox = this.getBBox();
+      const ctm = this.getCTM();
+      if (!ctm) return;
+      const r = { x: ctm.e + bbox.x, y: ctm.f + bbox.y, w: bbox.width, h: bbox.height, el };
+      for (const prev of rects) {
+        if (r.x < prev.x + prev.w && r.x + r.w > prev.x &&
+            r.y < prev.y + prev.h && r.y + r.h > prev.y) {
+          el.attr("opacity", 0);
+          return;
+        }
+      }
+      rects.push(r);
+    } catch(e) {}
+  });
+}
+
+function renderLinks(animate) {
+  const showLinks = document.getElementById("showLinks").checked;
+  const line = makeLine();
+  const duration = animate ? 900 : 0;
+  const t = svg.transition("links").duration(duration).ease(d3.easeCubicInOut);
+
+  if (!showLinks) {
+    gLinks.selectAll("path.link").transition(t).attr("stroke-opacity", 0).remove();
+    return;
+  }
+
+  gLinks.selectAll("path.link")
+    .data(bundlePaths, (d, i) => {
+      const s = d[0].data.id, e = d[d.length - 1].data.id;
+      return s < e ? `${s}~${e}` : `${e}~${s}`;
+    })
+    .join(
+      enter => enter.append("path").attr("class", "link")
+        .attr("stroke", d => nodeColor(d[0]))
+        .attr("stroke-opacity", 0)
+        .attr("stroke-width", 1.2)
+        .attr("d", line)
+        .call(e => e.transition(t).attr("stroke-opacity", 0.25)),
+      update => update.transition(t)
+        .attr("d", line)
+        .attr("stroke", d => nodeColor(d[0]))
+        .attr("stroke-opacity", 0.25),
+      exit => exit.transition(t).attr("stroke-opacity", 0).remove()
+    );
+}
+
+function updateLayerOrder() {
+  const onTop = document.getElementById("linksOnTop").checked;
+  if (onTop) {
+    gLinks.raise();
+  } else {
+    gNodes.raise();
+  }
+}
+
+// --- Interaction ---
+function selectNode(d) {
+  if (selectedNode === d) {
+    selectedNode = null;
+  } else {
+    selectedNode = d;
+  }
+  gNodes.selectAll("g").classed("selected", n => n === selectedNode);
+  highlightConnections();
+}
+
+function hoverGroup(d, entering) {
+  if (entering) {
+    hoveredGroup = d;
+    // Find group ancestor at depth 1
+    let group = d;
+    while (group.depth > 1) group = group.parent;
+    const groupLeafIds = new Set(group.leaves().map(l => l.data.id));
+    gNodes.selectAll("g").select("circle,rect,path")
+      .attr("opacity", function(n) {
+        if (!n) return;
+        let ng = n; while (ng.depth > 1) ng = ng.parent;
+        return ng === group ? (n.children ? 0.5 : 0.95) : 0.15;
+      });
+    highlightLinks(groupLeafIds);
+  } else {
+    hoveredGroup = null;
+    gNodes.selectAll("g").select("circle,rect,path")
+      .attr("opacity", d => d && d.children ? 0.4 : 0.8);
+    gLinks.selectAll("path.link")
+      .classed("highlighted", false)
+      .attr("stroke-opacity", 0.25)
+      .attr("stroke-width", 1.2);
+  }
+}
+
+function highlightLinks(leafIds) {
+  gLinks.selectAll("path.link").each(function(d) {
+    const s = d[0].data.id, t = d[d.length - 1].data.id;
+    const match = leafIds.has(s) || leafIds.has(t);
+    d3.select(this)
+      .classed("highlighted", match)
+      .attr("stroke-opacity", match ? 0.85 : 0.05)
+      .attr("stroke-width", match ? 2 : 1);
+  });
+}
+
+function highlightConnections() {
+  if (!selectedNode) {
+    gLinks.selectAll("path.link")
+      .classed("highlighted", false)
+      .attr("stroke-opacity", 0.25)
+      .attr("stroke-width", 1.2);
+    return;
+  }
+  const leafIds = new Set(selectedNode.leaves ? selectedNode.leaves().map(l => l.data.id) : [selectedNode.data.id]);
+  highlightLinks(leafIds);
+}
+
+// --- Controls ---
+document.getElementById("layoutSelect").addEventListener("change", e => {
+  currentLayout = e.target.value;
+  applyLayout(root, currentLayout);
+  const duration = 900;
+  const t = svg.transition().duration(duration).ease(d3.easeCubicInOut);
+
+  // Transition nodes
+  renderNodes(true);
+
+  // Transition links
+  renderLinks(true);
+  updateLayerOrder();
+});
+
+document.getElementById("tensionSlider").addEventListener("input", e => {
+  const tension = +e.target.value;
+  beta = 1 - tension;
+  document.getElementById("tensionVal").textContent = tension.toFixed(2);
+  renderLinks(false);
+});
+
+document.getElementById("showLinks").addEventListener("change", () => {
+  renderLinks(true);
+});
+
+document.getElementById("linksOnTop").addEventListener("change", () => {
+  updateLayerOrder();
+});
+
+document.getElementById("randomBtn").addEventListener("click", () => {
+  selectedNode = null;
+  hoveredGroup = null;
+  data = generateData();
+  fullRender(true);
+});
+
+// --- Init ---
+fullRender(false);
+</script>
+</body>
+</html>
