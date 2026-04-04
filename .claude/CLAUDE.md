@@ -182,6 +182,7 @@ Each `SKILL.md` encodes domain knowledge, architecture patterns, interaction rec
 - `skills/responsive/` — ResizeObserver, container sizing, viewBox vs redraw, aspect ratio, breakpoints, touch, Canvas DPI, iframe embedding
 
 ### Before you render
+- `skills/exploratory-design/` — exploratory visualization design process: find the data's natural form, open a thinking space, match complexity to the problem
 - `skills/data-gathering/` — data loading, type coercion, cleaning, reshaping (group/rollup/pivot), aggregation, binning, joining, normalization
 - `skills/sparkcharts/` — word-sized inline charts: sparklines, spark bars, win/loss, bullet charts, dot strips, embedding in tables and text
 - `skills/small-multiples/` — trellis/faceted layouts, grid layout math, shared vs independent scales, synchronized cross-panel interaction
