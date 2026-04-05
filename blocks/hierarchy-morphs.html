@@ -207,7 +207,12 @@ function computeSunburst() {
   const rScale = d3.scaleSqrt().domain([0, halfU]).range([0, halfU]);
   root.each(n => {
     n.tArc = { startAngle: n.x0, endAngle: n.x1, innerRadius: rScale(n.y0), outerRadius: rScale(n.y1) };
-    n.tx = 0; n.ty = 0; n.tShape = 'arc';
+    // Group at arc centroid so transitions stay connected
+    const midAngle = (n.x0 + n.x1) / 2 - Math.PI / 2;
+    const midR = (rScale(n.y0) + rScale(n.y1)) / 2;
+    n.tx = Math.cos(midAngle) * midR;
+    n.ty = Math.sin(midAngle) * midR;
+    n.tShape = 'arc';
   });
 }
 function computeForce() {
@@ -369,15 +374,29 @@ function updateNodes(dur = 600) {
     .attr('fill-opacity', d => d.tShape === 'rect' ? nodeOpacity(d) : 0)
     .attr('stroke-opacity', d => d.tShape === 'rect' ? 1 : 0);
 
-  // Arc shape
+  // Arc shape — compensate for group position so arc renders at SVG origin
   merged.select('.shape-arc').transition(t)
+    .attrTween('transform', function(d) {
+      return () => `translate(${-d.current_x},${-d.current_y})`;
+    })
     .attrTween('d', function(d) {
       if (d.tShape !== 'arc') {
-        const prev = this.__prev || {startAngle:0,endAngle:0,innerRadius:0,outerRadius:0};
-        const interp = d3.interpolate(prev, {startAngle:0,endAngle:0,innerRadius:0,outerRadius:0});
+        // Leaving sunburst: collapse to midpoint sliver
+        if (!this.__prev) return () => '';
+        const p = this.__prev;
+        const mid = (p.startAngle + p.endAngle) / 2;
+        const rMid = (p.innerRadius + p.outerRadius) / 2;
+        const target = {startAngle:mid, endAngle:mid, innerRadius:rMid, outerRadius:rMid};
+        const interp = d3.interpolate(p, target);
         return t => { this.__prev = interp(t); return arcGen(interp(t)); };
       }
-      const prev = this.__prev || {startAngle:0,endAngle:0,innerRadius:0,outerRadius:0};
+      // Entering sunburst: start as sliver at target position
+      let prev = this.__prev;
+      if (!prev || (prev.endAngle - prev.startAngle < 0.001 && prev.outerRadius < 1)) {
+        const mid = (d.tArc.startAngle + d.tArc.endAngle) / 2;
+        const rMid = (d.tArc.innerRadius + d.tArc.outerRadius) / 2;
+        prev = {startAngle:mid, endAngle:mid, innerRadius:rMid, outerRadius:rMid};
+      }
       const interp = d3.interpolate(prev, d.tArc);
       return t => { this.__prev = interp(t); return arcGen(interp(t)); };
     })
