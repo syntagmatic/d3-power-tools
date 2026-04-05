@@ -137,7 +137,7 @@ def run_proposer(prompt, html_path):
          "--allowedTools", "Read,Edit,Write",
          "--max-turns", "10",
          "--output-format", "json"],
-        capture_output=True, text=True, timeout=300,
+        capture_output=True, text=True, timeout=600,
         cwd=str(html_path.parent))
     try:
         return json.loads(r.stdout).get("result", "")
