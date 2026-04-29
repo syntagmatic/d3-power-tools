@@ -90,6 +90,14 @@ def _block_num(bid):
 
 
 def parse_block_range(spec):
+    if "," in spec:
+        out, seen = [], set()
+        for part in spec.split(","):
+            for b in parse_block_range(part.strip()):
+                if b["id"] not in seen:
+                    seen.add(b["id"])
+                    out.append(b)
+        return out
     parts = spec.split("-", 1) if "-" in spec and not spec.startswith("0") else None
     if parts and len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
         lo, hi = int(parts[0]), int(parts[1])
