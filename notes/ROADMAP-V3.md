@@ -2,6 +2,17 @@
 
 Written 2026-09-23, after a 10-agent audit of the whole repo.
 
+## Status (2026-09-23, branch `v3-restructure`)
+
+I skipped the phase 1 ablation for now and did phases 2-4 by judgment:
+
+- 29 skills merged into the 11 below, plus `review`. The SKILL.md files run 85-128 lines; the references are 87-541 lines per skill. All 127 js blocks parse (`scripts/check-snippets.mjs`), and all 156 example tests pass. About 40 factual errors were fixed during the merge, including the `curveBundle.beta(1 - tension)` inversion, which lived in the edge-bundling *examples*, not the SKILL.md text.
+- `agents/` has viz-critic, encoding-auditor and interaction-tester. `scripts/probe.mjs` does the scripted checks.
+- Plugin: `.claude-plugin/plugin.json` + `marketplace.json` (source `./`), `hooks/hooks.json` (render check after HTML writes), `package.json` (Playwright).
+- AGENTS.md is at the root; `.claude/CLAUDE.md` imports it. The manifest has v3 skill names, with `skills_v2` kept; `scripts/staging.py` copies whole skill dirs.
+
+Still open: ablation (phase 1, now run on 11 skills via `scripts/ablate.py`), the lab split (the plugin source is currently the whole repo, lab included), `run-audit-pipeline.py` still uses the v2 `meta/` rubrics rather than the new agents, and phase 5.
+
 ## Why I'm restructuring
 
 This project started in the Opus 4.5 era. The skills were written for a model
