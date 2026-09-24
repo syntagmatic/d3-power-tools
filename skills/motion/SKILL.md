@@ -76,7 +76,7 @@ Choose easing based on the semantic of the motion:
 ```js
 .ease(d3.easeCubicOut)      // responsive UI -- fast start, gentle stop
 .ease(d3.easeElasticOut.amplitude(1).period(0.4))  // bouncy -- use sparingly
-.ease(d3.easeBackOut.overshoot(1.5))   // anticipation -- pulls back first
+.ease(d3.easeBackOut.overshoot(1.5))   // overshoot -- passes target, settles back
 .ease(d3.easeLinear)        // only for continuous processes (loading, progress)
 .ease(d3.easeCubicInOut)    // smooth start and stop -- default, most cases
 ```
@@ -136,7 +136,7 @@ SVG transitions don't work on Canvas. Use `d3.timer` or `requestAnimationFrame`.
 function animate(data, targets) {
   const speed = 0.05, current = data.map(d => ({ ...d }));
 
-  d3.timer(() => {
+  const timer = d3.timer(() => {
     ctx.clearRect(0, 0, width, height);
     let settled = true;
     current.forEach((d, i) => {
@@ -148,7 +148,7 @@ function animate(data, targets) {
       ctx.arc(d.x, d.y, d.r, 0, 2 * Math.PI);
       ctx.fill();
     });
-    return settled; // true stops timer
+    if (settled) timer.stop(); // v4+ ignores the callback's return value
   });
 }
 ```

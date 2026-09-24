@@ -127,9 +127,9 @@ The three steps:
 
 Transitioning between different chart layouts (treemap→pack→pie) where each layout produces shapes with different geometry — rects, circles, arc wedges. Parametric interpolation breaks down here because a rect has 4 corners while an arc wedge has 2 straight edges and a curve; interpolating between their parameters produces a shape that collapses to near-zero area at `t=0.5` — the "pinch" artifact.
 
-**The fix:** resample all layout shapes to the same point count in the same coordinate space, then lerp the arrays. Each point travels in a straight line to its target, so area is preserved throughout.
+**The fix:** resample all layout shapes to the same point count in the same coordinate space, then lerp the arrays. Each point travels in a straight line to its target, so shapes never collapse to near-zero area mid-transition.
 
-The recipe (see `examples/layout-morph.html` for the full working version):
+The recipe (see `../hierarchy-layouts/examples/layout-switcher.html` for a working version):
 1. Compute each layout (treemap, pack, pie) to get path strings in absolute coordinates
 2. Resample each shape to N points via a temporary hidden `<path>` element
 3. Align rotations via `bestRotation()` to prevent spinning
@@ -172,7 +172,8 @@ function projectTransition(projA, projB, duration = 1500) {
       ];
     })
       .scale(1)       // raw output is already in pixels
-      .translate([0, 0]);
+      .translate([0, 0])
+      .reflectY(true); // undo geoProjection's y-negation (output is already screen-space)
 
     path.projection(interpolated);
     paths.attr("d", path);

@@ -125,8 +125,8 @@
 <div class="legend" id="legend"></div>
 <div id="tooltip"></div>
 
-<script src="https://d3js.org/d3.v7.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
+<script src="../vendor/js/d3.v7.min.js"></script>
+<script src="../vendor/js/topojson-client.min.js"></script>
 <script>
 (async function() {
   const width = 1200, height = 800;
@@ -161,7 +161,8 @@
   oceaniaIds.forEach(id => continentMap.set(String(id), "Oceania"));
 
   function getContinent(id) {
-    return continentMap.get(String(id)) || "Africa";
+    // world-atlas ids are zero-padded strings ("076"); the tables are unpadded
+    return continentMap.get(String(+id)) || (+id === 10 ? "Antarctica" : "Other");
   }
 
   function getColor(id) {
@@ -208,7 +209,7 @@
   ]);
 
   function getCountryName(id) {
-    return countryNames.get(String(id)) || `Country ${id}`;
+    return countryNames.get(String(+id)) || `Country ${id}`;
   }
 
   // Projections
@@ -226,7 +227,7 @@
   let autoTimer = null;
 
   // Load world data
-  const world = await d3.json("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json");
+  const world = await d3.json("../vendor/data/world-atlas/countries-110m.json");
   const countries = topojson.feature(world, world.objects.countries).features;
   const borders = topojson.mesh(world, world.objects.countries, (a, b) => a !== b);
   const graticule = d3.geoGraticule10();
@@ -290,8 +291,11 @@
     if (transitioning || targetIdx === currentIdx) return;
     transitioning = true;
 
-    const sourceProj = fitProjection(projections[currentIdx].make());
+    const sourceIdx = currentIdx;
+    const sourceProj = fitProjection(projections[sourceIdx].make());
     const targetProj = fitProjection(projections[targetIdx].make());
+    const mercator = projections[sourceIdx].name === "Mercator" ? sourceProj
+      : projections[targetIdx].name === "Mercator" ? targetProj : null;
 
     // Update UI
     currentIdx = targetIdx;
@@ -304,16 +308,31 @@
     const timer = d3.timer((elapsed) => {
       const t = Math.min(1, ease(elapsed / duration));
 
-      // Interpolate projection output point by point
+      // Interpolate projection output point by point. geoProjection negates y
+      // and recenters so [0,0] lands on translate, so the raw returns -y and
+      // translate is set to the interpolated image of [0,0]. Mercator's
+      // infinite poles are clamped to its fitted latitude limit.
+      const project = (proj, lon, lat) => proj === mercator
+        ? proj([lon, Math.max(-85, Math.min(85, lat))])
+        : proj([lon, lat]);
       const interpolated = d3.geoProjection((lon, lat) => {
-        const a = sourceProj([lon * 180 / Math.PI, lat * 180 / Math.PI]);
-        const b = targetProj([lon * 180 / Math.PI, lat * 180 / Math.PI]);
+        const a = project(sourceProj, lon * 180 / Math.PI, lat * 180 / Math.PI);
+        const b = project(targetProj, lon * 180 / Math.PI, lat * 180 / Math.PI);
         if (!a || !b) return [0, 0];
         return [
           a[0] * (1 - t) + b[0] * t,
-          a[1] * (1 - t) + b[1] * t
+          -(a[1] * (1 - t) + b[1] * t)
         ];
-      }).scale(1).translate([0, 0]);
+      });
+      const c0 = sourceProj([0, 0]), c1 = targetProj([0, 0]);
+      interpolated.scale(1).translate([c0[0] * (1 - t) + c1[0] * t, c0[1] * (1 - t) + c1[1] * t]);
+
+      // Orthographic's back hemisphere folds onto the front: sweep the clip
+      // circle between 180deg (no clip) and 90deg across the transition.
+      const orthoWeight = (projections[sourceIdx].name === "Orthographic" ? 1 - t : 0)
+        + (projections[targetIdx].name === "Orthographic" ? t : 0);
+      if (orthoWeight > 0) interpolated.clipAngle(Math.min(179.9, 180 - 90 * orthoWeight));
+      interpolated.clipExtent([[-mapX, -mapY], [width - mapX, height - mapY]]);
 
       path.projection(interpolated);
       spherePath.attr("d", path(sphere));

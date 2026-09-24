@@ -129,7 +129,7 @@ function animate() {
   render();
   if (simulation.alpha() > simulation.alphaMin()) requestAnimationFrame(animate);
 }
-simulation.restart();
+simulation.stop(); // drive ticks manually; the internal timer would double-tick
 requestAnimationFrame(animate);
 ```
 
@@ -186,7 +186,7 @@ The N-body force is O(n log n) per tick, but the constant factor is large — at
 
 ```js
 // force-worker.js (progressive)
-importScripts('https://d3js.org/d3-force.v3.min.js');
+importScripts('https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js'); // d3-force UMD alone lacks its dispatch/quadtree/timer deps
 self.onmessage = ({ data: { nodes, links, width, height } }) => {
   const sim = d3.forceSimulation(nodes)
     .force("link", d3.forceLink(links).id(d => d.id))

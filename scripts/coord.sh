@@ -63,7 +63,8 @@ iso_to_epoch() {
   if date -d "2000-01-01T00:00:00Z" +%s &>/dev/null; then
     date -d "$1" +%s
   else
-    date -jf "%Y-%m-%dT%H:%M:%SZ" "$1" +%s 2>/dev/null || echo 0
+    # BSD date parses in local time unless -u; the trailing Z is literal
+    date -juf "%Y-%m-%dT%H:%M:%SZ" "$1" +%s 2>/dev/null || echo 0
   fi
 }
 
@@ -75,10 +76,23 @@ age_minutes() {
 }
 
 with_task_lock() {
-  (
-    flock -x -w 5 200 2>/dev/null || true
-    "$@"
-  ) 200>"$LOCK_FILE"
+  if command -v flock &>/dev/null; then
+    (
+      flock -x -w 5 200 2>/dev/null || true
+      "$@"
+    ) 200>"$LOCK_FILE"
+  else
+    # macOS has no flock: mkdir is atomic, so use a lock dir (5s timeout)
+    local i=0
+    until mkdir "$LOCK_FILE.d" 2>/dev/null; do
+      (( ++i > 50 )) && break
+      sleep 0.1
+    done
+    local rc=0
+    ( "$@" ) || rc=$?
+    rmdir "$LOCK_FILE.d" 2>/dev/null
+    return $rc
+  fi
 }
 
 ensure_tasks_file() {

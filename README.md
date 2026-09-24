@@ -6,6 +6,22 @@ Skills for building advanced D3.js visualizations. Each one captures the judgmen
 
 Each skill is a `SKILL.md` file — patterns, code, and pitfalls for a specific visualization domain. Skills load automatically based on what you're building. They produce self-contained HTML files with inline JS/CSS. No build tools, no frameworks — just vanilla JS + D3 v7.
 
+## Vendored assets
+
+Blocks load D3, topojson and fonts from `vendor/` by relative path rather than a
+CDN, so they render inside a network-restricted sandbox and work offline.
+
+```bash
+./scripts/vendor.sh    # populates vendor/ (gitignored)
+python3 -m http.server 8000
+```
+
+ES module blocks need an HTTP origin — serve the directory rather than opening
+the file directly. The Pages workflow runs the same script before deploying.
+
+Files under `blocks/archive/` and `evals/` are a record of generated output and
+deliberately still point at CDNs; they are not offline-safe.
+
 ## Install
 
 Each skill is a folder with a `SKILL.md` file and optional examples and scripts. AI coding tools auto-discover skills from specific directories — install by symlinking or copying the skills you want.

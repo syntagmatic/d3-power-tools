@@ -213,7 +213,7 @@ Call `markDirty()` from event handlers instead of drawing directly.
 
 4. **Overusing `.each()` when chained `.attr()` suffices.** Reserve `.each()` for side effects or when multiple attributes share an expensive intermediate value.
 
-5. **Forgetting `.transition()` returns a transition, not a selection.** You can't `.on("click", ...)` on a transition — it silently doesn't attach. Attach handlers before `.transition()`.
+5. **Forgetting `.transition()` returns a transition, not a selection.** You can't `.on("click", ...)` on a transition — `transition.on` only accepts start/end/interrupt/cancel and throws on other types. Attach handlers before `.transition()`.
 
 6. **Using `.enter().append()...merge()` when `.join()` works.** The old pattern is four lines where `.join()` is one. Use old pattern only for D3 v4/v5 compatibility.
 

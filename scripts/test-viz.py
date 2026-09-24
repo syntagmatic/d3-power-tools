@@ -124,11 +124,15 @@ def run_single_test(pw_browser, test_spec, server_url=None, serve_root=None):
         rel = html_path.relative_to(Path(serve_root).resolve())
         url = f"{server_url}/{rel}"
     else:
-        # Standalone: start a per-test server
-        serve_dir = str(html_path.parent)
+        # Standalone: serve the nearest ancestor containing vendor/ (pages
+        # import ../vendor/esm/d3.mjs), else the repo root if the file is
+        # inside it, else the file's own directory.
+        serve_dir = next((p for p in html_path.parents if (p / "vendor").is_dir()), None)
+        if serve_dir is None:
+            serve_dir = REPO_ROOT if html_path.is_relative_to(REPO_ROOT) else html_path.parent
         port = find_free_port()
-        httpd = start_server(serve_dir, port)
-        url = f"http://127.0.0.1:{port}/{html_path.name}"
+        httpd = start_server(str(serve_dir), port)
+        url = f"http://127.0.0.1:{port}/{html_path.relative_to(serve_dir).as_posix()}"
 
     results = {
         "file": str(html_path),
@@ -147,6 +151,13 @@ def run_single_test(pw_browser, test_spec, server_url=None, serve_root=None):
 
     page = pw_browser.new_page(viewport={"width": width, "height": height})
     page.on("pageerror", lambda err: js_errors.append(str(err)))
+    # Failed fetches (e.g. a 404 on an ES module import) raise no pageerror
+    failed_requests = []
+    page.on("response", lambda r: (
+        failed_requests.append(f"{r.status} {r.url}")
+        if r.status >= 400 and not r.url.endswith("/favicon.ico") else None
+    ))
+    page.on("requestfailed", lambda r: failed_requests.append(f"{r.failure} {r.url}"))
     page.on("console", lambda msg: (
         console_warnings.append(msg.text) if msg.type == "warning" else None
     ))
@@ -247,7 +258,7 @@ def run_single_test(pw_browser, test_spec, server_url=None, serve_root=None):
         const imgs = document.querySelectorAll('img');
         return Array.from(imgs).filter(i => !i.complete || i.naturalWidth === 0)
                     .map(i => i.src);
-    }""")
+    }""") + failed_requests
     check("no_broken_resources", len(broken) == 0,
           ", ".join(broken) if broken else "")
 

@@ -14,9 +14,12 @@
 
 ;(function () {
   const KEY = "d3pt-theme";
-  const stored = localStorage.getItem(KEY);
+  let stored = null;
+  try { stored = localStorage.getItem(KEY); } catch {}
+  // No saved choice: follow the OS preference without persisting it.
+  const initial = stored || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : null);
 
-  if (stored) document.documentElement.setAttribute("data-theme", stored);
+  if (initial) document.documentElement.setAttribute("data-theme", initial);
 
   // SVG icons — moon shown in light mode (click for dark), sun in dark mode
   const MOON = '<svg width="16" height="16" viewBox="0 0 16 16"><path d="M12.4 10.3A5 5 0 115.7 3.6a4 4 0 006.7 6.7z" fill="var(--color-text-muted)" stroke="var(--color-text-muted)" stroke-width="0.5"/></svg>';
@@ -29,7 +32,7 @@
   function setTheme(value) {
     const theme = value === "dark" ? "dark" : "light";
     document.documentElement.setAttribute("data-theme", theme);
-    localStorage.setItem(KEY, theme);
+    try { localStorage.setItem(KEY, theme); } catch {}
     d3pt.theme = theme;
     updateButton();
     document.documentElement.dispatchEvent(

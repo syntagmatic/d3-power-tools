@@ -295,7 +295,7 @@ Show when A exceeds B with two clipped area paths — green (A > B), red (B > A)
 ```js
 const byDate = new Map(data.map(d => [+d.date, d.value]));
 const yoy = data
-  .map(d => ({ date: d.date, current: d.value, previous: byDate.get(+d.date - 365.25 * 86400000) ?? null }))
+  .map(d => ({ date: d.date, current: d.value, previous: byDate.get(+d3.utcYear.offset(d.date, -1)) ?? null }))
   .filter(d => d.previous != null);
 ```
 

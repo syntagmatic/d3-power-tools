@@ -190,11 +190,14 @@ def parse_stream_report(stream_output: str) -> dict:
                         turn["text"] = (turn["text"] + " " + text).strip()
             turns.append(turn)
 
-        elif etype == "tool_result":
-            if event.get("is_error") and turns:
-                last = turns[-1]
-                if not last.get("error"):
-                    last["error"] = str(event.get("content", ""))[:500]
+        elif etype == "user":
+            # Tool results arrive as tool_result blocks inside user messages
+            content = event.get("message", {}).get("content", [])
+            for block in content if isinstance(content, list) else []:
+                if block.get("type") == "tool_result" and block.get("is_error") and turns:
+                    last = turns[-1]
+                    if not last.get("error"):
+                        last["error"] = str(block.get("content", ""))[:500]
 
         elif etype == "result":
             result_event = {

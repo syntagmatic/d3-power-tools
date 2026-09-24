@@ -259,8 +259,8 @@ const color2 = d3.scaleQuantize(d3.extent(values), d3.schemeBlues[5]);
 
 // Jenks via simple-statistics (not built into D3)
 import { jenks } from "simple-statistics";
-const breaks = jenks(values, 5); // [min, b1, b2, b3, b4, max]
-const color3 = d3.scaleThreshold(breaks.slice(1, -1), d3.schemeYlOrRd[5]);
+const jenksBreaks = jenks(values, 5); // [min, b1, b2, b3, b4, max]
+const color3 = d3.scaleThreshold(jenksBreaks.slice(1, -1), d3.schemeYlOrRd[5]);
 ```
 
 **The quantile trap:** Because every color appears equally on the map, two very different distributions produce identical-looking maps. A bimodal distribution and a uniform distribution are indistinguishable. Always pair a quantile choropleth with a histogram showing the actual distribution and breakpoints.

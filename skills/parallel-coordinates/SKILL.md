@@ -277,7 +277,8 @@ container.on("pointermove", (event) => {
   const [mx, my] = d3.pointer(event, canvas);
   const pixel = hitCtx.getImageData(mx, my, 1, 1).data;
   const color = `rgb(${pixel[0]},${pixel[1]},${pixel[2]})`;
-  const idx = colorToIndex.get(color);
+  // alpha < 255: background (would read as index 0) or an anti-aliased edge blend
+  const idx = pixel[3] === 255 ? colorToIndex.get(color) : undefined;
   idx !== undefined ? highlightLine(idx) : clearHighlight();
 });
 ```

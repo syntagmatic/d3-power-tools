@@ -45,11 +45,11 @@ SVG captures pointer events, WebGL has `pointer-events: none`. For DPR-aware can
 Most data viz needs just: position points, color them. This vertex+fragment pair is the starting point for nearly every WebGL D3 visualization.
 
 ```glsl
-// vertex — converts D3 CSS-pixel positions to WebGL clip space
 #version 300 es
+// vertex — converts D3 CSS-pixel positions to WebGL clip space
 in vec2 a_position;  // CSS pixels, pre-scaled by D3
 in vec4 a_color;     // RGBA [0,1]
-in float a_size;     // point radius in pixels
+in float a_size;     // point diameter in CSS pixels
 uniform vec2 u_resolution;
 uniform float u_dpr;
 out vec4 v_color;
@@ -64,8 +64,8 @@ void main() {
 ```
 
 ```glsl
-// fragment — antialiased circle via SDF on gl_PointCoord
 #version 300 es
+// fragment — antialiased circle via SDF on gl_PointCoord
 precision mediump float;
 in vec4 v_color;
 out vec4 fragColor;

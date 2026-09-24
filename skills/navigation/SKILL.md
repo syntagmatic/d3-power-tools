@@ -161,15 +161,15 @@ minimap.on("click", (event) => {
 Brush in a context chart drives zoom in the main chart. The `sourceEvent` check prevents infinite loops:
 
 ```js
-function brushed({ selection }) {
-  if (!selection) return;
+function brushed({ selection, sourceEvent }) {
+  if (!selection || !sourceEvent) return;  // ignore programmatic brush.move from zoomed
   const [sx0, sx1] = selection;
   const k = (xScale.range()[1] - xScale.range()[0]) / (sx1 - sx0);
   svg.call(zoom.transform, d3.zoomIdentity.translate(xScale.range()[0] - sx0 * k, 0).scale(k));
 }
 
 function zoomed({ transform, sourceEvent }) {
-  if (sourceEvent?.type === "brush") return;
+  if (!sourceEvent) return;  // programmatic zoom.transform from brushed
   const [d0, d1] = transform.rescaleX(xScale).domain();
   contextSvg.select(".brush").call(brush.move, [xContext(d0), xContext(d1)]);
 }

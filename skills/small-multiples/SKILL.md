@@ -126,11 +126,12 @@ panels.append("rect")
 ```js
 const brush = d3.brushX()
   .extent([[0, 0], [plotWidth, plotHeight]])
-  .on("brush end", (event) => {
+  .on("brush end", function(event) {
     if (!event.sourceEvent) return; // prevent loops
+    const source = this; // event.target is the brush behavior, not the <g>
     const selection = event.selection;
     panels.selectAll(".brush")
-      .filter(function() { return this !== event.target; })
+      .filter(function() { return this !== source; })
       .call(brush.move, selection);
   });
 ```

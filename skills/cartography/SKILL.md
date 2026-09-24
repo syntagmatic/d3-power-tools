@@ -31,8 +31,8 @@ const borders   = topojson.mesh(world, world.objects.countries, (a, b) => a !== 
 
 Fit to the **merged outline**, not individual features:
 ```js
-const projection = d3.geoAlbersUsa().fitSize([width, height], nation);
-const projection = d3.geoEqualEarth().fitSize([width, height], { type: "Sphere" }); // world: fit Sphere
+const projection = d3.geoAlbersUsa().fitSize([width, height], nation);          // US
+// const projection = d3.geoEqualEarth().fitSize([width, height], { type: "Sphere" }); // world: fit Sphere
 ```
 
 Choropleth rendering order -- fills, internal borders (mesh), outer boundary:
@@ -110,7 +110,8 @@ function scaledPath(feature, scaleFactor) {
   const t = d3.geoTransform({
     point(x, y) { this.stream.point(cx + (x - cx) * scaleFactor, cy + (y - cy) * scaleFactor); }
   });
-  return d3.geoPath(t)(feature);
+  // Project first, then scale in screen space around the projected centroid
+  return d3.geoPath({ stream: s => projection.stream(t.stream(s)) })(feature);
 }
 ```
 
@@ -178,7 +179,7 @@ features.forEach((f, i) => {
 });
 // Lookup: hctx.getImageData(mx, my, 1, 1).data -> decode RGB -> indexToFeature.get()
 ```
-Supports 16.7M features. Disable anti-aliasing (`imageSmoothingEnabled = false`, no strokes) or edge colors blend. `d3.geoContains` is simpler but O(n) -- fine for <=200 features.
+Supports 16.7M features. Canvas path fills are always anti-aliased (`imageSmoothingEnabled` only affects `drawImage`), so edge pixels blend into bogus colors: no strokes, and treat colors with no map entry as a miss. `d3.geoContains` is simpler but O(n) -- fine for <=200 features.
 
 ### Batch by Fill Color
 
@@ -260,10 +261,10 @@ Bridge via `d3.geoTransform` that calls `map.project(new maplibregl.LngLat(lon, 
 ## Common Pitfalls
 
 1. **AlbersUsa gotchas.** No `rotate()`, `center()`, or `clipAngle()`. `invert()` returns `null` outside composite regions. Cannot use with `d3.tile`.
-2. **Winding order.** RFC 7946: counterclockwise outer rings. Reversed winding fills the globe minus your target. Detect: `d3.geoArea()` > 2pi. Fix: `@turf/rewind`.
-3. **Null projections.** `projection([lon, lat])` returns `null` outside clip region. Guard: `?? [NaN, NaN]`.
+2. **Winding order.** d3-geo expects clockwise outer rings -- the opposite of RFC 7946's counterclockwise. Wrong winding fills the globe minus your target. Detect: `d3.geoArea()` > 2pi. Fix: `@turf/rewind` with `{ reverse: true }`.
+3. **Null projections.** `geoAlbersUsa` returns `null` outside its insets; other projections return coordinates even for clipped points (clipping only happens in `geoPath` streams), so check visibility with `d3.geoDistance` for globes. Guard: `?? [NaN, NaN]`.
 4. **Stroke scaling on zoom.** Transforming `<g>` scales strokes. Fix: divide by `transform.k`, `vector-effect: non-scaling-stroke` (SVG only), or re-project.
-5. **Hidden canvas anti-aliasing.** Color-picking breaks at edges. `imageSmoothingEnabled = false`, no strokes.
+5. **Hidden canvas anti-aliasing.** Color-picking breaks at edges; canvas can't disable path anti-aliasing. No strokes, and ignore unmatched colors.
 6. **Re-projecting every frame.** `geoPath` for 3000+ features at 60fps is slow. Geometric zoom for SVG, viewport-cull for Canvas.
 7. **`d3.geoArea` units.** Returns steradians. Multiply by 6371^2 for km^2.
 8. **Forgetting the Sphere.** World maps need `{ type: "Sphere" }` for water and graticule clipping.

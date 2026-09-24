@@ -23,21 +23,21 @@ Edges between leaves in the same subtree bundle tightly; edges between distant s
 
 `d3.curveBundle.beta(β)` controls how tightly edges follow the tree structure:
 
-- **β = 1** — straight lines between endpoints. Maximum edge clarity, maximum clutter.
-- **β = 0.15** (tension 0.85) — tight bundling. Good default for showing group-level flow.
-- **β = 0** — curves follow tree edges exactly. Maximum bundling, maximum ambiguity.
+- **β = 0** — straight lines between endpoints. Maximum edge clarity, maximum clutter.
+- **β = 0.85** — tight bundling. Good default for showing group-level flow.
+- **β = 1** — curves follow tree edges exactly (uniform B-spline). Maximum bundling, maximum ambiguity.
 
 **The perceptual trap:** CHI 2025 research (Wallinger et al.) confirms that tight bundling creates *false connections* — viewers follow merged bundles and perceive adjacencies that don't exist in the data. When two bundles merge and split, viewers read the split point as a path in the graph. They do this even while reporting the diagram feels "ambiguous."
 
 **Practical guidance:**
-- Start at β = 0.15 (tension 0.85) for the overview. This bundles enough to show group patterns without merging unrelated clusters.
-- If distinct clusters' bundles merge into a single river, *reduce* tension (raise β toward 0.3–0.5) until they separate. The visual merge is a lie — those paths don't share structure.
+- Start at β = 0.85 for the overview. This bundles enough to show group patterns without merging unrelated clusters.
+- If distinct clusters' bundles merge into a single river, *reduce* β (toward 0.5–0.7) until they separate. The visual merge is a lie — those paths don't share structure.
 - Add a tension slider so viewers can unbundle on demand. This turns bundling from a fixed editorial choice into an interactive lens.
 - For presentations (no interaction), err toward less bundling. The viewer can't unbundle to check.
 
 ```js
 const line = d3.lineRadial()
-  .curve(d3.curveBundle.beta(0.15))
+  .curve(d3.curveBundle.beta(0.85))
   .radius(d => d.y)
   .angle(d => d.x);
 ```
@@ -219,7 +219,7 @@ Hierarchical bundling (this skill's focus) requires a tree structure and routes 
 
 1. **Mismatched IDs between hierarchy and connections.** Source/target must exactly match leaf node IDs. Silent edge drops are the most common bug.
 
-2. **Beta vs tension confusion.** `d3.curveBundle.beta(β)` where `β = 1 - tension`. High tension = low beta = tight bundling. The naming is backwards from intuition — beta 0 is maximum bundling, not minimum.
+2. **Beta direction.** `d3.curveBundle.beta(β)` is bundling strength (Holten's β): β = 0 is a straight line, β = 1 follows the tree path fully. Higher beta = tighter bundling.
 
 3. **Labels overlapping at high node counts.** Above ~100 leaves, radial labels collide. Show labels only on hover, increase radius, or filter to every Nth label.
 

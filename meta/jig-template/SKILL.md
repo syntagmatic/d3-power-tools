@@ -87,8 +87,8 @@ let dirty = 0;
 const DATA = 1, HIGHLIGHT = 2, AXES = 4;
 
 function markDirty(layers) {
+  if (!dirty) requestAnimationFrame(flush);  // one flush per frame
   dirty |= layers;
-  requestAnimationFrame(flush);
 }
 function flush() {
   if (dirty & DATA) drawData(dataCtx, data, scales);

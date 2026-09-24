@@ -143,6 +143,7 @@ const tctx = tile.getContext("2d");
 tctx.scale(dpr, dpr);
 drawHatchTile(tctx, size, 45);
 const pattern = ctx.createPattern(tile, "repeat");
+pattern.setTransform(new DOMMatrix().scale(1 / dpr));  // main ctx is already scaled by dpr
 ```
 
 **Batch by pattern** — changing `fillStyle` to a different `CanvasPattern` flushes the GPU draw buffer. Sort draw calls by pattern to minimize flushes.

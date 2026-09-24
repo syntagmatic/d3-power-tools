@@ -38,7 +38,7 @@ The `+"" === 0` row is the single most common D3 data bug. Empty CSV cells becom
 
 Use `isFinite()` over `!isNaN()` — it also rejects `Infinity`, which blows out scale domains.
 
-Missing values propagate silently through scales: `scaleLinear()(undefined)` returns `NaN`. The element renders at an invisible position — no error, no warning, just a missing mark.
+Missing values propagate silently through scales: `scaleLinear()(undefined)` returns `undefined` (the default `.unknown()` value), so D3 drops the attribute and the element falls back to 0 or doesn't render — no error, no warning, just a missing mark.
 
 ## Grouping and Aggregation
 

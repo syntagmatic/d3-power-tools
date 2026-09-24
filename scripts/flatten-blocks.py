@@ -11,6 +11,7 @@ Usage:
 """
 import argparse
 import json
+import re
 import shutil
 from collections import defaultdict
 from pathlib import Path
@@ -39,12 +40,20 @@ ARCHIVE_DIR = PROJ / "blocks" / "archive"
 SKIP_DIRS = {"archive", "standalone"}  # standalone gets merged, not archived separately
 
 
+def is_block_set(d):
+    """Generation-run dirs (v0-..., v2-...-noskills) and standalone/.
+
+    Other subdirs of blocks/ (e.g. multi-file projects) are left alone.
+    """
+    return d.is_dir() and (d.name == "standalone" or re.match(r"v\d+-", d.name) is not None)
+
+
 def find_all_versions():
     """Find all HTML files per block across all block-sets."""
     versions = defaultdict(dict)  # bid -> {block_set: path}
     blocks_dir = PROJ / "blocks"
     for d in sorted(blocks_dir.iterdir()):
-        if not d.is_dir() or d.name in ("archive",):
+        if not is_block_set(d):
             continue
         for f in d.glob("*.html"):
             versions[f.stem][d.name] = f
@@ -158,22 +167,14 @@ def main():
     # Move block-set directories to archive
     moved = 0
     for d in sorted(blocks_dir.iterdir()):
-        if not d.is_dir():
+        if not is_block_set(d):
             continue
-        if d.name in ("archive",) or d == ARCHIVE_DIR:
-            continue
-        # Don't archive manifest.json, GENERATE.md, etc.
         dest = ARCHIVE_DIR / d.name
         if dest.exists():
             shutil.rmtree(dest)
         shutil.move(str(d), str(dest))
         moved += 1
         print(f"  Archived: {d.name}/")
-
-    # Move loose non-HTML files back (manifest.json, GENERATE.md)
-    for f in ARCHIVE_DIR.parent.glob("*"):
-        if f.is_file() and not f.name.endswith(".html"):
-            pass  # already in blocks/, leave them
 
     print(f"\nArchived {moved} directories to blocks/archive/")
     print(f"blocks/ now has {len(list(blocks_dir.glob('*.html')))} HTML files + archive/")
