@@ -59,22 +59,19 @@ def create_staging_dir(
     skill_names = _all_skill_names(proj) if all_skills else skills
 
     # Copy skills for Claude (skills/{name}/SKILL.md)
+    # Whole skill dir minus examples: SKILL.md plus references/ and scripts/ it points to.
     for name in skill_names:
-        src = proj / CLAUDE_SKILLS_DIR / name / "SKILL.md"
-        if not src.exists():
+        src = proj / CLAUDE_SKILLS_DIR / name
+        if not (src / "SKILL.md").exists():
             continue
-        dest_dir = staging / CLAUDE_SKILLS_DIR / name
-        dest_dir.mkdir(parents=True)
-        shutil.copy2(src, dest_dir / "SKILL.md")
+        shutil.copytree(src, staging / CLAUDE_SKILLS_DIR / name, ignore=shutil.ignore_patterns("examples"))
 
     # Copy skills for Gemini (.gemini/skills/{name}/SKILL.md)
     for name in skill_names:
-        src = proj / GEMINI_SKILLS_DIR / name / "SKILL.md"
-        if not src.exists():
+        src = proj / GEMINI_SKILLS_DIR / name
+        if not (src / "SKILL.md").exists():
             continue
-        dest_dir = staging / GEMINI_SKILLS_DIR / name
-        dest_dir.mkdir(parents=True)
-        shutil.copy2(src, dest_dir / "SKILL.md")
+        shutil.copytree(src, staging / GEMINI_SKILLS_DIR / name, ignore=shutil.ignore_patterns("examples"))
 
     # Write .claude/CLAUDE.md
     _write_claude_md(staging, skill_names, proj)

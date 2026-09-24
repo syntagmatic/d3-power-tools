@@ -1,253 +1,108 @@
 ---
 name: motion
-description: "Build fluid, purposeful D3.js animated transitions. Use this skill whenever the user wants to animate data changes, add enter/update/exit transitions, create staggered animations, build scrollytelling narratives, animate on canvas, or make any D3 visualization transition smoothly between states. Also use when the user mentions animation, tweening, easing, or wants to make a visualization feel alive. For shape morphing (circle↔rect, bar↔pie, arbitrary path morphing), use the shape-morphing skill instead."
+description: "Animate D3 charts only when motion shows a real correspondence: enter/update/exit transitions, object constancy, easing, stagger and duration budgets, staged sequencing, interruption and named transitions, prefers-reduced-motion, canvas animation loops, color tweens, View Transitions, scrollytelling and steppers (sticky graphic, Scrollama), and shape morphing (circle to rect, bar to pie, path resampling, flubber, d3-interpolate-path, layout and projection transitions)."
 ---
 
-# Animated Transitions
+# Motion
 
-Build fluid, purposeful D3 transitions that communicate data changes clearly. Covers enter/update/exit, staggering, interruption handling, canvas animation, and scrollytelling.
+Animation earns its frames by answering "which thing became which thing?" Models add transitions by reflex, let them fight each other on rapid input, and morph shapes that share no identity. This skill is about when to move, in what order, and how to survive interruption.
 
-## Core Principle
+Decide in order: should it animate, how is it staged, and what does the shape do in between.
 
-Animation should answer: **"What changed?"** If a transition doesn't help the viewer track changes, remove it.
+## Should it animate?
 
-### When Animation Helps (Heer & Robertson 2007)
+| If... | Do | Not |
+|---|---|---|
+| the same marks change position/size and each has a stable id | transition with a key function `d => d.id` (object constancy) | the default index key: "first stays first" is a false correspondence |
+| the data changed category (revenue → headcount) or marks have no shared identity | cut or crossfade | a morph, which claims continuity that isn't there |
+| the viewer needs to compare two states precisely | small multiples side by side | sequential animation they must remember |
+| marks would pass through each other or occlude mid-flight | stage it (below) or cut | a single tween with invalid intermediate frames |
+| everything reorders at once (sorted bars → unsorted treemap) | keep order, or stagger so a few can be followed | 30+ shapes swarming |
+| the swap is container-level (chart type, chart ↔ table) | View Transitions API crossfade | D3 transitions on the same content (VT animates a snapshot) |
+| the user has `prefers-reduced-motion: reduce` | duration 0, jump to the final state | shorter animation; listen for `change` at runtime |
+| the transition will be seen on every hover or tick | skip it | animation that becomes friction |
 
-- **Tracking identity**: viewer sees which elements moved where (object constancy)
-- **Revealing causation**: temporal sequence shows this-caused-that
-- **Sequential storytelling**: scrollytelling, steppers, guided narratives
-- **Aggregation/disaggregation**: seeing how points roll up into summaries
+Every intermediate frame should be a valid chart (congruence).
 
-### When to Use Small Multiples Instead
+## Budgets
 
-- Viewer needs to **compare** two states precisely -- side-by-side beats sequential
-- More than ~4 elements move simultaneously without staggering
-- Animation creates **occluded intermediate states** where elements overlap mid-flight
-- Users will see the transition **repeatedly** (it becomes annoying fast)
-
-### Duration Guidelines
-
-| Motion type | Duration |
+| Motion | Duration |
 |---|---|
 | Simple position change | 300-500ms |
 | Complex multi-element transition | ~1000ms total |
-| Dwell time between stages | 200-400ms |
-| Stagger gap per element | 20-80ms (total stagger < 500ms) |
-| Scrollytelling step transition | 400-800ms |
+| Dwell between stages of one transition | 200-400ms |
+| Stagger per element | 20-80ms, total stagger < 500ms |
+| Scrollytelling step | 400-800ms |
+| Rest before an auto-advancing narrative stage | ~1.5s |
 
-**Congruence Principle**: maintain valid data graphics during transitions. No nonsensical intermediate states -- if bars pass through each other mid-animation, stage the transition instead.
-
-## SVG Transitions
-
-### Enter / Update / Exit with `.join()`
-
-Always use a key function so D3 can track identity:
-
-```js
-svg.selectAll("circle")
-  .data(data, d => d.id)  // key function -- critical for object constancy
-  .join(
-    enter => enter.append("circle")
-      .attr("r", 0).attr("cx", d => xScale(d.x)).attr("cy", d => yScale(d.y))
-      .call(e => e.transition().duration(500).attr("r", d => rScale(d.value))),
-    update => update
-      .call(u => u.transition().duration(500)
-        .attr("cx", d => xScale(d.x)).attr("cy", d => yScale(d.y))
-        .attr("r", d => rScale(d.value))),
-    exit => exit
-      .call(e => e.transition().duration(300).attr("r", 0).remove())
-  );
-```
-
-## Staggered Animations
-
-**Strategies**: index-based `i * 20` (left-to-right), value-based `(maxVal - d.value) / maxVal * 500` (largest first), spatial `Math.hypot(d.x - cx, d.y - cy) * 2` (ripple from center), random `Math.random() * 300` (organic feel), or group-then-item (exit all, transition layout, enter all).
-
-```js
-svg.selectAll("rect").transition().duration(400)
-  .delay((d, i) => i * 20)  // 20ms offset per element
-  .attr("y", d => yScale(d.value));
-```
-
-## Easing Functions
-
-Choose easing based on the semantic of the motion:
-
-```js
-.ease(d3.easeCubicOut)      // responsive UI -- fast start, gentle stop
-.ease(d3.easeElasticOut.amplitude(1).period(0.4))  // bouncy -- use sparingly
-.ease(d3.easeBackOut.overshoot(1.5))   // overshoot -- passes target, settles back
-.ease(d3.easeLinear)        // only for continuous processes (loading, progress)
-.ease(d3.easeCubicInOut)    // smooth start and stop -- default, most cases
-```
-
-**Rule of thumb**: Out-easing for entrances, in-easing for exits, in-out for position changes.
-
-## Staged Exit, Update, Enter
-
-Run exit first so departing marks clear before remaining marks reposition. Use coordinated delays -- more robust than `transition.end()` promises, which reject on interruption or empty selections:
-
-```js
-function render(data) {
-  const joined = svg.selectAll(".bar").data(data, d => d.id);
-  const exitDur = 300, moveDur = 400, enterDur = 400;
-  const moveDelay = joined.exit().empty() ? 0 : exitDur;
-  const enterDelay = moveDelay + moveDur;
-
-  joined.join(
-    enter => enter.append("rect").attr("class", "bar")
-      .attr("y", height).attr("height", 0)
-      .call(e => e.transition().delay(enterDelay).duration(enterDur)
-        .attr("y", d => yScale(d.value))
-        .attr("height", d => height - yScale(d.value))),
-    update => update
-      .call(u => u.transition().delay(moveDelay).duration(moveDur)
-        .attr("x", d => xScale(d.id)).attr("width", xScale.bandwidth())
-        .attr("y", d => yScale(d.value))
-        .attr("height", d => height - yScale(d.value))),
-    exit => exit
-      .call(e => e.transition().duration(exitDur)
-        .attr("height", 0).attr("y", height).attr("opacity", 0).remove())
-  );
-}
-```
-
-**Interruption safety:** The update handler must assert every visual property that enter or exit animates -- especially `opacity`. If an enter transition is interrupted by a new render, the element moves to update at whatever mid-transition opacity it had.
-
-## Handling Interruptions
-
-When a new transition starts before the old one finishes, D3 interrupts. **Cache targets, not mid-interpolation values.** Reading DOM attributes mid-transition produces jittery restarts. Store intended targets in a Map:
-
-```js
-const targets = new Map();
-function moveTo(sel, x, y) {
-  targets.set(sel.node(), { x, y });
-  sel.interrupt().transition().duration(300).attr("x", x).attr("y", y);
-}
-```
-
-## Canvas Animations
-
-SVG transitions don't work on Canvas. Use `d3.timer` or `requestAnimationFrame`.
-
-### Lerp Animation Loop
-
-```js
-function animate(data, targets) {
-  const speed = 0.05, current = data.map(d => ({ ...d }));
-
-  const timer = d3.timer(() => {
-    ctx.clearRect(0, 0, width, height);
-    let settled = true;
-    current.forEach((d, i) => {
-      d.x += (targets[i].x - d.x) * speed;
-      d.y += (targets[i].y - d.y) * speed;
-      if (Math.abs(targets[i].x - d.x) > 0.5 || Math.abs(targets[i].y - d.y) > 0.5)
-        settled = false;
-      ctx.beginPath();
-      ctx.arc(d.x, d.y, d.r, 0, 2 * Math.PI);
-      ctx.fill();
-    });
-    if (settled) timer.stop(); // v4+ ignores the callback's return value
-  });
-}
-```
-
-### Multi-Property State Machine
-
-For complex layout morphs (e.g., Circle Pack to Treemap) where properties change shape (radius vs. width/height), separate three concerns: (1) **Render State** -- Map of current drawn values per node; (2) **Target State** -- desired layout from D3; (3) **Transition Manager** -- builds `d3.interpolateNumber` interpolators per node/property, runs `d3.timer` loop applying `easeCubicInOut(elapsed / duration)`. For shape type switches (circle to rect), flip at `t = 0.5`. Handles interruption gracefully since it reads current render state (possibly mid-flight) as the new source.
-
-**Background tab safety:** `d3.timer` pauses when a tab is hidden. If transitions must complete while hidden, add a `setTimeout(tick, 16)` fallback when `document.hidden` is true.
-
-## Color Transitions
-
-Never interpolate in RGB -- it produces muddy intermediate colors. Use `d3.interpolateLab` (perceptually uniform) or `d3.interpolateHcl` (best for hue rotation). When the data domain changes, transition the color mapping with `attrTween`:
-
-```js
-const oldScale = colorScale.copy();
-colorScale.domain(newDomain);
-selection.transition().duration(600)
-  .attrTween("fill", d => d3.interpolateLab(oldScale(d.value), colorScale(d.value)));
-```
-
-## Animated Data Storytelling
-
-### Scrollytelling: Sticky-Graphic Pattern
-
-A chart stays fixed (`position: sticky`) while narrative text scrolls past. Each step triggers a D3 transition. Use IntersectionObserver to detect step crossings:
-
-```js
-const observer = new IntersectionObserver(
-  entries => entries.forEach(e => {
-    if (e.isIntersecting) updateChart(states[e.target.dataset.step]);
-  }),
-  { threshold: 0.5 }
-);
-document.querySelectorAll(".step").forEach(el => observer.observe(el));
-```
-
-**Layout**: graphic container uses `position: sticky; top: 0`, step text scrolls in a sibling column. For step-sequenced annotations, see the **annotation** skill.
-
-### Stepper / Slideshow
-
-Maintain a steps array (`[{ data, layout, title }]`) and an index. On advance, clamp the index and call your D3 transition function with the new step's data and layout.
-
-## View Transitions API
-
-Browser-native cross-fade between DOM states (Baseline 2025). Use for container-level view changes (switching chart types, toggling chart vs. data table), not data-level animation where D3 interpolation produces valid intermediate states.
-
-```js
-if (document.startViewTransition) document.startViewTransition(() => renderChart(newData));
-else renderChart(newData);
-```
-
-**Don't combine with D3 transitions** -- View Transitions animate a snapshot, not the live DOM.
-
-## Choosing an Animation Approach
-
-| Need | Tool |
+| Elements | Technique |
 |---|---|
-| Data-driven element animation | D3 `.transition()` |
-| Container-level view swap | View Transitions API |
-| Scroll-triggered data updates | IntersectionObserver + D3 |
-| Canvas animation (500+ elements) | `requestAnimationFrame` loop with state interpolation |
-| Complex multi-stage choreography | Coordinated delays (preferred) or `transition.end()` promises |
-| Reduced-motion fallback | `prefers-reduced-motion`: instant state change, no interpolation |
+| < 100 | SVG transitions |
+| 100-1,000 | SVG with 10-30ms stagger |
+| 1,000+ | Canvas + `d3.timer`, redraw every frame |
 
-## Performance Guidelines
+Easing: `easeCubicInOut` for position changes, out-easing for entrances, in-easing for exits, `easeLinear` only for continuous processes. Elastic/back overshoot sparingly.
 
-| Elements | Technique | Duration |
-|----------|-----------|----------|
-| < 100 | SVG transitions | 300-800ms |
-| 100-1,000 | SVG with stagger | 400-1000ms, 10-30ms stagger |
-| 1,000-10,000 | Canvas + d3.timer | 500-1000ms |
-| 10,000+ | Canvas + Web Worker | 500ms, skip frames if needed |
+Stagger order says something: by index (reading order), by value (largest first), by distance from a point (ripple). Move at most 2-3 major groups at once.
 
-At 60fps you have 16ms per frame. See the **canvas** skill for `createRenderQueue` and frame profiling.
+## Staging: exit → update → enter
 
-## Accessibility: prefers-reduced-motion
+Departing marks clear first, survivors move, newcomers appear into the freed space. Use coordinated delays:
 
 ```js
-const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
-const safeDur = ms => reducedMotion.matches ? 0 : ms;
-
-selection.transition().duration(safeDur(600)).attr("y", d => yScale(d.value));
+const moveDelay = joined.exit().empty() ? 0 : exitDur;
+const enterDelay = moveDelay + moveDur;
 ```
 
-For canvas animations, skip straight to the final frame. Listen for runtime changes with `reducedMotion.addEventListener("change", ...)` since users can toggle this while the page is open.
+- Enter sets *every* start attribute (x, width, y, opacity) before its transition, or it animates from 0,0.
+- Update asserts every property enter or exit animates, `opacity` especially. An element interrupted mid-enter lands in update half-transparent.
+- `transition.end()` works for promise-chained stages but rejects on any interruption, so wrap it in try/catch. An empty selection resolves immediately.
 
-## Common Pitfalls
+## Interruption
 
-1. **Animating from undefined**: If an element has no initial position, the transition starts from 0,0. Always set initial attributes before transitioning.
-2. **Key function returning index**: `(d, i) => i` is the default and means "first element stays first." Use a data ID for object constancy.
-3. **Transition name collisions**: Unnamed transitions on the same element interrupt each other. Name them: `.transition("move")`, `.transition("color")`.
-4. **Interpolating path strings directly**: `d3.interpolateString` on SVG paths produces garbage when paths have different commands. See the **shape-morphing** skill.
-5. **Canvas not clearing**: Forgetting `clearRect` causes trails. Sometimes intentional for effect, but usually a bug.
+This is where generated code breaks most often.
+
+- A transition, when it starts, interrupts the active transition **of the same name** on that element and cancels earlier-scheduled ones of that name. Unnamed transitions all share the name `null`.
+- Independent properties need separate names (`.transition("move")`, `.transition("color")`), or the color change kills the move.
+- Rapid clicks and slider drags: call `sel.interrupt()` (or `interrupt(name)`) before scheduling. Otherwise delayed stages from old clicks fire after the new one.
+- When the next target depends on the previous one, read it from a cached target Map, not the DOM. Mid-transition attributes are interpolated values.
+- Canvas: the new animation reads the *current render state* as its source, so interruption is free if render state is kept separately from target state.
+- Scroll-up and Back need idempotent stage functions: each sets the full scene regardless of the previous stage.
+
+## Scrollytelling
+
+- Sticky graphic: chart `position: sticky; top: 0`, step text scrolling in a sibling column. IntersectionObserver (threshold ~0.5) or Scrollama maps step index → `goToStage(i)`.
+- Discrete shifts use **step triggers** (a transition fires on enter). Continuous changes use **progress scrub**: the property is a direct function of scroll fraction 0-1, with no transition.
+- One stage manager: an array of idempotent stage functions and a single index. Raise active elements at the start of each stage.
+
+## Which morph technique
+
+| Shapes | Technique |
+|---|---|
+| Share numeric params: rect `rx`/size, arc angles/radii, positions | Attribute/parameter tween: true curves, cheapest |
+| Different closed geometry (star → circle, rect → wedge, treemap → pack) | Point resampling: N points, rotation-aligned, lerp arrays (`scripts/morph-paths.js`) |
+| Open lines with different point counts | `d3-interpolate-path` |
+| Holes, multiple subpaths, winding mismatch | `flubber` |
+| Two map projections | lerp raw projection output inside `d3.geoProjection` |
+
+Circle ↔ rect: a `<rect>` with `w == h` and `rx = w/2` is a circle. If `w != h` it's a pill. Bar ↔ pie: tween `d3.arc` parameter objects stashed on the element (`this`), not the datum.
+
+## Traps
+
+- `d3.interpolateString` on paths with different commands → garbage frames. Parametric or resample.
+- Arc params stored on the datum → lost on `.data()` rebind; `interpolate(undefined, next)` snaps.
+- No rotation alignment → shape spins or pinches mid-morph. Tweening rect ↔ wedge parameters → near-zero area at t = 0.5; resample instead.
+- `getPointAtLength()` per frame → jank. Resample once. Below ~64 points circles look polygonal; 128 is safe.
+- Color tweens in RGB → muddy midpoints. Use `interpolateLab`; on domain change, tween from `oldScale.copy()` to the new scale in `attrTween`.
+- `d3.timer` ignores the callback's return value → stop it with `timer.stop()`.
+- rAF-backed timers stop in hidden tabs. If it must finish, fall back to `setTimeout` when `document.hidden`.
+- No `clearRect` per canvas frame → trails.
+- Unhandled `end()` rejection when the user clicks Next mid-stage.
 
 ## References
 
-- [Object Constancy](https://bost.ocks.org/mike/constancy/) -- foundational article on key-based transitions
-- [Animated Transitions in Statistical Data Graphics](https://idl.cs.washington.edu/papers/motion/) -- Heer & Robertson (IEEE InfoVis 2007)
-- [D3 Easing Functions](https://observablehq.com/@d3/easing) -- visual reference for all `d3-ease` curves
-- [Scrollama](https://github.com/russellsamora/scrollama) -- IntersectionObserver-based scrollytelling library
-- [View Transitions API](https://developer.mozilla.org/en-US/docs/Web/API/View_Transition_API) -- browser-native view transitions (Baseline 2025)
+- `references/motion.md`: staged join code, easing table, interruption, canvas lerp loop and multi-property state machine, color tweens, View Transitions, reduced motion.
+- `references/choreography.md`: promise sequencing with catch, stage manager, IntersectionObserver/Scrollama, step vs scrub, pacing.
+- `references/shape-morphing.md`: technique table and libraries, bar ↔ pie arc tween, resampling steps, cross-layout morphs, projection transition code, when not to morph.
+- `scripts/morph-paths.js`: `resamplePath`, `bestRotation`, `pointsToPath`, `morphPaths`.
+- `examples/`: animated transitions, shape morph (circle/rect), arc morph (bar/pie/donut).
