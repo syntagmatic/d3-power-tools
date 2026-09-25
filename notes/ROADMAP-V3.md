@@ -174,22 +174,24 @@ skill change, per the "every skill is a bet" conviction.
 - Does `design` as a router actually improve triggering, or just add a hop?
 - Lab split: directory or separate repo?
 
-## Next session prompt (phase 1)
+## Next session prompt
+
+v3-restructure merged to main on 2026-09-25. The phase 1 prompt that was here is obsolete: the skills are already merged to 11, and the ablation now runs on the corpus suite.
 
 ```
-I'm restructuring d3-power-tools per notes/ROADMAP-V3.md. Start phase 1: the
-ablation. I want to know which of the 29 content skills in skills/ still
-improve output on the current model, because the skills were written for
-Opus 4.5 and are mostly API snippets the model may no longer need.
+I'm continuing d3-power-tools per notes/ROADMAP-V3.md. The first corpus
+ablation (notes/ablation-corpus-data.md) couldn't separate the three arms at
+n=2 per cell, and the choropleth task's data was broken. I want a run that
+can actually tell me whether the skills help.
 
-For each skill, pick 3-4 prompts from blocks/manifest.json that the skill is
-meant to help. Generate each with and without the skill loaded, then audit
-blind using the existing pipeline (scripts/run-audit-pipeline.py and the
-scripts/audit/ package). Keep the maker and judge in separate contexts.
+First, replace the choropleth task's us-states.json with real TopoJSON from
+the committed plugin/vendor atlas, and update its verify.json to match.
+Probe one output to confirm the task renders a real map. Then add the
+Polygon vs MultiPolygon nesting-depth line to the maps skill.
 
-Write notes/ablation-v3.md: a table of per-skill score delta, a keep /
-compress / cut verdict, and for keepers the specific sections or pitfalls
-the winning outputs relied on. Don't merge or delete any skills yet; I'll
-review the verdicts first. Estimate cost before generating and check with me
-if it's large.
+Then estimate the cost of scripts/ablate.py --suite corpus at n=5 per cell
+and check with me before generating. After the run, add the numbers to
+notes/ablation-corpus-data.md and a dated entry to the roadmap: per-task
+winner, whether any arm's margin is larger than sample noise, and which skill
+sections the winning outputs used.
 ```
