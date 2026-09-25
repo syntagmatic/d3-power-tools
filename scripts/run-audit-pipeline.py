@@ -2,20 +2,29 @@
 """
 Audit pipeline for D3 Power Tools blocks.
 
-Renders blocks, runs 4 inspection tools in isolated subprocesses,
+Renders blocks, runs the critics in isolated headless sessions,
 writes one compact JSON per run to evals/runs/.
+
+Critic sets:
+  v3 (default)  the plugin's agents/ run as themselves via `claude --agent`:
+                viz-critic gets the request + screenshot, encoding-auditor and
+                interaction-tester get the HTML path. No user CLAUDE.md.
+  v2            the four meta/ rubric prompts (iterate-block still uses these)
 
 Usage:
   python3 scripts/run-audit-pipeline.py                       # v1 blocks 85-93
   python3 scripts/run-audit-pipeline.py --blocks 1-105        # all blocks
   python3 scripts/run-audit-pipeline.py --block-set v0        # v0 blocks
   python3 scripts/run-audit-pipeline.py --model opus          # different model
+  python3 scripts/run-audit-pipeline.py --critics v2          # legacy meta/ rubrics
   python3 scripts/run-audit-pipeline.py --skip-render         # reuse temp screenshots
   python3 scripts/run-audit-pipeline.py --report              # regenerate report from runs/
 """
 import argparse
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -30,18 +39,47 @@ RUNS_DIR = PROJ / "evals" / "runs"
 SCREENSHOT_BASE = PROJ / "temp" / "audit-screenshots"
 REPORT_FILE = PROJ / "evals" / "report.html"
 
-TOOLS = {
-    "visual_critic":       PROJ / "meta" / "visual-critic" / "SKILL.md",
-    "encoding_integrity":  PROJ / "meta" / "encoding-integrity" / "SKILL.md",
-    "stress_test":         PROJ / "meta" / "stress-test" / "SKILL.md",
-    "cognitive_load":      PROJ / "meta" / "cognitive-load" / "SKILL.md",
+CRITIC_SETS = {
+    "v3": {
+        "tools": {
+            "viz_critic":         PROJ / "agents" / "viz-critic.md",
+            "encoding_auditor":   PROJ / "agents" / "encoding-auditor.md",
+            "interaction_tester": PROJ / "agents" / "interaction-tester.md",
+        },
+        # viz-critic absorbed cognitive load, so it carries the most weight.
+        # The review skill reports scores separately; this composite is for ablation only.
+        "weights": {"viz_critic": 0.40, "encoding_auditor": 0.30, "interaction_tester": 0.30},
+        # v2 anchor dimension each v3 critic is compared against for drift (approximate).
+        "anchor_map": {"viz_critic": "visual_critic", "encoding_auditor": "encoding_integrity",
+                       "interaction_tester": "stress_test"},
+        "flags_from": "interaction_tester",
+    },
+    "v2": {
+        "tools": {
+            "visual_critic":       PROJ / "meta" / "visual-critic" / "SKILL.md",
+            "encoding_integrity":  PROJ / "meta" / "encoding-integrity" / "SKILL.md",
+            "stress_test":         PROJ / "meta" / "stress-test" / "SKILL.md",
+            "cognitive_load":      PROJ / "meta" / "cognitive-load" / "SKILL.md",
+        },
+        "weights": {"visual_critic": 0.30, "encoding_integrity": 0.25, "cognitive_load": 0.25, "stress_test": 0.20},
+        "anchor_map": {t: t for t in ("visual_critic", "encoding_integrity", "stress_test", "cognitive_load")},
+        "flags_from": "stress_test",
+    },
 }
 
-WEIGHTS = {"visual_critic": 0.30, "encoding_integrity": 0.25, "cognitive_load": 0.25, "stress_test": 0.20}
+CRITICS = "v3"
+TOOLS = CRITIC_SETS[CRITICS]["tools"]
+WEIGHTS = CRITIC_SETS[CRITICS]["weights"]
+
+
+def use_critics(name):
+    global CRITICS, TOOLS, WEIGHTS
+    CRITICS, TOOLS, WEIGHTS = name, CRITIC_SETS[name]["tools"], CRITIC_SETS[name]["weights"]
+
 
 MODEL_IDS = {
-    "sonnet": "claude-sonnet-4-6",
-    "opus": "claude-opus-4-6",
+    "sonnet": "claude-sonnet-5",
+    "opus": "claude-opus-5-5",
     "haiku": "claude-haiku-4-5-20251001",
 }
 
@@ -161,10 +199,69 @@ Format: {fmt}
 Write the file now. No markdown, no explanation."""
 
 
-CLAUDE_BIN = "/usr/local/share/npm-global/bin/claude"
+CLAUDE_BIN = shutil.which("claude") or "/usr/local/share/npm-global/bin/claude"
 
 
-def run_one_audit(bid, tool, skill_path, ss_path, html_path, out_path, model):
+def load_agent(path, model):
+    """agents/*.md -> {name: definition} for `claude --agents`, with repo paths filled in."""
+    _, front, body = path.read_text().split("---", 2)
+    meta = dict(line.split(":", 1) for line in front.strip().splitlines())
+    body = body.strip().replace("<repo-or-plugin-root>", str(PROJ)).replace("<plugin-root>", str(PROJ))
+    return {path.stem: {"description": meta["description"].strip(), "prompt": body, "model": model,
+                        "tools": [t.strip() for t in meta["tools"].split(",")]}}
+
+
+def critic_input(tool, request, ss_path, html_path):
+    # Each critic gets only its slice (see skills/review/SKILL.md).
+    if tool == "viz_critic":
+        return f"Request: {request}\nScreenshot: {ss_path}"
+    if tool == "encoding_auditor":
+        return f"Audit {html_path}"
+    return f"Test {html_path}"
+
+
+def last_json_object(text):
+    """The agents are told to return only JSON; tolerate prose or fences around it."""
+    dec, found = json.JSONDecoder(), None
+    for m in re.finditer(r"\{", text):
+        try:
+            obj, _ = dec.raw_decode(text, m.start())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and "score" in obj:
+            found = obj
+    return found
+
+
+def run_one_critic(bid, tool, agent_path, ss_path, html_path, out_path, model, request):
+    agent = load_agent(agent_path, model)
+    cwd = tempfile.mkdtemp(prefix="critic-")
+    try:
+        # --setting-sources project, run from an empty dir: no user CLAUDE.md, memory, or hooks reach the critic.
+        r = subprocess.run(
+            [CLAUDE_BIN, "-p", critic_input(tool, request, ss_path, html_path),
+             "--agents", json.dumps(agent), "--agent", agent_path.stem, "--model", model,
+             "--setting-sources", "project", "--strict-mcp-config", "--no-session-persistence",
+             "--max-turns", "30", "--permission-mode", "bypassPermissions", "--output-format", "json"],
+            capture_output=True, text=True, timeout=420, cwd=cwd)
+        envelope = json.loads(r.stdout)
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    finally:
+        shutil.rmtree(cwd, ignore_errors=True)
+
+    data = last_json_object(envelope.get("result") or "")
+    if not data:
+        return None
+    data.setdefault("note", data.get("impression", ""))
+    data["cost_usd"] = envelope.get("total_cost_usd")
+    out_path.write_text(json.dumps(data, ensure_ascii=False))
+    return data
+
+
+def run_one_audit(bid, tool, skill_path, ss_path, html_path, out_path, model, request=""):
+    if CRITICS == "v3":
+        return run_one_critic(bid, tool, skill_path, ss_path, html_path, out_path, model, request)
     skill_content = skill_path.read_text()
     prompt = build_prompt(tool, skill_content, ss_path, html_path, out_path)
     bare = tempfile.mkdtemp(prefix="audit-")
@@ -216,7 +313,7 @@ def run_audits(blocks, render_results, block_set, model, parallel, ss_dir, block
                         continue
                 except json.JSONDecodeError:
                     pass
-            tasks.append((bid, tool, skill_path, str(ss), str(html), out, model))
+            tasks.append((bid, tool, skill_path, str(ss), str(html.resolve()), out, model, b.get("prompt", "")))
 
     with ThreadPoolExecutor(max_workers=parallel) as pool:
         futures = {pool.submit(run_one_audit, *t): (t[0], t[1]) for t in tasks}
@@ -252,7 +349,7 @@ def write_run(blocks, render_results, audit_results, block_set, model, tag):
         for tool in TOOLS:
             if tool in audits:
                 entry[tool] = audits[tool]["score"]
-                if tool == "stress_test":
+                if tool == CRITIC_SETS[CRITICS]["flags_from"]:
                     flags = audits[tool].get("flags", [])
                     if flags:
                         entry["flags"] = flags
@@ -275,6 +372,7 @@ def write_run(blocks, render_results, audit_results, block_set, model, tag):
         "git_sha": git_sha(),
         "skill_shas": git_skill_shas(),
         "block_set": block_set,
+        "critics": CRITICS,
         "model": MODEL_IDS.get(model, model),
         "cli_version": cli_version(),
         "blocks": block_scores,
@@ -291,15 +389,17 @@ def write_run(blocks, render_results, audit_results, block_set, model, tag):
 
     # Calibration drift
     drifts = []
+    amap = CRITIC_SETS[CRITICS]["anchor_map"]
     for bid, s in block_scores.items():
         if bid in anchors:
             for t in TOOLS:
-                if s.get(t) is not None and t in anchors[bid]:
-                    d = abs(s[t] - anchors[bid][t])
-                    drifts.append(d)
+                a = amap.get(t)
+                if s.get(t) is not None and a in anchors[bid]:
+                    drifts.append(abs(s[t] - anchors[bid][a]))
     if drifts:
         over2 = sum(1 for d in drifts if d > 2)
-        print(f"  Calibration: {len(drifts)} comparisons, {over2} beyond ±2")
+        approx = " (v2 anchors, approximate)" if CRITICS != "v2" else ""
+        print(f"  Calibration{approx}: {len(drifts)} comparisons, {over2} beyond ±2")
 
     print(f"  Run file: {out}")
     return out
@@ -347,14 +447,19 @@ def generate_report():
 <div id="chart"></div>
 <script>
 const runs = {json.dumps(runs, ensure_ascii=False)};
-const dims = ["render","visual_critic","encoding_integrity","stress_test","cognitive_load","composite"];
-const labels = ["Render","Visual Critic","Encoding","Stress","Cognitive","Comp"];
+// Runs without a "critics" field predate v3 and use the v2 dimensions.
+const DIMS = {{
+  v2: [["render","Render"],["visual_critic","Visual Critic"],["encoding_integrity","Encoding"],
+       ["stress_test","Stress"],["cognitive_load","Cognitive"],["composite","Comp"]],
+  v3: [["render","Render"],["viz_critic","Design"],["encoding_auditor","Encoding"],
+       ["interaction_tester","Interaction"],["composite","Comp"]],
+}};
 const sel = document.getElementById("run-select");
 runs.forEach((r,i) => {{
   const o = document.createElement("option");
   o.value = i;
   const d = r.timestamp.slice(0,16).replace("T"," ");
-  o.textContent = `${{d}} · ${{r.block_set}} · ${{r.model}}`;
+  o.textContent = `${{d}} · ${{r.block_set}} · ${{r.model}} · ${{r.critics || "v2"}}`;
   sel.appendChild(o);
 }});
 sel.value = runs.length - 1;
@@ -365,6 +470,8 @@ const color = d3.scaleSequential(d3.interpolateRdYlGn).domain([1, 10]);
 
 function draw(idx) {{
   const run = runs[idx];
+  const dimSpec = DIMS[run.critics || "v2"];
+  const dims = dimSpec.map(d => d[0]), labels = dimSpec.map(d => d[1]);
   const bids = Object.keys(run.blocks).sort();
   const w = margin.left + dims.length * cellW + margin.right;
   const h = margin.top + (bids.length + 1) * cellH + margin.bottom;
@@ -434,6 +541,7 @@ def main():
     ap.add_argument("--block-set", default="v1", help="e.g. v1-claude-sonnet-4-6")
     ap.add_argument("--block-dir", default=None, help="Override block directory (default: blocks/{block-set})")
     ap.add_argument("--model", default="sonnet", help="sonnet, opus, or haiku")
+    ap.add_argument("--critics", choices=sorted(CRITIC_SETS), default="v3")
     ap.add_argument("--parallel", type=int, default=4)
     ap.add_argument("--skip-render", action="store_true")
     ap.add_argument("--report", action="store_true", help="Just regenerate report from existing runs")
@@ -443,6 +551,7 @@ def main():
         generate_report()
         return
 
+    use_critics(args.critics)
     blocks = parse_block_range(args.blocks)
     if not blocks:
         print(f"No blocks match '{args.blocks}'"); sys.exit(1)
@@ -458,7 +567,7 @@ def main():
     print(f"Blocks: {args.blocks} ({len(blocks)}, set: {args.block_set})")
     if args.block_dir:
         print(f"Block dir: {block_dir}")
-    print(f"Model: {MODEL_IDS.get(args.model, args.model)}")
+    print(f"Model: {MODEL_IDS.get(args.model, args.model)}  Critics: {CRITICS}")
     print(f"Git: {git_sha()}\n")
 
     ss_dir = SCREENSHOT_BASE / args.block_set

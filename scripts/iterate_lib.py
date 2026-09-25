@@ -315,6 +315,7 @@ def run_audit(block_id, block_dir, block_set_name, model="sonnet", wait_for="svg
          "--block-set", block_set_name,
          "--block-dir", str(block_dir),
          "--model", model,
+         "--critics", "v2",  # the iterations index uses the v2 dimensions
          "--skip-render"],
         capture_output=True, text=True, timeout=600, cwd=str(PROJ))
 

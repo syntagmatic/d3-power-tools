@@ -60,7 +60,8 @@ def get_audit_scores(html_path, block_id, wait_for="svg", model="sonnet"):
          "--blocks", block_id,
          "--block-set", "iterate",
          "--block-dir", str(block_dir),
-         "--model", model],
+         "--model", model,
+         "--critics", "v2"],  # scores below use the v2 dimensions
         capture_output=True, text=True, timeout=600, cwd=str(PROJ))
 
     if r.returncode != 0 or "FAIL" in (r.stdout or ""):

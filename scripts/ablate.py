@@ -225,7 +225,8 @@ def cmd_audit(a):
         sys.exit(subprocess.call([uv, "run", "--with", "playwright", "python3", *sys.argv]))
     key = load_json(KEY, {})
     prompts = all_prompts()
-    blocks = [{"id": oid, "wait_for": prompts[m["prompt_id"]].get("wait_for", "svg")}
+    blocks = [{"id": oid, "wait_for": prompts[m["prompt_id"]].get("wait_for", "svg"),
+               "prompt": prompts[m["prompt_id"]]["prompt"]}  # viz-critic judges against the request
               for oid, m in sorted(key.items()) if m.get("ok")]
     pipe = load_pipeline()
     ss_dir = OUT / "screenshots"

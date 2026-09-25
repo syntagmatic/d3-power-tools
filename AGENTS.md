@@ -7,7 +7,7 @@ A Claude Code plugin (and plain skill folders usable by other agents) for buildi
 The repo has two halves:
 
 - **Product:** `skills/`, `agents/`, `hooks/`, `.claude-plugin/`, and the scripts they call (`probe.mjs`, `hook-render-check.mjs`, `check-snippets.mjs`).
-- **Lab:** `blocks/`, `evals/`, `meta/` (calibrate, sharpen, and the v2 audit rubrics used by `run-audit-pipeline.py`), `notes/`, and the generation/iteration/ablation scripts.
+- **Lab:** `blocks/`, `evals/`, `meta/` (calibrate, sharpen, and the v2 audit rubrics, which `run-audit-pipeline.py --critics v2` and iterate-block still use; the default v3 set runs the `agents/` critics), `notes/`, and the generation/iteration/ablation scripts.
 
 ## Skills
 

@@ -11,9 +11,9 @@
 //   keys    Tab walk; what receives focus, whether focus is visible, arrow-key response
 //   click   click every button/select option twice rapidly (transition handoff); errors and NaN after settle
 // Exit 0 when no finding has severity "error".
-import { pathToFileURL } from "node:url";
-import { resolve, join } from "node:path";
-import { mkdirSync } from "node:fs";
+import { resolve, join, dirname, relative, extname, sep } from "node:path";
+import { mkdirSync, existsSync, readFile } from "node:fs";
+import { createServer } from "node:http";
 
 let chromium;
 try { ({ chromium } = await import("playwright")); }
@@ -26,7 +26,28 @@ if (!target) { console.error("usage: probe.mjs <file-or-url> [--checks a,b] [--o
 const checks = new Set(opt("checks", "load,nan,hover,brush,storm,resize,keys,click").split(","));
 const outDir = opt("out", null);
 if (outDir) mkdirSync(outDir, { recursive: true });
-const url = /^https?:/.test(target) ? target : pathToFileURL(resolve(target)).href;
+
+// Local files are served over http, not file://: ES module imports and fetch() of data files fail
+// under file:// CORS. The root is the nearest git root so sibling dirs like ../vendor resolve.
+const MIME = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css",
+  ".json": "application/json", ".csv": "text/csv", ".tsv": "text/tab-separated-values", ".svg": "image/svg+xml",
+  ".png": "image/png", ".jpg": "image/jpeg", ".wasm": "application/wasm", ".txt": "text/plain" };
+let server = null;
+async function serve(file) {
+  let root = dirname(file);
+  for (let d = root; d !== dirname(d); d = dirname(d)) if (existsSync(join(d, ".git"))) { root = d; break; }
+  server = createServer((req, res) => {
+    const p = join(root, decodeURIComponent(new URL(req.url, "http://x").pathname));
+    if (p !== root && !p.startsWith(root + sep)) { res.writeHead(403).end(); return; }
+    readFile(p, (err, buf) => {
+      if (err) { res.writeHead(404).end(); return; }
+      res.writeHead(200, { "content-type": MIME[extname(p)] || "application/octet-stream" }).end(buf);
+    });
+  });
+  await new Promise(r => server.listen(0, "127.0.0.1", r));
+  return `http://127.0.0.1:${server.address().port}/${relative(root, file).split(sep).map(encodeURIComponent).join("/")}`;
+}
+const url = /^https?:/.test(target) ? target : await serve(resolve(target));
 
 const findings = [];
 const add = (check, severity, detail) => findings.push({ check, severity, detail });
@@ -224,6 +245,7 @@ try {
   add("probe", "error", `probe aborted: ${e.message.split("\n")[0]}`);
 } finally {
   await browser.close();
+  server?.close();
 }
 
 console.log(JSON.stringify({ target, findings, stats }, null, 2));

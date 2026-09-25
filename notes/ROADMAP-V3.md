@@ -11,7 +11,9 @@ I skipped the phase 1 ablation for now and did phases 2-4 by judgment:
 - Plugin: `.claude-plugin/plugin.json` + `marketplace.json` (source `./`), `hooks/hooks.json` (render check after HTML writes), `package.json` (Playwright).
 - AGENTS.md is at the root; `.claude/CLAUDE.md` imports it. The manifest has v3 skill names, with `skills_v2` kept; `scripts/staging.py` copies whole skill dirs.
 
-Still open: ablation (phase 1, now run on 11 skills via `scripts/ablate.py`), the lab split (the plugin source is currently the whole repo, lab included), `run-audit-pipeline.py` still uses the v2 `meta/` rubrics rather than the new agents, and phase 5.
+Still open: ablation (phase 1, now run on 11 skills via `scripts/ablate.py`), the lab split (the plugin source is currently the whole repo, lab included), and phase 5.
+
+2026-09-24: `run-audit-pipeline.py` now runs the three `agents/` critics by default (`--critics v3`). Each runs headless as itself (`claude --agents ... --agent <name> --setting-sources project` from an empty dir, so no user CLAUDE.md reaches it) and gets only its slice: viz-critic the manifest prompt + screenshot, the other two the HTML path. The composite is 0.4 design / 0.3 encoding / 0.3 interaction, for ablation only. Anchor drift compares against the v2 anchors approximately. iterate-block and iterate_lib pass `--critics v2` until phase 5 replaces them. About $0.07-0.11 per block on Sonnet. `probe.mjs` now serves local files over http from the git root, because under file:// the ESM `../vendor` imports failed and the page rendered blank.
 
 ## Why I'm restructuring
 
