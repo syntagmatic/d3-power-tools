@@ -102,8 +102,18 @@ def check_page(page, url, verify):
                 page.mouse.up()
                 page.wait_for_timeout(300)
             elif is_hover:
-                loc.hover(force=True, timeout=TIMEOUT_MS)
-                page.wait_for_timeout(200)
+                # A trigger selector often matches marks without handlers too (branch nodes, legend dots), so
+                # d3pt's single .last hover failed working charts. Try up to 5 matches spread through the list and
+                # keep the first that changes state; the pointer leaves between tries so mouseleave resets.
+                all_ = page.locator(trigger)
+                n = all_.count()
+                for i in sorted({n - 1, *(round(k * (n - 1) / 4) for k in range(4))}, reverse=True) if n else []:
+                    all_.nth(i).hover(force=True, timeout=TIMEOUT_MS)
+                    page.wait_for_timeout(200)
+                    if page.evaluate(SVG_CLASSES_JS) != before_cls:
+                        break
+                    page.mouse.move(0, 0)
+                    page.wait_for_timeout(100)
             else:
                 loc.click(timeout=TIMEOUT_MS)
                 page.wait_for_timeout(200)
