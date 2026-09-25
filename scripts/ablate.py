@@ -123,15 +123,27 @@ def frontmatter(path):
     return dict(l.split(":", 1) for l in front.strip().splitlines()), body.strip()
 
 
+def request_text(body):
+    """The task's requirement paragraphs: everything before d3pt's "Render-load is ..." harness note. The first
+    paragraph alone omitted features verify.json checks (filters, count badges, the sunburst's outer ring), so base
+    and skill were graded on requirements only the compact prompt stated."""
+    paras = []
+    for para in body.split("\n\n"):
+        if para.startswith(("Render-load", "#")):
+            break
+        paras.append(" ".join(para.split()))
+    return "\n\n".join(paras)
+
+
 def corpus_prompts():
-    """Corpus tasks as prompt entries. "prompt" is the plain request (the task's first paragraph), which base
+    """Corpus tasks as prompt entries. "prompt" is the plain request (the task's requirement paragraphs), which base
     and skill arms get and critics judge against; "compact" is d3pt's tier-100 prompt for the prompt arm."""
     p = {}
     for d in sorted(x for x in CORPUS.iterdir() if (x / "verify.json").exists()):
         meta, body = frontmatter(d / "task.md")
         _, compact = frontmatter(d / "tier-100.md")
         p[f"c-{d.name}"] = {"id": f"c-{d.name}", "skills": [meta["ablate-skill"].strip()], "wait_for": "svg",
-                            "prompt": " ".join(body.split("\n\n")[0].split()), "compact": compact,
+                            "prompt": request_text(body), "compact": compact,
                             "data": sorted((d / "data").iterdir()), "verify": d / "verify.json"}
     return p
 
@@ -203,22 +215,7 @@ def gen_one(oid, meta, model):
     out.unlink(missing_ok=True)  # else a failed call leaves the previous page in place and counts as ok
     b = all_prompts()[meta["prompt_id"]]
     skills = [meta["skill"]] if meta["skill"] else []
-    force = f"Before writing any code, read skills/{meta['skill']}/SKILL.md and apply what is relevant.\n\n" if skills else ""
-    body = b["compact"] if meta["cond"] == "prompt" else b["prompt"]
-    if b.get("data"):
-        names = ", ".join(f"data/{f.name}" for f in b["data"])
-        data_note = (f"The dataset is at {names} in your working directory; read it before designing. The page is "
-                     f"served with that same path beside it, so load it with d3.json('{names.split(', ')[0]}'), and "
-                     f"load D3 with <script src=\"d3.v7.min.js\"></script>.\n"
-                     # Every arm gets this: verify.json finds marks and states by class name, and only some arms'
-                     # text asked for classes, which made the structural gate grade naming instead of the chart.
-                     "Give marks descriptive class names (such as node, leaf, link, label, cell, dot), and show "
-                     "interaction state by toggling a class (such as highlight, active, dimmed).")
-    else:
-        data_note = "Generate ALL synthetic data inline. No external data files."
-    prompt = (f"{force}Build a standalone D3.js visualization as a single HTML file.\n\n{body}\n\n"
-              f"{MANIFEST['defaults'].get('suffix', '')}\n{data_note}\n"
-              f"Write the complete file to {out}")
+    prompt = gen_prompt(meta, out)
     staging = create_staging_dir(oid, skills, PROJ, prefix="ablate")
     for f in b.get("data", []):
         (staging / "data").mkdir(exist_ok=True)
@@ -238,9 +235,30 @@ def gen_one(oid, meta, model):
     ok = out.exists() and out.stat().st_size > 200
     if not ok and not err:
         err = f"api: {res['text'][:120]}" if res.get("is_error") else "no output"
-    return {**meta, "model": model, "ok": ok, "error": err,
+    return {**meta, "model": model, "ok": ok, "error": err, "prompt_sha": opaque(prompt),
             "skills_read": parse_skill_reads(stream), "cost_usd": res.get("cost_usd"),
             "tokens_out": res.get("total_tokens_out"), "elapsed_s": round(time.time() - t0, 1)}
+
+
+def gen_prompt(meta, out):
+    b = all_prompts()[meta["prompt_id"]]
+    skills = [meta["skill"]] if meta["skill"] else []
+    force = f"Before writing any code, read skills/{meta['skill']}/SKILL.md and apply what is relevant.\n\n" if skills else ""
+    body = b["compact"] if meta["cond"] == "prompt" else b["prompt"]
+    if b.get("data"):
+        names = ", ".join(f"data/{f.name}" for f in b["data"])
+        data_note = (f"The dataset is at {names} in your working directory; read it before designing. The page is "
+                     f"served with that same path beside it, so load it with d3.json('{names.split(', ')[0]}'), and "
+                     f"load D3 with <script src=\"d3.v7.min.js\"></script>.\n"
+                     # Every arm gets this: verify.json finds marks and states by class name, and only some arms'
+                     # text asked for classes, which made the structural gate grade naming instead of the chart.
+                     "Give marks descriptive class names (such as node, leaf, link, label, cell, dot), and show "
+                     "interaction state by toggling a class (such as highlight, active, dimmed).")
+    else:
+        data_note = "Generate ALL synthetic data inline. No external data files."
+    return (f"{force}Build a standalone D3.js visualization as a single HTML file.\n\n{body}\n\n"
+            f"{MANIFEST['defaults'].get('suffix', '')}\n{data_note}\n"
+            f"Write the complete file to {out}")
 
 
 def cmd_gen(a):
@@ -248,8 +266,9 @@ def cmd_gen(a):
     key = load_json(KEY, {})
     only = set(a.skills.split(",")) if a.skills else None
     todo = [(oid, m) for oid, m in jobs_for(plan, a.samples, only).items()
-            # Resume only outputs from this model, so switching --model regenerates rather than mixing generators.
+            # Resume only outputs from this model and this exact prompt text; otherwise regenerate.
             if not (oid in key and key[oid].get("ok") and key[oid].get("model") == a.model
+                    and key[oid].get("prompt_sha") == opaque(gen_prompt(m, GEN / f"{oid}.html"))
                     and (GEN / f"{oid}.html").exists())]
     if a.limit:
         todo = todo[: a.limit]

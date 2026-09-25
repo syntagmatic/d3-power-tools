@@ -20,12 +20,15 @@ SVG_CLASSES_JS = """() => Array.from(document.querySelectorAll('svg *[class]')).
     const cn = el.className; return cn.baseVal !== undefined ? cn.baseVal : String(cn);
 }).join('|')"""
 
+# Samples every path, node group and label, not d3pt's first path only: that first path is often a static
+# background band, which failed charts whose links and labels did animate.
 MORPH_SAMPLES_JS = """async () => {
-    const sel = document.querySelector('path, g[class*="node"], rect[class*="node"]');
-    if (!sel) return [];
+    const els = [...document.querySelectorAll('svg path, svg g[class*="node"], svg rect[class*="node"], svg text')];
+    if (!els.length) return [];
     const out = [];
     for (let i = 0; i < 5; i++) {
-        out.push((sel.getAttribute('d') || '') + '|' + (sel.getAttribute('transform') || ''));
+        out.push(els.map(e => (e.getAttribute('d') || '') + '|' + (e.getAttribute('transform') || '') + '|'
+                               + (e.getAttribute('x') || '')).join('~'));
         await new Promise(r => setTimeout(r, 80));
     }
     return out;
@@ -67,7 +70,10 @@ def check_page(page, url, verify):
             continue
         loc = page.locator(spec["selector"])
         try:
-            count = loc.count()
+            # outermost: a match nested inside another match (g.axis inside g.axis-group) counts once
+            count = page.evaluate("""s => [...document.querySelectorAll(s)]
+                .filter(e => !e.parentElement || !e.parentElement.closest(s)).length""", spec["selector"]) \
+                if spec.get("outermost") else loc.count()
         except Exception as e:
             record(f"dom.{key}.selector-eval", False, str(e))
             continue
