@@ -28,14 +28,16 @@ const outDir = opt("out", null);
 if (outDir) mkdirSync(outDir, { recursive: true });
 
 // Local files are served over http, not file://: ES module imports and fetch() of data files fail
-// under file:// CORS. The root is the nearest git root so sibling dirs like ../vendor resolve.
+// under file:// CORS. The root is the nearest project root (git repo, plugin, or package) so
+// sibling dirs like ../vendor resolve, including from an installed plugin with no .git.
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css",
   ".json": "application/json", ".csv": "text/csv", ".tsv": "text/tab-separated-values", ".svg": "image/svg+xml",
   ".png": "image/png", ".jpg": "image/jpeg", ".wasm": "application/wasm", ".txt": "text/plain" };
 let server = null;
 async function serve(file) {
   let root = dirname(file);
-  for (let d = root; d !== dirname(d); d = dirname(d)) if (existsSync(join(d, ".git"))) { root = d; break; }
+  const markers = [".git", ".claude-plugin", "package.json"];
+  for (let d = root; d !== dirname(d); d = dirname(d)) if (markers.some(m => existsSync(join(d, m)))) { root = d; break; }
   server = createServer((req, res) => {
     const p = join(root, decodeURIComponent(new URL(req.url, "http://x").pathname));
     if (p !== root && !p.startsWith(root + sep)) { res.writeHead(403).end(); return; }

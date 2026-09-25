@@ -77,6 +77,13 @@ fetch_font_css() { # fetch_font_css <name> <css-url>
 }
 fetch_font_css ui 'https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=Source+Sans+3:ital,wght@0,300;0,400;0,600;0,700;1,400&display=swap'
 
+# Refresh the committed subset the skill examples load (plugin/vendor/). Keep this list
+# in sync with the ../../../vendor/ paths in plugin/skills/*/examples/.
+for f in js/d3.v7.min.js esm/d3.mjs esm/topojson-client.mjs \
+         data/us-atlas/counties-10m.json data/world-atlas/countries-110m.json; do
+  [ -f "$V/$f" ] && { mkdir -p "plugin/vendor/$(dirname "$f")"; cp "$V/$f" "plugin/vendor/$f"; }
+done
+
 echo
 find "$V" -type f | wc -l | xargs echo "vendored files:"
 du -sh "$V" | cut -f1 | xargs echo "total size:"

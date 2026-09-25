@@ -81,10 +81,10 @@ node plugin/scripts/probe.mjs chart.html --out temp/probe    # JSON findings + a
 
 ## Vendored assets
 
-Examples and blocks load D3, topojson and fonts from `vendor/` by relative path, so they render offline and inside network-restricted sandboxes.
+Everything loads D3 and topojson by relative path, so pages render offline and inside network-restricted sandboxes. The skill examples use `plugin/vendor/`, which is committed and ships with the plugin. Blocks use the root `vendor/`, which is gitignored and fetched by the script, and adds fonts and extra libraries.
 
 ```bash
-./scripts/vendor.sh    # populates vendor/ (gitignored)
+./scripts/vendor.sh    # populates vendor/ and refreshes plugin/vendor/
 python3 -m http.server 8000
 ```
 

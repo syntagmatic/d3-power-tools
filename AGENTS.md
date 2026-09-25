@@ -56,7 +56,7 @@ Format rules for every skill are in [notes/SKILL-FORMAT.md](notes/SKILL-FORMAT.m
 
 ```bash
 npm install && npx playwright install chromium   # probe.mjs, hook, check-snippets
-./scripts/vendor.sh                               # vendor/ (gitignored): d3 and other assets, for offline/sandboxed rendering
+./scripts/vendor.sh                               # vendor/ (gitignored) for blocks; refreshes the committed plugin/vendor/ subset the examples load
 ```
 
 Host Python usually lacks Playwright. Run Python test scripts with `uv run --with playwright python3 scripts/...`.
