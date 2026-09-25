@@ -8,7 +8,8 @@ import re
 import shutil
 from pathlib import Path
 
-CLAUDE_SKILLS_DIR = "skills"
+SKILLS_SRC = "plugin/skills"  # where skills live in the repo
+CLAUDE_SKILLS_DIR = "skills"  # where they go in a staging dir
 GEMINI_SKILLS_DIR = ".gemini/skills"
 
 
@@ -20,8 +21,8 @@ def _parse_description(skill_path: Path) -> str:
 
 
 def _all_skill_names(proj: Path) -> list[str]:
-    """List all skill directory names under skills/."""
-    skills_dir = proj / CLAUDE_SKILLS_DIR
+    """List all skill directory names under plugin/skills/."""
+    skills_dir = proj / SKILLS_SRC
     return sorted(
         d.name for d in skills_dir.iterdir()
         if d.is_dir() and (d / "SKILL.md").exists()
@@ -61,7 +62,7 @@ def create_staging_dir(
     # Copy skills for Claude (skills/{name}/SKILL.md)
     # Whole skill dir minus examples: SKILL.md plus references/ and scripts/ it points to.
     for name in skill_names:
-        src = proj / CLAUDE_SKILLS_DIR / name
+        src = proj / SKILLS_SRC / name
         if not (src / "SKILL.md").exists():
             continue
         shutil.copytree(src, staging / CLAUDE_SKILLS_DIR / name, ignore=shutil.ignore_patterns("examples"))

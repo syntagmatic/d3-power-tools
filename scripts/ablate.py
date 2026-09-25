@@ -126,7 +126,7 @@ def opaque(*parts):
 def cmd_plan(a):
     """Per skill: prefer prompts where the skill is listed first, then with fewest co-skills."""
     prompts = all_prompts()
-    skills = sorted(p.name for p in (PROJ / "skills").iterdir() if (p / "SKILL.md").exists() and p.name != "review")
+    skills = sorted(p.name for p in (PROJ / "plugin" / "skills").iterdir() if (p / "SKILL.md").exists() and p.name != "review")
     plan = {}
     for s in skills:
         cands = [(b["skills"].index(s), len(b["skills"]), bid) for bid, b in prompts.items()

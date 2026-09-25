@@ -6,8 +6,10 @@ A Claude Code plugin (and plain skill folders usable by other agents) for buildi
 
 The repo has two halves:
 
-- **Product:** `skills/`, `agents/`, `hooks/`, `.claude-plugin/`, and the scripts they call (`probe.mjs`, `hook-render-check.mjs`, `check-snippets.mjs`).
-- **Lab:** `blocks/`, `evals/`, `meta/` (calibrate, sharpen, and the v2 audit rubrics, which `run-audit-pipeline.py --critics v2` and iterate-block still use; the default v3 set runs the `agents/` critics), `notes/`, and the generation/iteration/ablation scripts.
+- **Product:** everything under `plugin/`: `skills/`, `agents/`, `hooks/`, `.claude-plugin/plugin.json`, `package.json`, and the scripts they call (`plugin/scripts/probe.mjs`, `hook-render-check.mjs`, `check-snippets.mjs`). The root `.claude-plugin/marketplace.json` points at `./plugin`, so an install copies only this folder.
+- **Lab:** everything else at the root: `blocks/`, `evals/`, `meta/` (calibrate, sharpen, and the v2 audit rubrics, which `run-audit-pipeline.py --critics v2` and iterate-block still use; the default v3 set runs the `plugin/agents/` critics), `notes/`, `tests/`, `vendor/`, and the generation/iteration/ablation scripts in `scripts/`.
+
+Nothing in `plugin/` may depend on a lab path. The lab reads `plugin/` freely.
 
 ## Skills
 
@@ -32,11 +34,11 @@ Format rules for every skill are in [notes/SKILL-FORMAT.md](notes/SKILL-FORMAT.m
 
 ## Critics
 
-`agents/` holds three subagents. They never share context with the maker, or with each other.
+`plugin/agents/` holds three subagents. They never share context with the maker, or with each other.
 
 - `viz-critic`: screenshot + request only, and a design score calibrated to Kai's anchors.
 - `encoding-auditor`: source + data. Honesty checks and metamorphic robustness.
-- `interaction-tester`: URL only. Drives `scripts/probe.mjs`.
+- `interaction-tester`: URL only. Drives `plugin/scripts/probe.mjs`.
 
 ## Workflow
 
@@ -48,7 +50,7 @@ Format rules for every skill are in [notes/SKILL-FORMAT.md](notes/SKILL-FORMAT.m
 
 **Canvas for data, SVG for interaction** past ~500 elements.
 
-**Snippets must parse.** `node scripts/check-snippets.mjs` checks every ```js block in `skills/`. Fence intentional fragments as `js-fragment`.
+**Snippets must parse.** `node plugin/scripts/check-snippets.mjs` checks every ```js block in `plugin/skills/`. Fence intentional fragments as `js-fragment`.
 
 ## Setup
 
@@ -70,12 +72,12 @@ ln -s ../dotfiles/scripts/claude-container-shell.sh shell
 ## Testing
 
 ```bash
-node scripts/probe.mjs <file-or-url> [--checks load,nan,hover,brush,storm,resize,keys,click] [--out dir]
+node plugin/scripts/probe.mjs <file-or-url> [--checks load,nan,hover,brush,storm,resize,keys,click] [--out dir]
 python3 scripts/test-viz.py <file> --out temp/check.png --wait-for "svg"
 python3 scripts/test-viz.py --config tests/test.config.json [--skill legibility] [--changed]
 ```
 
-Examples in `skills/*/examples/` double as test fixtures and are registered in `tests/test.config.json`. After building something: probe it, read the screenshot, and exercise the interactions you'd actually click.
+Examples in `plugin/skills/*/examples/` double as test fixtures and are registered in `tests/test.config.json`. After building something: probe it, read the screenshot, and exercise the interactions you'd actually click.
 
 ## Blocks (lab)
 

@@ -6,7 +6,7 @@ Renders blocks, runs the critics in isolated headless sessions,
 writes one compact JSON per run to evals/runs/.
 
 Critic sets:
-  v3 (default)  the plugin's agents/ run as themselves via `claude --agent`:
+  v3 (default)  plugin/agents/ run as themselves via `claude --agent`:
                 viz-critic gets the request + screenshot, encoding-auditor and
                 interaction-tester get the HTML path. No user CLAUDE.md.
   v2            the four meta/ rubric prompts (iterate-block still uses these)
@@ -33,6 +33,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 PROJ = Path(__file__).resolve().parent.parent
+PLUGIN = PROJ / "plugin"
 TEST_SCRIPT = PROJ / "scripts" / "test-viz.py"
 ANCHORS_FILE = PROJ / "evals" / "anchors.json"
 RUNS_DIR = PROJ / "evals" / "runs"
@@ -42,9 +43,9 @@ REPORT_FILE = PROJ / "evals" / "report.html"
 CRITIC_SETS = {
     "v3": {
         "tools": {
-            "viz_critic":         PROJ / "agents" / "viz-critic.md",
-            "encoding_auditor":   PROJ / "agents" / "encoding-auditor.md",
-            "interaction_tester": PROJ / "agents" / "interaction-tester.md",
+            "viz_critic":         PLUGIN / "agents" / "viz-critic.md",
+            "encoding_auditor":   PLUGIN / "agents" / "encoding-auditor.md",
+            "interaction_tester": PLUGIN / "agents" / "interaction-tester.md",
         },
         # viz-critic absorbed cognitive load, so it carries the most weight.
         # The review skill reports scores separately; this composite is for ablation only.
@@ -203,16 +204,16 @@ CLAUDE_BIN = shutil.which("claude") or "/usr/local/share/npm-global/bin/claude"
 
 
 def load_agent(path, model):
-    """agents/*.md -> {name: definition} for `claude --agents`, with repo paths filled in."""
+    """plugin/agents/*.md -> {name: definition} for `claude --agents`, with the plugin root filled in."""
     _, front, body = path.read_text().split("---", 2)
     meta = dict(line.split(":", 1) for line in front.strip().splitlines())
-    body = body.strip().replace("<repo-or-plugin-root>", str(PROJ)).replace("<plugin-root>", str(PROJ))
+    body = body.strip().replace("<plugin-root>", str(PLUGIN))
     return {path.stem: {"description": meta["description"].strip(), "prompt": body, "model": model,
                         "tools": [t.strip() for t in meta["tools"].split(",")]}}
 
 
 def critic_input(tool, request, ss_path, html_path):
-    # Each critic gets only its slice (see skills/review/SKILL.md).
+    # Each critic gets only its slice (see plugin/skills/review/SKILL.md).
     if tool == "viz_critic":
         return f"Request: {request}\nScreenshot: {ss_path}"
     if tool == "encoding_auditor":

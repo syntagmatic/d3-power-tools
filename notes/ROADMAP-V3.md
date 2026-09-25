@@ -11,7 +11,11 @@ I skipped the phase 1 ablation for now and did phases 2-4 by judgment:
 - Plugin: `.claude-plugin/plugin.json` + `marketplace.json` (source `./`), `hooks/hooks.json` (render check after HTML writes), `package.json` (Playwright).
 - AGENTS.md is at the root; `.claude/CLAUDE.md` imports it. The manifest has v3 skill names, with `skills_v2` kept; `scripts/staging.py` copies whole skill dirs.
 
-Still open: ablation (phase 1, now run on 11 skills via `scripts/ablate.py`), the lab split (the plugin source is currently the whole repo, lab included), and phase 5.
+Still open: ablation (phase 1, now run on 11 skills via `scripts/ablate.py`), phase 5, and shipping examples that render from an install (below).
+
+2026-09-24, lab split: the product moved to `plugin/` (skills, agents, hooks, `plugin.json`, `package.json`, and probe/hook-render-check/check-snippets under `plugin/scripts/`). The root `marketplace.json` source is `./plugin`, so an install no longer copies blocks/ and evals/ (~40MB). The lab stays at the root in the same repo, because the change-a-skill/re-measure loop needs both side by side. Rule: nothing in `plugin/` depends on a lab path. `plugin.json`'s `hooks` value needed a `./` prefix to pass `claude plugin validate`. That problem predated the move.
+
+Open, from the split: skill examples load d3 and atlas data from `../../../../vendor/`, which is gitignored and not shipped, so examples in an installed plugin don't render. It works in the repo after `scripts/vendor.sh`. Options: a CDN fallback in each example, or vendoring the handful of files the examples need into `plugin/`.
 
 2026-09-24: `run-audit-pipeline.py` now runs the three `agents/` critics by default (`--critics v3`). Each runs headless as itself (`claude --agents ... --agent <name> --setting-sources project` from an empty dir, so no user CLAUDE.md reaches it) and gets only its slice: viz-critic the manifest prompt + screenshot, the other two the HTML path. The composite is 0.4 design / 0.3 encoding / 0.3 interaction, for ablation only. Anchor drift compares against the v2 anchors approximately. iterate-block and iterate_lib pass `--critics v2` until phase 5 replaces them. About $0.07-0.11 per block on Sonnet. `probe.mjs` now serves local files over http from the git root, because under file:// the ESM `../vendor` imports failed and the page rendered blank.
 

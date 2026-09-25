@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Geographic Maps — D3 Power Tools</title>
+<style>
+  body {
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    margin: 0;
+    padding: 20px;
+    background: #fff;
+  }
+  h2 {
+    font-size: 14px;
+    font-weight: 500;
+    color: #333;
+    margin: 24px 0 8px;
+  }
+  h2:first-of-type { margin-top: 0; }
+  .row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+    margin-bottom: 20px;
+  }
+  .panel {
+    position: relative;
+    flex: 0 0 auto;
+  }
+  canvas, svg {
+    display: block;
+  }
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: rgba(0,0,0,0.8);
+    color: #fff;
+    padding: 4px 8px;
+    border-radius: 3px;
+    font-size: 12px;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    z-index: 10;
+  }
+  .tooltip.visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  #bubble circle {
+    transition: stroke-width 150ms ease, stroke 150ms ease;
+  }
+</style>
+</head>
+<body>
+
+<h2>US Choropleth — Unemployment Rate by County (Canvas + Color-Pick Hit Detection)</h2>
+<div class="row">
+  <div class="panel" id="choropleth"></div>
+</div>
+
+<h2>Bubble Map — Population by State (Force-Collision Layout)</h2>
+<div class="row">
+  <div class="panel" id="bubble"></div>
+</div>
+
+<h2>World — Equal Earth with Graticule &amp; Great-Circle Flows</h2>
+<div class="row">
+  <div class="panel" id="world"></div>
+</div>
+
+<h2>Interactive Globe (Versor Drag)</h2>
+<div class="row">
+  <div class="panel" id="globe"></div>
+</div>
+
+<div class="tooltip" id="tip"></div>
+
+<script type="module">
+import * as d3 from "../../../../vendor/esm/d3.mjs";
+import * as topojson from "../../../../vendor/esm/topojson-client.mjs";
+
+const tip = d3.select("#tip");
+
+// ─── Load shared data ───
+
+const us = await d3.json("../../../../vendor/data/us-atlas/counties-10m.json");
+const counties = topojson.feature(us, us.objects.counties).features;
+const statesGeo = topojson.feature(us, us.objects.states);
+const stateFeatures = statesGeo.features;
+const stateBorders = topojson.mesh(us, us.objects.states, (a, b) => a !== b);
+const nation = topojson.merge(us, us.objects.states.geometries);
+
+const world = await d3.json("../../../../vendor/data/world-atlas/countries-110m.json");
+const land = topojson.feature(world, world.objects.land);
+const countries = topojson.feature(world, world.objects.countries).features;
+const worldBorders = topojson.mesh(world, world.objects.countries, (a, b) => a !== b);
+
+
+// ─── 1. US Choropleth (Canvas) with Color-Pick Hit Detection ───
+
+const cw = 960, ch = 600;
+const dpr = window.devicePixelRatio || 1;
+
+// Main canvas
+const canvas = d3.select("#choropleth").append("canvas")
+  .attr("width", cw * dpr).attr("height", ch * dpr)
+  .style("width", `${cw}px`).style("height", `${ch}px`);
+const ctx = canvas.node().getContext("2d");
+ctx.scale(dpr, dpr);
+
+// Synthetic unemployment data (deterministic from FIPS)
+const unemploymentById = new Map(
+  counties.map(d => [d.id, ((d.id * 7 + 13) % 100) / 10])
+);
+
+const color = d3.scaleQuantize()
+  .domain([0, 10])
+  .range(d3.schemeBlues[9]);
+
+const projection = d3.geoAlbersUsa().fitSize([cw, ch], nation);
+const path = d3.geoPath(projection, ctx);
+
+// Batch by fill color for performance
+const byColor = d3.group(counties, f => {
+  const val = unemploymentById.get(f.id);
+  return val != null ? color(val) : "#ccc";
+});
+for (const [c, group] of byColor) {
+  ctx.beginPath();
+  for (const f of group) path(f);
+  ctx.fillStyle = c;
+  ctx.fill();
+}
+
+// State borders (single mesh path)
+ctx.beginPath(); path(stateBorders);
+ctx.strokeStyle = "#fff"; ctx.lineWidth = 0.8; ctx.stroke();
+
+// Nation outline
+ctx.beginPath(); path(nation);
+ctx.strokeStyle = "#333"; ctx.lineWidth = 1; ctx.stroke();
+
+// SVG legend overlay
+const legendSvg = d3.select("#choropleth").append("svg")
+  .attr("width", 300).attr("height", 50)
+  .style("position", "absolute").style("bottom", "6px").style("left", "20px");
+
+const lw = 240, lh = 10;
+const legendScale = d3.scaleLinear().domain(color.domain()).range([0, lw]);
+const thresholds = color.thresholds();
+
+legendSvg.selectAll("rect")
+  .data(color.range().map((c, i) => {
+    const d0 = i === 0 ? color.domain()[0] : thresholds[i - 1];
+    const d1 = i === color.range().length - 1 ? color.domain()[1] : thresholds[i];
+    return [d0, d1, c];
+  }))
+  .join("rect")
+    .attr("x", d => legendScale(d[0]) + 10)
+    .attr("y", 8)
+    .attr("width", d => legendScale(d[1]) - legendScale(d[0]))
+    .attr("height", lh)
+    .attr("fill", d => d[2]);
+
+legendSvg.append("g")
+  .attr("transform", `translate(10, ${8 + lh})`)
+  .call(d3.axisBottom(legendScale).ticks(5).tickSize(4).tickFormat(d => `${d}%`))
+  .call(g => g.select(".domain").remove())
+  .call(g => g.selectAll("text").attr("font-size", "10px"));
+
+// Color-pick hit detection (hidden canvas)
+const hiddenCanvas = document.createElement("canvas");
+hiddenCanvas.width = cw; hiddenCanvas.height = ch;
+const hctx = hiddenCanvas.getContext("2d", { willReadFrequently: true });
+hctx.imageSmoothingEnabled = false;
+const hiddenPath = d3.geoPath(projection, hctx);
+const indexToCounty = new Map();
+
+counties.forEach((f, i) => {
+  const idx = i + 1; // avoid 0 (background)
+  const r = (idx >> 16) & 255, g = (idx >> 8) & 255, b = idx & 255;
+  indexToCounty.set((r << 16) | (g << 8) | b, f);
+  hctx.beginPath(); hiddenPath(f);
+  hctx.fillStyle = `rgb(${r},${g},${b})`;
+  hctx.fill();
+});
+
+canvas.on("mousemove", (event) => {
+  const [mx, my] = d3.pointer(event);
+  const [r, g, b] = hctx.getImageData(mx, my, 1, 1).data;
+  const key = (r << 16) | (g << 8) | b;
+  const feature = indexToCounty.get(key);
+  if (feature) {
+    const val = unemploymentById.get(feature.id);
+    tip.classed("visible", true)
+      .style("left", `${event.pageX + 12}px`)
+      .style("top", `${event.pageY - 20}px`)
+      .html(`FIPS ${String(feature.id).padStart(5, "0")}<br>${val != null ? val.toFixed(1) + "%" : "N/A"}`);
+  } else {
+    tip.classed("visible", false);
+  }
+});
+canvas.on("mouseleave", () => tip.classed("visible", false));
+
+
+// ─── 2. Bubble Map — State Population (Force-Collision) ───
+
+const bw = 960, bh = 600;
+const bubbleSvg = d3.select("#bubble").append("svg")
+  .attr("width", bw).attr("height", bh)
+  .attr("viewBox", [0, 0, bw, bh]);
+
+const bubbleProjection = d3.geoAlbersUsa().fitSize([bw, bh], nation);
+const bubblePath = d3.geoPath(bubbleProjection);
+
+// Draw faint state outlines as context
+bubbleSvg.selectAll(".state-bg").data(stateFeatures).join("path")
+  .attr("class", "state-bg")
+  .attr("d", bubblePath)
+  .attr("fill", "#f0f0f0")
+  .attr("stroke", "#ccc")
+  .attr("stroke-width", 0.5);
+
+// Synthetic population data
+const statePop = stateFeatures.map(f => {
+  const pop = ((f.id * 31 + 7) % 40 + 1) * 500000; // 0.5M – 20M
+  const [x, y] = bubblePath.centroid(f);
+  return { feature: f, pop, targetX: x, targetY: y, x, y };
+}).filter(d => !isNaN(d.targetX));
+
+const radius = d3.scaleSqrt()
+  .domain([0, d3.max(statePop, d => d.pop)])
+  .range([4, 40]);
+
+statePop.forEach(d => { d.r = radius(d.pop); });
+
+// Force simulation to avoid overlaps
+const sim = d3.forceSimulation(statePop)
+  .force("x", d3.forceX(d => d.targetX).strength(0.8))
+  .force("y", d3.forceY(d => d.targetY).strength(0.8))
+  .force("collide", d3.forceCollide(d => d.r + 1).iterations(3))
+  .stop();
+
+for (let i = 0; i < 120; i++) sim.tick();
+
+// Sort large-behind-small
+statePop.sort((a, b) => b.r - a.r);
+
+const bubbleColor = d3.scaleSequential(d3.interpolateYlOrRd)
+  .domain([0, d3.max(statePop, d => d.pop)]);
+
+bubbleSvg.selectAll("circle").data(statePop).join("circle")
+  .attr("cx", d => d.x).attr("cy", d => d.y)
+  .attr("r", d => d.r)
+  .attr("fill", d => bubbleColor(d.pop))
+  .attr("fill-opacity", 0.75)
+  .attr("stroke", "#fff").attr("stroke-width", 0.5)
+  .on("mouseenter", function(event, d) {
+    d3.select(this).attr("stroke", "#333").attr("stroke-width", 1.5);
+    tip.classed("visible", true)
+      .style("left", `${event.pageX + 12}px`)
+      .style("top", `${event.pageY - 20}px`)
+      .html(`State ${d.feature.id}<br>Pop: ${(d.pop / 1e6).toFixed(1)}M`);
+  })
+  .on("mouseleave", function() {
+    d3.select(this).attr("stroke", "#fff").attr("stroke-width", 0.5);
+    tip.classed("visible", false);
+  });
+
+
+// ─── 3. World Map (SVG) with Great-Circle Flow Lines ───
+
+const ww = 960, wh = 500;
+const worldSvg = d3.select("#world").append("svg")
+  .attr("width", ww).attr("height", wh)
+  .attr("viewBox", [0, 0, ww, wh]);
+
+const worldProjection = d3.geoEqualEarth().fitSize([ww, wh], { type: "Sphere" });
+const worldPath = d3.geoPath(worldProjection);
+const graticule = d3.geoGraticule().step([20, 20]);
+
+// Sphere background
+worldSvg.append("path")
+  .datum({ type: "Sphere" })
+  .attr("d", worldPath)
+  .attr("fill", "#e8f4f8")
+  .attr("stroke", "#999");
+
+// Graticule
+worldSvg.append("path")
+  .datum(graticule())
+  .attr("d", worldPath)
+  .attr("fill", "none")
+  .attr("stroke", "#ddd")
+  .attr("stroke-width", 0.5);
+
+// Countries
+worldSvg.selectAll(".country")
+  .data(countries)
+  .join("path")
+    .attr("class", "country")
+    .attr("d", worldPath)
+    .attr("fill", "#d4e6b5")
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 0.3);
+
+// Borders
+worldSvg.append("path")
+  .datum(worldBorders)
+  .attr("d", worldPath)
+  .attr("fill", "none")
+  .attr("stroke", "#999")
+  .attr("stroke-width", 0.5)
+  .attr("stroke-linejoin", "round");
+
+// Great-circle flow lines
+const flows = [
+  { origin: [-73.9, 40.7], dest: [2.3, 48.9], volume: 1200, label: "NYC→Paris" },
+  { origin: [-73.9, 40.7], dest: [139.7, 35.7], volume: 800, label: "NYC→Tokyo" },
+  { origin: [-73.9, 40.7], dest: [-0.1, 51.5], volume: 1500, label: "NYC→London" },
+  { origin: [116.4, 39.9], dest: [2.3, 48.9], volume: 600, label: "Beijing→Paris" },
+  { origin: [-122.4, 37.8], dest: [151.2, -33.9], volume: 400, label: "SF→Sydney" },
+  { origin: [55.3, 25.3], dest: [77.2, 28.6], volume: 900, label: "Dubai→Delhi" },
+];
+
+const flowStroke = d3.scaleSqrt()
+  .domain(d3.extent(flows, d => d.volume))
+  .range([1, 5]);
+
+worldSvg.selectAll(".flow").data(flows).join("path")
+  .attr("class", "flow")
+  .attr("d", d => worldPath({ type: "LineString", coordinates: [d.origin, d.dest] }))
+  .attr("fill", "none")
+  .attr("stroke", "#e63946")
+  .attr("stroke-width", d => flowStroke(d.volume))
+  .attr("stroke-opacity", 0.6)
+  .attr("stroke-linecap", "round");
+
+// Flow origin dots
+worldSvg.selectAll(".origin-dot").data(flows).join("circle")
+  .attr("class", "origin-dot")
+  .attr("cx", d => worldProjection(d.origin)[0])
+  .attr("cy", d => worldProjection(d.origin)[1])
+  .attr("r", 3)
+  .attr("fill", "#e63946");
+
+// Zoom to feature on click
+const worldZoom = d3.zoom()
+  .scaleExtent([1, 8])
+  .on("zoom", (event) => {
+    worldSvg.selectAll("path, circle").attr("transform", event.transform);
+  });
+
+worldSvg.call(worldZoom);
+
+worldSvg.selectAll(".country").on("click", (event, d) => {
+  const [[x0, y0], [x1, y1]] = worldPath.bounds(d);
+  const dx = x1 - x0, dy = y1 - y0;
+  const x = (x0 + x1) / 2, y = (y0 + y1) / 2;
+  const scale = Math.max(1, Math.min(8, 0.9 / Math.max(dx / ww, dy / wh)));
+  worldSvg.transition().duration(750).call(
+    worldZoom.transform,
+    d3.zoomIdentity.translate(ww / 2, wh / 2).scale(scale).translate(-x, -y)
+  );
+});
+
+worldSvg.on("dblclick.zoom", () => {
+  worldSvg.transition().duration(750).call(worldZoom.transform, d3.zoomIdentity);
+});
+
+
+// ─── 4. Interactive Globe (Canvas) with Back-Face Rendering ───
+
+const gw = 500, gh = 500;
+const globeCanvas = d3.select("#globe").append("canvas")
+  .attr("width", gw * dpr).attr("height", gh * dpr)
+  .style("width", `${gw}px`).style("height", `${gh}px`);
+const gctx = globeCanvas.node().getContext("2d");
+gctx.scale(dpr, dpr);
+
+const globeProjection = d3.geoOrthographic()
+  .scale(gh / 2.2)
+  .translate([gw / 2, gh / 2])
+  .clipAngle(90);
+const globePath = d3.geoPath(globeProjection, gctx);
+const globeGraticule = d3.geoGraticule().step([15, 15]);
+
+function renderGlobe() {
+  gctx.clearRect(0, 0, gw, gh);
+
+  // Back-face (dimmed land behind globe)
+  const backProjection = d3.geoOrthographic()
+    .rotate(globeProjection.rotate())
+    .scale(globeProjection.scale())
+    .translate(globeProjection.translate())
+    .clipAngle(180);
+  const backPath = d3.geoPath(backProjection, gctx);
+  gctx.globalAlpha = 0.1;
+  gctx.beginPath(); backPath(land);
+  gctx.fillStyle = "#b8d4a0"; gctx.fill();
+  gctx.globalAlpha = 1;
+
+  // Sphere
+  gctx.beginPath();
+  globePath({ type: "Sphere" });
+  gctx.fillStyle = "#e8f4f8"; gctx.fill();
+  gctx.strokeStyle = "#999"; gctx.lineWidth = 1; gctx.stroke();
+
+  // Graticule
+  gctx.beginPath();
+  globePath(globeGraticule());
+  gctx.strokeStyle = "#ddd"; gctx.lineWidth = 0.4; gctx.stroke();
+
+  // Land
+  gctx.beginPath();
+  globePath(land);
+  gctx.fillStyle = "#b8d4a0"; gctx.fill();
+
+  // Borders
+  gctx.beginPath();
+  globePath(worldBorders);
+  gctx.strokeStyle = "#fff"; gctx.lineWidth = 0.5; gctx.stroke();
+}
+
+renderGlobe();
+
+// Drag to rotate (simple 2-axis)
+let [λ, φ] = globeProjection.rotate();
+
+d3.select(globeCanvas.node()).call(
+  d3.drag()
+    .on("drag", (event) => {
+      λ += event.dx * 0.4;
+      φ -= event.dy * 0.4;
+      φ = Math.max(-90, Math.min(90, φ));
+      globeProjection.rotate([λ, φ]);
+      renderGlobe();
+    })
+);
+
+
+// Signal ready
+document.body.setAttribute("data-ready", "true");
+</script>
+</body>
+</html>

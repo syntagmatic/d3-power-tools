@@ -335,9 +335,9 @@ def changed_skills():
             ["git", "diff", "--name-only", "HEAD"],
             capture_output=True, text=True, cwd=REPO_ROOT
         )
-        # Also include untracked files in skills/
+        # Also include untracked files in plugin/skills/
         untracked = subprocess.run(
-            ["git", "ls-files", "--others", "--exclude-standard", "skills/"],
+            ["git", "ls-files", "--others", "--exclude-standard", "plugin/skills/"],
             capture_output=True, text=True, cwd=REPO_ROOT
         )
         all_files = result.stdout.strip() + "\n" + untracked.stdout.strip()
@@ -346,7 +346,7 @@ def changed_skills():
 
     skills = set()
     for line in all_files.splitlines():
-        m = re.match(r"skills/([^/]+)/", line)
+        m = re.match(r"plugin/skills/([^/]+)/", line)
         if m:
             skills.add(m.group(1))
     return skills

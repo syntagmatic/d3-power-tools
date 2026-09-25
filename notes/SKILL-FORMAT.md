@@ -1,6 +1,6 @@
 # Skill format (v3)
 
-How I want each merged skill written. The pilot is `skills/legibility/`; copy its
+How I want each merged skill written. The pilot is `plugin/skills/legibility/`; copy its
 shape.
 
 ## What a skill is for
@@ -33,7 +33,7 @@ Weight the pages accordingly.
 ## Layout
 
 ```
-skills/<name>/
+plugin/skills/<name>/
   SKILL.md        <=150 lines, including frontmatter
   references/     one .md per absorbed v2 skill, named after it; loaded on demand
   examples/       tested HTML, moved from the absorbed skills
@@ -57,7 +57,7 @@ skills/<name>/
   the exact data, and code only where it encodes non-obvious logic (a custom
   force, a piecewise scale, an alpha solver). Cut API walkthroughs.
 - Target roughly a third of the original length or less. No hard cap.
-- Every fenced `js` block must parse (`node scripts/check-snippets.mjs`). If a
+- Every fenced `js` block must parse (`node plugin/scripts/check-snippets.mjs`). If a
   block is intentionally partial, fence it as `js-fragment`, and use it
   sparingly.
 - Fix wrong facts as you go. If you're not sure a claim is true, cut it.
@@ -69,7 +69,7 @@ agents share the index). Don't edit them unless they reference a moved path.
 
 ## Things not to do
 
-- Don't touch files outside your own `skills/<name>/` directory. I update
+- Don't touch files outside your own `plugin/skills/<name>/` directory. I update
   `tests/test.config.json`, `index.html`, the manifest and AGENTS.md centrally.
 - Don't run git commands that write (add, mv, commit).
 - Don't invent new content. Condense what's there, and correct errors.
