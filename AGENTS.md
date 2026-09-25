@@ -90,6 +90,7 @@ Examples in `plugin/skills/*/examples/` double as test fixtures and are register
 python3 scripts/generate-blocks-claude.py <version> [--model M] [--no-skills]
 python3 scripts/generate-blocks-gemini.py <version>
 python3 scripts/ablate.py plan|gen|audit|pair|report|cost   # with/without-skill ablation, blind pairwise judging
+python3 scripts/ablate.py --suite corpus plan|gen|struct|audit|pair|report   # base / d3pt prompt / skill on evals/corpus/
 ```
 
 `scripts/iterate-block.py` compacts a block's code under audit (git worktree, squash-merges on completion). After every run, regenerate the index:

@@ -251,6 +251,9 @@ def run_one_critic(bid, tool, agent_path, ss_path, html_path, out_path, model, r
     finally:
         shutil.rmtree(cwd, ignore_errors=True)
 
+    if envelope.get("is_error"):  # session limit, overload: say so instead of a bare FAIL
+        print(f"  {bid}/{tool}: api: {str(envelope.get('result'))[:120]}")
+        return None
     data = last_json_object(envelope.get("result") or "")
     if not data:
         return None

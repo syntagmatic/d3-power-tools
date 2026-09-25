@@ -115,6 +115,8 @@ slice of the artifact.
   audit comparison tooling. Either a top-level `lab/` split or a second repo;
   decide in phase 4.
 
+2026-09-24, corpus suite: d3pt's six single-shot tasks (real data, `verify.json` fingerprints, tier-100 prompts) are in `evals/corpus/`, and `ablate.py --suite corpus` compares three arms: plain request, d3pt's compact prompt, and plain request plus skill. `scripts/structural.py` is d3pt's structural gate ported to Python. It agreed with d3pt on 35/39 recorded cells, and the 4 disagreements were stale d3pt records. A smoke run on hierarchy-bundles (one output per arm, Opus 5.5) found two gate biases, now fixed: class names are asked for in every arm, and the links band was widened. After the fixes, base and skill passed, and the prompt arm threw `multiple roots` and rendered nothing. The full run (36 generations, about $20) has not been done. The critics and pairwise judging have not been exercised on this suite yet.
+
 ## Phases
 
 ### Phase 1: ablation on the current model
