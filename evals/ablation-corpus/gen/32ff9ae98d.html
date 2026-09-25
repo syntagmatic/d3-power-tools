@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Salary distribution by job category</title>
+<script src="d3.v7.min.js"></script>
+<style>
+  :root { --ink:#1f2933; --muted:#6b7785; --grid:#e3e7ec; --bg:#fbfbfa; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:13px/1.4 system-ui, sans-serif; color:var(--ink); background:var(--bg); }
+  #app { position:relative; max-width:1000px; margin:0 auto; padding:14px 16px 8px; }
+  h1 { font-size:17px; margin:0 0 2px; }
+  p.sub { margin:0 0 8px; color:var(--muted); }
+  #filters { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:6px; }
+  .filter-btn { display:flex; align-items:center; gap:6px; padding:4px 10px; border:1.5px solid var(--c); border-radius:999px;
+    background:#fff; color:var(--ink); font:inherit; cursor:pointer; transition:background .2s, color .2s, opacity .2s; }
+  .filter-btn .swatch { width:10px; height:10px; border-radius:50%; background:var(--c); }
+  .filter-btn.active { background:var(--c); color:#fff; }
+  .filter-btn.active .swatch { background:#fff; }
+  .filter-btn:focus-visible { outline:2px solid var(--ink); outline-offset:2px; }
+  svg { display:block; width:100%; height:auto; }
+  .grid-line { stroke:var(--grid); }
+  .band-label { font-size:12px; font-weight:600; fill:var(--ink); transition:opacity .4s; }
+  .band-label.dimmed { opacity:.25; }
+  .band-line { stroke:var(--grid); stroke-dasharray:2 3; transition:opacity .4s; }
+  .band-line.dimmed { opacity:.3; }
+  .axis text { fill:var(--muted); font-size:11px; }
+  .axis-title { fill:var(--muted); font-size:11px; text-anchor:middle; }
+  .dot { fill-opacity:.72; stroke:#fff; stroke-width:.8; cursor:pointer; }
+  .dot.highlight { fill-opacity:1; stroke:#111; stroke-width:2; }
+  .dot.hidden { pointer-events:none; }
+  #tooltip { position:absolute; pointer-events:none; background:#1f2933; color:#fff; padding:6px 9px; border-radius:5px;
+    font-size:12px; line-height:1.45; opacity:0; transition:opacity .12s; white-space:nowrap; z-index:5; }
+  #tooltip.visible { opacity:1; }
+  #tooltip b { font-weight:600; }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>Salary distribution by job category</h1>
+  <p class="sub">300 synthetic employees; each circle is one person. Toggle categories below, hover a circle for details.</p>
+  <div id="filters"></div>
+  <div id="chart"></div>
+  <div id="tooltip"></div>
+</div>
+<script type="module">
+const categories = ['Engineer','Designer','Manager','Analyst','Sales','Support'];
+// Okabe-Ito-derived, distinguishable hues that hold up on white
+const color = d3.scaleOrdinal(categories, ['#0072B2','#CC79A7','#D55E00','#009E73','#B8860B','#6A5ACD']);
+
+const data = await d3.json('data/job-salaries.json');
+
+const W = 960, bandH = 88, m = {top:10, right:20, bottom:42, left:86};
+const H = m.top + m.bottom + bandH * categories.length;
+const R = 4.5;
+
+const x = d3.scaleLinear().domain(d3.extent(data, d => d.salary_k)).nice().range([m.left, W - m.right]);
+const y = d3.scaleBand().domain(categories).range([m.top, H - m.bottom]);
+
+// Beeswarm: one deterministic force run per category, fixed tick count so nothing jumps on re-render
+d3.groups(data, d => d.category).forEach(([cat, rows]) => {
+  const cy = y(cat) + y.bandwidth() / 2;
+  rows.forEach(d => { d.x = x(d.salary_k); d.y = cy; });
+  const sim = d3.forceSimulation(rows)
+    .force('x', d3.forceX(d => x(d.salary_k)).strength(1))
+    .force('y', d3.forceY(cy).strength(0.08))
+    .force('collide', d3.forceCollide(R + 0.7).iterations(3))
+    .stop();
+  for (let i = 0; i < 400; ++i) sim.tick();
+  const half = y.bandwidth() / 2 - R;
+  rows.forEach(d => { d.y = Math.max(cy - half, Math.min(cy + half, d.y)); });
+});
+
+const svg = d3.select('#chart').append('svg').attr('viewBox', `0 0 ${W} ${H}`);
+
+svg.append('g').attr('class', 'axis grid')
+  .attr('transform', `translate(0,${H - m.bottom})`)
+  .call(d3.axisBottom(x).ticks(9).tickFormat(d => '$' + d + 'k').tickSize(-(H - m.top - m.bottom)))
+  .call(g => g.select('.domain').remove())
+  .call(g => g.selectAll('line').attr('class', 'grid-line'));
+
+svg.append('text').attr('class', 'axis-title').attr('x', (m.left + W - m.right) / 2).attr('y', H - 6)
+  .text('Annual salary (thousands USD)');
+
+const bands = svg.append('g').attr('class', 'bands')
+  .selectAll('g').data(categories).join('g').attr('class', 'band');
+bands.append('line').attr('class', 'band-line')
+  .attr('x1', m.left).attr('x2', W - m.right)
+  .attr('y1', d => y(d) + y.bandwidth() / 2).attr('y2', d => y(d) + y.bandwidth() / 2);
+bands.append('text').attr('class', 'band-label').attr('x', m.left - 10).attr('y', d => y(d) + y.bandwidth() / 2)
+  .attr('text-anchor', 'end').attr('dominant-baseline', 'middle').text(d => d);
+
+const dots = svg.append('g').attr('class', 'dots')
+  .selectAll('circle').data(data, d => d.id).join('circle')
+  .attr('class', 'dot')
+  .attr('cx', d => d.x).attr('cy', d => d.y).attr('r', R)
+  .attr('fill', d => color(d.category))
+  .attr('data-category', d => d.category);
+
+// Tooltip
+const app = d3.select('#app'), tip = d3.select('#tooltip');
+dots.on('mouseenter', function (event, d) {
+    d3.select(this).classed('highlight', true).raise();
+    tip.html(`<b>${d.category}</b><br>Salary: $${d.salary_k}k<br>Experience: ${d.years_exp} yr`).classed('visible', true);
+  })
+  .on('mousemove', event => {
+    const [px, py] = d3.pointer(event, app.node());
+    const tw = tip.node().offsetWidth;
+    const left = px + 14 + tw > app.node().clientWidth ? px - tw - 14 : px + 14;
+    tip.style('left', left + 'px').style('top', (py - 44) + 'px');
+  })
+  .on('mouseleave', function () {
+    d3.select(this).classed('highlight', false);
+    tip.classed('visible', false);
+  });
+
+// Filters
+const enabled = new Set(categories);
+d3.select('#filters').selectAll('button').data(categories).join('button')
+  .attr('class', 'filter-btn active').attr('type', 'button').attr('aria-pressed', 'true')
+  .style('--c', d => color(d))
+  .html(d => `<span class="swatch"></span>${d}`)
+  .on('click', function (event, cat) {
+    const on = !enabled.has(cat);
+    on ? enabled.add(cat) : enabled.delete(cat);
+    d3.select(this).classed('active', on).attr('aria-pressed', on);
+    bands.filter(d => d === cat).selectAll('text, line').classed('dimmed', !on);
+    if (!on) tip.classed('visible', false);
+
+    const sel = dots.filter(d => d.category === cat);
+    if (on) {
+      sel.classed('hidden', false).transition().duration(500)
+        .delay((d, i) => i * 3).ease(d3.easeCubicOut)
+        .attr('r', R).style('opacity', 1);
+    } else {
+      sel.classed('highlight', false).classed('hidden', true).transition().duration(450)
+        .ease(d3.easeCubicIn).attr('r', 0).style('opacity', 0);
+    }
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Org Budget and Headcount Sunburst</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0f1218; color: #e6e9ef; font-family: system-ui, -apple-system, sans-serif; overflow: hidden; }
+  #wrap { display: flex; height: 100vh; align-items: center; justify-content: center; }
+  svg { height: 100vh; width: auto; max-width: 100vw; }
+  .node { stroke: #0f1218; stroke-width: 1.2px; cursor: pointer; transition: opacity .15s, filter .15s; }
+  .node.dimmed { opacity: .22; }
+  .node.active { filter: brightness(1.25); stroke: #fff; stroke-width: 1.6px; }
+  .track { fill: #171c26; stroke: none; }
+  .label { fill: #fff; font-size: 11px; text-anchor: middle; dominant-baseline: middle; pointer-events: none; transition: opacity .15s; }
+  .label.depth-1 { font-weight: 600; font-size: 12px; }
+  .label.dimmed { opacity: .25; }
+  .center-title { fill: #e6e9ef; text-anchor: middle; font-size: 15px; font-weight: 600; }
+  .center-sub { fill: #8a93a6; text-anchor: middle; font-size: 11px; }
+  .note { fill: #6d768a; font-size: 10.5px; }
+  #tooltip { position: fixed; pointer-events: none; background: #1b212d; border: 1px solid #3a4356; border-radius: 6px; padding: 8px 10px; font-size: 12px; line-height: 1.5; opacity: 0; transition: opacity .1s; box-shadow: 0 4px 14px rgba(0,0,0,.5); }
+  #tooltip.visible { opacity: 1; }
+  #tooltip .t { font-weight: 600; font-size: 13px; }
+  #tooltip .path { color: #8a93a6; font-size: 11px; }
+  #tooltip b { font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<div id="wrap"><svg id="chart"></svg></div>
+<div id="tooltip"></div>
+<script src="d3.v7.min.js"></script>
+<script type="module">
+const W = 760, H = 760, cx = W / 2, cy = H / 2;
+const r0 = 78, r1 = 152, r2 = 226, R = 340;
+
+const svg = d3.select('#chart').attr('viewBox', `0 0 ${W} ${H}`);
+const g = svg.append('g').attr('transform', `translate(${cx},${cy})`);
+const tip = d3.select('#tooltip');
+const fmtK = d => d >= 1000 ? `$${(d / 1000).toFixed(1)}M` : `$${d}K`;
+
+const rows = await d3.json('data/org-budget.json');
+
+const tree = {
+  name: 'Org',
+  children: d3.groups(rows, d => d.division, d => d.department).map(([division, deps]) => ({
+    name: division,
+    children: deps.map(([department, teams]) => ({
+      name: department,
+      children: teams.map(t => ({ name: t.team, headcount: t.headcount, budget: t.budget_k }))
+    }))
+  }))
+};
+const h = d3.hierarchy(tree).sum(d => d.budget || 0).sort((a, b) => b.value - a.value);
+d3.partition().size([2 * Math.PI, 1])(h);
+
+const totalBudget = h.value;
+const totalHead = d3.sum(rows, d => d.headcount);
+h.each(n => {
+  n.headcount = n.leaves().reduce((s, l) => s + l.data.headcount, 0);
+  n.division = n.depth ? n.ancestors().find(a => a.depth === 1).data.name : null;
+});
+
+const divs = h.children.map(d => d.data.name);
+const base = ['#4e9bd6', '#e0894a', '#5fb98b', '#b78be0', '#d9c15a'];
+const divColor = d3.scaleOrdinal(divs, base);
+const fill = n => {
+  const c = d3.color(divColor(n.division));
+  return (n.depth === 1 ? c : n.depth === 2 ? c.darker(0.5) : c.darker(1.1)).formatHex();
+};
+
+// leaf outer radius: headcount relative to the largest team in its division
+const maxHead = new Map(h.children.map(d => [d.data.name, d3.max(d.leaves(), l => l.data.headcount)]));
+const leafOuter = n => r2 + 6 + (R - r2 - 6) * (n.data.headcount / maxHead.get(n.division));
+
+const arc = d3.arc().startAngle(d => d.x0).endAngle(d => d.x1)
+  .padAngle(d => Math.min((d.x1 - d.x0) / 2, 0.006)).padRadius(r1)
+  .innerRadius(d => d.depth === 1 ? r0 : d.depth === 2 ? r1 : r2)
+  .outerRadius(d => d.depth === 1 ? r1 - 2 : d.depth === 2 ? r2 - 2 : leafOuter(d));
+
+// faint tracks behind leaves so radial length reads against a full width
+g.append('g').selectAll('path.track').data(h.leaves()).join('path')
+  .attr('class', 'track')
+  .attr('d', d => d3.arc().startAngle(d.x0).endAngle(d.x1).padAngle(0.006).padRadius(r1).innerRadius(r2).outerRadius(R)());
+
+const nodes = h.descendants().filter(d => d.depth > 0);
+const cells = g.append('g').selectAll('path.node').data(nodes).join('path')
+  .attr('class', d => `node depth-${d.depth}${d.depth === 3 ? ' leaf' : ''}`)
+  .attr('d', arc)
+  .attr('fill', fill);
+
+// labels for depth 1 and 2 when the arc is wide enough
+const labelData = nodes.filter(d => d.depth < 3).filter(d => {
+  const rMid = d.depth === 1 ? (r0 + r1) / 2 : (r1 + r2) / 2;
+  const len = (d.x1 - d.x0) * rMid;
+  const need = d.data.name.length * (d.depth === 1 ? 7 : 6.2) + 8;
+  return len > need;
+});
+g.append('g').selectAll('text.label').data(labelData).join('text')
+  .attr('class', d => `label depth-${d.depth}`)
+  .attr('transform', d => {
+    const a = (d.x0 + d.x1) / 2, deg = a * 180 / Math.PI;
+    const r = d.depth === 1 ? (r0 + r1) / 2 : (r1 + r2) / 2;
+    return `rotate(${deg - 90}) translate(${r},0) rotate(${deg < 180 ? 0 : 180})`;
+  })
+  .text(d => d.data.name);
+
+// center readout
+const ct = g.append('text').attr('class', 'center-title').attr('y', -6).text(fmtK(totalBudget));
+const cs = g.append('text').attr('class', 'center-sub').attr('y', 12).text(`${totalHead} people`);
+const setCenter = (a, b) => { ct.text(a); cs.text(b); };
+
+svg.append('text').attr('class', 'note').attr('x', 16).attr('y', H - 34).text('Angle: budget');
+svg.append('text').attr('class', 'note').attr('x', 16).attr('y', H - 20).text('Outer ring length: headcount vs. largest team in division');
+
+const labels = g.selectAll('text.label');
+
+function setActive(d) {
+  const chain = new Set(d.ancestors());
+  const desc = new Set(d.descendants());
+  cells.classed('active', n => chain.has(n))
+       .classed('dimmed', n => !chain.has(n) && !desc.has(n));
+  labels.classed('dimmed', n => !chain.has(n) && !desc.has(n));
+}
+function clear() {
+  cells.classed('active', false).classed('dimmed', false);
+  labels.classed('dimmed', false);
+  setCenter(fmtK(totalBudget), `${totalHead} people`);
+}
+
+cells
+  .on('mouseenter', (e, d) => {
+    setActive(d);
+    setCenter(fmtK(d.value), `${d.headcount} people`);
+    const path = d.ancestors().reverse().slice(1).map(a => a.data.name).join(' / ');
+    const share = d3.format('.1%')(d.value / (d.depth === 1 ? totalBudget : d.parent.value));
+    tip.html(d.depth === 3
+      ? `<div class="t">${d.data.name}</div><div class="path">${path}</div>Headcount: <b>${d.data.headcount}</b><br>Budget: <b>${fmtK(d.data.budget)}</b>`
+      : `<div class="t">${d.data.name}</div><div class="path">${path}</div>Headcount: <b>${d.headcount}</b><br>Budget: <b>${fmtK(d.value)}</b> (${share} of ${d.depth === 1 ? 'total' : d.parent.data.name})`)
+      .classed('visible', true);
+  })
+  .on('mousemove', e => {
+    const x = Math.min(e.clientX + 14, innerWidth - 250);
+    tip.style('left', `${x}px`).style('top', `${e.clientY + 14}px`);
+  })
+  .on('mouseleave', () => { clear(); tip.classed('visible', false); });
+</script>
+</body>
+</html>

@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>US Economic Index by State</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; height: 100%; background: #f7f5f0; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #app { position: relative; width: 100vw; height: 100vh; display: flex; flex-direction: column; }
+  header { padding: 12px 20px 0; }
+  h1 { margin: 0; font-size: 20px; font-weight: 650; }
+  header p { margin: 2px 0 0; font-size: 12px; color: #666; }
+  #map { flex: 1; min-height: 0; }
+  svg { width: 100%; height: 100%; display: block; }
+  .state { stroke: #fff; stroke-width: 0.8; stroke-linejoin: round; cursor: pointer; transition: opacity .12s; }
+  .state.dimmed { opacity: 0.55; }
+  .state.highlight { stroke: #111; stroke-width: 2.2; opacity: 1; }
+  .state-label { font-size: 10px; font-weight: 600; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+  .state-label.dimmed { opacity: 0.5; }
+  .legend-title { font-size: 11px; fill: #444; font-weight: 600; }
+  .legend-axis text { font-size: 10px; fill: #555; }
+  .legend-axis path, .legend-axis line { stroke: #888; }
+  .legend-marker { stroke: #111; stroke-width: 2; fill: none; opacity: 0; }
+  .legend-marker.active { opacity: 1; }
+  .inset-frame { fill: none; stroke: #b9b4a8; stroke-dasharray: 3 3; pointer-events: none; }
+  #tooltip { position: fixed; pointer-events: none; background: rgba(20,20,24,.94); color: #fff; padding: 7px 10px; border-radius: 5px; font-size: 12px; line-height: 1.4; opacity: 0; transition: opacity .1s; z-index: 10; white-space: nowrap; }
+  #tooltip.visible { opacity: 1; }
+  #tooltip .name { font-weight: 650; font-size: 13px; }
+  #tooltip .abbr { color: #aaa; margin-left: 4px; }
+  #tooltip .value { font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Economic index by state</h1>
+    <p>Synthetic index, 0-100. Simplified rectangular geometry, Albers USA projection.</p>
+  </header>
+  <div id="map"></div>
+</div>
+<div id="tooltip"></div>
+<script src="d3.v7.min.js"></script>
+<script>
+d3.json('data/us-states.json').then(geo => {
+  const container = d3.select('#map');
+  const tooltip = d3.select('#tooltip');
+
+  // d3-geo wants clockwise exterior rings; this data is counter-clockwise (GeoJSON style).
+  // A wrongly wound ring means "the whole sphere except this shape", so rewind when needed.
+  geo.features.forEach(f => {
+    if (d3.geoArea(f) > 2 * Math.PI) {
+      f.geometry.coordinates.forEach(ring => ring.reverse());
+    }
+  });
+
+  const values = geo.features.map(f => f.properties.economic_index);
+  const [lo, hi] = [Math.min(20, d3.min(values)), Math.max(90, d3.max(values))];
+
+  // Light cool (pale blue-green) to dark warm (deep red-brown), resolved hex stops.
+  const ramp = d3.interpolateRgbBasis(['#e6f2f5', '#a9d3d6', '#f1d98a', '#e8894a', '#b6321f', '#6b0f1a']);
+  const color = d3.scaleSequential(ramp).domain([lo, hi]).clamp(true);
+  const textOn = v => (d3.hcl(color(v)).l < 55 ? '#fff' : '#222');
+
+  const svg = container.append('svg');
+  const gMap = svg.append('g').attr('class', 'map-layer');
+  const gLabels = svg.append('g').attr('class', 'label-layer');
+  const gLegend = svg.append('g').attr('class', 'legend');
+  const gInsets = svg.append('g').attr('class', 'inset-layer');
+
+  const projection = d3.geoAlbersUsa();
+  const path = d3.geoPath(projection);
+
+  const states = gMap.selectAll('path.state')
+    .data(geo.features, d => d.properties.abbr)
+    .join('path')
+    .attr('class', 'state')
+    .attr('fill', d => color(d.properties.economic_index));
+
+  const labels = gLabels.selectAll('text.state-label')
+    .data(geo.features, d => d.properties.abbr)
+    .join('text')
+    .attr('class', 'state-label')
+    .attr('fill', d => textOn(d.properties.economic_index))
+    .text(d => d.properties.abbr);
+
+  // Legend: gradient bar with axis and a marker showing the hovered value.
+  const legendW = 240, legendH = 12;
+  const defs = svg.append('defs');
+  const grad = defs.append('linearGradient').attr('id', 'legend-gradient');
+  d3.range(0, 1.001, 0.05).forEach(t => {
+    grad.append('stop').attr('offset', `${t * 100}%`).attr('stop-color', color(lo + t * (hi - lo)));
+  });
+  const legendScale = d3.scaleLinear().domain([lo, hi]).range([0, legendW]);
+  gLegend.append('text').attr('class', 'legend-title').attr('y', -8).text('Economic index');
+  gLegend.append('rect').attr('class', 'legend-bar').attr('width', legendW).attr('height', legendH)
+    .attr('fill', 'url(#legend-gradient)').attr('stroke', '#aaa').attr('stroke-width', 0.5);
+  gLegend.append('g').attr('class', 'legend-axis').attr('transform', `translate(0,${legendH})`)
+    .call(d3.axisBottom(legendScale).ticks(6).tickSize(4));
+  const marker = gLegend.append('rect').attr('class', 'legend-marker')
+    .attr('y', -2).attr('width', 4).attr('height', legendH + 4).attr('x', -2);
+
+  function layout() {
+    const { width, height } = container.node().getBoundingClientRect();
+    svg.attr('viewBox', `0 0 ${width} ${height}`);
+    projection.fitExtent([[16, 16], [width - 16, height - 60]], geo);
+    states.attr('d', path);
+    labels.each(function (d) {
+      const c = path.centroid(d);
+      const b = path.bounds(d);
+      const fits = (b[1][0] - b[0][0]) > 22 && (b[1][1] - b[0][1]) > 14;
+      d3.select(this).attr('transform', `translate(${c})`).style('display', fits ? null : 'none');
+    });
+    gLegend.attr('transform', `translate(${Math.max(16, width - legendW - 40)},${height - 42})`);
+  }
+  layout();
+  window.addEventListener('resize', layout);
+
+  function moveTooltip(event) {
+    const pad = 14;
+    const node = tooltip.node();
+    const w = node.offsetWidth, h = node.offsetHeight;
+    let x = event.clientX + pad, y = event.clientY + pad;
+    if (x + w > window.innerWidth - 4) x = event.clientX - w - pad;
+    if (y + h > window.innerHeight - 4) y = event.clientY - h - pad;
+    tooltip.style('left', `${x}px`).style('top', `${y}px`);
+  }
+
+  states
+    .on('pointerenter', function (event, d) {
+      const p = d.properties;
+      states.classed('highlight', s => s === d).classed('dimmed', s => s !== d);
+      labels.classed('dimmed', s => s !== d);
+      d3.select(this).raise();
+      tooltip.html(`<div><span class="name">${p.name}</span><span class="abbr">${p.abbr}</span></div>
+        <div class="value">Economic index: <b>${p.economic_index}</b></div>`)
+        .classed('visible', true);
+      marker.attr('x', legendScale(Math.max(lo, Math.min(hi, p.economic_index))) - 2).classed('active', true);
+      moveTooltip(event);
+    })
+    .on('pointermove', moveTooltip)
+    .on('pointerleave', () => {
+      states.classed('highlight', false).classed('dimmed', false);
+      labels.classed('dimmed', false);
+      tooltip.classed('visible', false);
+      marker.classed('active', false);
+    });
+  // keep labels above raised state paths
+  gLabels.raise();
+  gLegend.raise();
+}).catch(err => {
+  document.body.insertAdjacentHTML('beforeend', `<pre style="color:#b00;padding:20px">Failed to load data: ${err.message}</pre>`);
+});
+</script>
+</body>
+</html>

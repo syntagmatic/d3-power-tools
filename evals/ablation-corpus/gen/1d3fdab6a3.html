@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Salary Distribution Bee-Swarm</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --ink: #1f2933; --muted: #6b7785; --grid: #e3e7ec; --bg: #fafbfc; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--ink); background: var(--bg);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  header { padding: 14px 24px 4px; display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  h1 { font-size: 18px; margin: 0; font-weight: 650; }
+  .subtitle { color: var(--muted); }
+  #filters { padding: 6px 24px 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .filter-btn {
+    display: inline-flex; align-items: center; gap: 7px;
+    font: inherit; color: var(--ink); background: #fff;
+    border: 1px solid #cbd2da; border-radius: 999px; padding: 4px 12px 4px 9px;
+    cursor: pointer; transition: background .25s, border-color .25s, color .25s, opacity .25s;
+  }
+  .filter-btn:hover { border-color: #8593a3; }
+  .filter-btn:focus-visible { outline: 2px solid #2b6cb0; outline-offset: 2px; }
+  .filter-btn .swatch { width: 10px; height: 10px; border-radius: 50%; transition: background .25s, border-color .25s; border: 2px solid transparent; }
+  .filter-btn.off { color: var(--muted); background: #f0f2f5; }
+  .filter-btn.off .swatch { background: transparent !important; border-color: #b4bcc6; }
+  .filter-btn .count { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .filter-all { border-style: dashed; }
+  #chart { flex: 1; min-height: 0; position: relative; }
+  svg { display: block; width: 100%; height: 100%; }
+  .band-bg { fill: #fff; transition: opacity .4s; }
+  .band-bg.alt { fill: #f3f5f8; }
+  .band.off .band-bg { opacity: .35; }
+  .band-label { font-size: 12px; font-weight: 600; fill: var(--ink); transition: opacity .4s; }
+  .band-median { stroke: var(--ink); stroke-width: 1.5; stroke-dasharray: 2 3; opacity: .45; transition: opacity .4s; }
+  .band.off .band-label { opacity: .3; }
+  .band.off .band-median { opacity: 0; }
+  .grid-line { stroke: var(--grid); }
+  .axis text { fill: var(--muted); font-size: 11px; }
+  .axis .domain { stroke: #b4bcc6; }
+  .axis .tick line { stroke: #b4bcc6; }
+  .axis-title { fill: var(--muted); font-size: 11px; text-anchor: end; }
+  .dot { stroke: #fff; stroke-width: 1; cursor: pointer; fill-opacity: .88; }
+  .dot.hidden { pointer-events: none; }
+  .dot.active { stroke: #111; stroke-width: 2; fill-opacity: 1; }
+  .dot.dimmed { fill-opacity: .3; }
+  #tooltip {
+    position: absolute; pointer-events: none; background: #1f2933; color: #fff;
+    padding: 7px 10px; border-radius: 6px; font-size: 12px; line-height: 1.5;
+    opacity: 0; transition: opacity .12s; white-space: nowrap; z-index: 5;
+    box-shadow: 0 4px 12px rgba(0,0,0,.2);
+  }
+  #tooltip.visible { opacity: 1; }
+  #tooltip .tt-cat { font-weight: 650; display: flex; align-items: center; gap: 6px; }
+  #tooltip .tt-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  #tooltip .tt-row { color: #d4dae1; }
+  #tooltip b { color: #fff; font-weight: 600; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Salary distribution by role</h1>
+  <span class="subtitle" id="subtitle">300 employees, one circle each</span>
+</header>
+<div id="filters"></div>
+<div id="chart"><div id="tooltip"></div></div>
+
+<script src="d3.v7.min.js"></script>
+<script>
+(async () => {
+  const data = await d3.json('data/job-salaries.json');
+  const categories = ['Engineer', 'Designer', 'Manager', 'Analyst', 'Sales', 'Support'];
+  const colors = {
+    Engineer: '#2b6cb0', Designer: '#c05621', Manager: '#2f855a',
+    Analyst: '#805ad5', Sales: '#c53030', Support: '#b7791f'
+  };
+  const R = 4.6;
+  const enabled = new Set(categories);
+  const counts = d3.rollup(data, v => v.length, d => d.category);
+
+  const chart = d3.select('#chart');
+  const svg = chart.append('svg');
+  const tooltip = d3.select('#tooltip');
+  const root = svg.append('g');
+  const gGrid = root.append('g').attr('class', 'grid');
+  const gBands = root.append('g').attr('class', 'bands');
+  const gDots = root.append('g').attr('class', 'dots');
+  const gAxis = root.append('g').attr('class', 'axis');
+  const axisTitle = root.append('text').attr('class', 'axis-title').text('Salary ($k)');
+
+  const margin = { top: 12, right: 28, bottom: 40, left: 92 };
+  const x = d3.scaleLinear().domain([30, 220]).nice();
+  const y = d3.scaleBand().domain(categories).paddingInner(0.06);
+
+  // ---- filter buttons ----
+  const filters = d3.select('#filters');
+  const btns = filters.selectAll('button.filter-btn.cat')
+    .data(categories).join('button')
+    .attr('class', 'filter-btn cat').attr('type', 'button')
+    .attr('aria-pressed', 'true')
+    .on('click', (e, c) => {
+      enabled.has(c) ? enabled.delete(c) : enabled.add(c);
+      updateFilter();
+    });
+  btns.append('span').attr('class', 'swatch').style('background', d => colors[d]);
+  btns.append('span').attr('class', 'label').text(d => d);
+  btns.append('span').attr('class', 'count').text(d => counts.get(d));
+  filters.append('button').attr('class', 'filter-btn filter-all').attr('type', 'button')
+    .text('Show all').on('click', () => {
+      categories.forEach(c => enabled.add(c));
+      updateFilter();
+    });
+
+  // ---- bands ----
+  const band = gBands.selectAll('g.band').data(categories).join('g').attr('class', 'band');
+  band.append('rect').attr('class', (d, i) => 'band-bg' + (i % 2 ? ' alt' : ''));
+  band.append('text').attr('class', 'band-label').attr('dy', '0.35em').attr('x', -12).attr('text-anchor', 'end').text(d => d);
+  band.append('line').attr('class', 'band-median');
+
+  const medians = new Map(categories.map(c => [c, d3.median(data.filter(d => d.category === c), d => d.salary_k)]));
+
+  const dots = gDots.selectAll('circle.dot').data(data, d => d.id).join('circle')
+    .attr('class', 'dot')
+    .attr('r', R)
+    .attr('fill', d => colors[d.category])
+    .on('pointerenter', (e, d) => {
+      if (!enabled.has(d.category)) return;
+      d3.select(e.currentTarget).classed('active', true).raise();
+      dots.classed('dimmed', o => o !== d && o.category !== d.category);
+      showTip(e, d);
+    })
+    .on('pointermove', (e, d) => moveTip(e))
+    .on('pointerleave', (e) => {
+      d3.select(e.currentTarget).classed('active', false);
+      dots.classed('dimmed', false);
+      tooltip.classed('visible', false);
+    });
+
+  function showTip(e, d) {
+    tooltip.html(
+      `<div class="tt-cat"><span class="tt-dot" style="background:${colors[d.category]}"></span>${d.category}</div>` +
+      `<div class="tt-row">Salary: <b>$${d.salary_k}k</b></div>` +
+      `<div class="tt-row">Experience: <b>${d.years_exp}</b> ${d.years_exp === 1 ? 'year' : 'years'}</div>`
+    ).classed('visible', true);
+    moveTip(e);
+  }
+  function moveTip(e) {
+    const [mx, my] = d3.pointer(e, chart.node());
+    const w = tooltip.node().offsetWidth, h = tooltip.node().offsetHeight;
+    const cw = chart.node().clientWidth;
+    let left = mx + 14, top = my - h - 12;
+    if (left + w > cw - 4) left = mx - w - 14;
+    if (top < 4) top = my + 16;
+    tooltip.style('left', left + 'px').style('top', top + 'px');
+  }
+
+  // ---- beeswarm layout: per-category collision simulation, run to rest ----
+  function layout() {
+    const bw = y.bandwidth();
+    const half = bw / 2 - R - 2;
+    categories.forEach(c => {
+      const nodes = data.filter(d => d.category === c);
+      nodes.forEach(d => { d.tx = x(d.salary_k); d.x = d.tx; d.y = y(c) + bw / 2 + (Math.random() - 0.5) * 2; });
+      const sim = d3.forceSimulation(nodes)
+        .force('x', d3.forceX(d => d.tx).strength(1))
+        .force('y', d3.forceY(y(c) + bw / 2).strength(0.06))
+        .force('collide', d3.forceCollide(R + 0.9).iterations(3))
+        .stop();
+      for (let i = 0; i < 300; ++i) sim.tick();
+      const cy = y(c) + bw / 2;
+      nodes.forEach(d => { d.y = Math.max(cy - half, Math.min(cy + half, d.y)); });
+    });
+  }
+
+  let firstDraw = true;
+  function render() {
+    const W = chart.node().clientWidth, H = chart.node().clientHeight;
+    svg.attr('viewBox', `0 0 ${W} ${H}`);
+    root.attr('transform', `translate(${margin.left},${margin.top})`);
+    const iw = W - margin.left - margin.right, ih = H - margin.top - margin.bottom;
+    x.range([0, iw]); y.range([0, ih]);
+
+    gGrid.selectAll('line').data(x.ticks(10)).join('line').attr('class', 'grid-line')
+      .attr('x1', d => x(d)).attr('x2', d => x(d)).attr('y1', 0).attr('y2', ih);
+    gAxis.attr('transform', `translate(0,${ih})`).call(d3.axisBottom(x).ticks(10).tickFormat(d => '$' + d + 'k'));
+    axisTitle.attr('x', iw).attr('y', ih + 36);
+
+    band.attr('transform', d => `translate(0,${y(d)})`);
+    band.select('rect').attr('width', iw).attr('height', y.bandwidth());
+    band.select('text').attr('y', y.bandwidth() / 2);
+    band.select('line').attr('x1', d => x(medians.get(d))).attr('x2', d => x(medians.get(d)))
+      .attr('y1', 4).attr('y2', y.bandwidth() - 4);
+
+    layout();
+    dots.attr('cx', d => d.x).attr('cy', d => d.y);
+    updateFilter(firstDraw);
+    firstDraw = false;
+  }
+
+  function updateFilter(immediate) {
+    const t = d3.transition().duration(immediate ? 0 : 450).ease(d3.easeCubicInOut);
+    btns.classed('off', d => !enabled.has(d)).attr('aria-pressed', d => enabled.has(d));
+    band.classed('off', d => !enabled.has(d));
+    dots.classed('hidden', d => !enabled.has(d))
+      .transition(t)
+      .attr('r', d => enabled.has(d.category) ? R : 0)
+      .style('opacity', d => enabled.has(d.category) ? 1 : 0);
+    const n = data.filter(d => enabled.has(d.category)).length;
+    d3.select('#subtitle').text(`${n} of ${data.length} employees shown, one circle each`);
+  }
+
+  render();
+  let raf;
+  new ResizeObserver(() => { cancelAnimationFrame(raf); raf = requestAnimationFrame(render); }).observe(chart.node());
+})();
+</script>
+</body>
+</html>

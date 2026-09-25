@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>US States by Economic Index</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; height: 100%; background: #f6f4ef; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #1f2933; }
+  .page { display: flex; flex-direction: column; height: 100vh; padding: 12px 20px; box-sizing: border-box; }
+  h1 { font-size: 20px; margin: 0; font-weight: 650; }
+  .subtitle { font-size: 12px; color: #616e7c; margin: 2px 0 6px; }
+  #map { flex: 1; min-height: 0; width: 100%; }
+  .state { stroke: #fff; stroke-width: 0.8; cursor: pointer; transition: opacity 0.12s; }
+  .state.highlight { stroke: #111; stroke-width: 2.5; }
+  .state.dimmed { opacity: 0.55; }
+  .state-label { font-size: 9px; font-weight: 600; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+  .legend-title { font-size: 11px; fill: #3e4c59; font-weight: 600; }
+  .legend-tick text { font-size: 10px; fill: #3e4c59; }
+  .legend-bar { stroke: #9aa5b1; stroke-width: 0.5; }
+  .legend-marker { stroke: #111; stroke-width: 2; opacity: 0; }
+  .legend-marker.active { opacity: 1; }
+  .tooltip { position: fixed; pointer-events: none; background: rgba(17, 24, 39, 0.94); color: #fff; padding: 7px 10px; border-radius: 5px; font-size: 12px; line-height: 1.4; opacity: 0; transition: opacity 0.1s; white-space: nowrap; z-index: 10; }
+  .tooltip.active { opacity: 1; }
+  .tooltip .tt-name { font-weight: 650; font-size: 13px; }
+  .tooltip .tt-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; border: 1px solid rgba(255,255,255,0.6); }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Economic Index by State</h1>
+  <div class="subtitle">Synthetic index, 0&ndash;100. Hover a state for details.</div>
+  <svg id="map"></svg>
+</div>
+<div class="tooltip" id="tooltip"></div>
+<script src="d3.v7.min.js"></script>
+<script type="module">
+const W = 960, H = 600;
+
+const svg = d3.select('#map').attr('viewBox', `0 0 ${W} ${H}`).attr('preserveAspectRatio', 'xMidYMid meet');
+const tooltip = d3.select('#tooltip');
+
+const data = await d3.json('data/us-states.json');
+
+// Source rings are counter-clockwise; d3 wants clockwise exterior rings.
+data.features.forEach(f => f.geometry.coordinates.forEach(ring => ring.reverse()));
+
+const projection = d3.geoAlbersUsa().fitExtent([[10, 10], [W - 10, H - 10]], data);
+const path = d3.geoPath(projection);
+
+const [lo, hi] = d3.extent(data.features, d => d.properties.economic_index);
+// Cool light blue through pale sand to warm dark red; resolved hex values only.
+const color = d3.scaleSequential(d3.interpolateRgbBasis(['#dbe9f4', '#8fbcd6', '#f0dca0', '#e58a45', '#8f2418'])).domain([lo, hi]);
+const textColor = v => d3.hcl(color(v)).l > 60 ? '#1f2933' : '#fff';
+
+const map = svg.append('g').attr('class', 'map');
+
+const states = map.selectAll('path.state')
+  .data(data.features)
+  .join('path')
+  .attr('class', 'state')
+  .attr('d', path)
+  .attr('fill', d => color(d.properties.economic_index));
+
+// Labels only where the state is big enough on screen
+map.selectAll('text.state-label')
+  .data(data.features.filter(d => {
+    const [[x0, y0], [x1, y1]] = path.bounds(d);
+    return x1 - x0 > 26 && y1 - y0 > 16;
+  }))
+  .join('text')
+  .attr('class', 'state-label')
+  .attr('transform', d => `translate(${path.centroid(d)})`)
+  .attr('fill', d => textColor(d.properties.economic_index))
+  .text(d => d.properties.abbr);
+
+// Legend
+const lw = 260, lh = 12, lx = W - lw - 30, ly = H - 44;
+const legend = svg.append('g').attr('class', 'legend').attr('transform', `translate(${lx},${ly})`);
+const defs = svg.append('defs');
+const grad = defs.append('linearGradient').attr('id', 'legend-gradient');
+d3.range(0, 1.001, 0.05).forEach(t => grad.append('stop').attr('offset', t).attr('stop-color', color(lo + t * (hi - lo))));
+legend.append('text').attr('class', 'legend-title').attr('y', -8).text('Economic index');
+legend.append('rect').attr('class', 'legend-bar').attr('width', lw).attr('height', lh).attr('fill', 'url(#legend-gradient)');
+const lScale = d3.scaleLinear().domain([lo, hi]).range([0, lw]);
+legend.append('g').attr('class', 'legend-ticks').attr('transform', `translate(0,${lh})`)
+  .call(d3.axisBottom(lScale).ticks(6).tickSize(4))
+  .call(g => g.select('.domain').remove())
+  .selectAll('text').attr('class', 'legend-tick-label').style('font-size', '10px').style('fill', '#3e4c59');
+const marker = legend.append('rect').attr('class', 'legend-marker').attr('y', -3).attr('width', 3).attr('height', lh + 6).attr('fill', '#111');
+
+const move = event => {
+  const pad = 14, node = tooltip.node();
+  const w = node.offsetWidth, h = node.offsetHeight;
+  let x = event.clientX + pad, y = event.clientY + pad;
+  if (x + w > window.innerWidth - 4) x = event.clientX - w - pad;
+  if (y + h > window.innerHeight - 4) y = event.clientY - h - pad;
+  tooltip.style('left', `${x}px`).style('top', `${y}px`);
+};
+
+states
+  .on('mouseenter', function (event, d) {
+    const p = d.properties;
+    states.classed('dimmed', s => s !== d);
+    d3.select(this).classed('highlight', true).raise();
+    tooltip.html(`<div class="tt-name">${p.name} (${p.abbr})</div><div><span class="tt-swatch" style="background:${color(p.economic_index)}"></span>Economic index: <b>${p.economic_index}</b></div>`)
+      .classed('active', true);
+    marker.classed('active', true).attr('x', lScale(p.economic_index) - 1.5);
+    move(event);
+  })
+  .on('mousemove', move)
+  .on('mouseleave', function () {
+    states.classed('dimmed', false).classed('highlight', false);
+    tooltip.classed('active', false);
+    marker.classed('active', false);
+  });
+
+// Keep labels above the raised state path
+map.selectAll('text.state-label').raise();
+</script>
+</body>
+</html>

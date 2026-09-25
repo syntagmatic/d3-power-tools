@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>US States Economic Index</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #f7f6f2; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #222; }
+  #app { position: relative; width: 100vw; height: 100vh; overflow: hidden; }
+  svg { display: block; width: 100%; height: 100%; }
+  .title { font-size: 18px; font-weight: 600; fill: #222; }
+  .subtitle { font-size: 12px; fill: #666; }
+  .state { stroke: #ffffff; stroke-width: 0.8; stroke-linejoin: round; cursor: pointer; }
+  .state.highlight { stroke: #111111; stroke-width: 2.5; }
+  .state.dimmed { opacity: 0.55; }
+  .state-label { font-size: 9px; fill: #111; pointer-events: none; text-anchor: middle; dominant-baseline: central; font-weight: 600; }
+  .state-label.light { fill: #ffffff; }
+  .legend-bar { stroke: #999; stroke-width: 0.5; }
+  .legend-label { font-size: 11px; fill: #444; text-anchor: middle; }
+  .legend-title { font-size: 11px; fill: #444; font-weight: 600; }
+  .legend-marker { stroke: #111; stroke-width: 2; opacity: 0; }
+  .legend-marker.active { opacity: 1; }
+  .tooltip { position: absolute; pointer-events: none; background: #ffffff; border: 1px solid #ccc; border-radius: 4px; padding: 6px 9px; font-size: 12px; line-height: 1.4; box-shadow: 0 2px 8px rgba(0,0,0,.15); opacity: 0; transition: opacity .1s; white-space: nowrap; }
+  .tooltip.active { opacity: 1; }
+  .tooltip .name { font-weight: 600; }
+  .tooltip .swatch { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border: 1px solid #999; vertical-align: -1px; }
+</style>
+</head>
+<body>
+<div id="app"><div class="tooltip" id="tip"></div></div>
+<script src="d3.v7.min.js"></script>
+<script>
+(async () => {
+  const data = await d3.json('data/us-states.json');
+
+  // Source rings are counterclockwise in lon/lat; d3 spherical geometry wants clockwise exteriors.
+  const rewind = ring => ring.slice().reverse();
+  data.features.forEach(f => {
+    const g = f.geometry;
+    if (g.type === 'Polygon') g.coordinates = g.coordinates.map(rewind);
+    else g.coordinates = g.coordinates.map(p => p.map(rewind));
+  });
+
+  const app = d3.select('#app');
+  const tip = d3.select('#tip');
+  const svg = app.append('svg');
+  const map = svg.append('g').attr('class', 'map');
+  const legend = svg.append('g').attr('class', 'legend');
+  const header = svg.append('g').attr('class', 'header');
+
+  header.append('text').attr('class', 'title').attr('x', 20).attr('y', 28).text('Economic index by state');
+  header.append('text').attr('class', 'subtitle').attr('x', 20).attr('y', 46).text('Index 0-100; hover a state for detail');
+
+  const values = data.features.map(d => d.properties.economic_index);
+  const [lo, hi] = d3.extent(values);
+  const color = d3.scaleSequential(d3.interpolateYlGnBu).domain([lo, hi]);
+  const t = v => (v - lo) / (hi - lo);
+  const isDark = v => t(v) > 0.55;
+
+  const projection = d3.geoAlbersUsa();
+  const path = d3.geoPath(projection);
+
+  const states = map.selectAll('path.state')
+    .data(data.features, d => d.properties.abbr)
+    .join('path')
+    .attr('class', 'state')
+    .attr('fill', d => color(d.properties.economic_index));
+
+  const labels = map.selectAll('text.state-label')
+    .data(data.features, d => d.properties.abbr)
+    .join('text')
+    .attr('class', d => 'state-label' + (isDark(d.properties.economic_index) ? ' light' : ''))
+    .text(d => d.properties.abbr);
+
+  // Legend
+  const lw = 240, lh = 12;
+  const legendScale = d3.scaleLinear().domain([lo, hi]).range([0, lw]);
+  const defs = svg.append('defs');
+  const grad = defs.append('linearGradient').attr('id', 'legend-grad');
+  d3.range(0, 1.001, 0.1).forEach(s => grad.append('stop').attr('offset', s * 100 + '%').attr('stop-color', color(lo + s * (hi - lo))));
+  legend.append('text').attr('class', 'legend-title').attr('x', 0).attr('y', -8).text('Economic index');
+  legend.append('rect').attr('class', 'legend-bar').attr('width', lw).attr('height', lh).attr('fill', 'url(#legend-grad)');
+  const ticks = legend.append('g').attr('class', 'legend-ticks').attr('transform', `translate(0,${lh})`);
+  ticks.selectAll('text.legend-label').data(legendScale.ticks(5)).join('text')
+    .attr('class', 'legend-label').attr('x', d => legendScale(d)).attr('y', 14).text(d => d);
+  ticks.selectAll('line.legend-tick').data(legendScale.ticks(5)).join('line')
+    .attr('class', 'legend-tick').attr('x1', d => legendScale(d)).attr('x2', d => legendScale(d))
+    .attr('y1', 0).attr('y2', 4).attr('stroke', '#666');
+  const marker = legend.append('line').attr('class', 'legend-marker').attr('y1', -2).attr('y2', lh + 2);
+
+  function layout() {
+    const w = app.node().clientWidth, h = app.node().clientHeight;
+    svg.attr('viewBox', `0 0 ${w} ${h}`);
+    projection.fitExtent([[20, 60], [w - 20, h - 50]], data);
+    states.attr('d', path);
+    labels.attr('transform', d => {
+      const c = path.centroid(d);
+      return isNaN(c[0]) ? 'translate(-100,-100)' : `translate(${c[0]},${c[1]})`;
+    });
+    legend.attr('transform', `translate(${w - lw - 30},${h - 36})`);
+  }
+  layout();
+  window.addEventListener('resize', layout);
+
+  function place(event) {
+    const box = app.node().getBoundingClientRect();
+    const node = tip.node();
+    let x = event.clientX - box.left + 14, y = event.clientY - box.top + 14;
+    if (x + node.offsetWidth > box.width - 4) x = event.clientX - box.left - node.offsetWidth - 14;
+    if (y + node.offsetHeight > box.height - 4) y = event.clientY - box.top - node.offsetHeight - 14;
+    tip.style('left', x + 'px').style('top', y + 'px');
+  }
+
+  states
+    .on('mouseenter', function (event, d) {
+      states.classed('highlight', s => s === d).classed('dimmed', s => s !== d);
+      d3.select(this).raise();
+      labels.raise();
+      const p = d.properties;
+      tip.html(`<div class="name"><span class="swatch" style="background:${color(p.economic_index)}"></span>${p.name} (${p.abbr})</div><div>Economic index: <b>${p.economic_index}</b></div>`)
+        .classed('active', true);
+      marker.classed('active', true).attr('x1', legendScale(p.economic_index)).attr('x2', legendScale(p.economic_index));
+      place(event);
+    })
+    .on('mousemove', place)
+    .on('mouseleave', () => {
+      states.classed('highlight', false).classed('dimmed', false);
+      tip.classed('active', false);
+      marker.classed('active', false);
+    });
+})();
+</script>
+</body>
+</html>

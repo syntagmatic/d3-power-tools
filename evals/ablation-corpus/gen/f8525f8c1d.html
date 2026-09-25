@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Linked modules: hierarchical edge bundle</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #fafaf7;
+    --ink: #1f2430;
+    --muted: #6b7280;
+    --rule: #dcdcd4;
+    --out: #e4572e;
+    --in: #1e293b;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font: 12px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 24px; padding: 10px 18px 6px; flex: none; }
+  h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: .01em; }
+  h1 span { color: var(--muted); font-weight: 400; margin-left: 8px; font-size: 12px; }
+  .toggle { display: inline-flex; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; background: #fff; }
+  .toggle button { border: 0; background: none; padding: 5px 12px; font: inherit; color: var(--muted); cursor: pointer; }
+  .toggle button + button { border-left: 1px solid var(--rule); }
+  .toggle button.active { background: var(--ink); color: #fff; }
+  .legend { display: flex; gap: 14px; align-items: center; margin-left: auto; color: var(--muted); flex-wrap: wrap; }
+  .legend .item { display: inline-flex; align-items: center; gap: 5px; }
+  .legend .swatch { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .legend .line { width: 18px; height: 0; border-top: 2.5px solid; display: inline-block; }
+  main { position: relative; flex: 1; min-height: 0; }
+  svg { width: 100%; height: 100%; display: block; }
+
+  .tree-edge { fill: none; stroke: #c9c9bf; stroke-width: 1; opacity: .55; transition: opacity .15s, stroke .15s; }
+  .tree-edge.ancestor { stroke: #1f2430; stroke-width: 2; opacity: 1; }
+  .tree-edge.dimmed { opacity: .15; }
+
+  .link { fill: none; stroke-width: 1.2; opacity: .42; transition: opacity .15s; pointer-events: none; }
+  .link.dimmed { opacity: .05; }
+  .link.highlight { opacity: 1; stroke-width: 2; }
+  .link.outgoing { stroke: var(--out) !important; }
+  .link.incoming { stroke: var(--in) !important; }
+  .link.active { stroke: var(--out) !important; stroke-width: 3; opacity: 1; }
+  .link-hit { fill: none; stroke: transparent; stroke-width: 9; cursor: pointer; }
+
+  .node .dot { stroke: #fff; stroke-width: 1.5; transition: opacity .15s; }
+  .node.leaf.status-experimental .dot { stroke: var(--ink); stroke-width: 1.6; stroke-dasharray: 2.5 1.8; }
+  .node.leaf.status-deprecated .dot { fill-opacity: .35; stroke: var(--ink); stroke-width: 1.4; }
+  .node.branch .dot { fill: #fff; stroke: var(--ink); stroke-width: 1.5; }
+  .node.branch.ancestor .dot { fill: var(--ink); }
+  .node.dimmed .dot { opacity: .2; }
+  .node.highlight .dot { stroke: var(--ink); stroke-width: 2; }
+  .node.active .dot { stroke: var(--out); stroke-width: 3.5; }
+  .node { cursor: pointer; }
+
+  .label { font-size: 10.5px; fill: var(--ink); paint-order: stroke; stroke: var(--bg); stroke-width: 3px; stroke-linejoin: round; transition: opacity .15s; pointer-events: none; }
+  .label.branch-label { font-weight: 700; font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; }
+  .label.root-label { font-weight: 700; font-size: 12px; }
+  .label.dimmed { opacity: .25; }
+  .label.highlight { font-weight: 700; }
+  .label.active { font-weight: 700; fill: var(--out); }
+  .label.status-deprecated { text-decoration: line-through; }
+
+  .panel { position: absolute; left: 18px; bottom: 14px; width: 250px; background: #fff; border: 1px solid var(--rule);
+    border-radius: 6px; padding: 9px 11px; pointer-events: none; }
+  .panel .name { font-weight: 650; font-size: 12.5px; word-break: break-all; }
+  .panel .meta { color: var(--muted); margin-top: 2px; }
+  .panel .counts { margin-top: 5px; display: flex; gap: 14px; }
+  .panel .counts b.out { color: var(--out); }
+  .panel .hint { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Atlas module dependencies<span id="summary"></span></h1>
+  <div class="toggle" role="group" aria-label="Layout">
+    <button class="active" data-layout="radial">Radial bundle</button>
+    <button data-layout="tree">Two-column tree</button>
+  </div>
+  <div class="legend" id="legend"></div>
+</header>
+<main>
+  <svg id="chart" role="img" aria-label="Hierarchical edge bundle of software module imports"></svg>
+  <div class="panel" id="panel"></div>
+</main>
+<script src="d3.v7.min.js"></script>
+<script>
+const TEAM_COLOR = {
+  core: '#4c78a8', data: '#59a14f', ops: '#9c755f',
+  research: '#4fa8a3', ui: '#e0b72e', viz: '#b07aa1'
+};
+const W = 1100, H = 780;
+const R_LEAF = 285, R_BRANCH = 150;
+const COL_X = 270, HUB_X = 140, ROW = 18.5, GROUP_GAP = 14;
+const DURATION = 900;
+
+d3.json('data/linked-modules.json').then(rows => {
+  // ---- hierarchy from dotted names ----
+  const byName = new Map(rows.map(r => [r.name, r]));
+  const root = d3.stratify()
+    .id(d => d.name)
+    .parentId(d => {
+      if (d.name === '__root__') return null;
+      const i = d.name.lastIndexOf('.');
+      return i < 0 ? '__root__' : d.name.slice(0, i);
+    })(
+      (() => {
+        const all = new Map();
+        all.set('__root__', { name: '__root__' });
+        rows.forEach(r => {
+          const parts = r.name.split('.');
+          for (let i = 1; i < parts.length; i++) {
+            const p = parts.slice(0, i).join('.');
+            if (!all.has(p)) all.set(p, { name: p });
+          }
+          all.set(r.name, r);
+        });
+        // top-level prefixes hang off __root__
+        return [...all.values()];
+      })()
+    );
+  // collapse the single "atlas" wrapper so the six teams' packages are the branches
+  const top = root.children.length === 1 ? root.children[0] : root;
+  top.parent = null;
+  const tree = d3.hierarchy(rebuild(top));
+  function rebuild(n) {
+    return { id: n.id, data: n.data, children: n.children ? n.children.map(rebuild) : null };
+  }
+  tree.sort((a, b) => d3.ascending(a.data.id, b.data.id) ||
+    d3.descending(a.data.data.size || 0, b.data.data.size || 0));
+  tree.each(n => {
+    n.id = n.data.id;
+    n.row = n.data.data;
+    n.label = n.id.split('.').pop();
+    n.isLeaf = !n.children;
+  });
+  // sort leaves within each branch by size, descending
+  tree.each(n => { if (n.children) n.children.sort((a, b) => b.row.size - a.row.size || d3.ascending(a.id, b.id)); });
+  // branches alphabetical
+  tree.children.sort((a, b) => d3.ascending(a.id, b.id));
+
+  const nodes = tree.descendants();
+  const leaves = tree.leaves();
+  const branches = tree.children;
+  const idMap = new Map(nodes.map(n => [n.id, n]));
+  // dotted names in data include the "atlas." prefix; top.id === 'atlas'
+
+  const links = [];
+  leaves.forEach(s => (s.row.imports || []).forEach(t => {
+    const target = idMap.get(t);
+    if (target) links.push({ source: s, target, nodes: s.path(target) });
+  }));
+  links.forEach((l, i) => { l.id = i; });
+  const inCount = new Map(nodes.map(n => [n, 0])), outCount = new Map(nodes.map(n => [n, 0]));
+  links.forEach(l => { outCount.set(l.source, outCount.get(l.source) + 1); inCount.set(l.target, inCount.get(l.target) + 1); });
+
+  d3.select('#summary').text(`${leaves.length} modules, ${links.length} imports`);
+
+  // ---- positions for both layouts ----
+  // A: radial
+  const gapUnits = 0.9;
+  const totalUnits = leaves.length + gapUnits * branches.length;
+  let u = 0;
+  branches.forEach(b => {
+    b.children.forEach(l => {
+      l.ang = (u + 0.5) / totalUnits * 2 * Math.PI;
+      u += 1;
+    });
+    u += gapUnits;
+    b.ang = d3.mean(b.children, c => c.ang);
+  });
+  const polar = (a, r) => [Math.sin(a) * r, -Math.cos(a) * r];
+  leaves.forEach(l => { l.pA = polar(l.ang, R_LEAF); });
+  branches.forEach(b => { b.pA = polar(b.ang, R_BRANCH); });
+  tree.pA = [0, 0];
+
+  // B: two columns; first half of branches left, rest right
+  const half = Math.ceil(branches.length / 2);
+  [branches.slice(0, half), branches.slice(half)].forEach((group, side) => {
+    const sign = side === 0 ? -1 : 1;
+    const nRows = d3.sum(group, b => b.children.length);
+    const height = nRows * ROW + (group.length - 1) * GROUP_GAP;
+    let y = -height / 2 + ROW / 2;
+    group.forEach(b => {
+      b.children.forEach(l => { l.pB = [sign * COL_X, y]; l.side = sign; y += ROW; });
+      b.pB = [sign * HUB_X, d3.mean(b.children, c => c.pB[1])];
+      b.side = sign;
+      y += GROUP_GAP;
+    });
+  });
+  tree.pB = [0, 0];
+  nodes.forEach(n => { n.p = n.pA.slice(); });
+
+  // ---- scales ----
+  const rScale = d3.scaleSqrt().domain([0, d3.max(leaves, d => d.row.size)]).range([0, 8.5]);
+  const nodeR = n => n.isLeaf ? Math.max(3, rScale(n.row.size)) : (n === tree ? 6 : 6);
+  const color = d3.scaleOrdinal().domain(Object.keys(TEAM_COLOR)).range(Object.values(TEAM_COLOR));
+  const leafFill = n => color(n.row.team);
+
+  // ---- svg ----
+  const svg = d3.select('#chart').attr('viewBox', `${-W / 2} ${-H / 2} ${W} ${H}`)
+    .attr('preserveAspectRatio', 'xMidYMid meet');
+  const gTree = svg.append('g').attr('class', 'tree-edges');
+  const gLinks = svg.append('g').attr('class', 'links');
+  const gHits = svg.append('g').attr('class', 'link-hits');
+  const gNodes = svg.append('g').attr('class', 'nodes');
+  const gLabels = svg.append('g').attr('class', 'labels');
+
+  const treeEdges = gTree.selectAll('line.tree-edge').data(nodes.filter(n => n.parent), d => d.id)
+    .join('line').attr('class', 'tree-edge');
+
+  const line = d3.line().curve(d3.curveBundle.beta(0.85));
+  const linkSel = gLinks.selectAll('path.link').data(links).join('path')
+    .attr('class', 'link')
+    .attr('stroke', d => color(d.source.row.team));
+  const hitSel = gHits.selectAll('path.link-hit').data(links).join('path').attr('class', 'link-hit')
+    .on('mouseenter', (e, d) => focusLink(d))
+    .on('mouseleave', clearFocus);
+
+  const nodeSel = gNodes.selectAll('g.node').data(nodes).join('g')
+    .attr('class', d => d.isLeaf ? `node leaf status-${d.row.status} team-${d.row.team}` : 'node branch')
+    .on('mouseenter', (e, d) => focusNode(d))
+    .on('mouseleave', clearFocus);
+  nodeSel.append('circle').attr('class', 'dot')
+    .attr('r', nodeR)
+    .attr('fill', d => d.isLeaf ? leafFill(d) : '#fff');
+  nodeSel.append('title').text(d => d.isLeaf ? d.id : d.id);
+
+  const labelSel = gLabels.selectAll('text.label').data(nodes).join('text')
+    .attr('class', d => 'label ' + (d === tree ? 'root-label' : d.isLeaf ? `leaf-label status-${d.row.status}` : 'branch-label'))
+    .attr('dy', '0.32em')
+    .text(d => d.label);
+
+  // ---- rendering with a morph parameter t in [0,1] ----
+  let t = 0;
+  const lerp = (a, b, k) => a + (b - a) * k;
+  const pos = (n, k) => [lerp(n.pA[0], n.pB[0], k), lerp(n.pA[1], n.pB[1], k)];
+
+  function leafLabelParams(n, k) {
+    const deg = n.ang * 180 / Math.PI - 90;
+    const flip = n.ang > Math.PI;
+    const rotA = flip ? deg + 180 : deg;
+    const rot = lerp(rotA, 0, k);
+    const dxA = flip ? -(nodeR(n) + 5) : nodeR(n) + 5;
+    const dxB = n.side * (nodeR(n) + 5);
+    const anchor = k < 0.5 ? (flip ? 'end' : 'start') : (n.side < 0 ? 'end' : 'start');
+    return { rot, dx: lerp(dxA, dxB, k), anchor };
+  }
+
+  function render(k) {
+    nodes.forEach(n => { n.p = pos(n, k); });
+    treeEdges
+      .attr('x1', d => d.parent.p[0]).attr('y1', d => d.parent.p[1])
+      .attr('x2', d => d.p[0]).attr('y2', d => d.p[1]);
+    const dStr = d => line(d.nodes.map(n => n.p));
+    linkSel.attr('d', dStr);
+    hitSel.attr('d', dStr);
+    nodeSel.attr('transform', d => `translate(${d.p})`);
+    labelSel.each(function (d) {
+      const el = d3.select(this);
+      if (d.isLeaf) {
+        const q = leafLabelParams(d, k);
+        el.attr('transform', `translate(${d.p}) rotate(${q.rot})`).attr('x', q.dx).attr('text-anchor', q.anchor);
+      } else if (d === tree) {
+        el.attr('transform', `translate(${d.p[0]},${d.p[1] + 16})`).attr('x', 0).attr('text-anchor', 'middle');
+      } else {
+        el.attr('transform', `translate(${d.p[0]},${d.p[1] - 14})`)
+          .attr('x', 0).attr('text-anchor', 'middle');
+      }
+    });
+  }
+  render(0);
+
+  function morphTo(target) {
+    svg.transition('morph').duration(DURATION).ease(d3.easeCubicInOut)
+      .tween('morph', () => {
+        const i = d3.interpolateNumber(t, target);
+        return s => { t = i(s); render(t); };
+      });
+  }
+
+  d3.selectAll('.toggle button').on('click', function () {
+    d3.selectAll('.toggle button').classed('active', false);
+    d3.select(this).classed('active', true);
+    morphTo(this.dataset.layout === 'tree' ? 1 : 0);
+  });
+
+  // ---- interaction ----
+  const panel = d3.select('#panel');
+  const hint = () => panel.html('<div class="hint">Hover a module to trace its imports (orange) and dependents (navy), or hover a link.</div>');
+  hint();
+
+  function ancestorsOf(n) { return new Set(n.ancestors()); }
+
+  function apply(state) {
+    const { active, activeLink, nodesHi, linksOut, linksIn, anc } = state;
+    nodeSel
+      .classed('active', d => d === active || (activeLink && (d === activeLink.source || d === activeLink.target)))
+      .classed('highlight', d => nodesHi.has(d) && d !== active)
+      .classed('ancestor', d => anc.has(d))
+      .classed('dimmed', d => !(nodesHi.has(d) || anc.has(d)));
+    labelSel
+      .classed('active', d => d === active || (activeLink && (d === activeLink.source || d === activeLink.target)))
+      .classed('highlight', d => nodesHi.has(d) && d !== active)
+      .classed('dimmed', d => !(nodesHi.has(d) || anc.has(d)));
+    linkSel
+      .classed('outgoing', d => linksOut.has(d))
+      .classed('incoming', d => linksIn.has(d))
+      .classed('highlight', d => linksOut.has(d) || linksIn.has(d) || d === activeLink)
+      .classed('active', d => d === activeLink)
+      .classed('dimmed', d => !(linksOut.has(d) || linksIn.has(d) || d === activeLink));
+    treeEdges
+      .classed('ancestor', d => anc.has(d) && anc.has(d.parent))
+      .classed('dimmed', d => !(anc.has(d) && anc.has(d.parent)));
+  }
+
+  function focusNode(n) {
+    const linksOut = new Set(links.filter(l => l.source === n));
+    const linksIn = new Set(links.filter(l => l.target === n));
+    const nodesHi = new Set([n]);
+    linksOut.forEach(l => nodesHi.add(l.target));
+    linksIn.forEach(l => nodesHi.add(l.source));
+    const anc = ancestorsOf(n);
+    apply({ active: n, activeLink: null, nodesHi, linksOut, linksIn, anc });
+    if (n.isLeaf) {
+      panel.html(`<div class="name">${n.id}</div>
+        <div class="meta">${n.row.team} team &middot; ${n.row.status} &middot; size ${n.row.size}</div>
+        <div class="counts"><span><b class="out">${outCount.get(n)}</b> imports</span><span><b>${inCount.get(n)}</b> imported by</span></div>`);
+    } else {
+      const kids = n.leaves();
+      panel.html(`<div class="name">${n.id}</div>
+        <div class="meta">${kids.length} modules &middot; total size ${d3.sum(kids, d => d.row.size)}</div>`);
+    }
+  }
+
+  function focusLink(l) {
+    const nodesHi = new Set([l.source, l.target]);
+    const anc = new Set([...ancestorsOf(l.source), ...ancestorsOf(l.target)]);
+    apply({ active: null, activeLink: l, nodesHi, linksOut: new Set(), linksIn: new Set(), anc });
+    panel.html(`<div class="name">${l.source.id}</div>
+      <div class="meta">imports</div><div class="name">${l.target.id}</div>`);
+  }
+
+  function clearFocus() {
+    nodeSel.classed('active highlight dimmed ancestor', false);
+    labelSel.classed('active highlight dimmed', false);
+    linkSel.classed('outgoing incoming highlight active dimmed', false);
+    treeEdges.classed('ancestor dimmed', false);
+    hint();
+  }
+
+  // ---- legend ----
+  const legend = d3.select('#legend');
+  Object.entries(TEAM_COLOR).forEach(([team, c]) => {
+    legend.append('span').attr('class', 'item')
+      .html(`<i class="swatch" style="background:${c}"></i>${team}`);
+  });
+  legend.append('span').attr('class', 'item')
+    .html('<i class="swatch" style="background:#ddd;border:1.6px dashed #1f2430"></i>experimental');
+  legend.append('span').attr('class', 'item')
+    .html('<i class="swatch" style="background:#ddd;opacity:.5;border:1.4px solid #1f2430"></i>deprecated');
+  legend.append('span').attr('class', 'item').html('<i class="line" style="border-color:#e4572e"></i>imports');
+  legend.append('span').attr('class', 'item').html('<i class="line" style="border-color:#1e293b"></i>imported by');
+}).catch(err => {
+  document.body.insertAdjacentHTML('beforeend', `<pre style="color:#b00;padding:16px">${err}</pre>`);
+});
+</script>
+</body>
+</html>

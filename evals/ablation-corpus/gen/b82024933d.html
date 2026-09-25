@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Org Budget and Headcount Sunburst</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; height: 100%; background: #f7f6f2; color: #22252b; font-family: -apple-system, "Helvetica Neue", Arial, sans-serif; overflow: hidden; }
+  #app { display: flex; height: 100vh; align-items: center; justify-content: center; gap: 28px; padding: 0 24px; box-sizing: border-box; }
+  #chart { height: 96vh; width: auto; aspect-ratio: 1 / 1; max-width: 68vw; }
+  #side { width: 230px; font-size: 12px; line-height: 1.45; }
+  #side h1 { font-size: 17px; margin: 0 0 6px; font-weight: 650; }
+  #side p { margin: 0 0 10px; color: #4a4f59; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  .legend-row { margin: 2px 0; }
+  .key { margin-top: 12px; padding-top: 10px; border-top: 1px solid #d9d6cc; }
+
+  .arc { stroke: #f7f6f2; stroke-width: 1; transition: opacity .15s, filter .15s; cursor: pointer; }
+  .arc.headcount { stroke-width: .75; }
+  .arc.dimmed { opacity: .18; }
+  .arc.active { stroke: #22252b; stroke-width: 1.6; opacity: 1; }
+  .track { fill: none; stroke: #dedbd0; stroke-width: 1; stroke-dasharray: 2 3; pointer-events: none; }
+  .label { font-size: 10.5px; fill: #fff; pointer-events: none; text-anchor: middle; dominant-baseline: middle; font-weight: 600; transition: opacity .15s; }
+  .label.dimmed { opacity: .2; }
+  .center-title { font-size: 15px; font-weight: 650; text-anchor: middle; fill: #22252b; }
+  .center-sub { font-size: 11px; text-anchor: middle; fill: #5b606b; }
+
+  #tooltip { position: fixed; pointer-events: none; background: #22252b; color: #fff; padding: 7px 10px; border-radius: 5px; font-size: 12px; line-height: 1.4; opacity: 0; transition: opacity .1s; box-shadow: 0 2px 8px rgba(0,0,0,.25); z-index: 10; white-space: nowrap; }
+  #tooltip.visible { opacity: 1; }
+  #tooltip .t-name { font-weight: 650; margin-bottom: 2px; }
+  #tooltip .t-path { color: #b9bdc7; font-size: 11px; }
+  #tooltip .t-row { display: flex; justify-content: space-between; gap: 14px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <svg id="chart" viewBox="-360 -360 720 720" role="img" aria-label="Org budget sunburst"></svg>
+  <div id="side">
+    <h1>Budget vs. headcount</h1>
+    <p>Angle is budget share. Rings run division, department, team. The outer band repeats each team: its depth is headcount relative to the largest team in its division.</p>
+    <div id="legend"></div>
+    <div class="key">A tall outer arc under a narrow team arc means many people on a small budget share.</div>
+  </div>
+</div>
+<div id="tooltip"></div>
+<script src="d3.v7.min.js"></script>
+<script type="module">
+const R = { center: 62, ring: 70, gap: 0 };
+const ringInner = d => R.center + (d - 1) * R.ring;
+const bandInner = R.center + 3 * R.ring + 6;
+const bandWidth = 360 - 6 - bandInner;
+
+const divColors = { Engineering: "#2f6f9f", Product: "#8a5aa8", Sales: "#c2683a", Operations: "#3f8f6b" };
+const fmt = d3.format(",");
+
+d3.json("data/org-budget.json").then(rows => {
+  // Nest into division > department > team
+  const tree = { name: "Org", children: d3.groups(rows, r => r.division, r => r.department).map(([div, depts]) => ({
+    name: div,
+    children: depts.map(([dep, teams]) => ({
+      name: dep,
+      children: teams.map(t => ({ name: t.team, headcount: t.headcount, budget_k: t.budget_k, value: t.budget_k }))
+    }))
+  })) };
+
+  const root = d3.hierarchy(tree).sum(d => d.value || 0).sort((a, b) => b.value - a.value);
+  d3.partition().size([2 * Math.PI, 1])(root);
+
+  const totalHead = d3.sum(rows, r => r.headcount);
+  root.each(n => { n.headcountSum = n.children ? d3.sum(n.leaves(), l => l.data.headcount) : n.data.headcount; });
+
+  const divOf = n => n.ancestors().find(a => a.depth === 1);
+  const color = (n, lift = 0) => {
+    const base = d3.hsl(divColors[divOf(n).data.name]);
+    const dept = n.depth === 1 ? 0 : n.depth === 2 ? 0.08 : 0.16;
+    base.l = Math.min(0.82, base.l + dept + lift);
+    return base.formatHex();
+  };
+
+  // Outer band: per-division max headcount
+  const maxHead = new Map(root.children.map(d => [d.data.name, d3.max(d.leaves(), l => l.data.headcount)]));
+
+  const svg = d3.select("#chart");
+  const g = svg.append("g");
+  const pad = 0.004;
+
+  const arcFor = d => d3.arc()
+    .startAngle(d.x0).endAngle(d.x1).padAngle(pad).padRadius(200)
+    .innerRadius(ringInner(d.depth)).outerRadius(ringInner(d.depth) + R.ring - 1)();
+
+  const headArc = d => {
+    const k = d.data.headcount / maxHead.get(divOf(d).data.name);
+    return d3.arc().startAngle(d.x0).endAngle(d.x1).padAngle(pad).padRadius(300)
+      .innerRadius(bandInner).outerRadius(bandInner + bandWidth * k)();
+  };
+
+  // Tracks for the outer band
+  g.append("circle").attr("class", "track").attr("r", bandInner);
+  g.append("circle").attr("class", "track").attr("r", bandInner + bandWidth);
+
+  const nodes = root.descendants().filter(d => d.depth > 0);
+  const leaves = root.leaves();
+
+  const budgetArcs = g.append("g").attr("class", "budget-arcs")
+    .selectAll("path").data(nodes).join("path")
+    .attr("class", d => `arc node depth-${d.depth}${d.children ? "" : " leaf"}`)
+    .attr("d", arcFor)
+    .attr("fill", d => color(d));
+
+  const headArcs = g.append("g").attr("class", "headcount-arcs")
+    .selectAll("path").data(leaves).join("path")
+    .attr("class", "arc headcount leaf")
+    .attr("d", headArc)
+    .attr("fill", d => color(d, -0.1));
+
+  // Labels for depth 1 and 2 when span > 15 degrees
+  const span = d => (d.x1 - d.x0) * 180 / Math.PI;
+  const maxChars = d => d.depth === 1 ? 11 : 11;
+  const trunc = (s, n) => s.length > n ? s.slice(0, n - 1) + "…" : s;
+  const labelData = nodes.filter(d => d.depth <= 2 && span(d) > 15);
+
+  const labels = g.append("g").attr("class", "labels")
+    .selectAll("text").data(labelData).join("text")
+    .attr("class", d => `label depth-${d.depth}`)
+    .attr("transform", d => {
+      const a = (d.x0 + d.x1) / 2 * 180 / Math.PI;
+      const r = ringInner(d.depth) + R.ring / 2;
+      return `rotate(${a - 90}) translate(${r},0) rotate(${a < 180 ? 0 : 180})`;
+    })
+    .text(d => trunc(d.data.name, maxChars(d)));
+
+  // Center readout
+  const centerTitle = g.append("text").attr("class", "center-title").attr("y", -4);
+  const centerSub = g.append("text").attr("class", "center-sub").attr("y", 13);
+  const resetCenter = () => {
+    centerTitle.text(`$${fmt(root.value)}k`);
+    centerSub.text(`${fmt(totalHead)} people`);
+  };
+  resetCenter();
+
+  // Legend
+  d3.select("#legend").selectAll("div").data(root.children).join("div")
+    .attr("class", "legend-row")
+    .html(d => `<span class="swatch" style="background:${color(d)}"></span>${d.data.name} <span style="color:#6b707b">$${fmt(d.value)}k, ${d.headcountSum}</span>`);
+
+  // Interaction
+  const tip = d3.select("#tooltip");
+  const path = d => d.ancestors().reverse().slice(1).map(a => a.data.name).join(" / ");
+
+  const showTip = (event, d) => {
+    const isLeaf = !d.children;
+    tip.html(`<div class="t-name">${d.data.name}</div>
+      <div class="t-path">${path(d)}</div>
+      <div class="t-row"><span>Headcount</span><b>${fmt(d.headcountSum)}</b></div>
+      <div class="t-row"><span>Budget</span><b>$${fmt(isLeaf ? d.data.budget_k : d.value)}k</b></div>`)
+      .classed("visible", true);
+    moveTip(event);
+  };
+  const moveTip = event => {
+    const node = tip.node();
+    const w = node.offsetWidth, h = node.offsetHeight;
+    let x = event.clientX + 14, y = event.clientY + 14;
+    if (x + w > innerWidth - 8) x = event.clientX - w - 14;
+    if (y + h > innerHeight - 8) y = event.clientY - h - 14;
+    tip.style("left", x + "px").style("top", y + "px");
+  };
+
+  const setActive = d => {
+    const chain = new Set(d.ancestors());
+    const isOn = n => chain.has(n) || d.descendants().includes(n);
+    budgetArcs.classed("active", n => chain.has(n) && n.depth > 0)
+      .classed("dimmed", n => !isOn(n));
+    headArcs.classed("active", n => n === d)
+      .classed("dimmed", n => !isOn(n));
+    labels.classed("dimmed", n => !isOn(n));
+    centerTitle.text(d.data.name);
+    centerSub.text(`$${fmt(d.children ? d.value : d.data.budget_k)}k, ${d.headcountSum} people`);
+  };
+  const clear = () => {
+    budgetArcs.classed("active", false).classed("dimmed", false);
+    headArcs.classed("active", false).classed("dimmed", false);
+    labels.classed("dimmed", false);
+    tip.classed("visible", false);
+    resetCenter();
+  };
+
+  [budgetArcs, headArcs].forEach(sel => sel
+    .on("mouseenter", (event, d) => { setActive(d); showTip(event, d); })
+    .on("mousemove", moveTip)
+    .on("mouseleave", clear));
+}).catch(err => {
+  document.body.insertAdjacentHTML("beforeend", `<pre style="color:#b00;padding:16px">Failed to load data: ${err.message}</pre>`);
+});
+</script>
+</body>
+</html>

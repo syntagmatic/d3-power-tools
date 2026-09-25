@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Linked modules: hierarchical edge bundle</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="d3.v7.min.js"></script>
+<style>
+  :root { --ink:#1d2330; --muted:#6b7280; --bg:#fafaf7; --rule:#dcdcd4; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; overflow:hidden; background:var(--bg); color:var(--ink);
+    font: 12px/1.35 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+  svg { display:block; width:100vw; height:100vh; }
+  .panel { position:absolute; background:rgba(250,250,247,.92); border:1px solid var(--rule); border-radius:6px; padding:10px 12px; }
+  #head { left:14px; top:14px; width:250px; }
+  #head h1 { font-size:15px; margin:0 0 2px; letter-spacing:-.01em; }
+  #head p { margin:0 0 8px; color:var(--muted); font-size:11px; }
+  .toggle { display:inline-flex; border:1px solid #b9b9ae; border-radius:5px; overflow:hidden; margin-bottom:8px; }
+  .toggle button { font:inherit; border:0; background:#fff; padding:4px 10px; cursor:pointer; color:var(--ink); }
+  .toggle button + button { border-left:1px solid #b9b9ae; }
+  .toggle button.active { background:var(--ink); color:#fff; }
+  .row { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:11px; }
+  .row input { flex:1; }
+  #legend { right:14px; top:14px; font-size:11px; }
+  #legend div { display:flex; align-items:center; gap:7px; margin:2px 0; }
+  #legend .sw { width:10px; height:10px; border-radius:50%; flex:none; }
+  #legend .sep { border-top:1px solid var(--rule); margin:6px 0; height:0; }
+  #legend .ln { width:16px; height:0; border-top:2.5px solid; flex:none; }
+  #info { left:14px; bottom:14px; width:280px; min-height:92px; }
+  #info b { font-size:13px; }
+  #info .meta { color:var(--muted); margin:2px 0 4px; }
+  #info .list { font-size:11px; }
+  .out-c { color:#d6282b; font-weight:600; } .in-c { color:#1c6dc0; font-weight:600; }
+
+  .link { fill:none; stroke-width:1.1; stroke-opacity:.38; transition: stroke-opacity .15s; }
+  .link.highlight.out { stroke:#d6282b !important; stroke-opacity:.92; stroke-width:1.9; }
+  .link.highlight.in { stroke:#1c6dc0 !important; stroke-opacity:.92; stroke-width:1.9; }
+  .link.active { stroke:#111 !important; stroke-opacity:1; stroke-width:2.6; }
+  .link.dimmed { stroke-opacity:.05; }
+  .link-hit { fill:none; stroke:transparent; stroke-width:7; cursor:pointer; }
+
+  .node { stroke-width:1.6; cursor:pointer; transition: opacity .15s; }
+  .node.leaf { fill-opacity:.9; }
+  .node.leaf.experimental { fill:#fff; stroke-width:2; }
+  .node.leaf.deprecated { fill:#b9b9ae; }
+  .node.branch { fill:#fff; stroke:#8a8a80; stroke-width:1.4; cursor:pointer; }
+  .node.highlight { stroke:#111; }
+  .node.active { stroke:#111; stroke-width:2.8; }
+  .node.dimmed { opacity:.22; }
+  .arc-band { opacity:.9; transition: opacity .15s; }
+  .arc-band.dimmed { opacity:.2; }
+
+  .label { font-size:10.5px; fill:#444; cursor:pointer; dominant-baseline:central; transition: opacity .15s; }
+  .label.branch { font-weight:700; font-size:11.5px; }
+  .label.highlight { fill:#000; font-weight:700; }
+  .label.active { fill:#000; font-weight:700; text-decoration:underline; }
+  .label.dimmed { opacity:.25; }
+</style>
+</head>
+<body>
+<svg id="chart"></svg>
+
+<div class="panel" id="head">
+  <h1>atlas module dependencies</h1>
+  <p>62 modules, dotted names give the tree, imports give the links.</p>
+  <div class="toggle" id="layout">
+    <button data-mode="radial" class="active">Radial bundle</button>
+    <button data-mode="tree">Linked tree</button>
+  </div>
+  <div class="row"><span>bundling</span><input id="beta" type="range" min="0" max="1" step="0.05" value="0.85"><span id="betaVal">0.85</span></div>
+</div>
+
+<div class="panel" id="legend"></div>
+<div class="panel" id="info"></div>
+
+<script type="module">
+const TEAM = { core:"#5f7f8a", data:"#4d9a5e", viz:"#b58a1f", ui:"#8a63c7", ops:"#9a6a55", research:"#d0669a" };
+const OUT = "#d6282b", IN = "#1c6dc0";
+
+const rows = await d3.json("data/linked-modules.json");
+
+// ---- build tree from dotted names ----
+const rootData = { id: "", name: "atlas", children: [] };
+const byId = new Map([["", rootData]]);
+const ensure = (id) => {
+  if (byId.has(id)) return byId.get(id);
+  const i = id.lastIndexOf(".");
+  const parent = ensure(i < 0 ? "" : id.slice(0, i));
+  const n = { id, name: id.slice(i + 1), children: [] };
+  parent.children.push(n); byId.set(id, n);
+  return n;
+};
+rows.forEach(r => { const n = ensure(r.name); Object.assign(n, r, { id: r.name, name: r.name.split(".").pop() }); });
+// collapse the single-child "atlas" prefix into the root so groups sit at depth 1
+let top = rootData;
+while (top.children.length === 1 && !top.children[0].size) top = top.children[0];
+top.children.forEach(function prune(n) { if (!n.children.length) delete n.children; else n.children.forEach(prune); });
+
+const root = d3.hierarchy(top)
+  .sum(d => d.children ? 0 : d.size)
+  .sort((a, b) => b.value - a.value || d3.ascending(a.data.name, b.data.name));
+const nodes = root.descendants();
+const leaves = root.leaves();
+const leafById = new Map(leaves.map(d => [d.data.id, d]));
+const teamOf = d => d.data.team || d.ancestors().find(a => a.depth === 1)?.data.name;
+
+// ---- links ----
+const links = [];
+const misses = [];
+leaves.forEach(s => (s.data.imports || []).forEach(tid => {
+  const t = leafById.get(tid);
+  if (!t) { misses.push([s.data.id, tid]); return; }
+  links.push({ source: s, target: t, path: s.path(t) });
+}));
+if (misses.length) console.warn("unmatched imports", misses);
+const outCount = d3.rollup(links, v => v.length, l => l.source);
+const inCount = d3.rollup(links, v => v.length, l => l.target);
+
+// ---- layout (both coordinate sets live on every node) ----
+d3.cluster().size([2 * Math.PI - 0.12, 1]).separation((a, b) => a.parent === b.parent ? 1 : 2.2)(root);
+nodes.forEach(d => { d.ang = d.x + 0.06; d.rad = d.y; });   // d.y: 0 at root, 1 at leaves
+const yExtent = d3.extent(leaves, d => d.ang);
+const rScale = d3.scaleSqrt().domain(d3.extent(leaves, d => d.data.size)).range([3, 7]);
+
+const svg = d3.select("#chart");
+const g = svg.append("g");
+const gBands = g.append("g").attr("class", "bands");
+const gLinks = g.append("g").attr("class", "links");
+const gNodes = g.append("g").attr("class", "nodes");
+const gLabels = g.append("g").attr("class", "labels");
+const gHits = g.append("g").attr("class", "hits");
+
+const state = { t: 0, mode: "radial", beta: 0.85, W: 0, H: 0, R: 0, span: 0, rowH: 0 };
+const line = d3.line().curve(d3.curveBundle.beta(state.beta));
+
+const linkSel = gLinks.selectAll("path.link").data(links).join("path")
+  .attr("class", "link").attr("stroke", d => TEAM[teamOf(d.source)]);
+const hitSel = gHits.selectAll("path.link-hit").data(links).join("path").attr("class", "link-hit");
+const nodeSel = gNodes.selectAll("circle.node").data(nodes).join("circle")
+  .attr("class", d => d.children ? "node branch" : `node leaf ${d.data.status}`)
+  .attr("r", d => d.children ? 3.5 : rScale(d.data.size))
+  .style("stroke", d => d.children ? null : TEAM[teamOf(d)])
+  .style("fill", d => (d.children || d.data.status !== "stable") ? null : TEAM[teamOf(d)]);
+const labelSel = gLabels.selectAll("text.label").data(nodes).join("text")
+  .attr("class", d => d.children ? "label branch" : "label leaf")
+  .style("fill", d => d.children && d.depth === 1 ? TEAM[d.data.name] : null)
+  .text(d => d.data.name);
+
+const bandArc = d3.arc();
+const bands = root.children.map(grp => {
+  const a = d3.extent(grp.leaves(), d => d.ang);
+  const pad = (yExtent[1] - yExtent[0]) / leaves.length * 0.42;
+  return { grp, a0: a[0] - pad, a1: a[1] + pad };
+});
+const bandSel = gBands.selectAll("path.arc-band").data(bands).join("path")
+  .attr("class", "arc-band").attr("fill", d => TEAM[d.grp.data.name]);
+
+// ---- geometry ----
+function measure() {
+  state.W = innerWidth; state.H = innerHeight;
+  state.R = Math.max(120, Math.min(state.W - 200, state.H - 90) / 2 - 78);
+  state.span = Math.min(state.W - 420, 620);
+  state.rowH = (state.H - 90) / (yExtent[1] - yExtent[0] + 0.1);
+  svg.attr("viewBox", `0 0 ${state.W} ${state.H}`);
+  g.attr("transform", `translate(${state.W / 2 + 40 * state.t * 0},${state.H / 2})`);
+}
+const radialXY = d => [state.R * d.rad * Math.sin(d.ang), -state.R * d.rad * Math.cos(d.ang)];
+const treeXY = d => {
+  const col = [-0.5, 0, 0.5][d.depth] ?? 0.5;   // root | branches | leaves
+  const y = ((d.ang - (yExtent[0] + yExtent[1]) / 2)) * state.rowH;
+  return [state.span * (col - 0.08), y + 2];
+};
+const labelRot = d => { let r = d.ang * 180 / Math.PI - 90; return d.ang > Math.PI ? r - 180 : r; };
+
+function render() {
+  const t = state.t;
+  const ease = t;
+  nodes.forEach(d => {
+    const a = radialXY(d), b = treeXY(d);
+    d.cx = a[0] + (b[0] - a[0]) * ease;
+    d.cy = a[1] + (b[1] - a[1]) * ease;
+  });
+  line.curve(d3.curveBundle.beta(state.beta));
+  const pathOf = l => line(l.path.map(n => [n.cx, n.cy]));
+  linkSel.attr("d", pathOf);
+  hitSel.attr("d", pathOf);
+  nodeSel.attr("cx", d => d.cx).attr("cy", d => d.cy)
+    .attr("opacity", d => d.children ? t : null)
+    .style("pointer-events", d => d.children && t < 0.5 ? "none" : null);
+  const flip = t < 0.5;
+  labelSel.each(function (d) {
+    const el = d3.select(this);
+    const leaf = !d.children;
+    if (leaf) {
+      const radial = flip;
+      const back = d.ang > Math.PI;
+      const rot = labelRot(d) * (1 - t);
+      const off = 8 + rScale(d.data.size) * 0.4;
+      const dir = radial ? (back ? -1 : 1) : 1;
+      el.attr("transform", `translate(${d.cx},${d.cy}) rotate(${rot})`)
+        .attr("x", dir * off).attr("y", 0)
+        .attr("text-anchor", dir < 0 ? "end" : "start");
+    } else {
+      el.attr("transform", `translate(${d.cx},${d.cy})`).attr("x", -9).attr("y", 0)
+        .attr("text-anchor", "end").attr("opacity", t < 0.5 ? 0 : (t - 0.5) * 2);
+    }
+  });
+  bandSel.attr("d", d => bandArc({ innerRadius: state.R + 10, outerRadius: state.R + 13.5, startAngle: d.a0, endAngle: d.a1 }))
+    .attr("opacity", 1 - Math.min(1, t * 2.2))
+    .attr("transform", `translate(${0},${0})`);
+}
+
+// ---- legend ----
+const legend = d3.select("#legend");
+legend.append("div").style("font-weight", "600").text("Team");
+Object.entries(TEAM).forEach(([k, c]) => legend.append("div").html(`<span class="sw" style="background:${c}"></span>${k}`));
+legend.append("div").attr("class", "sep");
+legend.append("div").html(`<span class="sw" style="background:#555"></span>stable`);
+legend.append("div").html(`<span class="sw" style="background:#fff;border:2px solid #555"></span>experimental`);
+legend.append("div").html(`<span class="sw" style="background:#b9b9ae;border:1.5px solid #555"></span>deprecated`);
+legend.append("div").html(`<span style="color:var(--muted)">dot area = size</span>`);
+legend.append("div").attr("class", "sep");
+legend.append("div").html(`<span class="ln" style="border-color:${OUT}"></span>imports (outgoing)`);
+legend.append("div").html(`<span class="ln" style="border-color:${IN}"></span>imported by (incoming)`);
+
+// ---- interaction ----
+const info = d3.select("#info");
+const idle = () => info.html(`<b>Hover a module or a link</b><div class="meta">Red = what it imports, blue = what imports it. Its ancestor branch stays lit.</div>`);
+idle();
+const short = d => d.data.id.replace(/^[^.]*\./, "");
+
+function hover(target) {
+  if (!target) {
+    [linkSel, nodeSel, labelSel, bandSel].forEach(s => s.classed("highlight active dimmed out in", false));
+    idle(); return;
+  }
+  const hot = new Set(), outL = new Set(), inL = new Set();
+  let activeNode = null, activeLink = null;
+  if (target.type === "link") {
+    activeLink = target.l;
+    activeLink.path.forEach(n => hot.add(n));       // both ends plus the whole route through the LCA
+  } else {
+    activeNode = target.d;
+    const S = new Set(activeNode.leaves());
+    hot.add(activeNode); activeNode.ancestors().forEach(a => hot.add(a));
+    activeNode.descendants().forEach(a => hot.add(a));
+    links.forEach(l => {
+      const so = S.has(l.source), ti = S.has(l.target);
+      if (so) { outL.add(l); hot.add(l.target); l.target.ancestors().forEach(a => a.depth === 1 && hot.add(a)); }
+      else if (ti) { inL.add(l); hot.add(l.source); l.source.ancestors().forEach(a => a.depth === 1 && hot.add(a)); }
+    });
+  }
+  const any = l => l === activeLink || outL.has(l) || inL.has(l);
+  linkSel.classed("active", l => l === activeLink)
+    .classed("highlight", l => any(l))
+    .classed("out", l => outL.has(l))
+    .classed("in", l => inL.has(l))
+    .classed("dimmed", l => !any(l))
+    .filter(l => any(l)).raise();
+  nodeSel.classed("active", d => d === activeNode || (activeLink && (d === activeLink.source || d === activeLink.target)))
+    .classed("highlight", d => hot.has(d)).classed("dimmed", d => !hot.has(d));
+  labelSel.classed("active", d => d === activeNode || (activeLink && (d === activeLink.source || d === activeLink.target)))
+    .classed("highlight", d => hot.has(d)).classed("dimmed", d => !hot.has(d));
+  const branchOn = new Set([...hot].filter(d => d.depth === 1).map(d => d.data.name));
+  bandSel.classed("dimmed", b => !branchOn.has(b.grp.data.name));
+
+  if (activeLink) {
+    const s = activeLink.source, t = activeLink.target;
+    info.html(`<b>${short(s)} <span class="out-c">&rarr;</span> ${short(t)}</b>
+      <div class="meta">import between ${teamOf(s) === teamOf(t) ? "modules of team " + teamOf(s) : teamOf(s) + " and " + teamOf(t)}</div>
+      <div class="list">bundle route: ${activeLink.path.map(n => n.data.name).join(" / ")}</div>`);
+  } else if (!activeNode.children) {
+    const d = activeNode;
+    const outs = links.filter(l => l.source === d).map(l => short(l.target));
+    const ins = links.filter(l => l.target === d).map(l => short(l.source));
+    const fmt = a => a.length ? a.slice(0, 6).join(", ") + (a.length > 6 ? ` +${a.length - 6}` : "") : "none";
+    info.html(`<b>${d.data.id}</b>
+      <div class="meta">${d.data.team} &middot; ${d.data.status} &middot; size ${d.data.size}</div>
+      <div class="list"><span class="out-c">imports ${outs.length}:</span> ${fmt(outs)}</div>
+      <div class="list"><span class="in-c">imported by ${ins.length}:</span> ${fmt(ins)}</div>`);
+  } else {
+    const d = activeNode, S = new Set(d.leaves());
+    const ext = links.filter(l => S.has(l.source) !== S.has(l.target));
+    info.html(`<b>${d.data.id || d.data.name}</b>
+      <div class="meta">${S.size} modules &middot; total size ${d.value}</div>
+      <div class="list"><span class="out-c">${ext.filter(l => S.has(l.source)).length}</span> imports leaving,
+      <span class="in-c">${ext.filter(l => S.has(l.target)).length}</span> arriving from other branches</div>`);
+  }
+}
+
+nodeSel.on("pointerenter", (e, d) => hover({ type: "node", d })).on("pointerleave", () => hover(null));
+labelSel.on("pointerenter", (e, d) => hover({ type: "node", d })).on("pointerleave", () => hover(null));
+hitSel.on("pointerenter", (e, l) => hover({ type: "link", l })).on("pointerleave", () => hover(null));
+
+// ---- controls ----
+d3.selectAll("#layout button").on("click", function () {
+  const mode = this.dataset.mode;
+  if (mode === state.mode) return;
+  state.mode = mode;
+  d3.selectAll("#layout button").classed("active", function () { return this.dataset.mode === mode; });
+  const t0 = state.t, t1 = mode === "tree" ? 1 : 0;
+  svg.transition("layout").duration(1000).ease(d3.easeCubicInOut)
+    .tween("mix", () => { const i = d3.interpolateNumber(t0, t1); return k => { state.t = i(k); render(); }; });
+});
+d3.select("#beta").on("input", function () {
+  state.beta = +this.value; d3.select("#betaVal").text(state.beta.toFixed(2)); render();
+});
+addEventListener("resize", () => { measure(); render(); });
+
+measure();
+render();
+</script>
+</body>
+</html>

@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>US Economic Index by State</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --ink: #1f2933; --muted: #6b7280; --bg: #f7f5f0; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  header { padding: 14px 24px 0; }
+  h1 { font-size: 20px; margin: 0; font-weight: 650; }
+  header p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+  #map { flex: 1; min-height: 0; position: relative; }
+  svg { width: 100%; height: 100%; display: block; }
+  .state { stroke: #fff; stroke-width: 0.8; stroke-linejoin: round; cursor: pointer;
+           transition: opacity 120ms; }
+  .state.dimmed { opacity: 0.55; }
+  .state.highlight { stroke: #111827; stroke-width: 2.2; opacity: 1; }
+  .state-label { font-size: 10px; font-weight: 600; text-anchor: middle; dominant-baseline: central;
+                 pointer-events: none; }
+  .legend-title { font-size: 12px; fill: var(--ink); font-weight: 600; }
+  .legend-bar { stroke: #9ca3af; stroke-width: 0.5; }
+  .legend-marker { stroke: #111827; stroke-width: 2; fill: none; }
+  .legend .tick text { font-size: 11px; fill: var(--muted); }
+  .legend .domain { display: none; }
+  .tooltip {
+    position: absolute; pointer-events: none; background: rgba(17,24,39,0.94); color: #fff;
+    padding: 8px 10px; border-radius: 6px; font-size: 12px; line-height: 1.45;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.25); opacity: 0; transition: opacity 100ms;
+    white-space: nowrap;
+  }
+  .tooltip.active { opacity: 1; }
+  .tooltip .name { font-weight: 650; font-size: 13px; }
+  .tooltip .abbr { color: #cbd5e1; margin-left: 4px; }
+  .tooltip .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+                     margin-right: 6px; vertical-align: -1px; border: 1px solid rgba(255,255,255,0.5); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Economic index by state</h1>
+  <p>Synthetic index, 0-100. Simplified rectangular geometry on an Albers USA projection (Alaska and Hawaii inset).</p>
+</header>
+<div id="map"></div>
+<div class="tooltip" id="tooltip"></div>
+<script src="d3.v7.min.js"></script>
+<script type="module">
+const container = d3.select("#map");
+const tooltip = d3.select("#tooltip");
+
+const data = await d3.json("data/us-states.json");
+
+// Source rings wind counterclockwise (RFC 7946); d3-geo wants clockwise or the
+// ring means "the whole sphere except this shape". Reverse any that overflow.
+data.features.forEach(f => {
+  if (d3.geoArea(f) > 2 * Math.PI) {
+    f.geometry.coordinates = f.geometry.coordinates.map(poly => poly.map(ring => ring.slice().reverse()));
+  }
+});
+
+// Sequential ramp: pale yellow (low) to deep red-brown (high). Resolved colors only.
+const domain = [20, 90];
+const color = d3.scaleSequential(d3.interpolateYlOrRd).domain(domain).clamp(true);
+const textColor = v => d3.lab(color(v)).l < 60 ? "#fff" : "#1f2933";
+
+const svg = container.append("svg");
+const gStates = svg.append("g").attr("class", "states");
+const gLabels = svg.append("g").attr("class", "labels");
+const gLegend = svg.append("g").attr("class", "legend");
+
+const gradId = "legend-gradient";
+const grad = svg.append("defs").append("linearGradient").attr("id", gradId);
+d3.range(0, 1.001, 0.1).forEach(t => {
+  grad.append("stop").attr("offset", `${t * 100}%`).attr("stop-color", color(domain[0] + t * (domain[1] - domain[0])));
+});
+
+const projection = d3.geoAlbersUsa();
+const path = d3.geoPath(projection);
+
+// Draw large states first so small ones (RI, DE, CT...) sit on top of overlaps.
+const features = data.features.slice().sort((a, b) => d3.geoArea(b) - d3.geoArea(a));
+
+const states = gStates.selectAll("path.state")
+  .data(features, d => d.properties.abbr)
+  .join("path")
+  .attr("class", "state")
+  .attr("fill", d => color(d.properties.economic_index))
+  .attr("aria-label", d => `${d.properties.name}: ${d.properties.economic_index}`);
+
+const labels = gLabels.selectAll("text.state-label")
+  .data(features.filter(d => d.geometry.coordinates[0].length && !["RI", "DE", "CT", "NJ", "NH", "VT", "MA", "MD"].includes(d.properties.abbr)),
+        d => d.properties.abbr)
+  .join("text")
+  .attr("class", "state-label")
+  .attr("fill", d => textColor(d.properties.economic_index))
+  .text(d => d.properties.abbr);
+
+const legendW = 240, legendH = 12;
+const legendScale = d3.scaleLinear().domain(domain).range([0, legendW]);
+gLegend.append("text").attr("class", "legend-title").attr("y", -8).text("Economic index");
+gLegend.append("rect").attr("class", "legend-bar").attr("width", legendW).attr("height", legendH)
+  .attr("fill", `url(#${gradId})`);
+gLegend.append("g").attr("class", "legend-axis").attr("transform", `translate(0,${legendH})`)
+  .call(d3.axisBottom(legendScale).ticks(7).tickSize(4));
+const marker = gLegend.append("rect").attr("class", "legend-marker").attr("y", -2)
+  .attr("width", 3).attr("height", legendH + 4).attr("x", -10).style("display", "none");
+
+function layout() {
+  const { width, height } = container.node().getBoundingClientRect();
+  svg.attr("viewBox", `0 0 ${width} ${height}`);
+  const pad = 16, legendSpace = 60;
+  projection.fitExtent([[pad, pad], [width - pad, height - pad - legendSpace]], data);
+  states.attr("d", path);
+  labels.each(function (d) {
+    const c = path.centroid(d);
+    d3.select(this).attr("x", c[0]).attr("y", c[1]);
+  });
+  gLegend.attr("transform", `translate(${(width - legendW) / 2},${height - legendSpace + 22})`);
+}
+layout();
+new ResizeObserver(layout).observe(container.node());
+
+function place(event) {
+  const box = container.node().getBoundingClientRect();
+  const [x, y] = d3.pointer(event, container.node());
+  const node = tooltip.node();
+  const tw = node.offsetWidth, th = node.offsetHeight;
+  let left = x + 16, top = y + 16;
+  if (left + tw > box.width) left = x - tw - 16;
+  if (top + th > box.height) top = y - th - 16;
+  tooltip.style("left", `${left + box.left}px`).style("top", `${top + box.top}px`);
+}
+
+states
+  .on("pointerenter", (event, d) => {
+    states.classed("dimmed", s => s !== d).classed("highlight", s => s === d);
+    d3.select(event.currentTarget).raise();
+    const v = d.properties.economic_index;
+    tooltip.html(`<div><span class="name">${d.properties.name}</span><span class="abbr">${d.properties.abbr}</span></div>
+      <div><span class="swatch" style="background:${color(v)}"></span>Economic index: <b>${v}</b></div>`)
+      .classed("active", true);
+    marker.style("display", null).attr("x", legendScale(Math.max(domain[0], Math.min(domain[1], v))) - 1.5);
+    place(event);
+  })
+  .on("pointermove", place)
+  .on("pointerleave", () => {
+    states.classed("dimmed", false).classed("highlight", false);
+    tooltip.classed("active", false);
+    marker.style("display", "none");
+  });
+</script>
+</body>
+</html>

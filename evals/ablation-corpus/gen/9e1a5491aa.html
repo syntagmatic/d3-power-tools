@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>US States Economic Index</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; height: 100%; background: #f7f6f2; color: #222;
+    font: 14px/1.4 -apple-system, "Helvetica Neue", Arial, sans-serif; overflow: hidden; }
+  .page { display: flex; flex-direction: column; height: 100vh; padding: 12px 20px; box-sizing: border-box; }
+  header { display: flex; justify-content: space-between; align-items: flex-end; gap: 24px; }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  .subtitle { color: #666; font-size: 12px; margin-top: 2px; }
+  #map-wrap { flex: 1; min-height: 0; }
+  svg#map { width: 100%; height: 100%; display: block; }
+  .state { stroke: #fff; stroke-width: 0.8; stroke-linejoin: round; transition: opacity .12s; }
+  .state.highlight { stroke: #111; stroke-width: 2.2; }
+  .map.has-hover .state:not(.highlight) { opacity: 0.6; }
+  .state.dimmed { opacity: 0.6; }
+  .state-label { font-size: 10px; font-weight: 600; text-anchor: middle; dominant-baseline: central;
+    pointer-events: none; }
+  .state-label.highlight { font-size: 12px; }
+  .legend-bar { stroke: #bbb; stroke-width: 0.5; }
+  .legend .domain { display: none; }
+  .legend text { font-size: 11px; fill: #444; }
+  .legend-marker { stroke: #111; stroke-width: 2; opacity: 0; pointer-events: none; }
+  .legend-marker.active { opacity: 1; }
+  .tooltip { position: fixed; pointer-events: none; background: rgba(20,20,20,.92); color: #fff;
+    padding: 7px 10px; border-radius: 4px; font-size: 12px; opacity: 0; transition: opacity .1s;
+    white-space: nowrap; z-index: 10; }
+  .tooltip.visible { opacity: 1; }
+  .tooltip .tt-name { font-weight: 600; font-size: 13px; }
+  .tooltip .tt-value { font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <div>
+      <h1>Economic Index by State</h1>
+      <div class="subtitle">Synthetic index, 0 to 100. Hover a state for details.</div>
+    </div>
+    <svg id="legend" width="280" height="44"></svg>
+  </header>
+  <div id="map-wrap"><svg id="map" class="map"></svg></div>
+</div>
+<div class="tooltip" id="tooltip"></div>
+
+<script src="d3.v7.min.js"></script>
+<script>
+d3.json('data/us-states.json').then(data => {
+  // Source rings are counter-clockwise; d3 spherical geometry needs clockwise, else fills invert.
+  const rewind = ring => ring.slice().reverse();
+  data.features.forEach(f => {
+    const g = f.geometry;
+    if (g.type === 'Polygon') g.coordinates = g.coordinates.map(rewind);
+    else g.coordinates = g.coordinates.map(p => p.map(rewind));
+  });
+
+  const W = 960, H = 560;
+  const svg = d3.select('#map').attr('viewBox', `0 0 ${W} ${H}`)
+    .attr('preserveAspectRatio', 'xMidYMid meet');
+  const projection = d3.geoAlbersUsa().fitExtent([[10, 6], [W - 10, H - 6]], data);
+  const path = d3.geoPath(projection);
+
+  const values = data.features.map(d => d.properties.economic_index);
+  const [lo, hi] = d3.extent(values);
+  const color = d3.scaleSequential(d3.interpolateYlGnBu).domain([lo, hi]);
+  const hex = v => d3.color(color(v)).formatHex();
+  const textOn = v => d3.lab(hex(v)).l > 58 ? '#222' : '#fff';
+
+  const tooltip = d3.select('#tooltip');
+  const states = svg.append('g').attr('class', 'states');
+
+  const cells = states.selectAll('path.state')
+    .data(data.features, d => d.properties.abbr)
+    .join('path')
+    .attr('class', 'state')
+    .attr('d', path)
+    .attr('fill', d => hex(d.properties.economic_index));
+
+  const labels = svg.append('g').attr('class', 'labels')
+    .selectAll('text.state-label')
+    .data(data.features.filter(d => path.bounds(d)[1][0] - path.bounds(d)[0][0] > 16))
+    .join('text')
+    .attr('class', 'state-label')
+    .attr('transform', d => `translate(${path.centroid(d)})`)
+    .attr('fill', d => textOn(d.properties.economic_index))
+    .text(d => d.properties.abbr);
+
+  // Legend
+  const lw = 240, lh = 10;
+  const legend = d3.select('#legend').append('g').attr('class', 'legend').attr('transform', 'translate(20,6)');
+  const defs = d3.select('#legend').append('defs');
+  const grad = defs.append('linearGradient').attr('id', 'legend-grad');
+  d3.range(0, 1.001, 0.1).forEach(t => grad.append('stop')
+    .attr('offset', t).attr('stop-color', hex(lo + t * (hi - lo))));
+  legend.append('rect').attr('class', 'legend-bar').attr('width', lw).attr('height', lh)
+    .attr('fill', 'url(#legend-grad)');
+  const lx = d3.scaleLinear([lo, hi], [0, lw]);
+  legend.append('g').attr('transform', `translate(0,${lh})`)
+    .call(d3.axisBottom(lx).ticks(5).tickSize(4));
+  legend.append('text').attr('y', 34).attr('x', 0).text('Economic index').style('font-weight', 600);
+  const marker = legend.append('line').attr('class', 'legend-marker').attr('y1', -3).attr('y2', lh + 3);
+
+  const setHover = (d, on) => {
+    const abbr = d.properties.abbr;
+    cells.classed('highlight', s => on && s === d);
+    labels.classed('highlight', s => on && s === d);
+    svg.classed('has-hover', on);
+    marker.classed('active', on);
+    if (on) marker.attr('x1', lx(d.properties.economic_index)).attr('x2', lx(d.properties.economic_index));
+  };
+
+  const place = event => {
+    const node = tooltip.node(), pad = 14;
+    let x = event.clientX + pad, y = event.clientY + pad;
+    if (x + node.offsetWidth > innerWidth - 4) x = event.clientX - node.offsetWidth - pad;
+    if (y + node.offsetHeight > innerHeight - 4) y = event.clientY - node.offsetHeight - pad;
+    tooltip.style('left', x + 'px').style('top', y + 'px');
+  };
+
+  cells
+    .on('mouseenter', (event, d) => {
+      const p = d.properties;
+      tooltip.html(`<div class="tt-name">${p.name} (${p.abbr})</div>
+        <div class="tt-value">Economic index: <b>${p.economic_index}</b></div>`)
+        .classed('visible', true);
+      setHover(d, true);
+      place(event);
+    })
+    .on('mousemove', place)
+    .on('mouseleave', (event, d) => {
+      tooltip.classed('visible', false);
+      setHover(d, false);
+    });
+
+  // Raise hovered path so its stroke is not covered by neighbours
+  cells.on('mouseover.raise', function () { d3.select(this).raise(); });
+  svg.select('.labels').raise();
+});
+</script>
+</body>
+</html>

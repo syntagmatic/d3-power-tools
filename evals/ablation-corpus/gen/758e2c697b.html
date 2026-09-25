@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cities: parallel coordinates + summary table</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #fafaf7; --ink: #23262b; --muted: #7b808a; --rule: #dcdcd4; --panel: #ffffff;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--ink); font: 12px/1.35 -apple-system, "Helvetica Neue", Arial, sans-serif;
+    display: grid; grid-template-rows: auto 1fr; overflow: hidden; }
+  header { display: flex; align-items: center; gap: 16px; padding: 10px 16px 6px; flex-wrap: wrap; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0; }
+  .count-badge { background: var(--ink); color: #fff; border-radius: 12px; padding: 3px 11px; font-weight: 600;
+    font-variant-numeric: tabular-nums; transition: background .15s; }
+  .count-badge.few { background: #b4441c; }
+  .count-badge.none { background: #a02020; }
+  button.reset { font: inherit; border: 1px solid var(--rule); background: var(--panel); border-radius: 4px; padding: 3px 10px; cursor: pointer; }
+  button.reset:hover { border-color: var(--ink); }
+  .legend { display: flex; gap: 6px; margin-left: auto; }
+  .legend-item { display: flex; align-items: center; gap: 5px; padding: 2px 8px; border: 1px solid var(--rule); border-radius: 12px;
+    background: var(--panel); cursor: pointer; user-select: none; }
+  .legend-item .swatch { width: 9px; height: 9px; border-radius: 50%; }
+  .legend-item.off { opacity: .4; text-decoration: line-through; }
+  .legend-item.highlight { border-color: var(--ink); }
+  main { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 12px; padding: 0 16px 12px; min-height: 0; }
+  .panel { background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; min-height: 0; position: relative; }
+  #pc { width: 100%; height: 100%; display: block; }
+  .hint { position: absolute; left: 10px; bottom: 6px; color: var(--muted); font-size: 11px; }
+
+  .axis-title { font-weight: 600; font-size: 12px; text-anchor: middle; fill: var(--ink); }
+  .axis-unit { font-size: 10px; text-anchor: middle; fill: var(--muted); }
+  .axis .domain { stroke: #9a9ea6; }
+  .axis text { fill: var(--muted); font-size: 10px; }
+  .line { fill: none; stroke-width: 1.2; stroke-opacity: .55; transition: stroke-opacity .15s; }
+  .line.dimmed { stroke: #c9c9c2 !important; stroke-opacity: .28; stroke-width: .8; }
+  .line.active { stroke-opacity: .8; }
+  .line.few { stroke-width: 2.4; stroke-opacity: .95; }
+  .line.highlight { stroke-width: 2.6; stroke-opacity: 1; }
+  .line.dimmed.highlight { stroke-opacity: .28; stroke-width: .8; }
+  .city-label { font-size: 10.5px; font-weight: 600; }
+  .city-label-leader { stroke: #bbb; stroke-width: .7; fill: none; }
+  .brush .selection { fill: #23262b; fill-opacity: .12; stroke: #23262b; stroke-width: 1; }
+
+  table { border-collapse: collapse; width: 100%; }
+  .table-panel { padding: 8px 10px; overflow: auto; }
+  th { text-align: right; font-weight: 500; font-size: 10.5px; color: var(--muted); padding: 2px 6px 5px; border-bottom: 1px solid var(--rule); text-transform: uppercase; letter-spacing: .04em; }
+  th:first-child { text-align: left; }
+  td { padding: 3px 6px; border-bottom: 1px solid #eeeee8; text-align: right; font-variant-numeric: tabular-nums; }
+  td.name { text-align: left; font-weight: 600; white-space: nowrap; }
+  td.name small { display: block; font-weight: 400; color: var(--muted); font-size: 10px; }
+  td.spark-cell { padding: 2px 0 2px 6px; }
+  tr.filtered td.name { color: #b4441c; }
+  td.stat.empty { color: #bbb; }
+  .spark { display: block; overflow: visible; }
+  .spark .bar-all { fill: #e4e4dc; }
+  .spark .bar-sel { fill: #4a5568; }
+  .spark .dot { stroke: #fff; stroke-width: 1; }
+  .spark .baseline { stroke: #c9c9c2; stroke-width: 1; }
+  .spark .empty-note { fill: var(--muted); font-size: 10px; font-style: italic; }
+  .spark .brush .selection { fill: #b4441c; fill-opacity: .1; stroke: #b4441c; }
+  .spark-ends { display: flex; justify-content: space-between; color: var(--muted); font-size: 9px; }
+  .few-list { margin-top: 10px; font-size: 11px; color: var(--muted); }
+  .few-list .chip { display: inline-block; margin: 2px 4px 2px 0; padding: 2px 7px; border-radius: 10px; background: #f3f3ee; color: var(--ink); }
+  .few-list .chip .swatch { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>150 synthetic cities</h1>
+  <span class="count-badge" id="badge">150 of 150</span>
+  <button class="reset" id="reset">Clear brushes</button>
+  <div class="legend" id="legend"></div>
+</header>
+<main>
+  <div class="panel"><svg id="pc"></svg><div class="hint">Drag on any axis to brush. Brushes combine. Drag a brush to move it.</div></div>
+  <div class="panel table-panel">
+    <table>
+      <thead><tr><th>Axis</th><th>Min</th><th>Median</th><th>Max</th><th>Distribution (brush here too)</th></tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div class="few-list" id="few"></div>
+  </div>
+</main>
+
+<script src="d3.v7.min.js"></script>
+<script>
+const AXES = [
+  { key: 'population', label: 'Population', unit: 'people' },
+  { key: 'temp', label: 'Temperature', unit: '°C' },
+  { key: 'elevation', label: 'Elevation', unit: 'm' },
+  { key: 'rainfall', label: 'Rainfall', unit: 'mm / yr' },
+  { key: 'gdp', label: 'GDP', unit: 'per capita' },
+  { key: 'density', label: 'Density', unit: 'per km²' }
+];
+const SPARK_W = 170, SPARK_H = 34, BINS = 22, FEW = 12, LABELS_MAX = 6;
+const REGION_COLORS = ['#2a6f97', '#d1495b', '#5f9e3f', '#e08a1e', '#7b5ea7', '#1b998b'];
+const fmt = d3.format('~s');
+const fmtVal = (k, v) => {
+  if (v == null || isNaN(v)) return '–';
+  if (k === 'temp') return d3.format('.1f')(v);
+  if (Math.abs(v) >= 1000) return d3.format('.3~s')(v);
+  return d3.format(',.0f')(v);
+};
+
+d3.json('data/cities-synthetic.json').then(data => {
+  const regions = Array.from(new Set(data.map(d => d.region))).sort();
+  const color = d3.scaleOrdinal(regions, REGION_COLORS);
+  const N = data.length;
+
+  // normalized scales: value -> [0,1], log where the data spans orders of magnitude
+  AXES.forEach(a => {
+    const [lo, hi] = d3.extent(data, d => d[a.key]);
+    a.log = lo > 0 && hi / lo > 30;
+    a.n = (a.log ? d3.scaleLog() : d3.scaleLinear()).domain([lo, hi]).range([0, 1]).nice();
+    a.values = data.map(d => d[a.key]);
+  });
+
+  const extents = {};          // key -> [lo, hi] in data units
+  const regionOff = new Set();
+  let passing = data;
+  const passes = d => !regionOff.has(d.region) &&
+    AXES.every(a => !extents[a.key] || (d[a.key] >= extents[a.key][0] && d[a.key] <= extents[a.key][1]));
+
+  // ---------- parallel coordinates ----------
+  const svg = d3.select('#pc');
+  let pcBrushes = {}, geo = {};
+  const M = { top: 46, right: 96, bottom: 26, left: 44 };
+
+  function buildPC() {
+    svg.selectAll('*').remove();
+    const box = svg.node().getBoundingClientRect();
+    const W = box.width, H = box.height;
+    svg.attr('viewBox', `0 0 ${W} ${H}`);
+    const iw = W - M.left - M.right, ih = H - M.top - M.bottom;
+    const x = d3.scalePoint(AXES.map(a => a.key), [0, iw]);
+    geo = { x, ih, iw };
+    const g = svg.append('g').attr('transform', `translate(${M.left},${M.top})`);
+    const y = a => v => (1 - a.n(v)) * ih;
+    geo.y = y;
+
+    const line = d => d3.line()(AXES.map(a => [x(a.key), y(a)(d[a.key])]));
+    g.append('g').attr('class', 'lines').selectAll('path').data(data, d => d.city).join('path')
+      .attr('class', 'line').attr('d', line).attr('stroke', d => color(d.region));
+    g.append('g').attr('class', 'labels');
+
+    const axis = g.selectAll('.axis').data(AXES).join('g').attr('class', 'axis')
+      .attr('transform', a => `translate(${x(a.key)},0)`);
+    axis.each(function (a) {
+      const s = d3.scaleLinear().domain([0, 1]).range([ih, 0]);
+      const ticks = a.n.ticks(a.log ? 4 : 5);
+      d3.select(this).call(d3.axisLeft(s).tickValues(ticks.map(a.n)).tickFormat((t, i) => fmt(ticks[i])).tickSize(4));
+    });
+    axis.append('text').attr('class', 'axis-title').attr('y', -26).text(a => a.label);
+    axis.append('text').attr('class', 'axis-unit').attr('y', -14).text(a => a.unit + (a.log ? ' (log)' : ''));
+
+    pcBrushes = {};
+    axis.append('g').attr('class', 'brush').each(function (a) {
+      const b = d3.brushY().extent([[-10, 0], [10, ih]])
+        .on('brush end', ev => {
+          if (!ev.sourceEvent) return;
+          if (!ev.selection) delete extents[a.key];
+          else {
+            const [y0, y1] = ev.selection;
+            extents[a.key] = [a.n.invert(1 - y1 / ih), a.n.invert(1 - y0 / ih)];
+          }
+          update('pc');
+        });
+      pcBrushes[a.key] = b;
+      d3.select(this).call(b);
+    });
+    update();
+  }
+
+  // ---------- table ----------
+  const rows = d3.select('#tbody').selectAll('tr').data(AXES).join('tr').attr('data-key', a => a.key);
+  rows.append('td').attr('class', 'name').html(a => `${a.label}<small>${a.unit}</small>`);
+  ['min', 'med', 'max'].forEach(c => rows.append('td').attr('class', `stat ${c}`));
+  const sparkBrushes = {};
+  rows.append('td').attr('class', 'spark-cell').each(function (a) {
+    const s = d3.select(this).append('svg').attr('class', 'spark').attr('width', SPARK_W).attr('height', SPARK_H);
+    s.append('g').attr('class', 'bars-all');
+    s.append('g').attr('class', 'bars-sel');
+    s.append('g').attr('class', 'dots');
+    s.append('line').attr('class', 'baseline').attr('x1', 0).attr('x2', SPARK_W).attr('y1', SPARK_H - 0.5).attr('y2', SPARK_H - 0.5);
+    s.append('text').attr('class', 'empty-note').attr('x', SPARK_W / 2).attr('y', SPARK_H / 2 + 3).attr('text-anchor', 'middle');
+    const b = d3.brushX().extent([[0, 0], [SPARK_W, SPARK_H]]).on('brush end', ev => {
+      if (!ev.sourceEvent) return;
+      if (!ev.selection) delete extents[a.key];
+      else extents[a.key] = [a.n.invert(ev.selection[0] / SPARK_W), a.n.invert(ev.selection[1] / SPARK_W)];
+      update('table');
+    });
+    sparkBrushes[a.key] = b;
+    s.append('g').attr('class', 'brush').call(b);
+  });
+
+  // histogram in normalized space
+  const hist = (vals, a) => {
+    const bins = d3.bin().domain([0, 1]).thresholds(d3.range(1, BINS).map(i => i / BINS)).value(v => a.n(v))(vals);
+    return bins;
+  };
+  const allHist = AXES.map(a => hist(a.values, a));
+
+  function drawSpark(a, i, sel, vals) {
+    const s = d3.select(sel);
+    const barW = SPARK_W / BINS;
+    const yAll = d3.scaleLinear([0, d3.max(allHist[i], b => b.length)], [SPARK_H, 2]);
+    s.select('.bars-all').selectAll('rect').data(allHist[i]).join('rect').attr('class', 'bar-all')
+      .attr('x', (b, j) => j * barW + 0.5).attr('width', barW - 1)
+      .attr('y', b => yAll(b.length)).attr('height', b => SPARK_H - yAll(b.length));
+    s.select('.empty-note').text(vals.length ? '' : 'no cities in brush');
+
+    const few = vals.length > 0 && vals.length <= FEW;
+    const selBins = few ? [] : (vals.length ? hist(vals, a) : []);
+    const ySel = d3.scaleLinear([0, Math.max(1, d3.max(selBins, b => b.length) || 1)], [SPARK_H, 2]);
+    s.select('.bars-sel').selectAll('rect').data(selBins).join('rect').attr('class', 'bar-sel')
+      .attr('x', (b, j) => j * barW + 0.5).attr('width', barW - 1)
+      .attr('y', b => ySel(b.length)).attr('height', b => SPARK_H - ySel(b.length));
+
+    // few cities: individual dots, stacked so none overlap
+    let dotData = [];
+    if (few) {
+      const r = 4, levels = [];
+      dotData = passing.map(d => ({ d, x: a.n(d[a.key]) * SPARK_W })).sort((p, q) => p.x - q.x);
+      dotData.forEach(p => {
+        let l = 0;
+        while (levels[l] !== undefined && p.x - levels[l] < 2 * r + 1) l++;
+        levels[l] = p.x; p.y = SPARK_H - r - 3 - l * (2 * r + 1);
+      });
+      dotData.forEach(p => p.x = Math.max(r, Math.min(SPARK_W - r, p.x)));
+    }
+    s.select('.dots').selectAll('circle').data(dotData, p => p.d.city).join('circle').attr('class', 'dot')
+      .attr('r', 4).attr('cx', p => p.x).attr('cy', p => Math.max(4, p.y)).attr('fill', p => color(p.d.region))
+      .selectAll('title').data(p => [p]).join('title').text(p => `${p.d.city} (${p.d.region}): ${fmtVal(a.key, p.d[a.key])}`);
+  }
+
+  // ---------- update ----------
+  function update(source) {
+    passing = data.filter(passes);
+    const n = passing.length;
+    const badge = d3.select('#badge').text(`${n} of ${N} cities`)
+      .classed('few', n > 0 && n <= FEW).classed('none', n === 0);
+
+    d3.selectAll('.line').classed('dimmed', d => !passes(d)).classed('active', passes)
+      .classed('few', d => n <= FEW && passes(d));
+    d3.selectAll('.line.active').raise();
+
+    // rows
+    rows.classed('filtered', a => !!extents[a.key]);
+    rows.each(function (a, i) {
+      const vals = passing.map(d => d[a.key]).sort(d3.ascending);
+      const r = d3.select(this);
+      const st = { min: vals[0], med: d3.median(vals), max: vals[vals.length - 1] };
+      ['min', 'med', 'max'].forEach(c => r.select('.' + c).text(fmtVal(a.key, st[c])).classed('empty', !vals.length));
+      drawSpark(a, i, r.select('svg').node(), vals);
+    });
+
+    // sync brush in the view that was not the source
+    AXES.forEach(a => {
+      const e = extents[a.key];
+      if (source !== 'pc') {
+        const node = svg.selectAll('.axis').filter(x => x === a).select('.brush');
+        if (!node.empty()) node.call(pcBrushes[a.key].move, e ? [(1 - a.n(e[1])) * geo.ih, (1 - a.n(e[0])) * geo.ih] : null);
+      }
+      if (source !== 'table') {
+        d3.select(`tr[data-key=${a.key}] .brush`).call(sparkBrushes[a.key].move, e ? [a.n(e[0]) * SPARK_W, a.n(e[1]) * SPARK_W] : null);
+      }
+    });
+
+    drawLabels(n);
+    drawFewList(n);
+  }
+
+  // right-edge city labels when only a handful pass
+  function drawLabels(n) {
+    const g = svg.select('.labels');
+    if (g.empty()) return;
+    const last = AXES[AXES.length - 1];
+    let items = n > 0 && n <= LABELS_MAX ? passing.map(d => ({ d, y: geo.y(last)(d[last.key]) })).sort((p, q) => p.y - q.y) : [];
+    items.forEach((p, i) => { p.ly = p.y; if (i && p.ly < items[i - 1].ly + 13) p.ly = items[i - 1].ly + 13; });
+    const x0 = geo.x(last.key);
+    const sel = g.selectAll('g.city-label-group').data(items, p => p.d.city).join(enter => {
+      const e = enter.append('g').attr('class', 'city-label-group');
+      e.append('path').attr('class', 'city-label-leader');
+      e.append('text').attr('class', 'city-label').attr('x', 22).attr('dy', '0.32em');
+      return e;
+    });
+    sel.attr('transform', `translate(${x0},0)`);
+    sel.select('path').attr('d', p => `M0,${p.y}L10,${p.ly}L18,${p.ly}`);
+    sel.select('text').attr('y', p => p.ly).attr('fill', p => color(p.d.region)).text(p => p.d.city.replace('city-', 'C') + ' ' + p.d.region);
+  }
+
+  function drawFewList(n) {
+    const el = d3.select('#few');
+    if (n === 0) { el.html('No city passes every brush. Widen or clear one to bring cities back.'); return; }
+    if (n > FEW) { el.html(''); return; }
+    el.html('Passing: ');
+    el.selectAll('span.chip').data(passing).join('span').attr('class', 'chip')
+      .html(d => `<span class="swatch" style="background:${color(d.region)}"></span>${d.city} · ${d.region}`);
+  }
+
+  // ---------- legend and reset ----------
+  const items = d3.select('#legend').selectAll('.legend-item').data(regions).join('div').attr('class', 'legend-item')
+    .on('click', (ev, r) => { regionOff.has(r) ? regionOff.delete(r) : regionOff.add(r); items.classed('off', q => regionOff.has(q)); update(); })
+    .on('mouseenter', (ev, r) => { d3.select(ev.currentTarget).classed('highlight', true); d3.selectAll('.line').classed('highlight', d => d.region === r); })
+    .on('mouseleave', ev => { d3.select(ev.currentTarget).classed('highlight', false); d3.selectAll('.line').classed('highlight', false); });
+  items.append('span').attr('class', 'swatch').style('background', r => color(r));
+  items.append('span').text(r => r);
+
+  d3.select('#reset').on('click', () => {
+    Object.keys(extents).forEach(k => delete extents[k]);
+    regionOff.clear(); items.classed('off', false);
+    update();
+  });
+
+  buildPC();
+  let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(buildPC, 120); });
+});
+</script>
+</body>
+</html>

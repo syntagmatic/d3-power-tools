@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cities: parallel coordinates + summary table</title>
+<style>
+  :root {
+    --ink: #1f2933; --muted: #6b7785; --rule: #d9dee4; --bg: #fafbfc; --accent: #0b6bcb;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { font: 12px/1.3 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; color: var(--ink); background: var(--bg); display: flex; flex-direction: column; overflow: hidden; }
+  header { display: flex; align-items: center; gap: 16px; padding: 8px 16px; border-bottom: 1px solid var(--rule); background: #fff; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  .count-badge { background: var(--accent); color: #fff; border-radius: 12px; padding: 3px 12px; font-weight: 600; font-variant-numeric: tabular-nums; min-width: 110px; text-align: center; }
+  .count-badge.few { background: #b45309; }
+  .count-badge.empty { background: #b91c1c; }
+  .legend { display: flex; gap: 6px; margin-left: auto; }
+  .legend-item { display: flex; align-items: center; gap: 5px; padding: 2px 8px; border: 1px solid var(--rule); border-radius: 10px; cursor: pointer; user-select: none; background: #fff; }
+  .legend-item .swatch { width: 9px; height: 9px; border-radius: 50%; }
+  .legend-item.dimmed { opacity: .4; }
+  .legend-item.dimmed .swatch { background: #bbb !important; }
+  button.reset { font: inherit; padding: 3px 10px; border: 1px solid var(--rule); border-radius: 4px; background: #fff; cursor: pointer; }
+  button.reset:hover { border-color: var(--accent); color: var(--accent); }
+  main { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); }
+  #pc-wrap { min-width: 0; min-height: 0; border-right: 1px solid var(--rule); position: relative; }
+  #pc-wrap svg { width: 100%; height: 100%; display: block; }
+  #table-wrap { padding: 8px 12px; overflow: hidden; display: flex; flex-direction: column; min-height: 0; }
+  table { border-collapse: collapse; width: 100%; flex: 1; table-layout: fixed; }
+  th { text-align: right; font-weight: 500; color: var(--muted); font-size: 11px; padding: 2px 6px; border-bottom: 1px solid var(--rule); }
+  th:first-child { text-align: left; }
+  td { padding: 0 6px; border-bottom: 1px solid #eef0f3; text-align: right; font-variant-numeric: tabular-nums; }
+  td.axis-name { text-align: left; font-weight: 600; }
+  td.axis-name small { display: block; color: var(--muted); font-weight: 400; }
+  td.stat.empty { color: #b7bec6; }
+  td.spark-cell { padding: 0; }
+  td.spark-cell svg { display: block; width: 100%; height: 100%; }
+  .readout { height: 30px; padding-top: 6px; color: var(--muted); font-size: 11px; }
+  .readout b { color: var(--ink); }
+
+  /* parallel coordinates */
+  .line { fill: none; stroke-width: 1.2; stroke-opacity: .55; }
+  .line.dimmed { stroke: #c5cbd2 !important; stroke-opacity: .25; stroke-width: 1; }
+  .line.active { stroke-width: 2.2; stroke-opacity: .95; }
+  .line.highlight { stroke-width: 3.4; stroke-opacity: 1; }
+  .axis-label { font-weight: 600; font-size: 12px; text-anchor: middle; fill: var(--ink); }
+  .axis-unit { font-size: 10px; text-anchor: middle; fill: var(--muted); }
+  .axis .domain { stroke: #8a94a0; }
+  .axis text { fill: var(--muted); font-size: 10px; }
+  .axis.filtered .axis-label { fill: var(--accent); }
+  .city-label { font-size: 10.5px; fill: var(--ink); pointer-events: none; }
+  .city-label-leader { stroke: #9aa4af; stroke-width: .6; }
+  .brush .selection { fill: var(--accent); fill-opacity: .14; stroke: var(--accent); stroke-width: 1.2; }
+
+  /* sparklines */
+  .bar { fill: #7b8794; }
+  .bar.ghost { fill: #e3e7ec; }
+  .dot { stroke: #fff; stroke-width: 1; }
+  .dot.highlight { stroke: #111; stroke-width: 1.6; }
+  .spark-base { stroke: #cfd5db; }
+  .med-tick { stroke: var(--ink); stroke-width: 1.2; }
+  .spark-empty { fill: #b7bec6; font-size: 10px; text-anchor: middle; }
+  .spark-brush .selection { fill: var(--accent); fill-opacity: .12; stroke: var(--accent); stroke-width: 1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>150 synthetic cities</h1>
+  <div class="count-badge" id="badge"></div>
+  <button class="reset" id="reset">Clear brushes</button>
+  <div class="legend" id="legend"></div>
+</header>
+<main>
+  <div id="pc-wrap"><svg id="pc"></svg></div>
+  <div id="table-wrap">
+    <table>
+      <colgroup><col style="width:18%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col></colgroup>
+      <thead><tr><th>Axis</th><th>Min</th><th>Median</th><th>Max</th><th>Brushed distribution (drag to brush)</th></tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div class="readout" id="readout">Hover a line to inspect a city.</div>
+  </div>
+</main>
+<script src="d3.v7.min.js"></script>
+<script>
+d3.json('data/cities-synthetic.json').then(data => {
+  const dims = [
+    { key: 'population', label: 'Population', unit: '' },
+    { key: 'temp', label: 'Temp', unit: '°C' },
+    { key: 'elevation', label: 'Elevation', unit: 'm' },
+    { key: 'rainfall', label: 'Rainfall', unit: 'mm' },
+    { key: 'gdp', label: 'GDP', unit: '$ per cap' },
+    { key: 'density', label: 'Density', unit: '/km²' }
+  ];
+  const regions = [...new Set(data.map(d => d.region))].sort();
+  const palette = ['#2563eb', '#dc2626', '#059669', '#d97706', '#7c3aed', '#0891b2', '#db2777', '#65a30d'];
+  const color = d3.scaleOrdinal(regions, palette);
+
+  // A scale factory shared by both views so brush extents translate exactly.
+  const makeScale = (dim, range) => {
+    const vals = data.map(d => d[dim.key]);
+    const [lo, hi] = d3.extent(vals);
+    const useLog = lo > 0 && hi / lo > 40;
+    const s = (useLog ? d3.scaleLog() : d3.scaleLinear()).domain([lo, hi]).range(range);
+    if (!useLog) s.nice();
+    return s;
+  };
+  const fmt = (dim, v) => {
+    if (v == null || isNaN(v)) return '–';
+    if (dim.key === 'temp') return v.toFixed(1);
+    if (Math.abs(v) >= 1e6) return d3.format('.3~s')(v).replace('M', 'M');
+    if (Math.abs(v) >= 1e4) return d3.format('.3~s')(v);
+    return d3.format(',.0f')(v);
+  };
+  const tickFmt = d3.format('~s');
+
+  const filters = {};          // key -> [lo, hi] in data units
+  const offRegions = new Set();
+  const pass = d => !offRegions.has(d.region) &&
+    dims.every(m => !filters[m.key] || (d[m.key] >= filters[m.key][0] && d[m.key] <= filters[m.key][1]));
+
+  // ---------- Parallel coordinates ----------
+  const svg = d3.select('#pc');
+  const g = svg.append('g');
+  const M = { t: 50, r: 96, b: 16, l: 46 };
+  let W, H, x, ys = {}, pcBrushes = {};
+  const line = d3.line();
+  const linesG = g.append('g').attr('class', 'lines');
+  const axesG = g.append('g').attr('class', 'axes');
+  const labelsG = g.append('g').attr('class', 'city-labels');
+
+  const cityPath = d => line(dims.map(m => [x(m.key), ys[m.key](d[m.key])]));
+
+  const drawPC = () => {
+    const box = document.getElementById('pc-wrap').getBoundingClientRect();
+    W = box.width - M.l - M.r; H = box.height - M.t - M.b;
+    svg.attr('viewBox', `0 0 ${box.width} ${box.height}`);
+    g.attr('transform', `translate(${M.l},${M.t})`);
+    x = d3.scalePoint(dims.map(m => m.key), [0, W]);
+    dims.forEach(m => { ys[m.key] = makeScale(m, [H, 0]); });
+
+    linesG.selectAll('.line').data(data, d => d.city).join('path')
+      .attr('class', 'line').attr('d', cityPath).attr('stroke', d => color(d.region))
+      .on('mouseenter', (e, d) => setHover(d)).on('mouseleave', () => setHover(null));
+
+    const ax = axesG.selectAll('.axis').data(dims, m => m.key).join(enter => {
+      const a = enter.append('g').attr('class', 'axis');
+      a.append('g').attr('class', 'ticks');
+      a.append('text').attr('class', 'axis-label').attr('y', -28);
+      a.append('text').attr('class', 'axis-unit').attr('y', -15);
+      a.append('g').attr('class', 'brush');
+      return a;
+    }).attr('transform', m => `translate(${x(m.key)},0)`);
+    ax.select('.ticks').each(function (m) {
+      d3.select(this).call(d3.axisLeft(ys[m.key]).ticks(5, m.key === 'temp' ? undefined : '~s').tickSize(4).tickFormat(tickFmt));
+    });
+    ax.select('.axis-label').text(m => m.label);
+    ax.select('.axis-unit').text(m => m.unit);
+    ax.select('.brush').each(function (m) {
+      const b = d3.brushY().extent([[-12, 0], [12, H]])
+        .on('start brush end', e => onBrush(e, m, 'pc', this));
+      pcBrushes[m.key] = { brush: b, node: this };
+      d3.select(this).call(b);
+    });
+  };
+
+  // ---------- Table + sparklines ----------
+  const SW = 230, SH = 40, SB = 6, bins = 22;
+  const sx = {};
+  const rows = d3.select('#tbody').selectAll('tr').data(dims).join('tr');
+  rows.append('td').attr('class', 'axis-name').html(m => `${m.label}<small>${m.unit}</small>`);
+  ['min', 'med', 'max'].forEach(k => rows.append('td').attr('class', `stat ${k}`));
+  const sparkCells = rows.append('td').attr('class', 'spark-cell').append('svg')
+    .attr('viewBox', `0 0 ${SW} ${SH}`).attr('preserveAspectRatio', 'none');
+  const spBrushes = {};
+  sparkCells.each(function (m) {
+    const s = d3.select(this);
+    sx[m.key] = makeScale(m, [4, SW - 4]);
+    s.append('g').attr('class', 'ghosts');
+    s.append('g').attr('class', 'bars');
+    s.append('line').attr('class', 'spark-base').attr('x1', 4).attr('x2', SW - 4).attr('y1', SH - SB).attr('y2', SH - SB);
+    s.append('g').attr('class', 'dots');
+    s.append('line').attr('class', 'med-tick');
+    s.append('text').attr('class', 'spark-empty').attr('x', SW / 2).attr('y', SH / 2 + 3);
+    const b = d3.brushX().extent([[4, 0], [SW - 4, SH]])
+      .on('start brush end', e => onBrush(e, m, 'spark', bg.node()));
+    const bg = s.append('g').attr('class', 'spark-brush');
+    bg.call(b);
+    s.select('.dots').raise();
+    spBrushes[m.key] = { brush: b, node: bg.node() };
+  });
+
+  const binsFor = (m, vals) => {
+    const s = sx[m.key], [a, b] = s.range();
+    const th = d3.range(1, bins).map(i => s.invert(a + (b - a) * i / bins));
+    return d3.bin().domain(s.domain()).thresholds(th)(vals);
+  };
+  const ghostBins = dims.map(m => binsFor(m, data.map(d => d[m.key])));
+
+  // ---------- Interaction ----------
+  let syncing = false;
+  function onBrush(e, m, view, node) {
+    if (syncing || !e.sourceEvent) return;
+    if (!e.selection) delete filters[m.key];
+    else {
+      const [p, q] = e.selection;
+      filters[m.key] = view === 'pc'
+        ? [ys[m.key].invert(q), ys[m.key].invert(p)]
+        : [sx[m.key].invert(p), sx[m.key].invert(q)];
+    }
+    update(node);
+  }
+
+  function syncBrushes(except) {
+    syncing = true;
+    dims.forEach(m => {
+      const f = filters[m.key];
+      const pcSel = f ? [ys[m.key](f[1]), ys[m.key](f[0])] : null;
+      const spSel = f ? [sx[m.key](f[0]), sx[m.key](f[1])] : null;
+      if (pcBrushes[m.key].node !== except) d3.select(pcBrushes[m.key].node).call(pcBrushes[m.key].brush.move, pcSel);
+      if (spBrushes[m.key].node !== except) d3.select(spBrushes[m.key].node).call(spBrushes[m.key].brush.move, spSel);
+    });
+    syncing = false;
+  }
+
+  let hovered = null;
+  function setHover(d) {
+    hovered = d;
+    linesG.selectAll('.line').classed('highlight', c => c === d);
+    if (d) linesG.selectAll('.line').filter(c => c === d).raise();
+    d3.selectAll('.dot').classed('highlight', o => o.d === d);
+    const ro = document.getElementById('readout');
+    ro.innerHTML = d
+      ? `<b>${d.city}</b> (${d.region}) &middot; ` + dims.map(m => `${m.label.toLowerCase()} ${fmt(m, d[m.key])}${m.unit && m.key !== 'gdp' ? ' ' + m.unit : ''}`).join(' &middot; ')
+      : 'Hover a line to inspect a city.';
+  }
+
+  function update(sourceNode) {
+    const sel = data.filter(pass);
+    const n = sel.length;
+    const few = n > 0 && n <= 6;
+
+    const badge = d3.select('#badge').text(`${n} of ${data.length} cities`)
+      .classed('few', few).classed('empty', n === 0);
+
+    linesG.selectAll('.line')
+      .classed('dimmed', d => !pass(d))
+      .classed('active', d => pass(d) && (n < data.length) && few);
+    linesG.selectAll('.line').filter(pass).raise();
+    if (hovered) linesG.selectAll('.line').filter(c => c === hovered).raise();
+    axesG.selectAll('.axis').classed('filtered', m => !!filters[m.key]);
+    d3.selectAll('.legend-item').classed('dimmed', r => offRegions.has(r));
+
+    // direct labels when only a few remain
+    const lastKey = dims[dims.length - 1].key;
+    let lab = [];
+    if (few) {
+      lab = sel.map(d => ({ d, y: ys[lastKey](d[lastKey]) })).sort((a, b) => a.y - b.y);
+      lab.forEach((l, i) => { l.ty = i === 0 ? l.y : Math.max(l.y, lab[i - 1].ty + 13); });
+    }
+    const li = labelsG.selectAll('.city-label-group').data(lab, l => l.d.city).join(en => {
+      const gg = en.append('g').attr('class', 'city-label-group');
+      gg.append('line').attr('class', 'city-label-leader');
+      gg.append('text').attr('class', 'city-label').attr('dy', '0.32em');
+      return gg;
+    });
+    li.select('line').attr('x1', W + 2).attr('x2', W + 12).attr('y1', l => l.y).attr('y2', l => l.ty);
+    li.select('text').attr('x', W + 15).attr('y', l => l.ty).text(l => `${l.d.city} (${l.d.region})`)
+      .style('fill', l => color(l.d.region));
+
+    // table stats + sparklines
+    rows.each(function (m, i) {
+      const vals = sel.map(d => d[m.key]).sort(d3.ascending);
+      const r = d3.select(this);
+      const st = n ? [vals[0], d3.median(vals), vals[n - 1]] : [null, null, null];
+      ['min', 'med', 'max'].forEach((k, j) => r.select('.' + k).text(fmt(m, st[j])).classed('empty', !n));
+
+      const s = r.select('svg');
+      const gh = ghostBins[i], gmax = d3.max(gh, b => b.length);
+      const hy = d3.scaleLinear([0, gmax], [0, SH - SB - 6]);
+      const barRect = (b, h) => [sx[m.key](b.x0), h, Math.max(1, sx[m.key](b.x1) - sx[m.key](b.x0) - 1)];
+      s.select('.ghosts').selectAll('.bar.ghost').data(gh).join('rect').attr('class', 'bar ghost')
+        .attr('x', b => sx[m.key](b.x0)).attr('width', b => Math.max(1, sx[m.key](b.x1) - sx[m.key](b.x0) - 1))
+        .attr('y', b => SH - SB - hy(b.length)).attr('height', b => hy(b.length));
+
+      // subset: histogram when many; dots when few so 3-4 cities stay legible
+      const small = n > 0 && n <= 12;
+      const sb = n && !small ? binsFor(m, vals) : [];
+      const smax = d3.max(sb, b => b.length) || 1;
+      const sy = d3.scaleLinear([0, smax], [0, SH - SB - 4]);
+      s.select('.bars').selectAll('.bar.subset').data(sb).join('rect').attr('class', 'bar subset')
+        .attr('x', b => sx[m.key](b.x0)).attr('width', b => Math.max(1, sx[m.key](b.x1) - sx[m.key](b.x0) - 1))
+        .attr('y', b => SH - SB - sy(b.length)).attr('height', b => sy(b.length));
+
+      // stack coinciding dots vertically so nothing hides
+      const dotData = small ? sel.map(d => ({ d, px: sx[m.key](d[m.key]) })) : [];
+      const taken = [];
+      dotData.sort((a, b) => a.px - b.px).forEach(o => {
+        let lvl = 0;
+        while (taken.some(t => t.lvl === lvl && Math.abs(t.px - o.px) < 9)) lvl++;
+        o.lvl = lvl; taken.push(o);
+      });
+      s.select('.dots').selectAll('.dot').data(dotData, o => o.d.city).join('circle').attr('class', 'dot')
+        .attr('r', 4.2).attr('cx', o => o.px).attr('cy', o => SH - SB - 5 - o.lvl * 8)
+        .attr('fill', o => color(o.d.region))
+        .on('mouseenter', (e, o) => setHover(o.d)).on('mouseleave', () => setHover(null));
+      s.select('.med-tick').attr('display', n && !small ? null : 'none')
+        .attr('x1', n ? sx[m.key](st[1]) : 0).attr('x2', n ? sx[m.key](st[1]) : 0)
+        .attr('y1', 2).attr('y2', SH - SB);
+      s.select('.spark-empty').text(n ? '' : 'no cities in brush');
+    });
+    // dots carry {d,px}; class toggling in setHover compares to city objects
+    d3.selectAll('.dot').classed('highlight', o => hovered && o.d === hovered);
+
+    syncBrushes(sourceNode);
+  }
+
+  // legend: click toggles region
+  d3.select('#legend').selectAll('.legend-item').data(regions).join('div').attr('class', 'legend-item')
+    .html(r => `<span class="swatch" style="background:${color(r)}"></span>${r}`)
+    .on('click', (e, r) => { offRegions.has(r) ? offRegions.delete(r) : offRegions.add(r); update(); });
+
+  document.getElementById('reset').onclick = () => {
+    Object.keys(filters).forEach(k => delete filters[k]);
+    offRegions.clear();
+    update();
+  };
+
+  drawPC();
+  update();
+  let rt;
+  window.addEventListener('resize', () => {
+    clearTimeout(rt);
+    rt = setTimeout(() => { drawPC(); update(); }, 120);
+  });
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cities: parallel coordinates + sparkline summary</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="d3.v7.min.js"></script>
+<style>
+  :root { --ink:#1d2330; --mute:#6b7383; --rule:#dfe3ea; --bg:#fafbfc; --accent:#2b5fd9; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; }
+  body { font:12px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif; color:var(--ink); background:var(--bg);
+         display:flex; flex-direction:column; overflow:hidden; }
+  header { display:flex; align-items:center; gap:16px; padding:8px 16px; border-bottom:1px solid var(--rule); background:#fff; }
+  header h1 { font-size:14px; margin:0; font-weight:600; }
+  header .sub { color:var(--mute); }
+  .count-badge { margin-left:auto; padding:3px 10px; border-radius:12px; background:var(--ink); color:#fff;
+                 font-variant-numeric:tabular-nums; }
+  .count-badge b { font-size:15px; }
+  .count-badge.empty { background:#b3261e; }
+  button.reset { font:inherit; padding:3px 10px; border:1px solid var(--rule); background:#fff; border-radius:4px; cursor:pointer; }
+  button.reset:hover { border-color:var(--accent); color:var(--accent); }
+  main { flex:1; min-height:0; display:grid; grid-template-columns: minmax(0,1fr) 470px; }
+  #pc-wrap { min-width:0; min-height:0; position:relative; }
+  #pc { width:100%; height:100%; display:block; }
+  aside { border-left:1px solid var(--rule); background:#fff; padding:8px 12px; display:flex; flex-direction:column; gap:8px; min-height:0; overflow:hidden; }
+  .legend { display:flex; flex-wrap:wrap; gap:4px 12px; }
+  .legend-item { display:flex; align-items:center; gap:5px; cursor:default; color:var(--mute); }
+  .legend-item.active { color:var(--ink); font-weight:600; }
+  .legend-swatch { width:10px; height:10px; border-radius:2px; }
+
+  /* parallel coordinates */
+  .line { fill:none; stroke-linejoin:round; transition:stroke-opacity .12s; }
+  .line.active { stroke-opacity:.5; stroke-width:1.2; }
+  .line.dimmed { stroke:#c9ced8 !important; stroke-opacity:.22; stroke-width:.8; }
+  .sparse .line.active { stroke-opacity:.95; stroke-width:2.4; }
+  .line.highlight { stroke-opacity:1 !important; stroke-width:3.2 !important; }
+  .line.dimmed.highlight { stroke:var(--ink) !important; stroke-opacity:.8 !important; }
+  .region-focus .line:not(.region-on) { stroke-opacity:.06 !important; }
+  .axis-title { font-weight:600; font-size:12px; fill:var(--ink); text-anchor:middle; }
+  .axis-unit { font-size:10px; fill:var(--mute); text-anchor:middle; }
+  .axis .domain { stroke:#8b93a3; }
+  .axis text { fill:var(--mute); font-size:10px; }
+  .selection { fill:var(--accent); fill-opacity:.18; stroke:var(--accent); stroke-width:1; }
+  .handle-dot { fill:var(--accent); }
+
+  /* table */
+  table.summary { border-collapse:collapse; width:100%; font-variant-numeric:tabular-nums; }
+  .summary th { text-align:right; font-weight:500; color:var(--mute); font-size:10px; padding:2px 4px 4px; border-bottom:1px solid var(--rule); }
+  .summary th:first-child, .summary th:last-child { text-align:left; }
+  .summary td { padding:3px 4px; border-bottom:1px solid #eef0f4; text-align:right; vertical-align:middle; }
+  .summary td.name { text-align:left; font-weight:600; }
+  .summary td.stat { white-space:nowrap; }
+  .summary td.spark { padding:2px 0 2px 6px; text-align:left; }
+  .summary tr.active-row td { background:#f3f7ff; }
+  .summary tr.active-row td.name { color:var(--accent); }
+  .summary td.stat.empty { color:#b3b8c4; }
+  .spark svg { display:block; overflow:visible; }
+  .spark-full { fill:#e6e9ef; stroke:none; }
+  .spark-subset { fill:rgba(43,95,217,.22); stroke:var(--accent); stroke-width:1.4; }
+  .spark-median { stroke:#b3261e; stroke-width:1.6; }
+  .spark-base { stroke:#c4c9d4; stroke-width:1; }
+  .dot { fill:var(--accent); stroke:#fff; stroke-width:1; }
+  .dot.highlight { fill:#b3261e; }
+  .note { color:var(--mute); font-size:10px; }
+
+  /* city list / detail */
+  .cities { display:flex; flex-direction:column; gap:3px; min-height:0; }
+  .cities h2 { font-size:11px; margin:0; color:var(--mute); font-weight:600; letter-spacing:.04em; text-transform:uppercase; }
+  .city-list { display:flex; flex-wrap:wrap; gap:4px; }
+  .city-chip { display:flex; align-items:center; gap:5px; padding:2px 7px; border:1px solid var(--rule); border-radius:10px; background:#fff; cursor:default; }
+  .city-chip.highlight { border-color:var(--ink); background:#f0f2f6; }
+  .city-chip .chip-dot { width:8px; height:8px; border-radius:50%; }
+  .detail { min-height:32px; color:var(--ink); font-variant-numeric:tabular-nums; }
+  .detail .k { color:var(--mute); }
+</style>
+</head>
+<body>
+<header>
+  <h1>150 synthetic cities</h1>
+  <span class="sub">Drag on any axis, or across a sparkline row, to filter both views. Brushes combine (AND).</span>
+  <button class="reset" id="reset">Clear brushes</button>
+  <div class="count-badge" id="badge"><b>150</b> of 150 cities</div>
+</header>
+<main>
+  <div id="pc-wrap"><svg id="pc"></svg></div>
+  <aside>
+    <div class="legend" id="legend"></div>
+    <table class="summary" id="summary">
+      <thead><tr><th>Axis</th><th>Min</th><th>Median</th><th>Max</th><th>Distribution of brushed cities</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="note">Sparklines share each axis's full-data scale. Grey = all cities, blue = brushed (shape normalized), red tick = median. At 12 or fewer cities, individual dots replace the curve.</div>
+    <div class="cities">
+      <h2>Brushed cities</h2>
+      <div class="city-list" id="city-list"></div>
+      <div class="detail" id="detail"></div>
+    </div>
+  </aside>
+</main>
+
+<script type="module">
+const REGION_COLORS = ["#4e79a7", "#e08a1e", "#3f9a5b", "#d0454c", "#9a6fb0", "#2fa3a0"];
+const SPARSE_N = 12;          // at or below this, draw individual dots
+const LIST_N = 10;            // at or below this, list city chips
+
+const AXES = [
+  { key: "population", label: "Population", unit: "people",  fmt: d3.format("~s") },
+  { key: "temp",       label: "Temp",       unit: "°C", fmt: d3.format(".1f") },
+  { key: "elevation",  label: "Elevation",  unit: "m",       fmt: d3.format(",.0f") },
+  { key: "rainfall",   label: "Rainfall",   unit: "mm/yr",   fmt: d3.format(",.0f") },
+  { key: "gdp",        label: "GDP",        unit: "$ per capita", fmt: d3.format("~s") },
+  { key: "density",    label: "Density",    unit: "per km²", fmt: d3.format(",.0f") }
+];
+
+const data = await d3.json("data/cities-synthetic.json");
+const regions = [...new Set(data.map(d => d.region))].sort();
+const color = d3.scaleOrdinal(regions, REGION_COLORS);
+
+// Axis order is the design: chain greedily by |r| so adjacent axes are the most related pairs.
+const corr = (a, b) => {
+  const xa = data.map(d => d[a]), xb = data.map(d => d[b]);
+  const ma = d3.mean(xa), mb = d3.mean(xb);
+  const num = d3.sum(xa, (v, i) => (v - ma) * (xb[i] - mb));
+  return num / Math.sqrt(d3.sum(xa, v => (v - ma) ** 2) * d3.sum(xb, v => (v - mb) ** 2));
+};
+const remaining = AXES.slice();
+const axes = [remaining.shift()];
+while (remaining.length) {
+  const last = axes[axes.length - 1].key;
+  remaining.sort((p, q) => Math.abs(corr(last, q.key)) - Math.abs(corr(last, p.key)));
+  axes.push(remaining.shift());
+}
+axes.forEach(a => {
+  const [lo, hi] = d3.extent(data, d => d[a.key]);
+  a.log = lo > 0 && hi / lo > 50;     // heavy right skew: log keeps the low end readable
+  a.domain = [lo, hi];
+  a.median = d3.median(data, d => d[a.key]);
+});
+const keys = axes.map(a => a.key);
+const makeScale = (a, range) => (a.log ? d3.scaleLog() : d3.scaleLinear()).domain(a.domain).range(range).nice();
+
+const filters = {};   // key -> [lo, hi] in data units; shared by both views
+const passes = d => keys.every(k => !filters[k] || (d[k] >= filters[k][0] && d[k] <= filters[k][1]));
+
+const badge = d3.select("#badge");
+const svg = d3.select("#pc");
+const tbody = d3.select("#summary tbody");
+let hovered = null, regionFocus = null;
+let pcBrushes = {}, tableBrushes = {}, yScales = {}, sxScales = {};
+let lineSel, dotLayer = {}, SW = 210, SH = 34;
+let lastSelection = data;
+
+// ---------- legend ----------
+const legend = d3.select("#legend").selectAll(".legend-item").data(regions).join("div").attr("class", "legend-item")
+  .on("mouseenter", (e, r) => { regionFocus = r; applyState(); })
+  .on("mouseleave", () => { regionFocus = null; applyState(); });
+legend.append("span").attr("class", "legend-swatch").style("background", r => color(r));
+legend.append("span").text(r => r);
+
+// ---------- table skeleton ----------
+const rows = tbody.selectAll("tr").data(axes).join("tr").attr("class", "axis-row");
+rows.append("td").attr("class", "name").html(a => `${a.label}<div class="note">${a.unit}</div>`);
+["min", "median", "max"].forEach(s => rows.append("td").attr("class", `stat ${s}`));
+const sparkCells = rows.append("td").attr("class", "spark").append("svg").attr("width", SW).attr("height", SH);
+
+function buildTableSparks() {
+  sparkCells.each(function (a) {
+    const s = d3.select(this);
+    s.selectAll("*").remove();
+    const sx = sxScales[a.key] = makeScale(a, [0, SW]);
+    const bins = d3.bin().domain([0, SW]).thresholds(d3.range(1, 26).map(i => i * SW / 26)).value(d => sx(d[a.key]));
+    const full = bins(data);
+    a.fullBins = full;
+    const area = d3.area().curve(d3.curveMonotoneX);
+    const yFull = d3.scaleLinear([0, d3.max(full, b => b.length)], [SH - 3, 3]);
+    const pts = full.map(b => [(b.x0 + b.x1) / 2, b.length]);
+    s.append("path").attr("class", "spark-full")
+      .attr("d", area.x(p => p[0]).y0(SH - 3).y1(p => yFull(p[1]))([[0, 0], ...pts, [SW, 0]]));
+    s.append("line").attr("class", "spark-base").attr("x1", 0).attr("x2", SW).attr("y1", SH - 3).attr("y2", SH - 3);
+    s.append("path").attr("class", "spark-subset");
+    s.append("g").attr("class", "dot-layer");
+    s.append("line").attr("class", "spark-median").attr("y1", 2).attr("y2", SH - 2).style("display", "none");
+    const brush = d3.brushX().extent([[0, 0], [SW, SH]])
+      .on("brush end", e => onBrush(e, a, "table", sx));
+    tableBrushes[a.key] = brush;
+    const g = s.append("g").attr("class", "brush").call(brush);
+    g.select(".selection").attr("class", "selection");
+    dotLayer[a.key] = g;
+  });
+}
+
+// ---------- parallel coordinates ----------
+function buildPC() {
+  const wrap = document.getElementById("pc-wrap");
+  const W = wrap.clientWidth, H = wrap.clientHeight;
+  const m = { top: 52, right: 44, bottom: 26, left: 52 };
+  svg.attr("viewBox", `0 0 ${W} ${H}`).selectAll("*").remove();
+  const x = d3.scalePoint(keys, [m.left, W - m.right]);
+  keys.forEach(k => { yScales[k] = makeScale(axes.find(a => a.key === k), [H - m.bottom, m.top]); });
+
+  const path = d => { const f = d3.line().x(k => x(k)).y(k => yScales[k](d[k])); return f(keys); };
+
+  lineSel = svg.append("g").attr("class", "lines").selectAll("path").data(data, d => d.city).join("path")
+    .attr("class", "line active").attr("d", path).attr("stroke", d => color(d.region))
+    .on("mouseenter", (e, d) => setHover(d)).on("mouseleave", () => setHover(null));
+
+  const ax = svg.append("g").attr("class", "axes").selectAll("g.axis").data(axes).join("g")
+    .attr("class", "axis").attr("transform", a => `translate(${x(a.key)},0)`);
+  ax.each(function (a) {
+    const y = yScales[a.key];
+    d3.select(this).call(d3.axisLeft(y).ticks(6).tickSize(4).tickFormat(d3.format("~s")));
+    d3.select(this).select(".domain").attr("transform", null);
+  });
+  ax.append("text").attr("class", "axis-title").attr("y", 22).text(a => a.label);
+  ax.append("text").attr("class", "axis-unit").attr("y", 35).text(a => a.unit + (a.log ? " (log)" : ""));
+
+  pcBrushes = {};
+  ax.each(function (a) {
+    const y = yScales[a.key];
+    const brush = d3.brushY().extent([[-12, m.top - 6], [12, H - m.bottom + 6]])
+      .on("brush end", e => onBrush(e, a, "axis", y));
+    pcBrushes[a.key] = brush;
+    d3.select(this).append("g").attr("class", "brush").call(brush);
+  });
+  svg.select(".lines").lower();
+}
+
+function onBrush(e, a, view, scale) {
+  if (!e.sourceEvent) return;    // programmatic sync from the other view
+  const k = a.key;
+  if (!e.selection) delete filters[k];
+  else {
+    const [p0, p1] = e.selection.map(scale.invert).sort((u, v) => u - v);
+    filters[k] = [p0, p1];
+  }
+  update({ view, key: k });
+}
+
+// move the other view's brush for each axis to match filters
+function syncBrushes(skip) {
+  const H = +svg.attr("viewBox").split(" ")[3];
+  axes.forEach(a => {
+    const k = a.key, f = filters[k];
+    if (!(skip && skip.view === "axis" && skip.key === k)) {
+      const g = svg.selectAll("g.axis").filter(d => d.key === k).select(".brush");
+      if (!g.empty()) g.call(pcBrushes[k].move, f ? [yScales[k](f[1]), yScales[k](f[0])] : null);
+    }
+    if (!(skip && skip.view === "table" && skip.key === k)) {
+      const g = dotLayer[k];
+      const sx = sxScales[k];
+      g.call(tableBrushes[k].move, f ? [sx(f[0]), sx(f[1])] : null);
+    }
+  });
+}
+
+// ---------- state -> DOM ----------
+function applyState() {
+  const sel = lastSelection;
+  const n = sel.length;
+  const ok = new Set(sel.map(d => d.city));
+  svg.classed("sparse", n <= SPARSE_N).classed("region-focus", !!regionFocus);
+  lineSel.classed("active", d => ok.has(d.city)).classed("dimmed", d => !ok.has(d.city))
+    .classed("highlight", d => hovered && d.city === hovered.city)
+    .classed("region-on", d => regionFocus && d.region === regionFocus)
+    .attr("stroke", d => color(d.region));
+  lineSel.filter(".active").raise();
+  lineSel.filter(".highlight").raise();
+  legend.classed("active", r => r === regionFocus);
+  d3.selectAll(".city-chip").classed("highlight", d => hovered && d.city === hovered.city);
+  d3.selectAll(".dot").classed("highlight", d => hovered && d.city === hovered.city);
+}
+
+function update(skip) {
+  lastSelection = data.filter(passes);
+  const sel = lastSelection, n = sel.length;
+  badge.classed("empty", n === 0).html(`<b>${n}</b> of ${data.length} cities`);
+
+  rows.classed("active-row", a => !!filters[a.key]);
+  axes.forEach((a, i) => {
+    const vals = sel.map(d => d[a.key]).sort(d3.ascending);
+    const row = rows.filter(r => r === a);
+    const stats = n ? [vals[0], d3.quantileSorted(vals, .5), vals[n - 1]] : [null, null, null];
+    row.selectAll("td.stat").data(stats).classed("empty", v => v == null).text(v => v == null ? "—" : a.fmt(v));
+
+    const s = d3.select(sparkCells.nodes()[i]);
+    const sx = sxScales[a.key];
+    const sparse = n <= SPARSE_N;
+    // subset curve, normalized to its own peak
+    const area = d3.area().curve(d3.curveMonotoneX);
+    if (n && !sparse) {
+      const bins = d3.bin().domain([0, SW]).thresholds(d3.range(1, 26).map(j => j * SW / 26)).value(d => sx(d[a.key]))(sel);
+      const yS = d3.scaleLinear([0, d3.max(bins, b => b.length)], [SH - 3, 3]);
+      const pts = bins.map(b => [(b.x0 + b.x1) / 2, b.length]);
+      s.select(".spark-subset").style("display", null)
+        .attr("d", area.x(p => p[0]).y0(SH - 3).y1(p => yS(p[1]))([[0, 0], ...pts, [SW, 0]]));
+    } else s.select(".spark-subset").style("display", "none");
+
+    // individual dots when few cities pass: stack duplicates so nothing hides
+    const placed = [];
+    const dots = sparse ? sel.slice().sort((p, q) => p[a.key] - q[a.key]).map(d => {
+      const px = sx(d[a.key]);
+      const near = placed.filter(p => Math.abs(p - px) < 6).length;
+      placed.push(px);
+      return { d, px, py: SH - 8 - near * 7 };
+    }) : [];
+    s.select(".dot-layer").selectAll("circle.dot").data(dots, o => o.d.city).join("circle")
+      .attr("class", "dot").attr("r", 3.2).attr("cx", o => o.px).attr("cy", o => o.py)
+      .datum(o => o.d)
+      .each(function (d) { const o = dots.find(q => q.d === d); d3.select(this).attr("cx", o.px).attr("cy", o.py); })
+      .on("mouseenter", (e, d) => setHover(d)).on("mouseleave", () => setHover(null));
+    s.select(".spark-median").style("display", n ? null : "none").attr("x1", n ? sx(stats[1]) : 0).attr("x2", n ? sx(stats[1]) : 0);
+  });
+
+  // city chips for small selections
+  const list = d3.select("#city-list");
+  if (n && n <= LIST_N) {
+    list.selectAll(".city-chip").data(sel, d => d.city).join(enter => {
+      const c = enter.append("div").attr("class", "city-chip");
+      c.append("span").attr("class", "chip-dot");
+      c.append("span").attr("class", "chip-name");
+      return c;
+    }).on("mouseenter", (e, d) => setHover(d)).on("mouseleave", () => setHover(null));
+    list.selectAll(".chip-dot").style("background", d => color(d.region));
+    list.selectAll(".chip-name").text(d => `${d.city} · ${d.region}`);
+  } else {
+    list.selectAll("*").remove();
+    list.append("span").attr("class", "note").text(n ? `Brush down to ${LIST_N} or fewer cities to list them.` : "No city passes every brush.");
+  }
+  syncBrushes(skip);
+  applyState();
+  renderDetail();
+}
+
+function renderDetail() {
+  const el = d3.select("#detail");
+  if (!hovered) { el.html('<span class="k">Hover a line, dot, or city for its values.</span>'); return; }
+  const d = hovered;
+  el.html(`<b>${d.city}</b> <span class="k">${d.region}</span> — ` +
+    axes.map(a => `<span class="k">${a.label}</span> ${a.fmt(d[a.key])}`).join(" · "));
+}
+function setHover(d) { hovered = d; applyState(); renderDetail(); }
+
+document.getElementById("reset").addEventListener("click", () => {
+  Object.keys(filters).forEach(k => delete filters[k]);
+  update(null);
+});
+
+// ---------- init / resize ----------
+function build() {
+  buildPC();
+  buildTableSparks();
+  update(null);
+}
+build();
+let rt;
+window.addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(build, 150); });
+</script>
+</body>
+</html>

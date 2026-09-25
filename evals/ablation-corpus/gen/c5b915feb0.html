@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Linked scatterplot matrix</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --ink:#1d2330; --muted:#6b7385; --line:#d9dde5; --bg:#fafbfc; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; overflow:hidden; background:var(--bg); color:var(--ink);
+    font:12px/1.3 -apple-system, "Helvetica Neue", Arial, sans-serif; }
+  header { display:flex; align-items:center; gap:20px; height:48px; padding:0 16px; }
+  h1 { font-size:15px; margin:0; font-weight:600; }
+  .hint { color:var(--muted); }
+  .spacer { flex:1; }
+  .legend { display:flex; gap:14px; }
+  .legend-item { display:flex; align-items:center; gap:5px; }
+  .legend-swatch { width:10px; height:10px; border-radius:50%; }
+  .count-badge { padding:4px 12px; border-radius:14px; border:1px solid var(--line); background:#fff;
+    font-variant-numeric:tabular-nums; min-width:170px; text-align:center; }
+  .count-badge.active { background:var(--ink); color:#fff; border-color:var(--ink); }
+  .clear-btn { font:inherit; padding:4px 10px; border:1px solid var(--line); border-radius:6px; background:#fff;
+    color:var(--ink); cursor:pointer; }
+  .clear-btn:disabled { opacity:.4; cursor:default; }
+  #chart { display:block; margin:0 auto; }
+  .cell-frame { fill:#fff; stroke:var(--line); }
+  .cell.active .cell-frame { stroke:var(--ink); }
+  .dot { fill-opacity:.75; stroke:#fff; stroke-width:.5; transition:fill-opacity .12s; }
+  .dot.dimmed { fill-opacity:.12; stroke:none; }
+  .dot.highlight { fill-opacity:.95; stroke:var(--ink); stroke-width:.8; }
+  .bar { stroke:#fff; stroke-width:.5; }
+  .bar.ghost { fill-opacity:.22; }
+  .bar.selected { fill-opacity:.95; }
+  .axis text { fill:var(--muted); font-size:9px; }
+  .axis path, .axis line { stroke:#b8bfcc; }
+  .axis-label { fill:var(--ink); font-size:10px; font-weight:500; }
+  .diag-label { fill:var(--ink); font-size:15px; font-weight:600; text-anchor:middle; }
+  .diag-sub { fill:var(--muted); font-size:10px; text-anchor:middle; }
+  .brush .selection { fill:#1d2330; fill-opacity:.08; stroke:var(--ink); stroke-dasharray:3 2; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Iris (synthetic) scatterplot matrix</h1>
+  <span class="hint">Drag in any scatter panel to brush. Esc clears.</span>
+  <span class="spacer"></span>
+  <div class="legend" id="legend"></div>
+  <div class="count-badge" id="badge" aria-live="polite"></div>
+  <button class="clear-btn" id="clear" disabled>Clear</button>
+</header>
+<svg id="chart"></svg>
+
+<script src="d3.v7.min.js"></script>
+<script type="module">
+const DIMS = ["sepal_length", "sepal_width", "petal_length", "petal_width"];
+const LABEL = { sepal_length:"Sepal length", sepal_width:"Sepal width", petal_length:"Petal length", petal_width:"Petal width" };
+const SPECIES = ["setosa", "versicolor", "virginica"];
+const color = d3.scaleOrdinal().domain(SPECIES).range(["#2a6fbb", "#e8871e", "#8a4fb0"]);
+const PAD = { l:34, t:8, r:10, b:30 };
+
+const data = await d3.json("data/iris-synthetic.json");
+const byId = new Map(data.map(d => [d.id, d]));
+
+// Shared state: one active brush, stored in data space so it survives resize.
+const state = { source:null, ranges:null, selected:new Set() };
+let cells = [];        // built by build()
+let queued = false;
+
+const legend = d3.select("#legend").selectAll(".legend-item").data(SPECIES).join("div").attr("class", "legend-item");
+legend.append("span").attr("class", "legend-swatch").style("background", color);
+legend.append("span").text(s => `${s} (${data.filter(d => d.species === s).length})`);
+
+function build() {
+  const svg = d3.select("#chart");
+  svg.selectAll("*").remove();
+  const size = Math.floor(Math.min(innerHeight - 56, innerWidth - 16) / 4);
+  const pw = size - PAD.l - PAD.r, ph = size - PAD.t - PAD.b;
+  svg.attr("width", size * 4).attr("height", size * 4);
+
+  const xs = {}, ys = {};
+  DIMS.forEach(k => {
+    const [lo, hi] = d3.extent(data, d => d[k]);
+    const pad = (hi - lo) * 0.05;
+    xs[k] = d3.scaleLinear().domain([lo - pad, hi + pad]).nice().range([0, pw]);
+    ys[k] = xs[k].copy().range([ph, 0]);
+  });
+
+  cells = [];
+  const cell = svg.selectAll(".cell").data(d3.cross(d3.range(4), d3.range(4)).map(([i, j]) => ({ i, j, xk:DIMS[j], yk:DIMS[i], diag:i === j })))
+    .join("g").attr("class", d => `cell ${d.diag ? "diagonal" : "scatter"}`)
+    .attr("transform", d => `translate(${d.j * size},${d.i * size})`);
+  cell.append("rect").attr("class", "cell-frame").attr("x", 1).attr("y", 1).attr("width", size - 2).attr("height", size - 2);
+
+  const plot = cell.append("g").attr("class", "plot").attr("transform", `translate(${PAD.l},${PAD.t})`);
+  plot.append("g").attr("class", "axis axis-x").attr("transform", `translate(0,${ph})`)
+    .each(function (d) { d3.select(this).call(d3.axisBottom(xs[d.xk]).ticks(4).tickSize(3)); });
+
+  // Scatter cells
+  const scat = plot.filter(d => !d.diag);
+  scat.append("g").attr("class", "axis axis-y").each(function (d) { d3.select(this).call(d3.axisLeft(ys[d.yk]).ticks(4).tickSize(3)); });
+  scat.append("text").attr("class", "axis-label x-label").attr("x", pw / 2).attr("y", ph + 25).attr("text-anchor", "middle").text(d => LABEL[d.xk]);
+  scat.append("text").attr("class", "axis-label y-label").attr("transform", `translate(${-27},${ph / 2}) rotate(-90)`).attr("text-anchor", "middle").text(d => LABEL[d.yk]);
+  scat.append("g").attr("class", "dots").each(function (d) {
+    d3.select(this).selectAll(".dot").data(data, p => p.id).join("circle")
+      .attr("class", "dot").attr("r", Math.max(2, size / 70))
+      .attr("cx", p => xs[d.xk](p[d.xk])).attr("cy", p => ys[d.yk](p[d.yk]))
+      .attr("fill", p => color(p.species));
+  });
+
+  // Diagonal cells: label + stacked species histogram (ghost = all, solid = brushed)
+  const diag = plot.filter(d => d.diag);
+  diag.append("text").attr("class", "diag-label").attr("x", pw / 2).attr("y", ph * 0.22).text(d => LABEL[d.xk]);
+  diag.append("text").attr("class", "diag-sub").attr("x", pw / 2).attr("y", ph * 0.22 + 14).text("distribution by species");
+  diag.each(function (d) {
+    const k = d.xk, x = xs[k];
+    const bin = d3.bin().domain(x.domain()).thresholds(x.ticks(12)).value(p => p[k]);
+    const bins = bin(data);
+    const stack = (rows, b) => { let acc = 0; return SPECIES.map(s => { const n = rows.filter(p => p.species === s).length; const o = { s, y0:acc, y1:acc + n }; acc += n; return o; }); };
+    const maxN = d3.max(bins, b => b.length);
+    const hy = d3.scaleLinear().domain([0, maxN]).range([0, ph * 0.5]);
+    const g = d3.select(this);
+    const groups = g.selectAll(".bin").data(bins).join("g").attr("class", "bin");
+    const seg = (cls) => groups.selectAll(`.${cls.split(" ").join(".")}`).data(b => stack(b.filter(p => true), b).map(o => ({ ...o, b })))
+      .join("rect").attr("class", `bar ${cls}`)
+      .attr("x", o => x(o.b.x0) + 0.5).attr("width", o => Math.max(1, x(o.b.x1) - x(o.b.x0) - 1)).attr("fill", o => color(o.s));
+    const place = sel => sel.attr("y", o => ph - hy(o.y1)).attr("height", o => hy(o.y1) - hy(o.y0));
+    place(seg("ghost"));
+    // selected layer: own group so it draws above ghost
+    const selGroups = g.append("g").attr("class", "bars-selected").selectAll(".bin").data(bins).join("g").attr("class", "bin");
+    const selRects = selGroups.selectAll(".bar").data(b => SPECIES.map(s => ({ s, b }))).join("rect")
+      .attr("class", "bar selected").attr("fill", o => color(o.s))
+      .attr("x", o => x(o.b.x0) + 0.5).attr("width", o => Math.max(1, x(o.b.x1) - x(o.b.x0) - 1));
+    d.hist = { bins, hy, selRects, ph, stack };
+  });
+
+  // Brushes on scatter cells
+  scat.each(function (d) {
+    const brush = d3.brush().extent([[0, 0], [pw, ph]]).on("start brush end", ev => onBrush(ev, d, xs, ys, brush));
+    d.brush = brush;
+    d.brushG = d3.select(this).append("g").attr("class", "brush").call(brush);
+    d.cellEl = this.parentNode;
+    cells.push(d);
+  });
+
+  // Restore an existing brush after a resize
+  if (state.source) {
+    const d = cells.find(c => c.i === state.source.i && c.j === state.source.j);
+    if (d) d.brushG.call(d.brush.move, [[xs[d.xk](state.ranges.x[0]), ys[d.yk](state.ranges.y[1])], [xs[d.xk](state.ranges.x[1]), ys[d.yk](state.ranges.y[0])]]);
+  }
+  cells.diagCells = cell.filter(d => d.diag);
+  cells.dots = svg.selectAll(".dot");
+  render();
+}
+
+function onBrush(ev, d, xs, ys, brush) {
+  if (!ev.sourceEvent) return;                       // programmatic moves (clearing others) are ignored
+  const sel = ev.selection;
+  if (!sel) {
+    if (state.source && state.source.i === d.i && state.source.j === d.j) setBrush(null);
+    return;
+  }
+  if (!state.source || state.source.i !== d.i || state.source.j !== d.j) {
+    cells.forEach(c => { if (c !== d) c.brushG.call(c.brush.move, null); });
+  }
+  const [[x0, y0], [x1, y1]] = sel;
+  setBrush({ i:d.i, j:d.j }, {
+    x:[xs[d.xk].invert(x0), xs[d.xk].invert(x1)],
+    y:[ys[d.yk].invert(y1), ys[d.yk].invert(y0)],
+  }, d);
+}
+
+function setBrush(source, ranges, d) {
+  state.source = source; state.ranges = ranges || null;
+  if (d) { state.xk = d.xk; state.yk = d.yk; }
+  state.selected = source
+    ? new Set(data.filter(p => p[state.xk] >= ranges.x[0] && p[state.xk] <= ranges.x[1] && p[state.yk] >= ranges.y[0] && p[state.yk] <= ranges.y[1]).map(p => p.id))
+    : new Set();
+  schedule();
+}
+
+function clearAll() {
+  cells.forEach(c => c.brushG.call(c.brush.move, null));
+  setBrush(null);
+}
+
+// rAF-coalesced rendering: handlers only mutate state
+function schedule() { if (queued) return; queued = true; requestAnimationFrame(() => { queued = false; render(); }); }
+
+function render() {
+  const on = !!state.source, sel = state.selected;
+  cells.dots.classed("dimmed", p => on && !sel.has(p.id)).classed("highlight", p => on && sel.has(p.id));
+  if (on) cells.dots.filter(p => sel.has(p.id)).raise();
+  d3.selectAll(".cell").classed("active", d => on && d.i === state.source.i && d.j === state.source.j);
+
+  cells.diagCells.each(function (d) {
+    const { bins, hy, selRects, ph } = d.hist;
+    const counts = bins.map(b => { let acc = 0; return SPECIES.map(s => { const n = b.filter(p => p.species === s && (!on || sel.has(p.id))).length; const o = { y0:acc, y1:acc + n }; acc += n; return o; }); });
+    selRects.each(function (o) {
+      const c = counts[bins.indexOf(o.b)][SPECIES.indexOf(o.s)];
+      d3.select(this).attr("y", ph - hy(c.y1)).attr("height", hy(c.y1) - hy(c.y0));
+    });
+    d3.select(this).selectAll(".bars-selected").classed("dimmed", false);
+  });
+
+  const total = data.length;
+  d3.select("#badge").classed("active", on)
+    .text(on ? `${sel.size} of ${total} brushed` : `${total} observations`);
+  d3.select("#clear").property("disabled", !on);
+}
+
+d3.select("#clear").on("click", clearAll);
+document.addEventListener("keydown", e => { if (e.key === "Escape") clearAll(); });
+let rt;
+addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(build, 150); });
+build();
+</script>
+</body>
+</html>

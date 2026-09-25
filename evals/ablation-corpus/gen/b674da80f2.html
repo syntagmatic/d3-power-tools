@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cities: parallel coordinates and sparkline summary</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="d3.v7.min.js"></script>
+<style>
+  :root { --ink:#1f2933; --muted:#6b7785; --rule:#d9dee4; --bg:#fafbfc; --accent:#111827; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--ink);
+    font:12px/1.35 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+  body { display:flex; flex-direction:column; padding:10px 16px; gap:8px; overflow:hidden; }
+  header { display:flex; align-items:center; gap:16px; flex:none; }
+  h1 { font-size:15px; margin:0; font-weight:650; }
+  .hint { color:var(--muted); }
+  .count-badge { margin-left:auto; display:flex; align-items:baseline; gap:6px; background:var(--accent);
+    color:#fff; border-radius:14px; padding:3px 14px; font-variant-numeric:tabular-nums; }
+  .count-badge .num { font-size:18px; font-weight:700; }
+  .count-badge.empty { background:#b42318; }
+  button.reset { font:inherit; border:1px solid var(--rule); background:#fff; border-radius:4px; padding:3px 10px; cursor:pointer; }
+  button.reset:hover { border-color:var(--muted); }
+  .legend { display:flex; gap:12px; flex:none; }
+  .legend-item { display:flex; align-items:center; gap:5px; cursor:default; padding:1px 6px; border-radius:10px; }
+  .legend-item.active { background:#e8ecf1; }
+  .legend-item.dimmed { opacity:.35; }
+  .swatch { width:10px; height:10px; border-radius:2px; }
+  main { display:flex; gap:16px; flex:1; min-height:0; }
+  .pane { background:#fff; border:1px solid var(--rule); border-radius:6px; padding:8px; min-height:0; }
+  .pane.axes { flex:1.35; min-width:0; }
+  .pane.summary { flex:1; min-width:0; display:flex; flex-direction:column; gap:6px; }
+  .pane h2 { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 4px; font-weight:600; }
+  svg { display:block; }
+  .axes svg { width:100%; height:calc(100% - 20px); }
+
+  .line { fill:none; stroke-width:1.3; stroke-opacity:.75; }
+  .line.dimmed { stroke:#cfd5dc !important; stroke-opacity:.45; stroke-width:1; }
+  .line.highlight { stroke-width:3; stroke-opacity:1; }
+  .line.faded { stroke-opacity:.08; }
+  .line.selected:not(.dimmed) { stroke-width:2; stroke-opacity:.95; }
+  .axis-title { font-weight:600; font-size:12px; text-anchor:middle; fill:var(--ink); }
+  .axis-group.active .axis-title { fill:#0b5fff; }
+  .axis-group .domain { stroke:#8a94a0; }
+  .axis-group text { fill:var(--muted); font-size:10px; }
+  .axis-group .axis-title { fill:var(--ink); font-size:12px; }
+  .axis-group.active .axis-title { fill:#0b5fff; }
+  .brush .selection { fill:#0b5fff; fill-opacity:.15; stroke:#0b5fff; }
+  .city-label { font-size:10.5px; font-weight:600; }
+  .city-label.dimmed { display:none; }
+
+  table { border-collapse:collapse; width:100%; }
+  th { text-align:right; font-weight:600; font-size:10.5px; color:var(--muted); padding:2px 6px; border-bottom:1px solid var(--rule); }
+  th:first-child, td:first-child { text-align:left; }
+  td { padding:3px 6px; border-bottom:1px solid #eef1f4; text-align:right; font-variant-numeric:tabular-nums; vertical-align:middle; }
+  tr.axis-row.active td { background:#f0f5ff; }
+  tr.axis-row.hover td { background:#f6f8fa; }
+  td.name { font-weight:600; }
+  td.spark { padding:1px 4px; width:180px; }
+  td.stat.empty { color:#b0b7bf; }
+  .bar { fill:#3b4a5c; }
+  .bar.ghost { fill:#e3e7ec; }
+  .bar.dimmed { fill:#e3e7ec; }
+  .bar.active { fill:#0b5fff; }
+  .rug { fill:#d9480f; }
+  .spark .selection { fill:#0b5fff; fill-opacity:.15; stroke:#0b5fff; }
+  .spark-base { stroke:#aab2bb; }
+
+  .chips { display:flex; flex-wrap:wrap; gap:4px; align-content:flex-start; overflow:auto; min-height:26px; }
+  .chip { display:flex; align-items:center; gap:5px; border:1px solid var(--rule); border-radius:12px; padding:1px 8px; background:#fff; font-variant-numeric:tabular-nums; cursor:default; }
+  .chip.highlight { border-color:var(--accent); background:#eef2f7; }
+  .chip i { width:8px; height:8px; border-radius:50%; display:inline-block; }
+  .chips-note { color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>150 synthetic cities</h1>
+  <span class="hint">Drag on an axis or on a table sparkline to filter. Brush ranges combine across axes.</span>
+  <button class="reset" id="reset">Clear brushes</button>
+  <div class="count-badge" id="badge"><span class="num" id="count">150</span><span>of <span id="total">150</span> cities</span></div>
+</header>
+<div class="legend" id="legend"></div>
+<main>
+  <section class="pane axes"><h2>Axes</h2><svg id="pc" preserveAspectRatio="xMidYMid meet"></svg></section>
+  <section class="pane summary">
+    <div><h2>Brushed subset: min / median / max and distribution</h2>
+      <table id="table"><thead><tr><th>Axis</th><th>Min</th><th>Median</th><th>Max</th><th>Distribution</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div><h2 id="chips-title">Cities</h2><div class="chips" id="chips"></div></div>
+  </section>
+</main>
+
+<script>
+const AXES = [
+  { key:"population", label:"Population", fmt:d3.format(".3~s") },
+  { key:"temp", label:"Temp (°C)", fmt:d3.format(".1f") },
+  { key:"elevation", label:"Elevation (m)", fmt:d3.format(",.0f") },
+  { key:"rainfall", label:"Rainfall (mm)", fmt:d3.format(",.0f") },
+  { key:"gdp", label:"GDP per capita", fmt:d3.format(".3~s") },
+  { key:"density", label:"Density (/km²)", fmt:d3.format(",.0f") }
+];
+const PALETTE = ["#1f77b4","#e8710a","#2a9d5c","#c2255c","#7048c6","#8a6d1d"];
+
+d3.json("data/cities-synthetic.json").then(data => {
+  const regions = [...new Set(data.map(d => d.region))].sort();
+  const color = d3.scaleOrdinal(regions, PALETTE);
+  const BINS = 20;
+  d3.select("#total").text(data.length);
+
+  // state: brushed value range per axis, or null
+  const ranges = Object.fromEntries(AXES.map(a => [a.key, null]));
+  let hoverRegion = null, hoverCity = null;
+  const passes = d => AXES.every(a => !ranges[a.key] || (d[a.key] >= ranges[a.key][0] && d[a.key] <= ranges[a.key][1]));
+
+  AXES.forEach(a => {
+    a.ext = d3.extent(data, d => d[a.key]);
+    const pad = (a.ext[1] - a.ext[0]) * 0.03;
+    a.domain = [a.ext[0] - pad, a.ext[1] + pad];
+    a.bins = d3.bin().domain(a.domain).thresholds(d3.range(BINS + 1).map(i => a.domain[0] + (a.domain[1] - a.domain[0]) * i / BINS)).value(d => d[a.key]);
+    a.ghost = a.bins(data).map(b => b.length);
+  });
+
+  // ---------- legend ----------
+  const legend = d3.select("#legend").selectAll(".legend-item").data(regions).join("div").attr("class", "legend-item")
+    .on("mouseenter", (e, r) => { hoverRegion = r; refreshHover(); })
+    .on("mouseleave", () => { hoverRegion = null; refreshHover(); });
+  legend.append("span").attr("class", "swatch").style("background", r => color(r));
+  legend.append("span").attr("class", "legend-label").text(r => r);
+
+  // ---------- parallel coordinates ----------
+  const W = 700, H = 470, m = { t:34, r:78, b:26, l:36 };
+  const svg = d3.select("#pc").attr("viewBox", `0 0 ${W} ${H}`);
+  const x = d3.scalePoint(AXES.map(a => a.key), [m.l, W - m.r]);
+  AXES.forEach(a => a.y = d3.scaleLinear(a.domain, [H - m.b, m.t]));
+  const line = d3.line().defined(p => p[1] != null);
+  const path = d => line(AXES.map(a => [x(a.key), a.y(d[a.key])]));
+
+  const linesG = svg.append("g").attr("class", "lines");
+  const lines = linesG.selectAll(".line").data(data, d => d.city).join("path")
+    .attr("class", "line").attr("d", path).attr("stroke", d => color(d.region));
+  lines.append("title").text(d => `${d.city} (${d.region})`);
+
+  const labelsG = svg.append("g").attr("class", "labels");
+
+  const axisG = svg.selectAll(".axis-group").data(AXES).join("g").attr("class", "axis-group")
+    .attr("transform", a => `translate(${x(a.key)},0)`);
+  axisG.each(function (a) { d3.select(this).call(d3.axisLeft(a.y).ticks(6).tickSize(4).tickFormat(a.fmt)); });
+  axisG.append("text").attr("class", "axis-title").attr("y", 18).text(a => a.label);
+  axisG.append("g").attr("class", "brush").each(function (a) {
+    a.axisBrush = d3.brushY().extent([[-12, m.t], [12, H - m.b]])
+      .on("start brush end", e => {
+        if (!e.sourceEvent) return;
+        if (!e.selection) ranges[a.key] = null;
+        else ranges[a.key] = [a.y.invert(e.selection[1]), a.y.invert(e.selection[0])];
+        update("axis");
+      });
+    d3.select(this).call(a.axisBrush);
+  });
+
+  // ---------- table ----------
+  const SW = 176, SH = 34;
+  const rows = d3.select("#table tbody").selectAll("tr").data(AXES).join("tr").attr("class", "axis-row")
+    .on("mouseenter", function () { d3.select(this).classed("hover", true); })
+    .on("mouseleave", function () { d3.select(this).classed("hover", false); });
+  rows.append("td").attr("class", "name").text(a => a.label);
+  ["min", "median", "max"].forEach(k => rows.append("td").attr("class", `stat ${k}`));
+  const sparkSvg = rows.append("td").attr("class", "spark").append("svg").attr("width", SW).attr("height", SH);
+  sparkSvg.each(function (a) {
+    const s = d3.select(this);
+    a.sx = d3.scaleLinear(a.domain, [2, SW - 2]);
+    s.append("g").attr("class", "bars-ghost");
+    s.append("g").attr("class", "bars");
+    s.append("line").attr("class", "spark-base").attr("x1", 2).attr("x2", SW - 2).attr("y1", SH - 6.5).attr("y2", SH - 6.5);
+    s.append("g").attr("class", "rugs");
+    a.sparkBrush = d3.brushX().extent([[2, 0], [SW - 2, SH]])
+      .on("start brush end", e => {
+        if (!e.sourceEvent) return;
+        if (!e.selection) ranges[a.key] = null;
+        else ranges[a.key] = [a.sx.invert(e.selection[0]), a.sx.invert(e.selection[1])];
+        update("spark");
+      });
+    s.append("g").attr("class", "brush spark-brush").call(a.sparkBrush);
+  });
+
+  const barH = SH - 8;
+  function drawSpark(a, subset) {
+    const s = d3.select(sparkSvg.nodes()[AXES.indexOf(a)]);
+    const bw = (SW - 4) / BINS;
+    const sub = a.bins(subset).map(b => b.length);
+    const gy = d3.scaleLinear([0, d3.max(a.ghost)], [0, barH]);
+    const sy = d3.scaleLinear([0, Math.max(1, d3.max(sub))], [0, barH]);
+    s.select(".bars-ghost").selectAll(".bar").data(a.ghost).join("rect").attr("class", "bar ghost")
+      .attr("x", (d, i) => 2 + i * bw + .5).attr("width", bw - 1).attr("y", d => SH - 6 - gy(d)).attr("height", d => gy(d));
+    s.select(".bars").selectAll(".bar").data(sub).join("rect").attr("class", "bar")
+      .attr("x", (d, i) => 2 + i * bw + 1.5).attr("width", Math.max(1, bw - 3))
+      .attr("y", d => SH - 6 - sy(d)).attr("height", d => sy(d));
+    // individual values as ticks when very few rows survive
+    const few = subset.length <= 12 ? subset : [];
+    s.select(".rugs").selectAll(".rug").data(few, d => d.city).join("rect").attr("class", "rug")
+      .attr("x", d => a.sx(d[a.key]) - 1).attr("width", 2).attr("y", SH - 6).attr("height", 6);
+  }
+
+  // ---------- chips ----------
+  const chipsEl = d3.select("#chips");
+
+  // ---------- update ----------
+  function update(source) {
+    const subset = data.filter(passes);
+    const n = subset.length;
+    d3.select("#count").text(n);
+    d3.select("#badge").classed("empty", n === 0);
+
+    lines.classed("dimmed", d => !passes(d)).classed("selected", d => n < data.length && passes(d));
+    lines.filter(d => passes(d)).raise();
+    axisG.classed("active", a => !!ranges[a.key]);
+
+    // sync brush rectangles from the other view
+    AXES.forEach(a => {
+      const r = ranges[a.key];
+      if (source !== "axis") {
+        axisG.filter(b => b === a).select(".brush").call(a.axisBrush.move, r ? [a.y(r[1]), a.y(r[0])] : null);
+      }
+      if (source !== "spark") {
+        d3.select(sparkSvg.nodes()[AXES.indexOf(a)]).select(".spark-brush").call(a.sparkBrush.move, r ? [a.sx(r[0]), a.sx(r[1])] : null);
+      }
+    });
+
+    rows.classed("active", a => !!ranges[a.key]);
+    rows.each(function (a) {
+      const v = subset.map(d => d[a.key]);
+      const vals = n ? [d3.min(v), d3.median(v), d3.max(v)] : [];
+      ["min", "median", "max"].forEach((k, i) =>
+        d3.select(this).select(`.${k}`).classed("empty", !n).text(n ? a.fmt(vals[i]) : "–"));
+      drawSpark(a, subset);
+    });
+
+    // chips and end-of-line labels for small subsets
+    const showList = n > 0 && n <= 24;
+    d3.select("#chips-title").text(showList ? `Passing cities (${n})` : "Cities");
+    const chipData = showList ? [...subset].sort((p, q) => d3.ascending(p.city, q.city)) : [];
+    const chips = chipsEl.selectAll(".chip").data(chipData, d => d.city).join(enter => {
+      const c = enter.append("div").attr("class", "chip")
+        .on("mouseenter", (e, d) => { hoverCity = d.city; refreshHover(); })
+        .on("mouseleave", () => { hoverCity = null; refreshHover(); });
+      c.append("i"); c.append("span");
+      return c;
+    });
+    chips.select("i").style("background", d => color(d.region));
+    chips.select("span").text(d => `${d.city} · ${d.region}`);
+    chipsEl.selectAll(".chips-note").data(showList ? [] : [n === 0 ? "No city passes every brush. Adjust or clear a brush." : `Brush to narrow below 25 cities to list them here (${n} now).`])
+      .join("div").attr("class", "chips-note").text(d => d);
+
+    drawLabels(n <= 8 ? subset : []);
+    refreshHover();
+  }
+
+  function drawLabels(list) {
+    const last = AXES[AXES.length - 1];
+    const items = list.map(d => ({ d, y: last.y(d[last.key]) })).sort((p, q) => p.y - q.y);
+    const gap = 13;
+    items.forEach((it, i) => { it.ty = i && it.y < items[i - 1].ty + gap ? items[i - 1].ty + gap : it.y; });
+    labelsG.selectAll(".city-label").data(items, it => it.d.city).join("text").attr("class", "city-label")
+      .attr("x", x(last.key) + 8).attr("dy", "0.32em").attr("y", it => it.ty)
+      .attr("fill", it => color(it.d.region)).text(it => it.d.city.replace("city-", "c"));
+  }
+
+  function refreshHover() {
+    const anyHover = hoverRegion || hoverCity;
+    lines.classed("highlight", d => passes(d) && (d.city === hoverCity || (!hoverCity && d.region === hoverRegion)))
+      .classed("faded", d => !!anyHover && passes(d) && !(d.city === hoverCity || (!hoverCity && d.region === hoverRegion)));
+    legend.classed("active", r => r === hoverRegion).classed("dimmed", r => !!hoverRegion && r !== hoverRegion);
+    chipsEl.selectAll(".chip").classed("highlight", d => d.city === hoverCity);
+  }
+
+  d3.select("#reset").on("click", () => {
+    AXES.forEach(a => ranges[a.key] = null);
+    update("reset");
+  });
+
+  update("init");
+}).catch(err => {
+  document.body.insertAdjacentHTML("beforeend", `<pre style="color:#b42318">Failed to load data: ${err}</pre>`);
+});
+</script>
+</body>
+</html>

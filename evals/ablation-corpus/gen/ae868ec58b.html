@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Atlas module dependencies: radial bundle / linked tree</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #f7f6f2;
+    --ink: #1f2430;
+    --muted: #6b7180;
+    --rule: #dcd9d0;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font: 12px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+  #stage { position: fixed; inset: 0; }
+  svg { width: 100%; height: 100%; display: block; }
+
+  .panel { position: fixed; pointer-events: none; }
+  #head { top: 14px; left: 18px; pointer-events: auto; }
+  #head h1 { margin: 0 0 2px; font-size: 16px; font-weight: 650; letter-spacing: .01em; }
+  #head p { margin: 0 0 10px; color: var(--muted); max-width: 300px; }
+  .toggle { display: inline-flex; border: 1px solid var(--ink); border-radius: 6px; overflow: hidden; }
+  .toggle button { font: inherit; font-weight: 600; padding: 5px 12px; border: 0; background: transparent;
+    color: var(--ink); cursor: pointer; }
+  .toggle button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+  .toggle button:focus-visible { outline: 2px solid #2563eb; outline-offset: -2px; }
+
+  #info { bottom: 16px; left: 18px; width: 300px; min-height: 84px; }
+  #info .name { font-weight: 650; font-size: 13px; }
+  #info .meta { color: var(--muted); }
+  #info .list { margin-top: 3px; color: var(--ink); }
+  #info .list b { font-weight: 600; }
+
+  #legend { bottom: 16px; right: 18px; text-align: left; }
+  #legend .row { display: flex; align-items: center; gap: 6px; margin-top: 3px; color: var(--muted); }
+  #legend .teams { display: grid; grid-template-columns: repeat(3, auto); gap: 2px 14px; margin-bottom: 6px; }
+  #legend .teams span { display: inline-flex; align-items: center; gap: 5px; color: var(--ink); }
+  #legend i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: currentColor; }
+  #legend svg { width: 26px; height: 10px; }
+
+  /* marks */
+  .branch { fill: none; stroke: #8a8577; stroke-width: 1; stroke-opacity: var(--base, 0); }
+  .branch.highlight { stroke-opacity: .9; stroke-width: 1.6; stroke: #1f2430; }
+
+  .link { fill: none; stroke-width: 1.1; stroke-opacity: .34; transition: stroke-opacity .15s, stroke-width .15s; }
+  .link.dimmed { stroke-opacity: .05; }
+  .link.highlight { stroke: #111827; stroke-opacity: .95; stroke-width: 1.8; }
+  .link.incoming { stroke-dasharray: 4 3; stroke-width: 1.5; }
+  .link.active { stroke-width: 2.6; stroke-dasharray: none; }
+  .link-hit { fill: none; stroke: transparent; stroke-width: 7; pointer-events: stroke; cursor: pointer; }
+
+  .dot { stroke-width: 1.6; transition: opacity .15s; }
+  .dot.status-stable { }
+  .dot.status-experimental { fill: var(--bg) !important; stroke-width: 2.2; }
+  .dot.status-deprecated { fill: #d8d5cb !important; }
+  .leaf { cursor: pointer; }
+  .label { font: 10.5px ui-monospace, "SF Mono", Menlo, Consolas, monospace; fill: var(--ink);
+    paint-order: stroke; stroke: var(--bg); stroke-width: 3px; stroke-linejoin: round; transition: opacity .15s; }
+  .label.status-experimental { font-style: italic; }
+  .label.status-deprecated { text-decoration: line-through; fill: var(--muted); }
+  .leaf.dimmed .dot, .leaf.dimmed .label { opacity: .22; }
+  .leaf.highlight .label { font-weight: 700; }
+  .leaf.active .dot { stroke: #111827; stroke-width: 3; }
+  .leaf.target .dot { stroke: #111827; }
+  .leaf.importer .dot { stroke: #111827; stroke-dasharray: 2 1.5; }
+
+  .team-node { fill: var(--bg); stroke-width: 2; }
+  .team-label { font: 650 10px ui-sans-serif, system-ui, sans-serif; letter-spacing: .08em; text-transform: uppercase;
+    text-anchor: middle; paint-order: stroke; stroke: var(--bg); stroke-width: 4px; stroke-linejoin: round;
+    pointer-events: none; transition: opacity .15s; }
+  .team-label.dimmed { opacity: .3; }
+  .team-label.highlight { opacity: 1; }
+  .team-node.dimmed { opacity: .3; }
+  .root-node { fill: var(--ink); }
+</style>
+</head>
+<body>
+<div id="stage"><svg id="chart" viewBox="-520 -440 1040 880" preserveAspectRatio="xMidYMid meet"></svg></div>
+
+<div class="panel" id="head">
+  <h1>Atlas module dependencies</h1>
+  <p>Each curve runs from a module to something it imports, routed through the name hierarchy.</p>
+  <div class="toggle" role="group" aria-label="Layout">
+    <button type="button" data-layout="radial" aria-pressed="true">Radial bundle</button>
+    <button type="button" data-layout="tree" aria-pressed="false">Sorted tree</button>
+  </div>
+</div>
+
+<div class="panel" id="info"></div>
+
+<div class="panel" id="legend">
+  <div class="teams" id="legend-teams"></div>
+  <div class="row"><svg viewBox="0 0 26 10"><circle cx="5" cy="5" r="3.6" fill="#6b7180"/></svg>stable</div>
+  <div class="row"><svg viewBox="0 0 26 10"><circle cx="5" cy="5" r="3.2" fill="#f7f6f2" stroke="#6b7180" stroke-width="2"/></svg>experimental (italic)</div>
+  <div class="row"><svg viewBox="0 0 26 10"><circle cx="5" cy="5" r="3.6" fill="#d8d5cb" stroke="#6b7180" stroke-width="1.5"/></svg>deprecated (struck)</div>
+  <div class="row"><svg viewBox="0 0 26 10"><line x1="1" x2="25" y1="5" y2="5" stroke="#111827" stroke-width="2"/></svg>imports (hovered module)</div>
+  <div class="row"><svg viewBox="0 0 26 10"><line x1="1" x2="25" y1="5" y2="5" stroke="#111827" stroke-width="1.6" stroke-dasharray="4 3"/></svg>imported by</div>
+  <div class="row">dot area ~ size</div>
+</div>
+
+<script src="d3.v7.min.js"></script>
+<script>
+(async () => {
+  const rows = await d3.json('data/linked-modules.json');
+
+  const TEAM_COLORS = ['#0f766e', '#7c3aed', '#4d7c0f', '#be185d', '#57534e', '#b45309'];
+  const R = 330;            // radial leaf radius
+  const BETA = 0.85;
+
+  /* ---------- hierarchy from name prefixes ---------- */
+  const rootData = { id: 'atlas', name: 'atlas', children: [] };
+  const byId = new Map([[rootData.id, rootData]]);
+  const leafRows = new Map();
+  for (const r of rows) {
+    const parts = r.name.split('.');
+    let parent = rootData;
+    for (let i = 1; i < parts.length; i++) {
+      const id = parts.slice(0, i + 1).join('.');
+      let n = byId.get(id);
+      if (!n) {
+        n = { id, name: parts[i] };
+        byId.set(id, n);
+        (parent.children ||= []).push(n);
+      }
+      parent = n;
+    }
+    parent.row = r;
+    leafRows.set(r.name, parent);
+  }
+
+  const root = d3.hierarchy(rootData)
+    .sum(d => d.row ? d.row.size : 0)
+    .sort((a, b) => b.value - a.value || d3.ascending(a.data.id, b.data.id));
+  const nodes = root.descendants();
+  const leaves = root.leaves();
+  const teams = root.children;
+  const leafById = new Map(leaves.map(d => [d.data.id, d]));
+  const teamName = d => d.ancestors().find(a => a.depth === 1)?.data.name;
+  const teamNames = teams.map(d => d.data.name).sort(d3.ascending);
+  const color = d3.scaleOrdinal(teamNames, TEAM_COLORS);
+  const leafTeam = d => color(teamName(d));
+
+  /* ---------- links ---------- */
+  const links = [];
+  for (const s of leaves) {
+    for (const t of s.data.row.imports) {
+      const tn = leafById.get(t);
+      if (tn) links.push({ source: s, target: tn, path: s.path(tn) });
+    }
+  }
+  const outgoing = d3.group(links, d => d.source);
+  const incoming = d3.group(links, d => d.target);
+
+  /* ---------- layouts (cartesian positions for both) ---------- */
+  const pos = new Map(); // node -> {r:[x,y], t:[x,y], ang, side}
+  d3.cluster().size([2 * Math.PI, R])(root);
+  for (const n of nodes) {
+    pos.set(n, { r: [n.y * Math.sin(n.x), -n.y * Math.cos(n.x)], ang: n.x, t: [0, 0], side: 0 });
+  }
+
+  // tree: teams alternate left / right in sorted order; leaves stack in two columns
+  const ROW = 22, GAP = 12, TEAM_X = 165, LEAF_X = 330;
+  [-1, 1].forEach(side => {
+    const sideTeams = teams.filter((_, i) => (i % 2 === 0 ? -1 : 1) === side);
+    const count = d3.sum(sideTeams, d => d.children.length);
+    const total = (count - 1) * ROW + (sideTeams.length - 1) * GAP;
+    let y = -total / 2;
+    sideTeams.forEach(team => {
+      const ys = [];
+      team.children.forEach(leaf => {
+        const p = pos.get(leaf);
+        p.t = [side * LEAF_X, y]; p.side = side;
+        ys.push(y); y += ROW;
+      });
+      y += GAP;
+      const tp = pos.get(team);
+      tp.t = [side * TEAM_X, d3.mean(ys)]; tp.side = side;
+    });
+  });
+  pos.get(root).t = [0, 0];
+
+  /* ---------- scales ---------- */
+  const rScale = d3.scaleSqrt().domain(d3.extent(leaves, d => d.data.row.size)).range([3, 7]);
+
+  /* ---------- DOM ---------- */
+  const svg = d3.select('#chart');
+  const gBranch = svg.append('g').attr('class', 'branches');
+  const gLink = svg.append('g').attr('class', 'links');
+  const gHit = svg.append('g').attr('class', 'link-hits');
+  const gTeam = svg.append('g').attr('class', 'teams');
+  const gLeaf = svg.append('g').attr('class', 'leaves');
+
+  const branchSel = gBranch.selectAll('path.branch')
+    .data(nodes.filter(d => d.parent), d => d.data.id).join('path').attr('class', 'branch');
+
+  const linkSel = gLink.selectAll('path.link').data(links).join('path')
+    .attr('class', 'link').attr('stroke', d => leafTeam(d.source));
+  const hitSel = gHit.selectAll('path.link-hit').data(links).join('path').attr('class', 'link-hit');
+
+  const teamG = gTeam.selectAll('g.team').data(teams, d => d.data.id).join('g').attr('class', 'team');
+  teamG.append('circle').attr('class', 'team-node').attr('r', 4.5).attr('stroke', d => color(d.data.name));
+  teamG.append('text').attr('class', 'team-label').attr('y', -10)
+    .attr('fill', d => color(d.data.name)).text(d => d.data.name);
+  gTeam.append('circle').attr('class', 'root-node').attr('r', 3);
+
+  const leafG = gLeaf.selectAll('g.leaf').data(leaves, d => d.data.id).join('g').attr('class', 'leaf');
+  leafG.append('circle')
+    .attr('class', d => `dot status-${d.data.row.status}`)
+    .attr('r', d => rScale(d.data.row.size))
+    .attr('fill', leafTeam).attr('stroke', leafTeam);
+  const labelG = leafG.append('g').attr('class', 'label-anchor');
+  labelG.append('text').attr('class', d => `label status-${d.data.row.status}`)
+    .attr('dy', '0.32em').text(d => d.data.name);
+  leafG.each(function (d) {
+    d.labelW = d3.select(this).select('text.label').node().getComputedTextLength();
+  });
+
+  /* ---------- drawing (t: 0 radial -> 1 tree) ---------- */
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const P = (n, t) => { const p = pos.get(n); return [lerp(p.r[0], p.t[0], t), lerp(p.r[1], p.t[1], t)]; };
+  const bundle = d3.line().curve(d3.curveBundle.beta(BETA));
+
+  const labelPose = (d, t) => {
+    const p = pos.get(d);
+    let deg = p.ang * 180 / Math.PI - 90, flip = false;
+    deg = ((deg + 180) % 360 + 360) % 360 - 180;
+    if (deg > 90) { deg -= 180; flip = true; } else if (deg < -90) { deg += 180; flip = true; }
+    const rr = rScale(d.data.row.size) + 5;
+    const offR = flip ? -(d.labelW + rr) : rr;
+    const offT = p.side < 0 ? -(d.labelW + rr) : rr;
+    return { rot: lerp(deg, 0, t), off: lerp(offR, offT, t) };
+  };
+
+  const draw = t => {
+    linkSel.attr('d', d => bundle(d.path.map(n => P(n, t))));
+    hitSel.attr('d', d => bundle(d.path.map(n => P(n, t))));
+
+    branchSel.attr('d', d => {
+      const a = P(d.parent, t), b = P(d, t);
+      const mx = (a[0] + b[0]) / 2;
+      const c1 = [lerp(lerp(a[0], b[0], 1 / 3), mx, t), lerp(lerp(a[1], b[1], 1 / 3), a[1], t)];
+      const c2 = [lerp(lerp(a[0], b[0], 2 / 3), mx, t), lerp(lerp(a[1], b[1], 2 / 3), b[1], t)];
+      return `M${a}C${c1},${c2},${b}`;
+    }).style('--base', .4 * t);
+
+    teamG.attr('transform', d => `translate(${P(d, t)})`);
+    gTeam.select('.root-node').attr('transform', `translate(${P(root, t)})`);
+    leafG.attr('transform', d => `translate(${P(d, t)})`);
+    labelG.attr('transform', d => { const l = labelPose(d, t); return `rotate(${l.rot}) translate(${l.off},0)`; });
+  };
+
+  let current = 0;
+  const setLayout = layout => {
+    const target = layout === 'tree' ? 1 : 0;
+    d3.selectAll('.toggle button').attr('aria-pressed', function () { return this.dataset.layout === layout; });
+    svg.transition('layout').duration(1100).ease(d3.easeCubicInOut)
+      .tween('morph', () => {
+        const i = d3.interpolateNumber(current, target);
+        return s => { current = i(s); draw(current); };
+      });
+  };
+  d3.selectAll('.toggle button').on('click', function () { setLayout(this.dataset.layout); });
+  draw(0);
+
+  /* ---------- legend ---------- */
+  d3.select('#legend-teams').selectAll('span').data(teamNames).join('span')
+    .html(d => `<i style="color:${color(d)}"></i>${d}`);
+
+  /* ---------- interaction ---------- */
+  const info = d3.select('#info');
+  const short = n => n.data.id.replace(/^atlas\./, '');
+
+  const apply = state => {
+    const act = new Set(), tgt = new Set(), imp = new Set(), anc = new Set();
+    const hl = new Set(), inc = new Set(), actLink = new Set();
+    if (state) {
+      if (state.leaf) {
+        const s = state.leaf;
+        act.add(s);
+        for (const l of outgoing.get(s) || []) { hl.add(l); tgt.add(l.target); }
+        for (const l of incoming.get(s) || []) { inc.add(l); imp.add(l.source); }
+      } else {
+        const l = state.link;
+        act.add(l.source); tgt.add(l.target); hl.add(l); actLink.add(l);
+      }
+      for (const n of [...act, ...tgt, ...imp]) n.ancestors().forEach(a => anc.add(a));
+    }
+    const on = !!state;
+    const related = n => act.has(n) || tgt.has(n) || imp.has(n);
+
+    const setCls = (sel, fn) => sel.each(function (d) {
+      const c = fn(d);
+      const el = d3.select(this);
+      for (const k in c) el.classed(k, c[k]);
+    });
+    const leafCls = d => ({
+      active: act.has(d), source: act.has(d), target: tgt.has(d), importer: imp.has(d),
+      highlight: related(d), dimmed: on && !related(d)
+    });
+    setCls(leafG, leafCls);
+    // select() propagates the leaf datum to the child marks
+    setCls(leafG.select('.dot'), leafCls);
+    setCls(leafG.select('.label'), leafCls);
+    setCls(linkSel, l => ({
+      highlight: hl.has(l) || inc.has(l), incoming: inc.has(l), active: actLink.has(l),
+      dimmed: on && !hl.has(l) && !inc.has(l)
+    }));
+    setCls(branchSel, d => ({ highlight: anc.has(d) && anc.has(d.parent) }));
+    setCls(teamG, d => ({ highlight: anc.has(d), dimmed: on && !anc.has(d) }));
+    for (const sel of ['.team-label', '.team-node'])
+      setCls(teamG.select(sel), d => ({ highlight: anc.has(d), dimmed: on && !anc.has(d) }));
+    linkSel.filter('.highlight').raise();
+
+    // info panel
+    if (!state) { info.html('<div class="meta">Hover a module or a curve to trace its imports.</div>'); return; }
+    if (state.leaf) {
+      const s = state.leaf, r = s.data.row;
+      const outs = (outgoing.get(s) || []).map(l => short(l.target));
+      const ins = (incoming.get(s) || []).map(l => short(l.source));
+      info.html(`<div class="name">${r.name}</div>
+        <div class="meta">${r.team} &middot; ${r.status} &middot; size ${r.size}</div>
+        <div class="list"><b>imports ${outs.length}:</b> ${outs.join(', ') || 'none'}</div>
+        <div class="list"><b>imported by ${ins.length}:</b> ${ins.join(', ') || 'none'}</div>`);
+    } else {
+      const l = state.link;
+      info.html(`<div class="name">${short(l.source)} &rarr; ${short(l.target)}</div>
+        <div class="meta">${l.source.data.row.team} imports ${l.target.data.row.team}</div>
+        <div class="list">${l.path.length - 1} hops through the hierarchy</div>`);
+    }
+  };
+
+  leafG.on('mouseenter focus', (e, d) => apply({ leaf: d })).on('mouseleave blur', () => apply(null));
+  hitSel.on('mouseenter', (e, d) => apply({ link: d })).on('mouseleave', () => apply(null));
+  apply(null);
+})();
+</script>
+</body>
+</html>

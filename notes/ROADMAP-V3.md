@@ -117,6 +117,13 @@ slice of the artifact.
 
 2026-09-24, corpus suite: d3pt's six single-shot tasks (real data, `verify.json` fingerprints, tier-100 prompts) are in `evals/corpus/`, and `ablate.py --suite corpus` compares three arms: plain request, d3pt's compact prompt, and plain request plus skill. `scripts/structural.py` is d3pt's structural gate ported to Python. It agreed with d3pt on 35/39 recorded cells, and the 4 disagreements were stale d3pt records. A smoke run on hierarchy-bundles (one output per arm, Opus 5.5) found two gate biases, now fixed: class names are asked for in every arm, and the links band was widened. After the fixes, base and skill passed, and the prompt arm threw `multiple roots` and rendered nothing. The full run (36 generations, about $20) has not been done. The critics and pairwise judging have not been exercised on this suite yet.
 
+2026-09-25, first corpus run (Sonnet 5 generating, Opus 5.5 critics and judge; 6 tasks x 3 arms x 2 samples; numbers in `notes/ablation-corpus-data.md`): no arm clearly wins. Pairwise over all tasks: skill beat base 7-5, prompt lost to base 5-7, and skill vs prompt tied 6-6. Almost every margin was "slight". Mean composite was base 5.96, prompt 6.16, skill 5.54, but one broken skill output on choropleth (1.3) pulls the skill mean down. At n=2 per cell none of these differences is signal. What the run did show:
+
+- The choropleth task's data is defective. d3pt's `us-states.json` is overlapping rectangles, and every arm scored 1-4 from the viz critic. Replace it with real TopoJSON (the committed `plugin/vendor` atlas) before the next run.
+- The plain request first used only the task's first paragraph, which dropped requirements that verify.json checks, so 16 of the 19 structural failures were base or skill. The request is now every requirement paragraph. After that and five arm-blind checker fixes (axis nesting, arc names, hover triggers, morph sampling), structural passes 33/36. The 3 failures are real: a filter bug that set `pointer-events: none` on every dot, and two sunburst outputs that folded the headcount ring into the leaf arcs.
+- Maps skill: the winding advice is right, but one output reversed at the wrong nesting depth (treating a Polygon as a MultiPolygon) and swapped lat/lon. A line on Polygon vs MultiPolygon depth would prevent it.
+- Next: more samples per cell (n=2 can't separate arms), a fixed choropleth, and possibly a second judge family.
+
 ## Phases
 
 ### Phase 1: ablation on the current model

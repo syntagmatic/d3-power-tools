@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Linked Scatterplot Matrix</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="d3.v7.min.js"></script>
+<style>
+  :root {
+    --bg: #fafaf7; --ink: #23262b; --muted: #6b7079; --grid: #e6e6e0; --panel: #ffffff; --edge: #d5d5cd;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font: 13px/1.3 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; overflow: hidden; }
+  header { height: 52px; display: flex; align-items: center; gap: 22px; padding: 0 20px; border-bottom: 1px solid var(--edge); }
+  h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: .01em; }
+  .legend, .chips { display: flex; gap: 14px; align-items: center; }
+  .legend-item, .chip { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+  .swatch { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .spacer { flex: 1; }
+  .count-badge { display: inline-flex; align-items: baseline; gap: 6px; padding: 5px 12px; border-radius: 999px;
+    background: var(--panel); border: 1px solid var(--edge); font-variant-numeric: tabular-nums; }
+  .count-badge.active { border-color: var(--ink); }
+  .count-badge .num { font-size: 18px; font-weight: 700; }
+  .count-badge .of { color: var(--muted); }
+  .chip .n { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; min-width: 2ch; text-align: right; }
+  button.reset { font: inherit; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--edge); background: var(--panel); color: var(--ink); cursor: pointer; }
+  button.reset:disabled { opacity: .4; cursor: default; }
+  #chart { display: block; }
+
+  .cell-bg { fill: var(--panel); stroke: var(--edge); }
+  .cell.active .cell-bg { stroke: var(--ink); stroke-width: 1.5; }
+  .grid-line { stroke: var(--grid); }
+  .axis text { fill: var(--muted); font-size: 10px; }
+  .axis path, .axis line { stroke: #b9b9b0; }
+
+  .dot { fill-opacity: .78; stroke: none; transition: fill-opacity .12s; }
+  .dot.highlight { fill-opacity: 1; stroke: #23262b; stroke-width: .8; }
+  .dot.dimmed { fill-opacity: .08; }
+
+  .diag-label { font-size: 15px; font-weight: 600; fill: var(--ink); text-anchor: middle; }
+  .diag-unit { font-size: 10px; fill: var(--muted); text-anchor: middle; }
+  .bar { stroke: var(--panel); stroke-width: .6; }
+  .bar-all { fill-opacity: .9; }
+  .bar-all.dimmed { fill-opacity: .16; }
+  .bar-sel { fill-opacity: 1; stroke: #23262b; stroke-width: .6; }
+
+  .brush .selection { fill: #23262b; fill-opacity: .07; stroke: #23262b; stroke-width: 1.2; }
+  .empty-msg { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Iris scatterplot matrix</h1>
+  <div class="legend"></div>
+  <div class="spacer"></div>
+  <div class="chips"></div>
+  <div class="count-badge"><span class="num">150</span><span class="of">of 150 selected</span></div>
+  <button class="reset" disabled>Clear brush</button>
+</header>
+<svg id="chart"></svg>
+
+<script>
+const DIMS = ["sepal_length", "sepal_width", "petal_length", "petal_width"];
+const LABEL = { sepal_length: "Sepal length", sepal_width: "Sepal width", petal_length: "Petal length", petal_width: "Petal width" };
+const SPECIES = ["setosa", "versicolor", "virginica"];
+const COLOR = { setosa: "#0072B2", versicolor: "#E69F00", virginica: "#CC79A7" };
+
+d3.json("data/iris-synthetic.json").then(data => {
+  data.forEach(d => DIMS.forEach(k => d[k] = +d[k]));
+  const total = data.length;
+  const color = d3.scaleOrdinal().domain(SPECIES).range(SPECIES.map(s => COLOR[s]));
+
+  // Header: legend + per-species chips
+  d3.select(".legend").selectAll(".legend-item").data(SPECIES).join("span").attr("class", "legend-item")
+    .html(s => `<span class="swatch" style="background:${COLOR[s]}"></span>${s}`);
+  const chips = d3.select(".chips").selectAll(".chip").data(SPECIES).join("span").attr("class", d => "chip chip-" + d);
+  chips.html(s => `<span class="swatch" style="background:${COLOR[s]}"></span><span class="n">0</span>`);
+
+  const badge = d3.select(".count-badge");
+  const resetBtn = d3.select("button.reset");
+  const svg = d3.select("#chart");
+
+  let selected = null;      // Set of ids, or null when nothing brushed
+  let activeCell = null;    // "i-j" key of brushed panel
+  let brushes = new Map();  // key -> {brush, g}
+  let dots, barsAll, barsSel, cellSel;
+  let silent = false;
+
+  const margin = { top: 12, right: 14, bottom: 34, left: 44 };
+
+  function render() {
+    svg.selectAll("*").remove();
+    brushes = new Map();
+    selected = null; activeCell = null;
+
+    const W = window.innerWidth, H = window.innerHeight - 52;
+    svg.attr("width", W).attr("height", H);
+    const avail = Math.min(W - margin.left - margin.right, H - margin.top - margin.bottom);
+    const cs = Math.floor(avail / 4);
+    const gx = Math.round((W - (cs * 4 + margin.left + margin.right)) / 2) + margin.left;
+    const gy = margin.top;
+    const pad = 7;
+
+    const scales = {};
+    DIMS.forEach(k => scales[k] = d3.scaleLinear().domain(d3.extent(data, d => d[k])).nice().range([pad, cs - pad]));
+    const sx = k => scales[k].copy().range([pad, cs - pad]);
+    const sy = k => scales[k].copy().range([cs - pad, pad]);
+
+    const cells = [];
+    DIMS.forEach((yk, i) => DIMS.forEach((xk, j) => cells.push({ i, j, xk, yk, key: i + "-" + j })));
+
+    const root = svg.append("g").attr("class", "matrix").attr("transform", `translate(${gx},${gy})`);
+    cellSel = root.selectAll(".cell").data(cells).join("g")
+      .attr("class", d => "cell " + (d.i === d.j ? "diagonal" : "scatter"))
+      .attr("transform", d => `translate(${d.j * cs},${d.i * cs})`);
+
+    cellSel.append("rect").attr("class", "cell-bg").attr("width", cs).attr("height", cs);
+
+    // grid lines
+    cellSel.each(function (d) {
+      const g = d3.select(this).append("g").attr("class", "grid");
+      const x = sx(d.xk), y = sy(d.yk);
+      g.selectAll(".grid-x").data(x.ticks(4)).join("line").attr("class", "grid-line grid-x")
+        .attr("x1", t => x(t)).attr("x2", t => x(t)).attr("y1", 0).attr("y2", cs);
+      if (d.i !== d.j) g.selectAll(".grid-y").data(y.ticks(4)).join("line").attr("class", "grid-line grid-y")
+        .attr("y1", t => y(t)).attr("y2", t => y(t)).attr("x1", 0).attr("x2", cs);
+    });
+
+    // Scatter panels
+    const scatter = cellSel.filter(d => d.i !== d.j);
+    const dotLayers = scatter.append("g").attr("class", "dots");
+    dots = dotLayers.selectAll(".dot").data(d => data.map(r => ({ r, c: d }))).join("circle")
+      .attr("class", d => "dot " + d.r.species)
+      .attr("cx", d => sx(d.c.xk)(d.r[d.c.xk]))
+      .attr("cy", d => sy(d.c.yk)(d.r[d.c.yk]))
+      .attr("r", 2.7)
+      .attr("fill", d => color(d.r.species))
+      .attr("data-id", d => d.r.id);
+    dots.append("title").text(d => `${d.r.species} #${d.r.id}\n${DIMS.map(k => LABEL[k] + ": " + d.r[k]).join("\n")}`);
+
+    // Diagonal panels: label + stacked species histogram
+    const diag = cellSel.filter(d => d.i === d.j);
+    const histData = new Map();
+    diag.each(function (d) {
+      const g = d3.select(this);
+      const x = sx(d.xk);
+      const th = x.ticks(12);
+      const bin = d3.bin().domain(x.domain()).thresholds(th).value(r => r[d.xk]);
+      const layout = rows => {
+        const bins = bin(rows.filter(() => true));
+        const per = SPECIES.map(s => bin(rows.filter(r => r.species === s)));
+        const rects = [];
+        bins.forEach((b, bi) => {
+          let acc = 0;
+          SPECIES.forEach((s, si) => {
+            const n = per[si][bi].length;
+            rects.push({ key: bi + s, species: s, x0: b.x0, x1: b.x1, y0: acc, y1: acc + n, n });
+            acc += n;
+          });
+        });
+        return rects;
+      };
+      const all = layout(data);
+      const maxY = d3.max(all, r => r.y1);
+      const histTop = cs * 0.42;
+      const y = d3.scaleLinear().domain([0, maxY]).range([cs - pad, histTop]);
+      histData.set(d.key, { layout, x, y });
+
+      g.append("text").attr("class", "diag-label").attr("x", cs / 2).attr("y", cs * 0.2).text(LABEL[d.xk]);
+      g.append("text").attr("class", "diag-unit").attr("x", cs / 2).attr("y", cs * 0.2 + 15).text("cm  ·  count by species");
+
+      const barLayer = g.append("g").attr("class", "bars");
+      const barRect = sel => sel
+        .attr("x", r => x(r.x0) + .5).attr("width", r => Math.max(0, x(r.x1) - x(r.x0) - 1))
+        .attr("y", r => y(r.y1)).attr("height", r => y(r.y0) - y(r.y1))
+        .attr("fill", r => color(r.species));
+      barLayer.append("g").attr("class", "bars-all").selectAll(".bar").data(all.filter(r => r.n > 0), r => r.key).join("rect")
+        .attr("class", r => "bar bar-all " + r.species).call(barRect);
+      barLayer.append("g").attr("class", "bars-sel");
+      d.barRect = barRect; d.layout = layout;
+    });
+    barsAll = diag.selectAll(".bar-all");
+
+    // Axes on outer edges
+    cellSel.filter(d => d.i === 3).append("g").attr("class", "axis axis-x")
+      .attr("transform", `translate(0,${cs})`)
+      .each(function (d) { d3.select(this).call(d3.axisBottom(sx(d.xk)).ticks(4).tickSize(3)); })
+      .append("text").attr("x", cs / 2).attr("y", 28).attr("fill", "#6b7079").attr("text-anchor", "middle")
+      .style("font-size", "11px").text(d => LABEL[d.xk]);
+    cellSel.filter(d => d.j === 0 && d.i !== 0).append("g").attr("class", "axis axis-y")
+      .each(function (d) { d3.select(this).call(d3.axisLeft(sy(d.yk)).ticks(4).tickSize(3)); });
+    // top-left diagonal has no y scale; give the left edge a y axis only for scatter rows
+
+    // Brushes (after dots so they sit on top)
+    scatter.each(function (d) {
+      const x = sx(d.xk), y = sy(d.yk);
+      const brush = d3.brush().extent([[0, 0], [cs, cs]])
+        .on("start", e => onStart(e, d))
+        .on("brush end", e => onBrush(e, d, x, y));
+      const g = d3.select(this).append("g").attr("class", "brush").call(brush);
+      brushes.set(d.key, { brush, g });
+    });
+
+    function onStart(e, d) {
+      if (silent || !e.sourceEvent) return;
+      if (activeCell && activeCell !== d.key) {
+        silent = true;
+        const o = brushes.get(activeCell);
+        o.g.call(o.brush.move, null);
+        silent = false;
+      }
+      activeCell = d.key;
+    }
+
+    function onBrush(e, d, x, y) {
+      if (silent || !e.sourceEvent) return;
+      const s = e.selection;
+      if (!s) {
+        if (activeCell === d.key) { activeCell = null; setSelection(null); }
+        return;
+      }
+      activeCell = d.key;
+      const [[x0, y0], [x1, y1]] = s;
+      const xa = x.invert(x0), xb = x.invert(x1), ya = y.invert(y1), yb = y.invert(y0);
+      const ids = new Set();
+      data.forEach(r => {
+        if (r[d.xk] >= xa && r[d.xk] <= xb && r[d.yk] >= ya && r[d.yk] <= yb) ids.add(r.id);
+      });
+      setSelection(ids);
+    }
+
+    function setSelection(ids) {
+      selected = ids;
+      const on = ids !== null;
+      dots.classed("highlight", d => on && ids.has(d.r.id))
+          .classed("dimmed", d => on && !ids.has(d.r.id));
+      dots.filter(".highlight").raise();
+      cellSel.classed("active", d => on && d.key === activeCell);
+
+      // linked histograms
+      const rows = on ? data.filter(r => ids.has(r.id)) : [];
+      barsAll.classed("dimmed", on);
+      diag.each(function (d) {
+        const { y } = histData.get(d.key);
+        const sel = on ? d.layout(rows).filter(r => r.n > 0) : [];
+        d3.select(this).select(".bars-sel").selectAll(".bar-sel").data(sel, r => r.key).join("rect")
+          .attr("class", r => "bar bar-sel highlight " + r.species).call(d.barRect);
+      });
+
+      // count badge
+      const n = on ? ids.size : total;
+      badge.classed("active", on);
+      badge.select(".num").text(n);
+      badge.select(".of").text(on ? `of ${total} selected` : `of ${total} · brush any panel`);
+      resetBtn.property("disabled", !on);
+      const counts = d3.rollup(on ? rows : data, v => v.length, r => r.species);
+      chips.select(".n").text(s => counts.get(s) || 0);
+    }
+
+    resetBtn.on("click", () => {
+      if (activeCell) {
+        silent = true;
+        const o = brushes.get(activeCell);
+        o.g.call(o.brush.move, null);
+        silent = false;
+      }
+      activeCell = null;
+      setSelection(null);
+    });
+
+    setSelection(null);
+  }
+
+  render();
+  let t;
+  window.addEventListener("resize", () => { clearTimeout(t); t = setTimeout(render, 150); });
+  window.addEventListener("keydown", e => { if (e.key === "Escape") resetBtn.dispatch("click"); });
+}).catch(err => {
+  document.body.insertAdjacentHTML("beforeend", `<p class="empty-msg">Could not load data: ${err.message}</p>`);
+});
+</script>
+</body>
+</html>

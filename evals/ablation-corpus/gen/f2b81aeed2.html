@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Atlas module dependencies: hierarchical edge bundle</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #10141c;
+    --panel: #171d28;
+    --line: #2a3344;
+    --text: #e6ebf2;
+    --muted: #8b97aa;
+    --out: #ff8a4c;
+    --in: #45d0ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 12px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+  #chart { position: absolute; inset: 0; }
+  #chart svg { width: 100%; height: 100%; display: block; }
+
+  .overlay { position: absolute; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; }
+  #title { top: 14px; left: 14px; width: 250px; }
+  #title h1 { margin: 0 0 2px; font-size: 14px; font-weight: 650; letter-spacing: .01em; }
+  #title p { margin: 0; color: var(--muted); }
+  #info { top: 96px; left: 14px; width: 250px; min-height: 150px; }
+  #info .name { font-size: 13px; font-weight: 650; word-break: break-all; }
+  #info .meta { color: var(--muted); margin: 2px 0 6px; }
+  #info .meta .swatch { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: baseline; }
+  #info .row { margin-top: 5px; }
+  #info .row b { font-weight: 600; }
+  #info .row.out b { color: var(--out); }
+  #info .row.in b { color: var(--in); }
+  #info .row span { color: var(--muted); }
+  #info .hint { color: var(--muted); }
+
+  #toggle { top: 14px; right: 14px; padding: 4px; display: flex; gap: 4px; }
+  #toggle button { font: inherit; color: var(--muted); background: transparent; border: 0; border-radius: 4px; padding: 6px 12px; cursor: pointer; }
+  #toggle button:hover { color: var(--text); }
+  #toggle button[aria-pressed="true"] { background: #2b3648; color: var(--text); }
+
+  #legend { bottom: 14px; left: 14px; width: 250px; }
+  #legend .grp { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+  #legend .grp + .grp { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
+  #legend .item { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); }
+  #legend svg { width: 14px; height: 14px; }
+  #legend .bar { width: 16px; height: 3px; border-radius: 2px; }
+
+  /* marks */
+  .tree-link { fill: none; stroke: #4a566c; stroke-opacity: .16; stroke-width: 1; }
+  .tree-link.ancestor { stroke: #c8d2e4; stroke-opacity: .75; stroke-width: 1.4; }
+  .has-focus .tree-link.dimmed { stroke-opacity: .05; }
+
+  .link { fill: none; stroke: #7d8aa3; stroke-opacity: .24; stroke-width: 1; }
+  .has-focus .link.dimmed { stroke-opacity: .035; }
+  .link.out { stroke: var(--out); stroke-opacity: .9; stroke-width: 1.6; }
+  .link.in { stroke: var(--in); stroke-opacity: .9; stroke-width: 1.6; }
+  .link.active { stroke-opacity: 1; stroke-width: 2.6; }
+  .link-hit { fill: none; stroke: transparent; stroke-width: 7; pointer-events: stroke; cursor: pointer; }
+
+  .node { cursor: pointer; transition: opacity .15s; }
+  .node circle { stroke-width: 1.2; }
+  .node.experimental circle { stroke-dasharray: 2.2 1.6; stroke: #f2f5fa; }
+  .node.deprecated circle { fill-opacity: .12; stroke-width: 1.6; }
+  .node.dimmed { opacity: .22; }
+  .node.ancestor circle { stroke: #fff; stroke-width: 1.8; }
+  .node.out-node circle { stroke: var(--out); stroke-width: 2.2; stroke-dasharray: none; }
+  .node.in-node circle { stroke: var(--in); stroke-width: 2.2; stroke-dasharray: none; }
+  .node.active circle { stroke: #fff; stroke-width: 2.8; stroke-dasharray: none; }
+
+  .label { fill: #a7b2c4; font-size: 10.5px; paint-order: stroke; stroke: var(--bg); stroke-width: 3px; stroke-linejoin: round; }
+  .label.group-label { fill: #d4dbe7; font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+  .label.root-label { fill: #8b97aa; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+  .node.highlight .label, .node.active .label, .node.ancestor .label { fill: #fff; font-weight: 650; }
+  .node.out-node .label { fill: #ffc9a8; }
+  .node.in-node .label { fill: #b3ecff; }
+</style>
+</head>
+<body>
+<div id="chart"></div>
+
+<div id="title" class="overlay">
+  <h1>Atlas module dependencies</h1>
+  <p id="stats"></p>
+</div>
+<div id="info" class="overlay"></div>
+<div id="toggle" class="overlay" role="group" aria-label="Layout">
+  <button type="button" data-layout="radial" aria-pressed="true">Radial bundle</button>
+  <button type="button" data-layout="tree" aria-pressed="false">Linked tree</button>
+</div>
+<div id="legend" class="overlay"></div>
+
+<script src="d3.v7.min.js"></script>
+<script>
+const TEAM_COLORS = {
+  core: '#8fa3ff', data: '#5fd39a', viz: '#f0c85a',
+  ui: '#e67fb8', ops: '#b08cf0', research: '#c9a37a'
+};
+const OUT = '#ff8a4c', IN = '#45d0ff';
+const R = 335;            // leaf radius, radial layout
+const COL_X = 340;        // leaf x, tree layout
+const GROUP_R = R * 0.45;
+const GROUP_X = 160;
+const BEAM = 0.85;
+
+d3.json('data/linked-modules.json').then(rows => {
+  // ---- hierarchy from dotted names
+  const ids = new Set();
+  rows.forEach(r => {
+    const p = r.name.split('.');
+    for (let i = 1; i < p.length; i++) ids.add(p.slice(0, i).join('.'));
+  });
+  const records = [...ids].map(id => ({ id, internal: true }))
+    .concat(rows.map(r => Object.assign({ id: r.name }, r)));
+  const root = d3.stratify()
+    .id(d => d.id)
+    .parentId(d => { const i = d.id.lastIndexOf('.'); return i < 0 ? null : d.id.slice(0, i); })(records);
+  root.sum(d => d.internal ? 0 : d.size);
+
+  const byId = new Map(root.descendants().map(d => [d.id, d]));
+  const isLeaf = d => !d.children;
+  const shortName = d => d.id.slice(d.id.lastIndexOf('.') + 1);
+
+  // ---- ordering: groups by total size; first half on the right column
+  const groups = root.children.slice().sort((a, b) => b.value - a.value);
+  const half = Math.ceil(groups.length / 2);
+  const side = new Map();          // group -> +1 right, -1 left
+  groups.forEach((g, i) => side.set(g, i < half ? 1 : -1));
+  const groupRank = new Map();
+  groups.slice(0, half).forEach((g, i) => groupRank.set(g, i));
+  groups.slice(half).reverse().forEach((g, i) => groupRank.set(g, half + i));
+  const sideOf = d => side.get(d.depth === 1 ? d : d.ancestors().find(a => a.depth === 1)) || 1;
+  root.sort((a, b) => {
+    if (a.depth === 1) return groupRank.get(a) - groupRank.get(b);
+    const s = sideOf(a);
+    return s * (b.data.size - a.data.size) || d3.ascending(a.id, b.id);
+  });
+
+  // team and status come from leaves; groups take the majority team
+  const teamOf = d => isLeaf(d) ? d.data.team : d.id.split('.')[1] || d.id;
+  const leaves = root.leaves();
+
+  // ---- radial coordinates
+  const sweep = Math.PI * 2 * 0.96, off = Math.PI * 2 * 0.02;
+  d3.cluster().size([sweep, R])
+    .separation((a, b) => a.parent === b.parent ? 1 : 2.2)(root);
+  root.each(n => {
+    const r = n.depth === 0 ? 0 : isLeaf(n) ? R : GROUP_R;
+    n.angle = n.x + off;
+    n.rx = r * Math.sin(n.angle);
+    n.ry = -r * Math.cos(n.angle);
+    n.r = r;
+  });
+
+  // ---- two-column coordinates
+  const colY = new Map();
+  [1, -1].forEach(s => {
+    const list = leaves.filter(l => sideOf(l) === s);
+    if (s < 0) list.reverse();
+    let u = 0, prev = null;
+    list.forEach(l => {
+      if (prev && prev.parent !== l.parent) u += 0.9;
+      colY.set(l, u); u += 1; prev = l;
+    });
+    const total = u - 1, Y = 385;
+    list.forEach(l => colY.set(l, (colY.get(l) / total - 0.5) * 2 * Y));
+  });
+  root.eachAfter(n => {
+    if (isLeaf(n)) { n.cx = sideOf(n) * COL_X; n.cy = colY.get(n); }
+    else if (n.depth === 0) { n.cx = 0; n.cy = 0; }
+    else { n.cx = sideOf(n) * GROUP_X; n.cy = d3.mean(n.children, c => c.cy); }
+  });
+
+  // ---- label geometry for radial
+  leaves.forEach(n => {
+    const deg = n.angle * 180 / Math.PI - 90;
+    const flip = n.angle > Math.PI;
+    let rot = flip ? deg + 180 : deg;
+    rot = ((rot + 540) % 360) - 180;
+    n.rotR = rot;
+    n.anchorR = flip ? 'end' : 'start';
+    n.anchorC = sideOf(n) > 0 ? 'start' : 'end';
+  });
+
+  // ---- links
+  const links = [];
+  leaves.forEach(s => (s.data.imports || []).forEach(tid => {
+    const t = byId.get(tid);
+    if (t && t !== s) links.push({ source: s, target: t, id: s.id + '>' + t.id, path: s.path(t) });
+  }));
+  const outMap = d3.group(links, l => l.source);
+  const inMap = d3.group(links, l => l.target);
+  const treeLinks = root.links();
+
+  d3.select('#stats').text(`${leaves.length} modules, ${groups.length} teams, ${links.length} imports`);
+
+  // ---- svg
+  const svg = d3.select('#chart').append('svg')
+    .attr('viewBox', '-600 -450 1200 900')
+    .attr('preserveAspectRatio', 'xMidYMid meet');
+  const gTree = svg.append('g').attr('class', 'tree-links');
+  const gLinks = svg.append('g').attr('class', 'links');
+  const gHits = svg.append('g').attr('class', 'link-hits');
+  const gNodes = svg.append('g').attr('class', 'nodes');
+
+  const treeSel = gTree.selectAll('line').data(treeLinks).join('line').attr('class', 'tree-link');
+  const linkSel = gLinks.selectAll('path').data(links, d => d.id).join('path').attr('class', 'link');
+  const hitSel = gHits.selectAll('path').data(links, d => d.id).join('path').attr('class', 'link-hit');
+
+  const rScale = d3.scaleSqrt().domain([10, 34]).range([3.4, 7.6]);
+  const nodeSel = gNodes.selectAll('g').data(root.descendants(), d => d.id).join('g')
+    .attr('class', d => 'node ' + (d.depth === 0 ? 'root' : isLeaf(d) ? 'leaf ' + d.data.status : 'group'));
+  nodeSel.append('circle')
+    .attr('r', d => isLeaf(d) ? rScale(d.data.size) : d.depth === 0 ? 4 : 6.5)
+    .attr('fill', d => d.depth === 0 ? '#c8d2e4' : TEAM_COLORS[teamOf(d)] || '#999')
+    .attr('stroke', d => isLeaf(d) && d.data.status === 'deprecated' ? TEAM_COLORS[teamOf(d)] : '#10141c');
+  const labelSel = nodeSel.append('text')
+    .attr('class', d => 'label ' + (d.depth === 0 ? 'root-label' : isLeaf(d) ? 'leaf-label' : 'group-label'))
+    .attr('dy', '0.32em')
+    .text(d => isLeaf(d) ? shortName(d) : d.depth === 0 ? d.id : shortName(d));
+
+  // ---- rendering with layout blend t: 0 radial, 1 tree
+  const line = d3.line().curve(d3.curveBundle.beta(BEAM)).x(d => d.px).y(d => d.py);
+  const state = { t: 0, layout: 'radial' };
+  const norm = a => ((a + 540) % 360) - 180;
+
+  function render() {
+    const t = state.t;
+    root.each(n => { n.px = n.rx + (n.cx - n.rx) * t; n.py = n.ry + (n.cy - n.ry) * t; });
+    nodeSel.attr('transform', d => `translate(${d.px},${d.py})`);
+    labelSel.each(function (d) {
+      const el = d3.select(this);
+      if (d.depth === 0) { el.attr('text-anchor', 'middle').attr('transform', 'translate(0,-11)'); return; }
+      if (!isLeaf(d)) { el.attr('text-anchor', 'middle').attr('transform', 'translate(0,-13)'); return; }
+      const anchor = t < 0.5 ? d.anchorR : d.anchorC;
+      const dx = (anchor === 'start' ? 1 : -1) * (rScale(d.data.size) + 4);
+      el.attr('text-anchor', anchor).attr('transform', `rotate(${d.rotR * (1 - t)}) translate(${dx},0)`);
+    });
+    treeSel.attr('x1', d => d.source.px).attr('y1', d => d.source.py)
+      .attr('x2', d => d.target.px).attr('y2', d => d.target.py);
+    const dPath = l => line(l.path);
+    linkSel.attr('d', dPath);
+    hitSel.attr('d', dPath);
+  }
+  render();
+
+  // ---- layout toggle
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  d3.selectAll('#toggle button').on('click', function () {
+    const layout = this.dataset.layout;
+    if (layout === state.layout) return;
+    state.layout = layout;
+    d3.selectAll('#toggle button').attr('aria-pressed', function () { return this.dataset.layout === layout; });
+    const target = layout === 'tree' ? 1 : 0;
+    const i = d3.interpolateNumber(state.t, target);
+    svg.transition('layout').duration(reduce ? 0 : 1100).ease(d3.easeCubicInOut)
+      .tween('layout', () => u => { state.t = i(u); render(); });
+  });
+
+  // ---- focus / highlight
+  const info = d3.select('#info');
+  const teamDot = t => `<span class="swatch" style="background:${TEAM_COLORS[t]}"></span>`;
+  const names = arr => arr.map(shortName).join(', ') || 'none';
+
+  function showDefault() {
+    const byTeam = d3.rollup(leaves, v => v.length, d => d.data.team);
+    info.html(`<div class="hint">Hover a module to trace its imports (<span style="color:${OUT}">out</span>) and importers (<span style="color:${IN}">in</span>). Hover a team label to trace a whole branch, or a link to see its endpoints.</div>
+      <div class="row"><span>${[...byTeam].map(([k, v]) => `${k} ${v}`).join(' &middot; ')}</span></div>`);
+  }
+  function showLeaf(d) {
+    const outs = (outMap.get(d) || []).map(l => l.target), ins = (inMap.get(d) || []).map(l => l.source);
+    info.html(`<div class="name">${d.id}</div>
+      <div class="meta">${teamDot(d.data.team)}${d.data.team} &middot; ${d.data.status} &middot; size ${d.data.size}</div>
+      <div class="row out"><b>Imports ${outs.length}</b> <span>${names(outs)}</span></div>
+      <div class="row in"><b>Imported by ${ins.length}</b> <span>${names(ins)}</span></div>`);
+  }
+  function showGroup(d) {
+    const set = new Set(d.leaves());
+    const out = links.filter(l => set.has(l.source) && !set.has(l.target)).length;
+    const inn = links.filter(l => !set.has(l.source) && set.has(l.target)).length;
+    const inside = links.filter(l => set.has(l.source) && set.has(l.target)).length;
+    info.html(`<div class="name">${d.id}</div>
+      <div class="meta">${teamDot(teamOf(d))}${set.size} modules &middot; size ${d.value}</div>
+      <div class="row out"><b>${out}</b> <span>imports leaving the branch</span></div>
+      <div class="row in"><b>${inn}</b> <span>imports entering the branch</span></div>
+      <div class="row"><b>${inside}</b> <span>internal imports</span></div>`);
+  }
+  function showLink(l) {
+    info.html(`<div class="name">${shortName(l.source)} &rarr; ${shortName(l.target)}</div>
+      <div class="meta">${l.source.id}<br>imports ${l.target.id}</div>
+      <div class="row"><span>${teamOf(l.source)} &rarr; ${teamOf(l.target)}</span></div>`);
+  }
+  showDefault();
+
+  function focus(f) {
+    if (!f) {
+      svg.classed('has-focus', false);
+      nodeSel.attr('class', d => baseNode(d));
+      linkSel.attr('class', 'link');
+      treeSel.attr('class', 'tree-link');
+      showDefault();
+      return;
+    }
+    const active = new Set(), outNodes = new Set(), inNodes = new Set(), ancestors = new Set(), branch = new Set();
+    const outL = new Set(), inL = new Set(), activeL = new Set();
+    if (f.type === 'node') {
+      const d = f.d;
+      active.add(d);
+      d.ancestors().slice(1).forEach(a => ancestors.add(a));
+      if (isLeaf(d)) {
+        (outMap.get(d) || []).forEach(l => { outL.add(l); outNodes.add(l.target); });
+        (inMap.get(d) || []).forEach(l => { inL.add(l); inNodes.add(l.source); });
+        showLeaf(d);
+      } else {
+        const set = new Set(d.leaves());
+        d.leaves().forEach(l => branch.add(l));
+        links.forEach(l => {
+          if (set.has(l.source)) { outL.add(l); if (!set.has(l.target)) outNodes.add(l.target); }
+          else if (set.has(l.target)) { inL.add(l); inNodes.add(l.source); }
+        });
+        showGroup(d);
+      }
+    } else {
+      const l = f.l;
+      activeL.add(l); outL.add(l); inL.add(l);
+      active.add(l.source); active.add(l.target);
+      l.source.ancestors().slice(1).forEach(a => ancestors.add(a));
+      l.target.ancestors().slice(1).forEach(a => ancestors.add(a));
+      showLink(l);
+    }
+    const inBranch = n => active.has(n) || ancestors.has(n) || branch.has(n);
+    svg.classed('has-focus', true);
+    nodeSel.attr('class', d => {
+      const c = [baseNode(d)];
+      if (active.has(d)) c.push('active', 'highlight');
+      else if (outNodes.has(d)) c.push('out-node', 'highlight');
+      else if (inNodes.has(d)) c.push('in-node', 'highlight');
+      else if (ancestors.has(d)) c.push('ancestor');
+      else if (branch.has(d)) c.push('highlight');
+      else c.push('dimmed');
+      return c.join(' ');
+    });
+    linkSel.attr('class', l => {
+      if (activeL.has(l)) return 'link active highlight ' + (f.type === 'link' ? '' : 'out');
+      if (f.type === 'link') return 'link dimmed';
+      if (outL.has(l)) return 'link out highlight';
+      if (inL.has(l)) return 'link in highlight';
+      return 'link dimmed';
+    });
+    linkSel.filter('.highlight').raise();
+    treeSel.attr('class', e => inBranch(e.source) && inBranch(e.target) ? 'tree-link ancestor' : 'tree-link dimmed');
+  }
+  const baseNode = d => 'node ' + (d.depth === 0 ? 'root' : isLeaf(d) ? 'leaf ' + d.data.status : 'group');
+
+  nodeSel.on('mouseenter', (e, d) => focus({ type: 'node', d })).on('mouseleave', () => focus(null));
+  hitSel.on('mouseenter', (e, l) => focus({ type: 'link', l })).on('mouseleave', () => focus(null));
+
+  // ---- legend
+  const teams = Object.keys(TEAM_COLORS);
+  const dot = (fill, extra = '') => `<svg viewBox="-7 -7 14 14"><circle r="4.5" fill="${fill}" ${extra}/></svg>`;
+  d3.select('#legend').html(`
+    <div class="grp">${teams.map(t => `<span class="item">${dot(TEAM_COLORS[t])}${t}</span>`).join('')}</div>
+    <div class="grp">
+      <span class="item">${dot('#8b97aa', 'stroke="#10141c"')}stable</span>
+      <span class="item">${dot('#8b97aa', 'stroke="#f2f5fa" stroke-dasharray="2.2 1.6" stroke-width="1.3"')}experimental</span>
+      <span class="item">${dot('#8b97aa', 'fill-opacity=".12" stroke="#8b97aa" stroke-width="1.6"')}deprecated</span>
+      <span class="item">node size = module size</span>
+    </div>
+    <div class="grp">
+      <span class="item"><span class="bar" style="background:${OUT}"></span>imports</span>
+      <span class="item"><span class="bar" style="background:${IN}"></span>imported by</span>
+    </div>`);
+});
+</script>
+</body>
+</html>

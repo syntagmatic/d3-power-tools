@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Org budget and headcount sunburst</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: light; }
+  html, body { margin: 0; height: 100%; background: #f7f6f2; color: #22252b;
+    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  #app { display: flex; align-items: center; gap: 28px; height: 100vh; padding: 0 24px; box-sizing: border-box; }
+  #chart { height: min(96vh, 900px); width: min(96vh, 900px); flex: none; }
+  #side { width: 250px; flex: none; }
+  h1 { font-size: 18px; margin: 0 0 6px; font-weight: 650; }
+  p { margin: 0 0 10px; color: #4a505a; }
+  .key { display: flex; flex-direction: column; gap: 6px; margin: 14px 0; }
+  .key div { display: flex; align-items: center; gap: 8px; color: #4a505a; }
+  .swatch { width: 14px; height: 14px; border-radius: 3px; display: inline-block; flex: none; }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+
+  .node { stroke: #f7f6f2; stroke-width: 1.2px; cursor: default; transition: opacity .15s, filter .15s; }
+  .node.active { stroke: #22252b; stroke-width: 1.8px; }
+  .node.dimmed { opacity: .28; }
+  .headcount { stroke: #f7f6f2; stroke-width: 1px; transition: opacity .15s; }
+  .headcount.active { stroke: #22252b; stroke-width: 1.8px; }
+  .headcount.dimmed { opacity: .2; }
+  .track { fill: #e6e3da; stroke: none; transition: opacity .15s; }
+  .track.dimmed { opacity: .35; }
+  .label { font-size: 11px; fill: #fff; pointer-events: none; text-anchor: middle;
+    dominant-baseline: central; transition: opacity .15s; }
+  .label.dimmed { opacity: .25; }
+  .ring-title { font-size: 10px; fill: #7a808a; text-anchor: middle; letter-spacing: .06em; text-transform: uppercase; }
+  .center-value { font-size: 20px; font-weight: 650; fill: #22252b; text-anchor: middle; }
+  .center-caption { font-size: 10.5px; fill: #7a808a; text-anchor: middle; }
+
+  #tooltip { position: fixed; pointer-events: none; opacity: 0; background: #22252b; color: #fff;
+    padding: 8px 10px; border-radius: 6px; font-size: 12px; line-height: 1.45;
+    box-shadow: 0 4px 14px rgba(0,0,0,.25); transition: opacity .1s; z-index: 10; white-space: nowrap; }
+  #tooltip.visible { opacity: 1; }
+  #tooltip .t-name { font-weight: 650; margin-bottom: 2px; }
+  #tooltip .t-path { color: #b9bec8; font-size: 11px; margin-bottom: 3px; }
+  #tooltip .t-row { display: flex; justify-content: space-between; gap: 18px; }
+  #tooltip .t-row span:first-child { color: #b9bec8; }
+</style>
+</head>
+<body>
+<div id="app">
+  <svg id="chart" viewBox="-360 -360 720 720" role="img" aria-label="Org budget and headcount sunburst"></svg>
+  <div id="side">
+    <h1>Org budget and headcount</h1>
+    <p>Inner rings: division, department, team. Angle is budget ($K).</p>
+    <p>Outer ring: one bar per team, height is headcount relative to the largest team in its division.</p>
+    <p>A tall outer bar under a narrow wedge means many people on a small budget share.</p>
+    <div class="key" id="key"></div>
+  </div>
+</div>
+<div id="tooltip"></div>
+
+<script src="d3.v7.min.js"></script>
+<script>
+const R = {
+  hole: 58,
+  division: [60, 118],
+  department: [120, 186],
+  team: [188, 244],
+  band: [252, 340]
+};
+const MIN_LABEL_DEG = 15;
+const palette = ["#3b6ea8", "#d9822b", "#3f9a7a", "#a24f8f"];
+
+d3.json('data/org-budget.json').then(data => {
+  const divisions = [...new Set(data.map(d => d.division))];
+  const base = d3.scaleOrdinal().domain(divisions).range(palette);
+  const fmtK = d => "$" + d3.format(",")(d) + "K";
+
+  const tree = {
+    name: "Org",
+    children: d3.groups(data, d => d.division).map(([division, rows]) => ({
+      name: division,
+      children: d3.groups(rows, d => d.department).map(([department, rs]) => ({
+        name: department,
+        children: rs.map(r => ({ name: r.team, headcount: r.headcount, budget_k: r.budget_k }))
+      }))
+    }))
+  };
+
+  const root = d3.hierarchy(tree)
+    .sum(d => d.children ? 0 : d.budget_k)
+    .sort((a, b) => b.value - a.value);
+  d3.partition().size([2 * Math.PI, 1])(root);
+
+  // headcount rolled up for every node (tooltip totals)
+  root.each(n => { n.headcount = n.leaves().reduce((s, l) => s + l.data.headcount, 0); });
+
+  const nodes = root.descendants().filter(d => d.depth > 0);
+  const leaves = root.leaves();
+  const divOf = d => d.ancestors().find(a => a.depth === 1);
+  const maxHc = new Map(root.children.map(div => [div, d3.max(div.leaves(), l => l.data.headcount)]));
+
+  // resolved hex colors: darker at depth 1, lighter deeper
+  const fillOf = d => {
+    const c = d3.color(base(divOf(d).data.name));
+    return c.brighter((d.depth - 1) * 0.45).formatHex();
+  };
+
+  const ringOf = d => R[["", "division", "department", "team"][d.depth]];
+  const arcGen = d3.arc()
+    .startAngle(d => d.x0).endAngle(d => d.x1)
+    .padAngle(d => Math.min((d.x1 - d.x0) / 2, 0.006)).padRadius(200)
+    .innerRadius(d => ringOf(d)[0]).outerRadius(d => ringOf(d)[1]);
+
+  const bandR = d3.scaleLinear().domain([0, 1]).range([0, R.band[1] - R.band[0]]);
+  const headArc = d3.arc()
+    .startAngle(d => d.x0).endAngle(d => d.x1)
+    .padAngle(d => Math.min((d.x1 - d.x0) / 2, 0.006)).padRadius(260)
+    .innerRadius(R.band[0])
+    .outerRadius(d => R.band[0] + bandR(d.data.headcount / maxHc.get(divOf(d))));
+  const trackArc = d3.arc()
+    .startAngle(d => d.x0).endAngle(d => d.x1)
+    .padAngle(d => Math.min((d.x1 - d.x0) / 2, 0.006)).padRadius(260)
+    .innerRadius(R.band[0]).outerRadius(R.band[1]);
+
+  const svg = d3.select("#chart");
+  const g = svg.append("g");
+
+  g.append("g").attr("class", "tracks").selectAll("path").data(leaves).join("path")
+    .attr("class", "track").attr("d", trackArc);
+
+  const arcs = g.append("g").attr("class", "arcs").selectAll("path").data(nodes).join("path")
+    .attr("class", d => "node " + ["", "division", "department", "leaf"][d.depth])
+    .attr("d", arcGen)
+    .attr("fill", fillOf);
+
+  const heads = g.append("g").attr("class", "headcounts").selectAll("path").data(leaves).join("path")
+    .attr("class", "headcount leaf")
+    .attr("d", headArc)
+    .attr("fill", d => d3.color(base(divOf(d).data.name)).darker(0.3).formatHex());
+
+  // labels: depth 1 and 2, only when the arc spans more than 15 degrees
+  const wide = d => (d.x1 - d.x0) * 180 / Math.PI > MIN_LABEL_DEG;
+  const truncate = (s, n) => s.length > n ? s.slice(0, Math.max(1, n - 1)) + "…" : s;
+  const labelNodes = nodes.filter(d => d.depth <= 2 && wide(d));
+  g.append("g").attr("class", "labels").selectAll("text").data(labelNodes).join("text")
+    .attr("class", d => "label label-d" + d.depth)
+    .attr("transform", d => {
+      const a = (d.x0 + d.x1) / 2 * 180 / Math.PI - 90;
+      const [r0, r1] = ringOf(d);
+      const flip = a > 90;
+      return `rotate(${a}) translate(${(r0 + r1) / 2},0) rotate(${flip ? 180 : 0})`;
+    })
+    .style("font-weight", d => d.depth === 1 ? 650 : 500)
+    .text(d => truncate(d.data.name, d.depth === 1 ? 10 : 10));
+
+  // ring titles along the 12 o'clock gap
+  g.append("text").attr("class", "center-value").attr("y", -2).text(fmtK(root.value));
+  g.append("text").attr("class", "center-caption").attr("y", 14).text(root.headcount + " people");
+
+  // legend
+  d3.select("#key").selectAll("div").data(root.children).join("div")
+    .html(d => `<span class="swatch" style="background:${base(d.data.name)}"></span>${d.data.name}
+      <span style="margin-left:auto;color:#7a808a">${fmtK(d.value)} / ${d.headcount}</span>`);
+
+  // interaction
+  const tip = d3.select("#tooltip");
+  const labels = g.selectAll(".label");
+  const tracks = g.selectAll(".track");
+
+  const setActive = d => {
+    const chain = new Set(d ? d.ancestors() : []);
+    const on = n => chain.has(n);
+    arcs.classed("active", n => !!d && on(n)).classed("dimmed", n => !!d && !on(n));
+    heads.classed("active", n => !!d && on(n)).classed("dimmed", n => !!d && !on(n));
+    tracks.classed("dimmed", n => !!d && !on(n));
+    labels.classed("dimmed", n => !!d && !on(n));
+  };
+
+  const tooltipHtml = d => {
+    const path = d.ancestors().reverse().slice(1, -1).map(a => a.data.name).join(" › ");
+    const isLeaf = !d.children;
+    const hc = isLeaf ? d.data.headcount : d.headcount;
+    const share = d.value / d.parent.value;
+    return `<div class="t-name">${d.data.name}${isLeaf ? " team" : ""}</div>
+      ${path ? `<div class="t-path">${path}</div>` : ""}
+      <div class="t-row"><span>Headcount</span><span>${hc}</span></div>
+      <div class="t-row"><span>Budget</span><span>${fmtK(d.value)}</span></div>
+      <div class="t-row"><span>Share of ${d.parent.depth ? d.parent.data.name : "org"}</span><span>${d3.format(".0%")(share)}</span></div>
+      ${isLeaf ? `<div class="t-row"><span>Per head</span><span>${fmtK(Math.round(d.value / hc))}</span></div>` : ""}`;
+  };
+
+  const place = event => {
+    const node = tip.node();
+    const w = node.offsetWidth, h = node.offsetHeight;
+    let x = event.clientX + 14, y = event.clientY + 14;
+    if (x + w > innerWidth - 6) x = event.clientX - w - 14;
+    if (y + h > innerHeight - 6) y = event.clientY - h - 14;
+    tip.style("left", x + "px").style("top", y + "px");
+  };
+
+  g.selectAll(".node, .headcount")
+    .on("mouseenter", (event, d) => { setActive(d); tip.html(tooltipHtml(d)).classed("visible", true); place(event); })
+    .on("mousemove", place)
+    .on("mouseleave", () => { setActive(null); tip.classed("visible", false); });
+});
+</script>
+</body>
+</html>

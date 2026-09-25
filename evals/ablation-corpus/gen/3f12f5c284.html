@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Linked SPLOM: four measurements, three species</title>
+<script src="d3.v7.min.js"></script>
+<style>
+  :root { --ink:#222; --muted:#6b7280; --grid:#d9dce1; --bg:#fafaf7; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--ink);
+    font-family: -apple-system, "Helvetica Neue", Arial, sans-serif; overflow:hidden; }
+  header { display:flex; align-items:center; gap:18px; padding:10px 20px 0; height:48px; }
+  h1 { font-size:16px; margin:0; font-weight:600; }
+  .sub { color:var(--muted); font-size:12px; }
+  .spacer { flex:1; }
+  .legend { display:flex; gap:14px; font-size:12px; }
+  .legend-item { display:flex; align-items:center; gap:5px; }
+  .legend-swatch { width:10px; height:10px; border-radius:50%; }
+  #count-badge { font-size:13px; font-variant-numeric:tabular-nums; padding:4px 10px; border-radius:12px;
+    background:#e9ecf1; color:#333; min-width:150px; text-align:center; }
+  #count-badge.active { background:#222; color:#fff; }
+  button { font:inherit; font-size:12px; padding:4px 10px; border:1px solid #c5c9d1; background:#fff; border-radius:4px; cursor:pointer; }
+  button:hover { background:#f0f2f5; }
+  svg { display:block; margin:0 auto; }
+  .cell-bg { fill:#fff; stroke:var(--grid); }
+  .cell.active .cell-bg { stroke:#222; stroke-width:1.5; }
+  .dot { fill-opacity:.75; stroke:#fff; stroke-width:.4; transition: fill-opacity .12s; }
+  .dot.dimmed { fill-opacity:.1; stroke:none; }
+  .dot.highlight { fill-opacity:.95; stroke:#222; stroke-width:.6; }
+  .bar { fill-opacity:.9; }
+  .bar-all { fill:#e3e6ea; }
+  .bar.dimmed { fill-opacity:.25; }
+  .tick-label { font-size:9px; fill:var(--muted); }
+  .axis path, .axis line { stroke:#b8bcc4; }
+  .axis text { font-size:9px; fill:var(--muted); }
+  .diag-label { font-size:14px; font-weight:600; fill:var(--ink); text-anchor:middle; }
+  .diag-sub { font-size:10px; fill:var(--muted); text-anchor:middle; }
+  .axis-title { font-size:11px; fill:#444; text-anchor:middle; font-weight:500; }
+  .brush .selection { fill:#222; fill-opacity:.08; stroke:#222; stroke-dasharray:3 2; }
+  #tip { position:fixed; pointer-events:none; background:#222; color:#fff; font-size:11px; padding:4px 7px; border-radius:3px; display:none; white-space:nowrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Iris (synthetic) scatterplot matrix</h1>
+  <span class="sub">Drag in any scatter panel to select; selection is linked across all panels.</span>
+  <span class="spacer"></span>
+  <div class="legend" id="legend"></div>
+  <div id="count-badge">150 of 150 observations</div>
+  <button id="clear">Clear brush</button>
+</header>
+<div id="chart"></div>
+<div id="tip"></div>
+<script>
+d3.json('data/iris-synthetic.json').then(data => {
+  const dims = ['sepal_length', 'sepal_width', 'petal_length', 'petal_width'];
+  const nice = { sepal_length:'Sepal length', sepal_width:'Sepal width', petal_length:'Petal length', petal_width:'Petal width' };
+  const species = ['setosa', 'versicolor', 'virginica'];
+  const color = d3.scaleOrdinal().domain(species).range(['#2f6fdb', '#e8871e', '#8e44ad']);
+  const N = data.length, n = dims.length;
+
+  const left = 46, top = 8, bottom = 40, right = 14;
+  const cell = Math.max(120, Math.min((innerHeight - 48 - top - bottom - 6) / n, (innerWidth - left - right) / n));
+  const pad = 9;
+  const W = left + right + cell * n, H = top + bottom + cell * n;
+
+  const svg = d3.select('#chart').append('svg').attr('width', W).attr('height', H);
+  const root = svg.append('g').attr('transform', `translate(${left},${top})`);
+
+  const scales = {};
+  dims.forEach(d => {
+    const e = d3.extent(data, r => r[d]);
+    scales[d] = { x: d3.scaleLinear().domain(e).nice().range([pad, cell - pad]),
+                  y: d3.scaleLinear().domain(e).nice().range([cell - pad, pad]) };
+  });
+
+  // legend
+  d3.select('#legend').selectAll('.legend-item').data(species).join('div').attr('class', 'legend-item')
+    .html(s => `<span class="legend-swatch" style="background:${color(s)}"></span>${s}`);
+
+  const pairs = d3.cross(d3.range(n), d3.range(n)); // [row, col]
+  const cells = root.selectAll('.cell').data(pairs).join('g')
+    .attr('class', ([r, c]) => `cell ${r === c ? 'diag' : 'scatter'}`)
+    .attr('transform', ([r, c]) => `translate(${c * cell},${r * cell})`);
+  cells.append('rect').attr('class', 'cell-bg').attr('width', cell).attr('height', cell);
+
+  let selected = new Set(data.map(d => d.id));
+  let brushing = false;
+
+  // ---- scatter cells
+  const scatter = cells.filter(([r, c]) => r !== c);
+  scatter.each(function ([r, c]) {
+    const g = d3.select(this), xd = dims[c], yd = dims[r];
+    const sx = scales[xd].x, sy = scales[yd].y;
+    g.append('g').attr('class', 'axis axis-x').attr('transform', `translate(0,${cell - 1})`)
+      .call(d3.axisBottom(sx).ticks(3).tickSize(-3).tickSizeOuter(0)).select('.domain').remove();
+    g.append('g').attr('class', 'axis axis-y').attr('transform', 'translate(1,0)')
+      .call(d3.axisLeft(sy).ticks(3).tickSize(-3).tickSizeOuter(0)).select('.domain').remove();
+    g.append('g').attr('class', 'dots').selectAll('.dot').data(data, d => d.id).join('circle')
+      .attr('class', 'dot').attr('r', Math.max(2, cell / 55))
+      .attr('cx', d => sx(d[xd])).attr('cy', d => sy(d[yd]))
+      .attr('fill', d => color(d.species))
+      .on('mouseenter', (ev, d) => {
+        d3.selectAll('.dot').classed('highlight', p => p.id === d.id);
+        d3.select('#tip').style('display', 'block')
+          .html(`<b>${d.species}</b> #${d.id}<br>${dims.map(k => `${nice[k]}: ${d[k]}`).join('<br>')}`);
+      })
+      .on('mousemove', ev => d3.select('#tip').style('left', ev.clientX + 12 + 'px').style('top', ev.clientY + 12 + 'px'))
+      .on('mouseleave', () => { d3.selectAll('.dot').classed('highlight', false); d3.select('#tip').style('display', 'none'); });
+
+    const brush = d3.brush().extent([[0, 0], [cell, cell]])
+      .on('start', function (ev) {
+        if (!ev.sourceEvent) return;
+        // clear brushes in other cells
+        scatter.each(function (_, i) {
+          if (this !== g.node()) { brushing = true; d3.select(this).select('.brush').call(brush.move, null); brushing = false; }
+        });
+        scatter.classed('active', false); g.classed('active', true);
+      })
+      .on('brush end', ev => {
+        if (brushing) return;
+        if (!ev.selection) { if (ev.type === 'end') { g.classed('active', false); } setSelection(null); return; }
+        const [[x0, y0], [x1, y1]] = ev.selection;
+        const s = new Set(data.filter(d => {
+          const px = sx(d[xd]), py = sy(d[yd]);
+          return px >= x0 && px <= x1 && py >= y0 && py <= y1;
+        }).map(d => d.id));
+        setSelection(s);
+      });
+    g.append('g').attr('class', 'brush').call(brush);
+    g.node().__brush = brush;
+  });
+
+  // ---- diagonal cells: stacked histogram per species + label
+  const diag = cells.filter(([r, c]) => r === c);
+  const bars = [];
+  diag.each(function ([r]) {
+    const g = d3.select(this), d = dims[r], sx = scales[d].x;
+    const dom = sx.domain();
+    const bins = d3.bin().domain(dom).thresholds(d3.range(dom[0], dom[1] + 1e-9, (dom[1] - dom[0]) / 14)).value(p => p[d]);
+    const binned = bins(data);
+    const maxCount = d3.max(binned, b => b.length);
+    const sy = d3.scaleLinear().domain([0, maxCount]).range([cell - pad, pad + 26]);
+    g.append('g').attr('class', 'hist-all').selectAll('.bar-all').data(binned).join('rect')
+      .attr('class', 'bar bar-all').attr('x', b => sx(b.x0) + .5).attr('width', b => Math.max(0, sx(b.x1) - sx(b.x0) - 1))
+      .attr('y', b => sy(b.length)).attr('height', b => sy(0) - sy(b.length));
+    const layer = g.append('g').attr('class', 'hist-selected');
+    bars.push({ layer, binned, sx, sy, d });
+    g.append('text').attr('class', 'diag-label').attr('x', cell / 2).attr('y', 17).text(nice[d]);
+    g.append('g').attr('class', 'axis axis-x').attr('transform', `translate(0,${cell - 1})`)
+      .call(d3.axisBottom(sx).ticks(3).tickSize(-3)).select('.domain').remove();
+  });
+
+  function drawHists() {
+    bars.forEach(({ layer, binned, sx, sy }) => {
+      const rects = [];
+      binned.forEach(b => {
+        let acc = 0;
+        species.forEach(s => {
+          const k = b.filter(p => p.species === s && selected.has(p.id)).length;
+          if (k) { rects.push({ b, s, y0: acc, y1: acc + k }); acc += k; }
+        });
+      });
+      layer.selectAll('.bar').data(rects, d => d.b.x0 + d.s).join('rect')
+        .attr('class', 'bar').attr('fill', d => color(d.s))
+        .attr('x', d => sx(d.b.x0) + .5).attr('width', d => Math.max(0, sx(d.b.x1) - sx(d.b.x0) - 1))
+        .attr('y', d => sy(d.y1)).attr('height', d => sy(d.y0) - sy(d.y1));
+    });
+  }
+
+  // ---- outer axis titles
+  root.append('g').attr('class', 'titles-x').selectAll('.axis-title').data(dims).join('text')
+    .attr('class', 'axis-title').attr('x', (d, i) => i * cell + cell / 2).attr('y', n * cell + 26).text(d => nice[d]);
+  root.append('g').attr('class', 'titles-y').selectAll('.axis-title').data(dims).join('text')
+    .attr('class', 'axis-title').attr('transform', (d, i) => `translate(${-34},${i * cell + cell / 2}) rotate(-90)`).text(d => nice[d]);
+
+  // ---- linking
+  function setSelection(s) {
+    selected = s || new Set(data.map(d => d.id));
+    const on = !!s;
+    d3.selectAll('.dot').classed('dimmed', d => on && !selected.has(d.id));
+    d3.select('#count-badge').classed('active', on)
+      .text(on ? `${selected.size} of ${N} selected` : `${N} of ${N} observations`);
+    drawHists();
+  }
+  setSelection(null);
+
+  d3.select('#clear').on('click', () => {
+    brushing = true;
+    scatter.each(function () { d3.select(this).select('.brush').call(this.__brush.move, null); });
+    brushing = false;
+    scatter.classed('active', false);
+    setSelection(null);
+  });
+});
+</script>
+</body>
+</html>

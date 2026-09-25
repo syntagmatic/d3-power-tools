@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Atlas module dependencies: hierarchical edge bundle</title>
+<style>
+  :root { --bg:#0f1419; --panel:#161d25; --line:#2a3440; --text:#d5dde6; --muted:#8b96a3; --out:#ffb020; --in:#22d3ee; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text); font:12px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; overflow:hidden; }
+  svg { display:block; width:100vw; height:100vh; }
+  .panel { position:absolute; background:rgba(22,29,37,.92); border:1px solid var(--line); border-radius:6px; padding:10px 12px; }
+  #head { top:12px; left:12px; width:250px; }
+  #head h1 { margin:0 0 2px; font-size:14px; font-weight:600; }
+  #head p { margin:0 0 8px; color:var(--muted); }
+  .row { display:flex; align-items:center; gap:8px; }
+  .seg { display:inline-flex; border:1px solid var(--line); border-radius:5px; overflow:hidden; }
+  .seg button { background:transparent; color:var(--muted); border:0; padding:4px 12px; font:inherit; cursor:pointer; }
+  .seg button + button { border-left:1px solid var(--line); }
+  .seg button[aria-pressed="true"] { background:#2a3644; color:#fff; }
+  #head label { display:flex; align-items:center; gap:8px; margin-top:8px; color:var(--muted); }
+  #head input[type=range] { flex:1; accent-color:#8fa3ff; }
+  #beta-val { width:28px; text-align:right; color:var(--text); font-variant-numeric:tabular-nums; }
+  #legend { bottom:12px; left:12px; width:250px; }
+  #legend .grp { display:flex; flex-wrap:wrap; gap:3px 12px; margin-bottom:8px; }
+  #legend .grp:last-child { margin-bottom:0; }
+  #legend .it { display:inline-flex; align-items:center; gap:5px; color:var(--muted); }
+  #legend svg { width:14px; height:10px; }
+  #info { top:12px; right:12px; width:270px; min-height:96px; max-height:calc(100vh - 24px); overflow:hidden; }
+  #info .name { font:600 12px ui-monospace, Menlo, monospace; word-break:break-all; }
+  #info .meta { color:var(--muted); margin:2px 0 6px; }
+  #info .hint { color:var(--muted); }
+  #info .sec { margin-top:5px; }
+  #info .sec b { font-weight:600; }
+  #info .sec.out b { color:var(--out); }
+  #info .sec.in b { color:var(--in); }
+  #info .sec span { display:block; color:var(--muted); font:11px ui-monospace, Menlo, monospace; }
+
+  .branch-link { fill:none; stroke:#3a4552; stroke-width:1; }
+  .branch-link.highlight { stroke:#aab4c0; stroke-width:1.6; }
+  .link { fill:none; stroke-width:1.1; stroke-opacity:.42; }
+  .link.dimmed { stroke-opacity:.05; }
+  .link.highlight { stroke-opacity:.95; stroke-width:1.8; }
+  .link.highlight.outgoing { stroke:var(--out); }
+  .link.highlight.incoming { stroke:var(--in); }
+  .link.highlight.internal { stroke:#e6edf3; }
+  .link.active { stroke-width:2.4; }
+  .link-hit { fill:none; stroke:transparent; stroke-width:8; pointer-events:stroke; cursor:pointer; }
+
+  .node { cursor:pointer; transition:opacity .12s; }
+  .node .hit { fill:transparent; }
+  .node.experimental .dot { fill:var(--bg); }
+  .node.deprecated .dot { fill:var(--bg); stroke-dasharray:2 1.6; }
+  .node.dimmed { opacity:.22; }
+  .node.highlight .dot { stroke:#fff; stroke-width:1.6; }
+  .node.active .dot { stroke:#fff; stroke-width:2.4; }
+  .is-radial .node.branch { pointer-events:none; }
+  .is-radial .label.root { pointer-events:none; }
+
+  .label { font:10px ui-monospace, Menlo, "SF Mono", monospace; fill:#9aa5b1; cursor:pointer; paint-order:stroke; stroke:var(--bg); stroke-width:3px; stroke-linejoin:round; transition:opacity .12s; }
+  .label.branch-label { font:600 11px system-ui, sans-serif; letter-spacing:.06em; text-transform:uppercase; fill:#c3cdd8; }
+  .label.deprecated { text-decoration:line-through; }
+  .label.dimmed { opacity:.22; }
+  .label.highlight { fill:#fff; }
+  .label.active { fill:#fff; font-weight:700; }
+</style>
+</head>
+<body>
+<svg id="stage" class="is-radial" role="img" aria-label="Hierarchical edge bundle of software module imports"></svg>
+
+<div id="head" class="panel">
+  <h1>Atlas module dependencies</h1>
+  <p id="sub">Loading</p>
+  <div class="row">
+    <div class="seg" role="group" aria-label="Layout">
+      <button id="btn-radial" aria-pressed="true">Radial</button>
+      <button id="btn-tree" aria-pressed="false">Tree</button>
+    </div>
+  </div>
+  <label>Bundling &beta;
+    <input id="beta" type="range" min="0" max="1" step="0.05" value="0.8">
+    <span id="beta-val">0.80</span>
+  </label>
+</div>
+
+<div id="legend" class="panel"></div>
+<div id="info" class="panel"><div class="hint">Hover a module, a team label, or a link. Outgoing imports are amber, incoming are cyan.</div></div>
+
+<script src="d3.v7.min.js"></script>
+<script type="module">
+const PALETTE = ['#6f8cff', '#5fd08a', '#b784f5', '#f472b6', '#a3aab5', '#ef6a5b'];
+const OUT = '#ffb020', IN = '#22d3ee';
+const DUR = 900;
+
+const rows = await d3.json('data/linked-modules.json');
+
+// ---- hierarchy from dotted names --------------------------------------
+const nodesById = new Map();
+rows.forEach(r => {
+  const p = r.name.split('.');
+  for (let i = 1; i <= p.length; i++) {
+    const id = p.slice(0, i).join('.');
+    if (!nodesById.has(id)) nodesById.set(id, { id });
+  }
+  nodesById.get(r.name).row = r;
+});
+const root = d3.stratify()
+  .id(d => d.id)
+  .parentId(d => { const i = d.id.lastIndexOf('.'); return i < 0 ? null : d.id.slice(0, i); })
+  ([...nodesById.values()]);
+root.sum(d => d.row ? d.row.size : 0)
+  .sort((a, b) => b.value - a.value || d3.ascending(a.id, b.id));
+
+const teams = [...new Set(rows.map(r => r.team))];
+const color = d3.scaleOrdinal(teams, PALETTE);
+const teamOf = d => d.data.row ? d.data.row.team
+  : (d.depth >= 1 ? d.ancestors().find(a => a.depth === 1).id.split('.').pop() : null);
+const fillOf = d => { const t = teamOf(d); return t ? color(t) : '#8b96a3'; };
+const shortName = d => d.id.split('.').pop();
+const leaves = root.leaves();
+const byId = new Map(leaves.map(d => [d.id, d]));
+const sizeR = d3.scaleSqrt().domain(d3.extent(rows, r => r.size)).range([2.6, 5.2]);
+
+// ---- links: leaf-to-leaf, routed through the tree path ----------------
+const missing = [];
+const links = rows.flatMap(r => r.imports.flatMap(t => {
+  const s = byId.get(r.name), e = byId.get(t);
+  if (!s || !e) { missing.push({ source: r.name, target: t }); return []; }
+  return [{ s, t: e, path: s.path(e), id: `${r.name}>${t}` }];
+}));
+if (missing.length) console.warn('unmatched import ids', missing);
+
+document.getElementById('sub').textContent =
+  `${leaves.length} modules, ${links.length} imports, ${teams.length} teams`;
+
+// incoming / outgoing lookups
+const importsOf = d => links.filter(l => l.s === d).map(l => shortName(l.t) + ' (' + teamOf(l.t) + ')');
+const importedBy = d => links.filter(l => l.t === d).map(l => shortName(l.s) + ' (' + teamOf(l.s) + ')');
+
+// ---- DOM --------------------------------------------------------------
+const svg = d3.select('#stage');
+const g = svg.append('g');
+const gTree = g.append('g').attr('class', 'branch-links');
+const gLinks = g.append('g').attr('class', 'links');
+const gHits = g.append('g').attr('class', 'link-hits');
+const gNodes = g.append('g').attr('class', 'nodes');
+const gLabels = g.append('g').attr('class', 'labels');
+
+const branchLink = gTree.selectAll('path').data(root.links()).join('path').attr('class', 'branch-link');
+const link = gLinks.selectAll('path').data(links, d => d.id).join('path')
+  .attr('class', 'link').attr('stroke', d => fillOf(d.s));
+const linkHit = gHits.selectAll('path').data(links, d => d.id).join('path').attr('class', 'link-hit');
+
+const statusOf = d => d.data.row ? d.data.row.status : '';
+const node = gNodes.selectAll('g').data(root.descendants()).join('g')
+  .attr('class', d => `node ${d.children ? 'branch' : 'leaf'} ${statusOf(d)}`.trim());
+node.append('circle').attr('class', 'hit').attr('r', d => d.children ? 8 : 9);
+const dot = node.append('circle').attr('class', 'dot')
+  .attr('r', d => d.children ? 3.5 : sizeR(d.data.row.size))
+  .attr('fill', fillOf)
+  .attr('stroke', d => d.data.row && d.data.row.status !== 'stable' ? fillOf(d) : '#0f1419')
+  .attr('stroke-width', d => d.data.row && d.data.row.status !== 'stable' ? 1.8 : 1);
+
+const label = gLabels.selectAll('text').data(root.descendants()).join('text')
+  .attr('class', d => `label ${d.children ? (d.depth === 0 ? 'branch-label root' : 'branch-label') : 'leaf-label'} ${statusOf(d)}`.trim())
+  .attr('dy', '0.35em').attr('text-anchor', 'middle')
+  .text(d => d.depth === 0 ? d.id : shortName(d));
+label.each(function (d) { d.lw = this.getComputedTextLength(); });
+
+// ---- layouts ----------------------------------------------------------
+let W, H, mode = 'radial', k = 0;
+
+function layout() {
+  W = window.innerWidth; H = window.innerHeight;
+  svg.attr('viewBox', `0 0 ${W} ${H}`);
+  g.attr('transform', `translate(${W / 2},${H / 2 + 6})`);
+
+  // radial: cluster puts every leaf on one ring
+  const R = Math.max(120, Math.min(W, H) / 2 - 100);
+  d3.cluster().size([2 * Math.PI, R])
+    .separation((a, b) => a.parent === b.parent ? 1 : 2.2)(root);
+  root.each(d => {
+    const a = d.x, r = d.y;
+    d.rad = { x: r * Math.sin(a), y: -r * Math.cos(a) };
+    if (!d.children) {
+      d.flip = a > Math.PI;
+      let rot = a * 180 / Math.PI - 90 + (d.flip ? 180 : 0);
+      if (rot > 180) rot -= 360;
+      d.rot = rot;
+    }
+  });
+
+  // two-column tree: branches at left, sorted leaves in one column
+  const gap = 0.8, units = leaves.length - 1 + gap * (root.children.length - 1);
+  const top = 34, step = (H - 2 * top - 12) / units;
+  let y = 0, prev = null;
+  leaves.forEach(d => {
+    if (prev && prev !== d.parent) y += gap;
+    prev = d.parent;
+    d.lin = { x: W * 0.09, y: top + y * step - H / 2 + 6 };
+    y += 1;
+  });
+  root.eachAfter(d => {
+    if (d.children) d.lin = { x: d.depth === 0 ? -W * 0.25 : -W * 0.1, y: d3.mean(d.children, c => c.lin.y) };
+  });
+  setK(k);
+}
+
+const line = d3.line().x(d => d.cx).y(d => d.cy);
+const lerp = (a, b, t) => a + (b - a) * t;
+
+function render() {
+  const beta = +document.getElementById('beta').value;
+  line.curve(d3.curveBundle.beta(beta));
+  node.attr('transform', d => `translate(${d.cx},${d.cy})`);
+  dot.attr('opacity', d => d.children ? k : 1);
+  link.attr('d', d => line(d.path));
+  linkHit.attr('d', d => line(d.path));
+  gTree.attr('opacity', k);
+  branchLink.attr('d', d => `M${d.source.cx},${d.source.cy}L${d.target.cx},${d.target.cy}`);
+  label
+    .attr('transform', d => d.children ? `translate(${d.cx},${d.cy})`
+      : `translate(${d.cx},${d.cy}) rotate(${lerp(d.rot, 0, k)})`)
+    .attr('x', d => {
+      const half = d.lw / 2 + 9;
+      if (d.children) return -half * k;
+      return lerp(d.flip ? -half : half, half, k);
+    })
+    .attr('fill-opacity', d => d.depth === 0 ? k : 1);
+  svg.classed('is-radial', k < 0.5);
+}
+
+function setK(v) {
+  k = v;
+  root.each(d => {
+    d.cx = lerp(d.rad.x, d.lin.x, k);
+    d.cy = lerp(d.rad.y, d.lin.y, k);
+  });
+  render();
+}
+
+function setMode(next) {
+  mode = next;
+  d3.select('#btn-radial').attr('aria-pressed', next === 'radial');
+  d3.select('#btn-tree').attr('aria-pressed', next === 'tree');
+  const target = next === 'tree' ? 1 : 0;
+  svg.interrupt().transition().duration(DUR).ease(d3.easeCubicInOut)
+    .tween('layout', () => { const i = d3.interpolateNumber(k, target); return t => setK(i(t)); });
+}
+
+d3.select('#btn-radial').on('click', () => setMode('radial'));
+d3.select('#btn-tree').on('click', () => setMode('tree'));
+d3.select('#beta').on('input', function () {
+  document.getElementById('beta-val').textContent = (+this.value).toFixed(2);
+  render();
+});
+window.addEventListener('resize', layout);
+
+// ---- hover state ------------------------------------------------------
+const info = d3.select('#info');
+const hint = info.html();
+
+function apply({ active, linkSet, hi, anc, dir, activeLink }) {
+  const touched = d => active.has(d) || hi.has(d) || anc.has(d);
+  const cls = (sel) => sel
+    .classed('active', d => active.has(d))
+    .classed('highlight', d => !active.has(d) && (hi.has(d) || anc.has(d)))
+    .classed('dimmed', d => !touched(d));
+  cls(node); cls(label);
+  link.classed('highlight', d => linkSet.has(d))
+    .classed('dimmed', d => !linkSet.has(d))
+    .classed('active', d => d === activeLink)
+    .classed('outgoing', d => linkSet.has(d) && dir(d) === 'outgoing')
+    .classed('incoming', d => linkSet.has(d) && dir(d) === 'incoming')
+    .classed('internal', d => linkSet.has(d) && dir(d) === 'internal');
+  link.filter('.highlight').raise();
+  branchLink.classed('highlight', d => anc.has(d.target) && anc.has(d.source));
+}
+
+function clear() {
+  node.classed('active highlight dimmed', false);
+  label.classed('active highlight dimmed', false);
+  link.classed('highlight dimmed active outgoing incoming internal', false).order();
+  branchLink.classed('highlight', false);
+  info.html(hint);
+}
+
+function chips(cls, title, items) {
+  if (!items.length) return `<div class="sec ${cls}"><b>${title} 0</b></div>`;
+  const shown = items.slice(0, 7).join('<br>') + (items.length > 7 ? `<br>+${items.length - 7} more` : '');
+  return `<div class="sec ${cls}"><b>${title} ${items.length}</b><span>${shown}</span></div>`;
+}
+
+function hoverNode(d) {
+  const S = new Set(d.leaves());
+  const ls = new Set(links.filter(l => S.has(l.s) || S.has(l.t)));
+  const hi = new Set(S);
+  ls.forEach(l => { hi.add(l.s); hi.add(l.t); });
+  apply({
+    active: new Set([d]), linkSet: ls, hi, anc: new Set(d.ancestors()),
+    dir: l => S.has(l.s) && S.has(l.t) ? 'internal' : S.has(l.s) ? 'outgoing' : 'incoming'
+  });
+  if (d.data.row) {
+    const r = d.data.row;
+    info.html(`<div class="name">${d.id}</div>
+      <div class="meta">${r.team} &middot; ${r.status} &middot; size ${r.size}</div>
+      ${chips('out', 'Imports', importsOf(d))}${chips('in', 'Imported by', importedBy(d))}`);
+  } else {
+    const ext = [...ls].filter(l => !(S.has(l.s) && S.has(l.t)));
+    info.html(`<div class="name">${d.id}</div>
+      <div class="meta">${S.size} modules &middot; size ${d.value}</div>
+      <div class="sec out"><b>Outgoing ${ext.filter(l => S.has(l.s)).length}</b></div>
+      <div class="sec in"><b>Incoming ${ext.filter(l => S.has(l.t)).length}</b></div>
+      <div class="sec"><span>Internal imports ${[...ls].length - ext.length}</span></div>`);
+  }
+}
+
+function hoverLink(l) {
+  apply({
+    active: new Set([l.s, l.t]), linkSet: new Set([l]), hi: new Set(),
+    anc: new Set([...l.s.ancestors(), ...l.t.ancestors()]),
+    dir: () => 'outgoing', activeLink: l
+  });
+  info.html(`<div class="name">${l.s.id}</div>
+    <div class="meta">imports</div>
+    <div class="name">${l.t.id}</div>
+    <div class="meta">${teamOf(l.s)} to ${teamOf(l.t)}${l.s.parent === l.t.parent ? ', same branch' : ''}</div>`);
+}
+
+node.on('mouseenter', (e, d) => hoverNode(d)).on('mouseleave', clear);
+label.on('mouseenter', (e, d) => hoverNode(d)).on('mouseleave', clear);
+linkHit.on('mouseenter', (e, d) => hoverLink(d)).on('mouseleave', clear);
+
+// ---- legend -----------------------------------------------------------
+const swatch = c => `<svg viewBox="0 0 14 10"><circle cx="7" cy="5" r="4" fill="${c}"/></svg>`;
+document.getElementById('legend').innerHTML = `
+  <div class="grp">${teams.map(t => `<span class="it">${swatch(color(t))}${t}</span>`).join('')}</div>
+  <div class="grp">
+    <span class="it"><svg viewBox="0 0 14 10"><circle cx="7" cy="5" r="4" fill="#8b96a3"/></svg>stable</span>
+    <span class="it"><svg viewBox="0 0 14 10"><circle cx="7" cy="5" r="3.4" fill="#0f1419" stroke="#8b96a3" stroke-width="1.6"/></svg>experimental</span>
+    <span class="it"><svg viewBox="0 0 14 10"><circle cx="7" cy="5" r="3.4" fill="#0f1419" stroke="#8b96a3" stroke-width="1.6" stroke-dasharray="2 1.6"/></svg>deprecated</span>
+  </div>
+  <div class="grp">
+    <span class="it"><svg viewBox="0 0 14 10"><line x1="1" y1="5" x2="13" y2="5" stroke="${OUT}" stroke-width="2"/></svg>outgoing import</span>
+    <span class="it"><svg viewBox="0 0 14 10"><line x1="1" y1="5" x2="13" y2="5" stroke="${IN}" stroke-width="2"/></svg>incoming</span>
+    <span class="it">dot size = module size</span>
+  </div>`;
+
+layout();
+</script>
+</body>
+</html>

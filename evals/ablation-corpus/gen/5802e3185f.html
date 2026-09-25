@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Salary distribution by job category</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --ink:#1f2933; --muted:#6b7683; --grid:#e3e7ec; --bg:#fbfbfa; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--ink);
+    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { display:flex; flex-direction:column; padding:14px 20px 10px; overflow:hidden; }
+  header { display:flex; align-items:baseline; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+  h1 { font-size:17px; margin:0; font-weight:650; }
+  .sub { color:var(--muted); font-size:12px; }
+  .filters { display:flex; gap:6px; flex-wrap:wrap; margin:8px 0 4px; }
+  .filter { display:inline-flex; align-items:center; gap:6px; padding:3px 10px 3px 8px;
+    border:1px solid var(--grid); border-radius:999px; background:#fff; color:var(--ink);
+    font:inherit; cursor:pointer; transition:opacity .25s, background .25s, border-color .25s; }
+  .filter .swatch { width:10px; height:10px; border-radius:50%; background:var(--c); }
+  .filter.active { border-color:var(--c); }
+  .filter.dimmed { opacity:.45; background:transparent; }
+  .filter.dimmed .swatch { background:transparent; box-shadow:inset 0 0 0 1.5px var(--c); }
+  .filter:focus-visible { outline:2px solid var(--ink); outline-offset:2px; }
+  #chart { flex:1; min-height:0; }
+  svg { width:100%; height:100%; display:block; }
+  .axis text { fill:var(--muted); font-size:11px; }
+  .axis .domain { display:none; }
+  .axis line { stroke:var(--grid); }
+  .band-line { stroke:var(--grid); stroke-dasharray:2 3; }
+  .band-label { font-size:12px; font-weight:600; transition:opacity .3s; }
+  .band-label.dimmed { opacity:.3; }
+  .axis-title { fill:var(--muted); font-size:11px; }
+  .dot { stroke:#fff; stroke-width:.8; fill-opacity:.85; cursor:pointer; }
+  .dot.highlight { stroke:var(--ink); stroke-width:2; fill-opacity:1; }
+  .tooltip { position:fixed; pointer-events:none; background:#1f2933; color:#fff; padding:6px 9px;
+    border-radius:5px; font-size:12px; line-height:1.45; opacity:0; transition:opacity .12s;
+    white-space:nowrap; z-index:5; }
+  .tooltip.visible { opacity:1; }
+  .tooltip b { font-weight:650; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Salary by job category</h1>
+  <div class="sub">300 synthetic employees, one circle each. Hover a circle for details; click a category to toggle it.</div>
+</header>
+<div class="filters" id="filters"></div>
+<div id="chart"></div>
+<div class="tooltip" id="tooltip"></div>
+
+<script src="d3.v7.min.js"></script>
+<script>
+d3.json('data/job-salaries.json').then(data => {
+  const categories = ['Engineer', 'Designer', 'Manager', 'Analyst', 'Sales', 'Support'];
+  const color = d3.scaleOrdinal(categories,
+    ['#2f6fb0', '#c2549a', '#d9822b', '#3a9a7a', '#8a6bbf', '#8a8f98']);
+  const active = new Set(categories);
+  const R = 4.6, PAD = 0.9, DUR = 450;
+
+  const chart = d3.select('#chart');
+  const tooltip = d3.select('#tooltip');
+  const svg = chart.append('svg');
+  const root = svg.append('g');
+  const gridG = root.append('g').attr('class', 'grid');
+  const xAxisG = root.append('g').attr('class', 'axis x-axis');
+  const bandG = root.append('g').attr('class', 'bands');
+  const dotG = root.append('g').attr('class', 'dots');
+  const xTitle = root.append('text').attr('class', 'axis-title').attr('text-anchor', 'middle')
+    .text('Annual salary ($ thousands)');
+
+  const x = d3.scaleLinear().domain([30, 220]).nice();
+  const y = d3.scalePoint().domain(categories).padding(0.5);
+
+  // Deterministic dodge: sort by salary, then place each circle at the smallest
+  // vertical offset that clears every already-placed neighbour. Depends on x scale
+  // so it is recomputed on resize.
+  const layout = () => {
+    const placed = [];
+    const minD = 2 * R + PAD;
+    categories.forEach(cat => {
+      const pts = data.filter(d => d.category === cat).sort((a, b) => a.salary_k - b.salary_k || a.id - b.id);
+      const done = [];
+      pts.forEach(d => {
+        d.px = x(d.salary_k);
+        let off = 0;
+        for (let k = 0; k < 400; k++) {
+          const cand = k === 0 ? 0 : (k % 2 ? 1 : -1) * Math.ceil(k / 2) * 0.5;
+          if (done.every(p => Math.hypot(p.px - d.px, p.off - cand) >= minD)) { off = cand; break; }
+        }
+        d.off = off;
+        done.push(d);
+      });
+      placed.push(...done);
+    });
+  };
+
+  // filters
+  const filters = d3.select('#filters').selectAll('button').data(categories).join('button')
+    .attr('class', 'filter active')
+    .attr('type', 'button')
+    .style('--c', d => color(d))
+    .attr('aria-pressed', 'true')
+    .html(d => `<span class="swatch"></span>${d}`)
+    .on('click', (event, cat) => {
+      active.has(cat) ? active.delete(cat) : active.add(cat);
+      updateVisibility(true);
+    });
+
+  const dots = dotG.selectAll('circle.dot').data(data, d => d.id).join('circle')
+    .attr('class', 'dot')
+    .attr('fill', d => color(d.category))
+    .attr('r', R)
+    .on('mouseenter', function (event, d) {
+      d3.select(this).classed('highlight', true).raise();
+      tooltip.html(`<b>${d.category}</b><br>Salary: $${d.salary_k}k<br>Experience: ${d.years_exp} yr`)
+        .classed('visible', true);
+      moveTip(event);
+    })
+    .on('mousemove', moveTip)
+    .on('mouseleave', function () {
+      d3.select(this).classed('highlight', false);
+      tooltip.classed('visible', false);
+    });
+
+  function moveTip(event) {
+    const t = tooltip.node(), w = t.offsetWidth, h = t.offsetHeight;
+    let tx = event.clientX + 14, ty = event.clientY - h - 10;
+    if (tx + w > innerWidth - 4) tx = event.clientX - w - 14;
+    if (ty < 4) ty = event.clientY + 16;
+    tooltip.style('left', tx + 'px').style('top', ty + 'px');
+  }
+
+  function updateVisibility(animate) {
+    filters.classed('active', d => active.has(d)).classed('dimmed', d => !active.has(d))
+      .attr('aria-pressed', d => active.has(d));
+    bandG.selectAll('.band-label').classed('dimmed', d => !active.has(d));
+    const on = d => active.has(d.category);
+    const sel = animate ? dots.transition().duration(DUR).ease(d3.easeCubicInOut) : dots;
+    // only dots that change state get delayed stagger-free transitions
+    sel.attr('r', d => on(d) ? R : 0)
+       .style('opacity', d => on(d) ? 1 : 0);
+    dots.style('pointer-events', d => on(d) ? null : 'none');
+    if (!animate) dots.attr('r', d => on(d) ? R : 0).style('opacity', d => on(d) ? 1 : 0);
+  }
+
+  function render() {
+    const W = chart.node().clientWidth, H = chart.node().clientHeight;
+    const m = { top: 8, right: 20, bottom: 40, left: 84 };
+    svg.attr('viewBox', `0 0 ${W} ${H}`);
+    root.attr('transform', `translate(${m.left},${m.top})`);
+    x.range([0, W - m.left - m.right]);
+    y.range([0, H - m.top - m.bottom]);
+    const ih = H - m.top - m.bottom;
+
+    xAxisG.attr('transform', `translate(0,${ih})`)
+      .call(d3.axisBottom(x).ticks(10).tickSize(-ih).tickFormat(d => '$' + d + 'k'));
+    xAxisG.selectAll('text').attr('dy', '1.2em');
+    xTitle.attr('x', x.range()[1] / 2).attr('y', ih + 34);
+
+    bandG.selectAll('.band-line').data(categories).join('line')
+      .attr('class', 'band-line').attr('x1', 0).attr('x2', x.range()[1])
+      .attr('y1', d => y(d)).attr('y2', d => y(d));
+    bandG.selectAll('.band-label').data(categories).join('text')
+      .attr('class', 'band-label').attr('x', -10).attr('y', d => y(d)).attr('dy', '0.32em')
+      .attr('text-anchor', 'end').attr('fill', d => color(d)).text(d => d);
+
+    layout();
+    dots.attr('cx', d => d.px).attr('cy', d => y(d.category) + d.off);
+    updateVisibility(false);
+  }
+
+  render();
+  let t;
+  addEventListener('resize', () => { clearTimeout(t); t = setTimeout(render, 120); });
+});
+</script>
+</body>
+</html>
