@@ -61,12 +61,10 @@ npm install && npx playwright install chromium   # probe.mjs, hook, check-snippe
 
 Host Python usually lacks Playwright. Run Python test scripts with `uv run --with playwright python3 scripts/...`.
 
-Launcher symlinks (gitignored) in the project root:
+Launcher symlink (gitignored) in the project root:
 
 ```bash
 ln -s ../dotfiles/scripts/worktree.sh branch
-ln -s ../dotfiles/scripts/gemini-claude-container.sh box
-ln -s ../dotfiles/scripts/claude-container-shell.sh shell
 ```
 
 ## Testing
